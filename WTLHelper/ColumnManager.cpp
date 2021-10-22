@@ -149,3 +149,19 @@ int ColumnManager::GetRealColumn(int index) const {
 	m_ListView.GetHeader().GetItem(index, &hdi);
 	return static_cast<int>(hdi.lParam);
 }
+
+bool ColumnManager::DeleteColumn(int col) {
+	if (col >= m_Columns.size() || col < 0)
+		return false;
+
+	m_Columns.erase(m_Columns.begin() + col);
+	HDITEM hdi;
+	hdi.mask = HDI_LPARAM;
+	auto header = m_ListView.GetHeader();
+	for (auto i = col; i < m_Columns.size(); i++) {
+		header.GetItem(i, &hdi);
+		hdi.lParam--;
+		header.SetItem(i, &hdi);
+	}
+	return true;
+}

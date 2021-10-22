@@ -160,8 +160,12 @@ protected:
 		auto& item = lv->item;
 		auto col = GetRealColumn(hdr->hwndFrom, item.iSubItem);
 		auto p = static_cast<T*>(this);
-		if (item.mask & LVIF_TEXT)
-			::StringCchCopy(item.pszText, item.cchTextMax, p->GetColumnText(hdr->hwndFrom, item.iItem, col));
+		if (item.mask & LVIF_TEXT) {
+			if (auto text = p->GetExistingColumnText(hdr->hwndFrom, item.iItem, col); text)
+				item.pszText = text;
+			else
+				::StringCchCopy(item.pszText, item.cchTextMax, p->GetColumnText(hdr->hwndFrom, item.iItem, col));
+		}
 		if (item.mask & LVIF_IMAGE) {
 			item.iImage = p->GetRowImage(hdr->hwndFrom, item.iItem);
 		}
@@ -180,6 +184,10 @@ protected:
 	}
 
 	int m_Selected = -1;
+
+	PCWSTR GetExistingColumnText(HWND hWnd, int row, int column) const {
+		return nullptr;
+	}
 
 	LRESULT OnItemChanged(int /*idCtrl*/, LPNMHDR hdr, BOOL& bHandled) {
 		auto lv = (NMLISTVIEW*)hdr;

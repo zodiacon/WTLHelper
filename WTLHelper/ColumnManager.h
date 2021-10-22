@@ -45,6 +45,7 @@ public:
 	bool IsModified(int column) const;
 	void SetModified(int column, bool modified);
 	bool IsConst(int column) const;
+	bool DeleteColumn(int column);
 
 	template<typename T = int>
 	int AddColumn(PCWSTR name, int format, int width, T tag = T(), ColumnFlags flags = ColumnFlags::Visible);
