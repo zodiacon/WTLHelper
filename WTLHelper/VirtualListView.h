@@ -162,7 +162,7 @@ protected:
 		auto p = static_cast<T*>(this);
 		if (item.mask & LVIF_TEXT) {
 			if (auto text = p->GetExistingColumnText(hdr->hwndFrom, item.iItem, col); text)
-				item.pszText = text;
+				item.pszText = (PWSTR)text;
 			else
 				::StringCchCopy(item.pszText, item.cchTextMax, p->GetColumnText(hdr->hwndFrom, item.iItem, col));
 		}
