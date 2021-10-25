@@ -19,6 +19,9 @@
     <Filter Include="Helpers">
       <UniqueIdentifier>{fb1d7221-8387-42af-a219-d79476d38679}</UniqueIdentifier>
     </Filter>
+    <Filter Include="CompoundFiles">
+      <UniqueIdentifier>{5a1add79-de8b-4a79-bc69-5c48b7f56917}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">
@@ -69,6 +72,12 @@
     <ClInclude Include="VirtualListView.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="CompoundFile.h">
+      <Filter>CompoundFiles</Filter>
+    </ClInclude>
+    <ClInclude Include="CompoundFileReaderWriter.h">
+      <Filter>CompoundFiles</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
@@ -112,6 +121,12 @@
     </ClCompile>
     <ClCompile Include="Settings.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CompoundFile.cpp">
+      <Filter>CompoundFiles</Filter>
+    </ClCompile>
+    <ClCompile Include="CompoundFileReaderWriter.cpp">
+      <Filter>CompoundFiles</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
