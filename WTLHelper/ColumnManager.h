@@ -49,9 +49,18 @@ public:
 
 	template<typename T = int>
 	int AddColumn(PCWSTR name, int format, int width, T tag = T(), ColumnFlags flags = ColumnFlags::Visible);
+
 	template<typename T = int>
 	T GetColumnTag(int index) const {
 		return static_cast<T>(m_Columns[index].Tag);
+	}
+
+	template<typename T = int>
+	int GetColumnByTag(T tag) {
+		for (int i = 0; i < GetCount(); i++)
+			if (m_Columns[i].Tag == static_cast<int>(tag))
+				return i;
+		return -1;
 	}
 
 	void Clear();

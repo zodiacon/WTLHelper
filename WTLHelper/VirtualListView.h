@@ -146,7 +146,7 @@ protected:
 			return mgr;
 		auto cm = std::make_unique<ColumnManager>(hListView);
 		auto pcm = cm.get();
-		m_Columns.push_back(std::move(cm));
+		m_Columns.push_back(std::move(cm));de
 		return pcm;
 	}
 
