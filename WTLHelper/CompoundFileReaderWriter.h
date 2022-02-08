@@ -22,6 +22,9 @@ namespace StructuredStorage {
 		void Write(PCWSTR value) {
 			return Write(std::wstring(value));
 		}
+		void Write(CString const& value) {
+			return Write(std::wstring((PCWSTR)value));
+		}
 		void Write(const std::string& value);
 
 		template<typename T>

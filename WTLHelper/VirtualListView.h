@@ -146,7 +146,7 @@ protected:
 			return mgr;
 		auto cm = std::make_unique<ColumnManager>(hListView);
 		auto pcm = cm.get();
-		m_Columns.push_back(std::move(cm));de
+		m_Columns.push_back(std::move(cm));
 		return pcm;
 	}
 
@@ -167,7 +167,7 @@ protected:
 				::StringCchCopy(item.pszText, item.cchTextMax, p->GetColumnText(hdr->hwndFrom, item.iItem, col));
 		}
 		if (item.mask & LVIF_IMAGE) {
-			item.iImage = p->GetRowImage(hdr->hwndFrom, item.iItem);
+			item.iImage = p->GetRowImage(hdr->hwndFrom, item.iItem, col);
 		}
 		if (item.mask & LVIF_INDENT)
 			item.iIndent = p->GetRowIndent(item.iItem);
@@ -314,7 +314,7 @@ protected:
 		return L"";
 	}
 
-	int GetRowImage(HWND hWnd, int row) const {
+	int GetRowImage(HWND hWnd, int row, int col) const {
 		return -1;
 	}
 

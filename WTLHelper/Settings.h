@@ -95,6 +95,8 @@ public:
 
 	void Set(PCWSTR name, int value);
 	void SetString(PCWSTR name, PCWSTR value);
+	bool SaveWindowPosition(HWND hWnd, PCWSTR name);
+	bool LoadWindowPosition(HWND hWnd, PCWSTR name) const;
 
 	std::wstring GetString(PCWSTR name) const;
 
@@ -119,14 +121,14 @@ public:
 		auto it = _settings.find(name);
 		if (it == _settings.end())
 			return def;
-		ATLASSERT(it->second.Size == sizeof(T));
+		ATLASSERT(it->second.Size >= sizeof(T));
 		return *(T*)it->second.Buffer.get();
 	}
 
 	int GetInt32(PCWSTR name) const;
 
 	template<typename T>
-	T* GetBinary(PCWSTR name) const {
+	const T* GetBinary(PCWSTR name) const {
 		auto it = _settings.find(name);
 		if (it == _settings.end())
 			return nullptr;

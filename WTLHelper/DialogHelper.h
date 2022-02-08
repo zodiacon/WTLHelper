@@ -17,7 +17,7 @@ public:
 		CButton cancel(dlg->GetDlgItem(IDCANCEL));
 		if (cancel) {
 			cancel.SetWindowText(L"  Cancel");
-			cancel.SetIcon(AtlLoadIconImage(IDI_DELETE, 0, 16, 16));
+			cancel.SetIcon(AtlLoadIconImage(IDI_CANCEL, 0, 16, 16));
 		}
 	}
 #endif

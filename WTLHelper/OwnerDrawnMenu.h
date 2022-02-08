@@ -23,8 +23,8 @@ protected:
 	};
 	std::unordered_map<UINT, ItemData> m_Items;
 	CImageList m_Images;
-	COLORREF m_TextColor{ RGB(0, 0, 0) }, m_BackColor{ ::GetSysColor(COLOR_MENUBAR) };
-	COLORREF m_SelectionBackColor{ RGB(0, 48, 192) }, m_SelectionTextColor{ RGB(255, 255, 255) };
+	COLORREF m_TextColor{ RGB(0, 0, 0) }, m_BackColor{ ::GetSysColor(COLOR_WINDOW) };
+	COLORREF m_SelectionBackColor{ ::GetSysColor(COLOR_HIGHLIGHT) }, m_SelectionTextColor{ ::GetSysColor(COLOR_HIGHLIGHTTEXT) };
 	COLORREF m_SeparatorColor{ RGB(64, 64, 64) };
 	int m_LastHeight{ 16 };
 	int m_CheckIcon{ -1 };
@@ -39,26 +39,26 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 	END_MSG_MAP()
 
 	LRESULT OnDrawItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled) {
-		m_pT->SetMsgHandled(TRUE);
+		static_cast<T*>(this)->SetMsgHandled(TRUE);
 		DrawItem((LPDRAWITEMSTRUCT)lParam);
-		bHandled = m_pT->IsMsgHandled();
+		bHandled = static_cast<T*>(this)->IsMsgHandled();
 		return TRUE;
 	}
 
 	LRESULT OnMeasureItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled) {
-		m_pT->SetMsgHandled(TRUE);
+		static_cast<T*>(this)->SetMsgHandled(TRUE);
 		MeasureItem((LPMEASUREITEMSTRUCT)lParam);
-		bHandled = m_pT->IsMsgHandled();
+		bHandled = static_cast<T*>(this)->IsMsgHandled();
 		return TRUE;
 	}
 
-	explicit COwnerDrawnMenu(T* pT) : m_pT(pT) {
+	COwnerDrawnMenu() {
 		m_Images.Create(16, 16, ILC_COLOR32 | ILC_COLOR | ILC_MASK, 16, 8);
 	}
 
 	BOOL TrackPopupMenu(HMENU hMenu, DWORD flags, int x, int y, HWND hWnd = nullptr) {
 		AddSubMenu(hMenu);
-		return ::TrackPopupMenu(hMenu, flags, x, y, 0, hWnd ? hWnd : m_pT->m_hWnd, nullptr);
+		return ::TrackPopupMenu(hMenu, flags, x, y, 0, hWnd ? hWnd : static_cast<T*>(this)->m_hWnd, nullptr);
 	}
 
 	void DrawSeparator(CDCHandle dc, CRect& rc) {
@@ -72,7 +72,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 
 	void DrawItem(LPDRAWITEMSTRUCT dis) {
 		if (dis->CtlType != ODT_MENU || !::IsMenu((HMENU)dis->hwndItem)) {
-			m_pT->SetMsgHandled(FALSE);
+			static_cast<T*>(this)->SetMsgHandled(FALSE);
 			return;
 		}
 
@@ -133,7 +133,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		}
 
 		WCHAR mtext[256];
-		auto text = m_pT->UIGetText(dis->itemID);
+		auto text = static_cast<T*>(this)->UIGetText(dis->itemID);
 		if (text == nullptr)
 			if (menu.GetMenuString(dis->itemID, mtext, _countof(mtext), MF_BYCOMMAND))
 				text = mtext;
@@ -169,7 +169,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 
 	void MeasureItem(LPMEASUREITEMSTRUCT mis) {
 		if (mis->CtlType != ODT_MENU) {
-			m_pT->SetMsgHandled(FALSE);
+			static_cast<T*>(this)->SetMsgHandled(FALSE);
 			return;
 		}
 
@@ -178,7 +178,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		if (mis->itemData == Separator)	// separator
 			mis->itemHeight = 10;
 		else if (mis->itemID) {
-			auto text = m_pT->UIGetText(mis->itemID);
+			auto text = static_cast<T*>(this)->UIGetText(mis->itemID);
 			CString stext;
 			if (text == nullptr) {
 				if (auto it = m_Items.find(mis->itemID); it != m_Items.end()) {
@@ -188,7 +188,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 			else {
 				stext = text;
 			}
-			CClientDC dc(m_pT->m_hWnd);
+			CClientDC dc(static_cast<T*>(this)->m_hWnd);
 			CSize size;
 			stext.Remove(L'&');
 			if (stext.IsEmpty())
@@ -205,6 +205,4 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		}
 	}
 
-private:
-	T* m_pT;
 };

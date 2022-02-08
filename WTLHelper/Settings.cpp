@@ -7,7 +7,6 @@ bool Settings::LoadFromKey(PCWSTR registryPath) {
 		registryPath = _path.c_str();
 	else
 		_path = registryPath;
-
 	ATLASSERT(registryPath);
 	if (registryPath == nullptr)
 		return false;
@@ -154,6 +153,24 @@ void Settings::SetString(PCWSTR name, PCWSTR value) {
 		Setting s(name, value);
 		_settings.insert({ name, std::move(s) });
 	}
+}
+
+bool Settings::SaveWindowPosition(HWND hWnd, PCWSTR name) {
+	CWindow win(hWnd);
+	WINDOWPLACEMENT wp = { sizeof(wp) };
+	if (!win.GetWindowPlacement(&wp))
+		return false;
+
+	Set(name, wp);
+	return true;
+}
+
+bool Settings::LoadWindowPosition(HWND hWnd, PCWSTR name) const {
+	const auto wp = GetBinary<WINDOWPLACEMENT>(name);
+	if (wp == nullptr)
+		return false;
+
+	return CWindow(hWnd).SetWindowPlacement(wp);
 }
 
 std::wstring Settings::GetString(PCWSTR name) const {
