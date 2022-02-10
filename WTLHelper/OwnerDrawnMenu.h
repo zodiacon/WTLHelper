@@ -65,7 +65,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		m_Images.Create(16, 16, ILC_COLOR32 | ILC_COLOR | ILC_MASK, 16, 8);
 	}
 
-	BOOL TrackPopupMenu(HMENU hMenu, DWORD flags, int x, int y, HWND hWnd = nullptr) {
+	BOOL ShowContextMenu(HMENU hMenu, DWORD flags, int x, int y, HWND hWnd = nullptr) {
 		AddSubMenu(hMenu);
 		return ::TrackPopupMenu(hMenu, flags, x, y, 0, hWnd ? hWnd : static_cast<T*>(this)->m_hWnd, nullptr);
 	}
