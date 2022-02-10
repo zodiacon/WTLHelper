@@ -57,7 +57,7 @@ CString ListViewHelper::GetRowAsString(CListViewCtrl& lv, int row, PCWSTR separa
 CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl& lv, PCWSTR separator) {
 	CString text;
 	for (auto line : SelectedItemsView(lv)) {
-		text += GetRowAsString(lv, line) += L"\r\n";
+		text += GetRowAsString(lv, line, separator) += L"\r\n";
 	}
 	if (!text.IsEmpty())
 		text = text.Left(text.GetLength() - 2);
