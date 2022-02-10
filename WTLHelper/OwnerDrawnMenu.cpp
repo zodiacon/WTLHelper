@@ -114,7 +114,9 @@ void COwnerDrawnMenuBase::AddSubMenu(CMenuHandle menu) {
 	}
 }
 
-void COwnerDrawnMenuBase::SetCheckIcon(HICON hIcon) {
+void COwnerDrawnMenuBase::SetCheckIcon(HICON hIcon, HICON hRadioIcon) {
 	m_CheckIcon = m_Images.AddIcon(hIcon);
+	if (hRadioIcon)
+		m_RadioIcon = m_Images.AddIcon(hRadioIcon);
 }
 

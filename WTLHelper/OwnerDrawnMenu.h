@@ -13,7 +13,7 @@ struct COwnerDrawnMenuBase {
 	void AddCommand(UINT id, UINT iconId);
 	bool AddMenu(HMENU hMenu);
 	void AddSubMenu(CMenuHandle menu);
-	void SetCheckIcon(HICON hicon);
+	void SetCheckIcon(HICON hicon, HICON hRadioIcon = nullptr);
 
 protected:
 	int m_Width{ 0 };
@@ -28,6 +28,7 @@ protected:
 	COLORREF m_SeparatorColor{ RGB(64, 64, 64) };
 	int m_LastHeight{ 16 };
 	int m_CheckIcon{ -1 };
+	int m_RadioIcon{ -1 };
 	enum { TopLevelMenu = 111, Separator = 100 };
 };
 
@@ -38,14 +39,22 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		MESSAGE_HANDLER(WM_MEASUREITEM, OnMeasureItem)
 	END_MSG_MAP()
 
-	LRESULT OnDrawItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled) {
+	LRESULT OnDrawItem(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+		if (wParam) {
+			static_cast<T*>(this)->SetMsgHandled(FALSE);
+			return 0;
+		}
 		static_cast<T*>(this)->SetMsgHandled(TRUE);
 		DrawItem((LPDRAWITEMSTRUCT)lParam);
 		bHandled = static_cast<T*>(this)->IsMsgHandled();
 		return TRUE;
 	}
 
-	LRESULT OnMeasureItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled) {
+	LRESULT OnMeasureItem(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+		if (wParam) {
+			static_cast<T*>(this)->SetMsgHandled(FALSE);
+			return 0;
+		}
 		static_cast<T*>(this)->SetMsgHandled(TRUE);
 		MeasureItem((LPMEASUREITEMSTRUCT)lParam);
 		bHandled = static_cast<T*>(this)->IsMsgHandled();
@@ -71,8 +80,9 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 	}
 
 	void DrawItem(LPDRAWITEMSTRUCT dis) {
+		auto p = static_cast<T*>(this);
 		if (dis->CtlType != ODT_MENU || !::IsMenu((HMENU)dis->hwndItem)) {
-			static_cast<T*>(this)->SetMsgHandled(FALSE);
+			p->SetMsgHandled(FALSE);
 			return;
 		}
 
@@ -104,12 +114,14 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 			}
 			else if (dis->itemState & ODS_CHECKED) {
 				// draw a checkmark
-				m_Images.DrawEx(m_CheckIcon, dis->hDC, rc, CLR_NONE, CLR_NONE, ILD_NORMAL);
+				bool radio = p->UIGetState(dis->itemID) & CUpdateUIBase::UPDUI_RADIO;
+				m_Images.DrawEx((radio && m_RadioIcon >= 0) ? m_RadioIcon : m_CheckIcon, dis->hDC, rc, CLR_NONE, CLR_NONE, ILD_NORMAL);
 			}
 		}
 		else if (dis->itemState & ODS_CHECKED) {
 			// draw a checkmark
-			m_Images.DrawEx(0, dis->hDC, rc, CLR_NONE, CLR_NONE, ILD_NORMAL);
+			bool radio = p->UIGetState(dis->itemID) & CUpdateUIBase::UPDUI_RADIO;
+			m_Images.DrawEx((radio && m_RadioIcon >= 0) ? m_RadioIcon : m_CheckIcon, dis->hDC, rc, CLR_NONE, CLR_NONE, ILD_NORMAL);
 		}
 		CMenuHandle menu((HMENU)dis->hwndItem);
 		ATLASSERT(menu.IsMenu());
@@ -132,8 +144,8 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 			dc.ExcludeClipRect(&rc);
 		}
 
-		WCHAR mtext[256];
-		auto text = static_cast<T*>(this)->UIGetText(dis->itemID);
+		WCHAR mtext[128];
+		auto text = (p->UIGetState(dis->itemID) & CUpdateUIBase::UPDUI_TEXT) ? p->UIGetText(dis->itemID) : nullptr;
 		if (text == nullptr)
 			if (menu.GetMenuString(dis->itemID, mtext, _countof(mtext), MF_BYCOMMAND))
 				text = mtext;
@@ -168,8 +180,9 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 	}
 
 	void MeasureItem(LPMEASUREITEMSTRUCT mis) {
+		auto p = static_cast<T*>(this);
 		if (mis->CtlType != ODT_MENU) {
-			static_cast<T*>(this)->SetMsgHandled(FALSE);
+			p->SetMsgHandled(FALSE);
 			return;
 		}
 
@@ -178,7 +191,7 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		if (mis->itemData == Separator)	// separator
 			mis->itemHeight = 10;
 		else if (mis->itemID) {
-			auto text = static_cast<T*>(this)->UIGetText(mis->itemID);
+			auto text = (p->UIGetState(mis->itemID) & CUpdateUIBase::UPDUI_TEXT) ? p->UIGetText(mis->itemID) : nullptr;
 			CString stext;
 			if (text == nullptr) {
 				if (auto it = m_Items.find(mis->itemID); it != m_Items.end()) {
