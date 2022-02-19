@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ListViewHelper.h"
+#include "IListView.h"
 #include <wil\resource.h>
 
 bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders) {
@@ -81,4 +82,10 @@ int ListViewHelper::FindItem(CListViewCtrl& lv, PCWSTR text, bool partial) {
 	}
 
 	return -1;
+}
+
+IListView* ListViewHelper::GetIListView(HWND hListView) {
+	IListView* p{ nullptr };
+	::SendMessage(hListView, LVM_QUERYINTERFACE, reinterpret_cast<WPARAM>(&__uuidof(IListView)), reinterpret_cast<LPARAM>(&p));
+	return p;
 }

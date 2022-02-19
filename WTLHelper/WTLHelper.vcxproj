@@ -242,6 +242,7 @@
     <ClInclude Include="CustomStatusBar.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="IconHelper.h" />
+    <ClInclude Include="IListView.h" />
     <ClInclude Include="IniFile.h" />
     <ClInclude Include="ListViewhelper.h" />
     <ClInclude Include="OwnerDrawnMenu.h" />

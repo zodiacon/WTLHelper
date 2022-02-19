@@ -204,17 +204,24 @@ protected:
 		auto len = ::wcslen(text);
 		auto list = fi->hdr.hwndFrom;
 
-		if (ListView_GetSelectedCount(list) == 0)
-			return -1;
-
-		int selected = ListView_GetNextItem(list, -1, LVIS_SELECTED);
+		int selected = fi->iStart;
 		int start = selected + 1;
 		int count = ListView_GetItemCount(list);
-		WCHAR name[256];
-		for (int i = start; i < count + start; i++) {
+		WCHAR name[128]{};
+		if (len >= _countof(name))
+			len = _countof(name) - 1;
+		int end = (fi->lvfi.flags & LVFI_WRAP) ? (count + start) : count;
+		bool partial = fi->lvfi.flags & (LVFI_PARTIAL | LVFI_SUBSTRING);
+		for (int i = start; i < end; i++) {
 			ListView_GetItemText(list, i % count, 0, name, _countof(name));
-			if (::_wcsnicmp(name, text, len) == 0)
-				return i % count;
+			if (partial) {
+				if (::_wcsnicmp(name, text, len) == 0)
+					return i % count;
+			}
+			else {
+				if (::_wcsicmp(name, text) == 0)
+					return i % count;
+			}
 		}
 		return -1;
 	}
