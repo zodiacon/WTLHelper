@@ -226,6 +226,53 @@ protected:
 		return -1;
 	}
 
+	void Sort(SortInfo const* si, bool ensureVisible = false) {
+		ATLASSERT(si);
+
+		CListViewCtrl list(si->hWnd);
+		auto header = list.GetHeader();
+
+		auto selected = list.GetSelectedIndex();
+		// comparing 4 columns should be enough...
+		int count = min(4, header.GetItemCount());
+		std::vector<CString> selectedText;
+		if (selected >= 0) {
+			//list.SetItemState(selected, LVIS_SELECTED, 0);
+			CString text;
+			for (int i = 0; i < count; i++) {
+				list.GetItemText(selected, i, text);
+				selectedText.push_back(text);
+			}
+		}
+		static_cast<T*>(this)->DoSort(si);
+		if (selected >= 0) {
+			selected = -1;
+			int start = -1, i, n;
+			CString text;
+			while ((n = list.FindItem(selectedText[0], false, false, start)) >= 0) {
+				for (i = 1; i < count; i++) {
+					if (list.GetItemText(n, i, text) && text != selectedText[i]) {
+						break;
+					}
+				}
+				if (i == count) {
+					selected = n;
+					break;
+				}
+				start = n;
+			}
+
+		}
+		if (selected >= 0) {
+			if (ensureVisible) {
+				list.EnsureVisible(selected, FALSE);
+				//list.SetSelectionMark(selected);
+			}
+			//list.SetItemState(-1, 0, LVIS_SELECTED);
+			list.SetItemState(selected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		}
+	}
+
 	LRESULT OnColumnClick(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
 		auto lv = (NMLISTVIEW*)hdr;
 		auto col = GetRealColumn(hdr->hwndFrom, lv->iSubItem);
@@ -275,7 +322,7 @@ protected:
 		//	header.SetItem(oldSortColumn, &h);
 		//}
 
-		static_cast<T*>(this)->DoSort(si);
+		Sort(si);
 		list.RedrawItems(list.GetTopIndex(), list.GetTopIndex() + list.GetCountPerPage());
 
 		return 0;
