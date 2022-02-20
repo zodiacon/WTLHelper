@@ -240,8 +240,8 @@ protected:
 			//list.SetItemState(selected, LVIS_SELECTED, 0);
 			CString text;
 			for (int i = 0; i < count; i++) {
-				list.GetItemText(selected, i, text);
-				selectedText.push_back(text);
+				if (list.GetItemText(selected, i, text))
+					selectedText.push_back(text);
 			}
 		}
 		static_cast<T*>(this)->DoSort(si);
@@ -268,8 +268,10 @@ protected:
 				list.EnsureVisible(selected, FALSE);
 				//list.SetSelectionMark(selected);
 			}
-			//list.SetItemState(-1, 0, LVIS_SELECTED);
 			list.SetItemState(selected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+		}
+		else if (!selectedText.empty()) {
+			list.SetItemState(-1, 0, LVIS_SELECTED);
 		}
 	}
 

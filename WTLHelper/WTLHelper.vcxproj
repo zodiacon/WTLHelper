@@ -260,6 +260,7 @@
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
     <ClCompile Include="IconHelper.cpp" />
+    <ClCompile Include="IListView.cpp" />
     <ClCompile Include="IniFile.cpp" />
     <ClCompile Include="ListViewhelper.cpp" />
     <ClCompile Include="OwnerDrawnMenu.cpp" />
