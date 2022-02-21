@@ -181,8 +181,10 @@ bool ThemeHelper::IsDefault() {
 	return GetCurrentTheme() == nullptr || GetCurrentTheme()->IsDefault();
 }
 
-void ThemeHelper::SetCurrentTheme(const Theme& theme) {
+void ThemeHelper::SetCurrentTheme(const Theme& theme, HWND hWnd) {
 	CurrentTheme = &theme;
+	if (hWnd)
+		::RedrawWindow(hWnd, nullptr, nullptr, RDW_ALLCHILDREN | RDW_INTERNALPAINT | RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
 void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
