@@ -8,12 +8,12 @@ struct COwnerDrawnMenuBase {
 	void SetSelectionTextColor(COLORREF color);
 	void SetSelectionBackColor(COLORREF color);
 	void SetSeparatorColor(COLORREF color);
-	void UpdateMenu(CMenuHandle menu, bool subMenus = false);
 	void AddCommand(UINT id, HICON hIcon);
 	void AddCommand(UINT id, UINT iconId);
 	bool AddMenu(HMENU hMenu);
 	void AddSubMenu(CMenuHandle menu);
 	void SetCheckIcon(HICON hicon, HICON hRadioIcon = nullptr);
+	void UpdateMenuBase(CMenuHandle menu, bool subMenus = false);
 
 protected:
 	int m_Width{ 0 };
@@ -38,6 +38,11 @@ struct COwnerDrawnMenu : COwnerDrawnMenuBase {
 		MESSAGE_HANDLER(WM_DRAWITEM, OnDrawItem)
 		MESSAGE_HANDLER(WM_MEASUREITEM, OnMeasureItem)
 	END_MSG_MAP()
+	
+	void UpdateMenu(CMenuHandle menu, bool subMenus = false) {
+		UpdateMenuBase(menu, subMenus);
+		::DrawMenuBar(static_cast<T*>(this)->m_hWnd);
+	}
 
 	LRESULT OnDrawItem(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
 		if (wParam) {

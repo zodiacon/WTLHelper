@@ -197,11 +197,12 @@ void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
 	// customize menu colors
 	//
 	auto theme = GetCurrentTheme();
-	menu.SetBackColor(theme->Menu.BackColor);
-	menu.SetTextColor(theme->Menu.TextColor);
-	menu.SetSelectionTextColor(dark ? RGB(240, 240, 240) : RGB(248, 248, 248));
-	menu.SetSelectionBackColor(dark ? RGB(0, 64, 240) : RGB(0, 48, 180));
-	menu.SetSeparatorColor(dark ? RGB(160, 160, 160) : RGB(64, 64, 64));
+	auto& mtheme = theme->Menu;
+	menu.SetBackColor(mtheme.BackColor);
+	menu.SetTextColor(mtheme.TextColor);
+	menu.SetSelectionTextColor(mtheme.SelectionTextColor);
+	menu.SetSelectionBackColor(mtheme.SelectionBackColor);
+	menu.SetSeparatorColor(mtheme.SeparatorColor);
 }
 
 void ThemeHelper::SendMessageToDescendants(HWND hWnd, UINT message,	WPARAM wParam, LPARAM lParam) {
