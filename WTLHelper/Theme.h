@@ -16,6 +16,12 @@ struct Theme {
 		COLORREF SelectionBackColor{ ::GetSysColor(COLOR_MENUHILIGHT) };
 		COLORREF SeparatorColor{ ::GetSysColor(COLOR_GRAYTEXT) };
 	} Menu;
+	struct {
+		COLORREF BackColor{ CLR_INVALID };
+		COLORREF TextColor{ CLR_INVALID };
+		COLORREF SelectedTextColor{ CLR_INVALID };
+		COLORREF SelectedBackColor{ CLR_INVALID };
+	} ListView;
 
 	COLORREF SysColors[32];
 

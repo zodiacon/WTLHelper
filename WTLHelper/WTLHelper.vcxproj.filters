@@ -96,6 +96,9 @@
     <ClInclude Include="IListView.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="CustomListView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">

@@ -9,6 +9,7 @@
 #include "CustomDialog.h"
 #include "CustomHeader.h"
 #include "CustomRebar.h"
+#include "CustomListView.h"
 #include "OwnerDrawnMenu.h"
 #include <unordered_map>
 
@@ -74,6 +75,8 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	//}
 	if (name.CompareNoCase(WC_LISTVIEW) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+		auto win = new CCustomListView;
+		win->SubclassWindow(cs->hwnd);
 	}
 	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
@@ -183,8 +186,10 @@ bool ThemeHelper::IsDefault() {
 
 void ThemeHelper::SetCurrentTheme(const Theme& theme, HWND hWnd) {
 	CurrentTheme = &theme;
-	if (hWnd)
+	if (hWnd) {
+		SendMessageToDescendants(hWnd, ::RegisterWindowMessage(L"WTLHelperUpdateTheme"), 0, reinterpret_cast<LPARAM>(&theme));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_ALLCHILDREN | RDW_INTERNALPAINT | RDW_INVALIDATE | RDW_UPDATENOW);
+	}
 }
 
 void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
@@ -197,4 +202,13 @@ void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
 	menu.SetSelectionTextColor(dark ? RGB(240, 240, 240) : RGB(248, 248, 248));
 	menu.SetSelectionBackColor(dark ? RGB(0, 64, 240) : RGB(0, 48, 180));
 	menu.SetSeparatorColor(dark ? RGB(160, 160, 160) : RGB(64, 64, 64));
+}
+
+void ThemeHelper::SendMessageToDescendants(HWND hWnd, UINT message,	WPARAM wParam, LPARAM lParam) {
+	for (auto hWndChild = ::GetTopWindow(hWnd); hWndChild; hWndChild = ::GetNextWindow(hWndChild, GW_HWNDNEXT)) {
+		::SendMessage(hWndChild, message, wParam, lParam);
+		if (::GetTopWindow(hWndChild)) {
+			SendMessageToDescendants(hWndChild, message, wParam, lParam);
+		}
+	}
 }

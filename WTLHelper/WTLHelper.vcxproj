@@ -238,6 +238,7 @@
     <ClInclude Include="CustomDialog.h" />
     <ClInclude Include="CustomEdit.h" />
     <ClInclude Include="CustomHeader.h" />
+    <ClInclude Include="CustomListView.h" />
     <ClInclude Include="CustomRebar.h" />
     <ClInclude Include="CustomStatusBar.h" />
     <ClInclude Include="DialogHelper.h" />
