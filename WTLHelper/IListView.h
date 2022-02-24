@@ -195,22 +195,22 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	virtual HRESULT __stdcall SetTextColor(COLORREF color) = 0;
 	virtual HRESULT __stdcall GetTextBackgroundColor(COLORREF* pColor) const = 0;
 	virtual HRESULT __stdcall SetTextBackgroundColor(COLORREF color) = 0;
-	virtual HRESULT __stdcall GetHotLightColor(COLORREF* pColor) = 0;
+	virtual HRESULT __stdcall GetHotLightColor(COLORREF* pColor) const = 0;
 	virtual HRESULT __stdcall SetHotLightColor(COLORREF color) = 0;
-	virtual HRESULT __stdcall GetItemCount(PINT pItemCount) = 0;
+	virtual HRESULT __stdcall GetItemCount(PINT pItemCount) const = 0;
 	virtual HRESULT __stdcall SetItemCount(int itemCount, DWORD flags) = 0;
-	virtual HRESULT __stdcall GetItem(LVITEMW* pItem) = 0;
+	virtual HRESULT __stdcall GetItem(LVITEMW* pItem) const = 0;
 	virtual HRESULT __stdcall SetItem(LVITEMW* const pItem) = 0;
-	virtual HRESULT __stdcall GetItemState(int itemIndex, int subItemIndex, ULONG mask, ULONG* pState) = 0;
+	virtual HRESULT __stdcall GetItemState(int itemIndex, int subItemIndex, ULONG mask, ULONG* pState) const = 0;
 	virtual HRESULT __stdcall SetItemState(int itemIndex, int subItemIndex, ULONG mask, ULONG state) = 0;
-	virtual HRESULT __stdcall GetItemText(int itemIndex, int subItemIndex, LPWSTR pBuffer, int bufferSize) = 0;
+	virtual HRESULT __stdcall GetItemText(int itemIndex, int subItemIndex, LPWSTR pBuffer, int bufferSize) const = 0;
 	virtual HRESULT __stdcall SetItemText(int itemIndex, int subItemIndex, LPCWSTR pText) = 0;
 	virtual HRESULT __stdcall GetBackgroundImage(LVBKIMAGEW* pBkImage) = 0;
 	virtual HRESULT __stdcall SetBackgroundImage(LVBKIMAGEW* const pBkImage) = 0;
-	virtual HRESULT __stdcall GetFocusedColumn(PINT pColumnIndex) = 0;
+	virtual HRESULT __stdcall GetFocusedColumn(PINT pColumnIndex) const = 0;
 	// parameters may be in wrong order
 	virtual HRESULT __stdcall SetSelectionFlags(ULONG mask, ULONG flags) const = 0;
-	virtual HRESULT __stdcall GetSelectedColumn(PINT pColumnIndex) = 0;
+	virtual HRESULT __stdcall GetSelectedColumn(PINT pColumnIndex) const = 0;
 	virtual HRESULT __stdcall SetSelectedColumn(int columnIndex) = 0;
 	virtual HRESULT __stdcall GetView(DWORD* pView) const = 0;
 	virtual HRESULT __stdcall SetView(DWORD view) = 0;
@@ -218,13 +218,11 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	virtual HRESULT __stdcall DeleteItem(int itemIndex) = 0;
 	virtual HRESULT __stdcall DeleteAllItems(void) = 0;
 	virtual HRESULT __stdcall UpdateItem(int itemIndex) = 0;
-	virtual HRESULT __stdcall GetItemRect(LVITEMINDEX itemIndex, int rectangleType, LPRECT pRectangle) = 0;
-	virtual HRESULT __stdcall GetSubItemRect(LVITEMINDEX itemIndex, int subItemIndex, int rectangleType, LPRECT pRectangle) = 0;
+	virtual HRESULT __stdcall GetItemRect(LVITEMINDEX itemIndex, int rectangleType, LPRECT pRectangle) const = 0;
+	virtual HRESULT __stdcall GetSubItemRect(LVITEMINDEX itemIndex, int subItemIndex, int rectangleType, LPRECT pRectangle) const = 0;
 	virtual HRESULT __stdcall HitTestSubItem(LVHITTESTINFO* pHitTestData) = 0;
-	virtual HRESULT __stdcall GetIncrSearchString(PWSTR pBuffer, int bufferSize, PINT pCopiedChars) = 0;
-	// pHorizontalSpacing and pVerticalSpacing may be in wrong order
-	virtual HRESULT __stdcall GetItemSpacing(BOOL smallIconView, PINT pHorizontalSpacing, PINT pVerticalSpacing) = 0;
-	// parameters may be in wrong order
+	virtual HRESULT __stdcall GetIncrSearchString(PWSTR pBuffer, int bufferSize, PINT pCopiedChars) const = 0;
+	virtual HRESULT __stdcall GetItemSpacing(BOOL smallIconView, PINT pHorizontalSpacing, PINT pVerticalSpacing) const = 0;
 	virtual HRESULT __stdcall SetIconSpacing(int horizontalSpacing, int verticalSpacing, PINT pHorizontalSpacing, PINT pVerticalSpacing) = 0;
 	virtual HRESULT __stdcall GetNextItem(LVITEMINDEX itemIndex, ULONG flags, LVITEMINDEX* pNextItemIndex) const = 0;
 	virtual HRESULT __stdcall FindItem(LVITEMINDEX startItemIndex, LVFINDINFOW const* pFindInfo, LVITEMINDEX* pFoundItemIndex) const = 0;
@@ -316,7 +314,7 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	virtual HRESULT __stdcall SetInfoTip(LVSETINFOTIP* const pInfoTip) = 0;
 	virtual HRESULT __stdcall GetOutlineColor(COLORREF* pColor) const = 0;
 	virtual HRESULT __stdcall SetOutlineColor(COLORREF color, COLORREF* pOldColor) = 0;
-	virtual HRESULT __stdcall GetFrozenItem(PINT pItemIndex) = 0;
+	virtual HRESULT __stdcall GetFrozenItem(PINT pItemIndex) const = 0;
 	// one parameter will be the item index; works in Icons view only
 	virtual HRESULT __stdcall SetFrozenItem(BOOL freeze, int item) = 0;
 	virtual HRESULT __stdcall GetFrozenSlot(RECT* rc) const = 0;
@@ -326,7 +324,7 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	virtual HRESULT __stdcall SetKeyboardSelected(LVITEMINDEX itemIndex) = 0;
 	virtual HRESULT __stdcall MapIndexToId(int itemIndex, PINT pItemID) = 0;
 	virtual HRESULT __stdcall MapIdToIndex(int itemID, PINT pItemIndex) = 0;
-	virtual HRESULT __stdcall IsItemVisible(LVITEMINDEX itemIndex, BOOL* pVisible) = 0;
+	virtual HRESULT __stdcall IsItemVisible(LVITEMINDEX itemIndex, BOOL* pVisible) const = 0;
 	virtual HRESULT __stdcall EnableAlphaShadow(BOOL enable) = 0;
 	virtual HRESULT __stdcall GetGroupSubsetCount(PINT pNumberOfRowsDisplayed) const = 0;
 	virtual HRESULT __stdcall SetGroupSubsetCount(int numberOfRowsToDisplay) = 0;
@@ -337,5 +335,11 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	virtual HRESULT __stdcall SetTypeAheadFlags(UINT mask, UINT flags) = 0;
 
 	int GetSelectedIndex() const;
+	int GetItemCount() const;
 	int GetTopIndex() const;
+	int GetCountPerPage() const;
+	bool IsItemVisible(int index) const;
+	CString GetItemText(int row, int column) const;
+	ULONG GetItemState(int row, ULONG mask) const;
+	int GetNextItem(int item, ULONG mask) const;
 };
