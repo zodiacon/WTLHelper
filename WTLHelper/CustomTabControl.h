@@ -21,7 +21,6 @@ public:
 
 };
 
-
 struct CCustomTabControlParent :
 	CWindowImpl<CCustomTabControlParent>,
 	COwnerDraw<CCustomTabControlParent> {
@@ -34,12 +33,12 @@ struct CCustomTabControlParent :
 	}
 
 	void MeasureItem(LPMEASUREITEMSTRUCT mis) {
-		if (mis->CtlType != ODT_TAB || ThemeHelper::IsDefault()) {
+		if (mis->CtlType != ODT_TAB) {
 			SetMsgHandled(FALSE);
 			return;
 		}
 		// not called with a dialog box
-		mis->itemWidth = 100;
+		mis->itemWidth = 120;
 	}
 
 	void DrawItem(LPDRAWITEMSTRUCT dis) {
@@ -75,6 +74,7 @@ struct CCustomTabControlParent :
 
 			m_Tab.GetImageList().DrawEx(tci.iImage, dc.m_hDC, irc, CLR_NONE, CLR_NONE, ILD_NORMAL);
 			rc.left += space * 2;
+			rc.top += 2;
 		}
 		dc.DrawText(tci.pszText, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 	}

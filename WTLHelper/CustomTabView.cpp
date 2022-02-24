@@ -2,7 +2,7 @@
 #include "CustomTabView.h"
 
 bool CCustomTabView::CreateTabControl() {
-	m_tab.Create(this->m_hWnd, this->rcDefault, nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_TOOLTIPS | TCS_MULTILINE | TCS_FOCUSNEVER,
+	m_tab.Create(this->m_hWnd, this->rcDefault, nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED,
 		0, m_nTabID);
 	ATLASSERT(m_tab.m_hWnd != NULL);
 	if (m_tab.m_hWnd == NULL)
@@ -35,8 +35,8 @@ void CCustomTabView::UpdateLayout() {
 	this->GetClientRect(&rect);
 
 	int cyOffset = 0;
-	if (m_tab.IsWindow() && ((m_tab.GetStyle() & WS_VISIBLE) != 0)) {
-		int rows = m_tab.GetRowCount();
+	if (m_tab.IsWindow() && (m_tab.GetStyle() & WS_VISIBLE)) {
+		int rows = 1;
 		m_tab.SetWindowPos(NULL, 0, 0, rect.right - rect.left, m_cyTabHeight * rows + 4, SWP_NOZORDER);
 		cyOffset = m_cyTabHeight * rows + 4;
 	}
@@ -51,7 +51,7 @@ void CCustomTabView::SetRedraw(bool redraw) {
 }
 
 void CCustomTabView::UpdateMenu() {
-	if (m_menu.m_hMenu != NULL)
+	if (m_menu.m_hMenu)
 		BuildWindowMenu(m_menu, m_nMenuItemsCount, m_bEmptyMenuItem, m_bWindowsMenuItem, m_bActivePageMenuItem, m_bActiveAsDefaultMenuItem);
 }
 
@@ -62,7 +62,7 @@ void CCustomTabView::BuildWindowMenu(HMENU hMenu, int nMenuItemsCount, bool bEmp
 	int nFirstPos = 0;
 
 	BOOL bRet = TRUE;
-	while (bRet != FALSE)
+	while (bRet)
 		bRet = menu.DeleteMenu(nFirstPos, MF_BYPOSITION);
 
 	// Find first menu item in our range
@@ -71,8 +71,6 @@ void CCustomTabView::BuildWindowMenu(HMENU hMenu, int nMenuItemsCount, bool bEmp
 		if (((nID >= ID_WINDOW_TABFIRST) && (nID <= ID_WINDOW_TABLAST)) || (nID == ID_WINDOW_SHOWTABLIST))
 			break;
 	}
-
-	// Remove all menu items for tab pages
 
 	// Add separator if it's not already there
 	int nPageCount = GetPageCount();

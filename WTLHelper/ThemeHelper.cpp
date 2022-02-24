@@ -82,9 +82,9 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 	}
-	else if (name.CompareNoCase(WC_TABCONTROL) == 0) {
+	else if (name.CompareNoCase(WC_TABCONTROL) == 0 || name.CompareNoCase(L"ATL:" WC_TABCONTROL) == 0) {
 		auto win = new CCustomTabControlParent;
-		win->SubclassWindow(lpcs->hwndParent);
+		ATLVERIFY(win->SubclassWindow(lpcs->hwndParent));
 		win->Init(cs->hwnd);
 	}
 	else if (name.CompareNoCase(REBARCLASSNAME) == 0) {
@@ -211,7 +211,7 @@ void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
 	menu.SetSeparatorColor(mtheme.SeparatorColor);
 }
 
-void ThemeHelper::SendMessageToDescendants(HWND hWnd, UINT message,	WPARAM wParam, LPARAM lParam) {
+void ThemeHelper::SendMessageToDescendants(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 	for (auto hWndChild = ::GetTopWindow(hWnd); hWndChild; hWndChild = ::GetNextWindow(hWndChild, GW_HWNDNEXT)) {
 		::SendMessage(hWndChild, message, wParam, lParam);
 		if (::GetTopWindow(hWndChild)) {
