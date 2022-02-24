@@ -102,6 +102,9 @@
     <ClInclude Include="CustomTabControl.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="CustomTabView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
@@ -160,6 +163,9 @@
     </ClCompile>
     <ClCompile Include="IListView.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CustomTabView.cpp">
+      <Filter>Controls</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

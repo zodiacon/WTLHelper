@@ -6,7 +6,12 @@ public:
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 	END_MSG_MAP()
 
-	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		if (ThemeHelper::IsDefault()) {
+			bHandled = FALSE;
+			return 0;
+		}
+
 		CDCHandle dc((HDC)wParam);
 		CRect rc;
 		GetClientRect(&rc);
@@ -75,9 +80,8 @@ struct CCustomTabControlParent :
 	}
 
 	void Init(HWND hWnd) {
-		m_Tab.Attach(hWnd);
-		m_Tab.ModifyStyle(0, TCS_OWNERDRAWFIXED);
 		m_Tab.SubclassWindow(hWnd);
+		m_Tab.ModifyStyle(0, TCS_OWNERDRAWFIXED);
 	}
 
 	CCustomTabControl m_Tab;

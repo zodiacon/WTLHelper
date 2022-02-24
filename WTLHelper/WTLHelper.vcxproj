@@ -242,6 +242,7 @@
     <ClInclude Include="CustomRebar.h" />
     <ClInclude Include="CustomStatusBar.h" />
     <ClInclude Include="CustomTabControl.h" />
+    <ClInclude Include="CustomTabView.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />
@@ -261,6 +262,7 @@
     <ClCompile Include="ColumnManager.cpp" />
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
+    <ClCompile Include="CustomTabView.cpp" />
     <ClCompile Include="IconHelper.cpp" />
     <ClCompile Include="IListView.cpp" />
     <ClCompile Include="IniFile.cpp" />
