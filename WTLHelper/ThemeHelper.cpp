@@ -11,6 +11,7 @@
 #include "CustomRebar.h"
 #include "CustomListView.h"
 #include "OwnerDrawnMenu.h"
+#include "CustomTabControl.h"
 #include <unordered_map>
 
 const Theme* CurrentTheme;
@@ -80,6 +81,11 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+	}
+	else if (name.CompareNoCase(WC_TABCONTROL) == 0) {
+		auto win = new CCustomTabControlParent;
+		win->SubclassWindow(lpcs->hwndParent);
+		win->Init(cs->hwnd);
 	}
 	else if (name.CompareNoCase(REBARCLASSNAME) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);

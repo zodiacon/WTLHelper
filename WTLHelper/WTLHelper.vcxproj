@@ -241,6 +241,7 @@
     <ClInclude Include="CustomListView.h" />
     <ClInclude Include="CustomRebar.h" />
     <ClInclude Include="CustomStatusBar.h" />
+    <ClInclude Include="CustomTabControl.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />

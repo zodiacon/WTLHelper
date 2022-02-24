@@ -99,6 +99,9 @@
     <ClInclude Include="CustomListView.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="CustomTabControl.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
