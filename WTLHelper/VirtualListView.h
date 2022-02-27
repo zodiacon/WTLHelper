@@ -101,29 +101,30 @@ struct CVirtualListView {
 			handled = FALSE;
 			return 0;
 		}
-		if (::wcscmp(className, WC_LISTVIEW)) {
-			handled = FALSE;
-			return 0;
-		}
-		CListViewCtrl lv(hdr->hwndFrom);
 		POINT pt;
 		::GetCursorPos(&pt);
 		POINT pt2(pt);
-		auto header = lv.GetHeader();
-		ATLASSERT(header);
-		header.ScreenToClient(&pt);
-		HDHITTESTINFO hti;
-		hti.pt = pt;
 		auto pT = static_cast<T*>(this);
-		int index = header.HitTest(&hti);
-		if (index >= 0) {
-			handled = pT->OnRightClickHeader(hdr->hwndFrom, index, pt2);
-		}
-		else {
+		if (::wcscmp(className, WC_LISTVIEW) == 0) {
+			CListViewCtrl lv(hdr->hwndFrom);
+			lv.ScreenToClient(&pt);
 			LVHITTESTINFO info{};
 			info.pt = pt;
 			lv.SubItemHitTest(&info);
 			handled = pT->OnRightClickList(hdr->hwndFrom, info.iItem, info.iSubItem, pt2);
+		}
+		else if (::wcscmp(className, WC_HEADER) == 0) {
+			CHeaderCtrl header(hdr->hwndFrom);
+			header.ScreenToClient(&pt);
+			HDHITTESTINFO hti;
+			hti.pt = pt;
+			int index = header.HitTest(&hti);
+			if (index >= 0) {
+				handled = pT->OnRightClickHeader(hdr->hwndFrom, index, pt2);
+			}
+		}
+		else {
+			handled = FALSE;
 		}
 		return 0;
 	}
