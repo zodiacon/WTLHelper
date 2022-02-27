@@ -46,3 +46,23 @@ int IListView::GetNextItem(int item, ULONG mask) const {
     GetNextItem(LVITEMINDEX{ item, -1 }, mask, &next);
     return next.iItem;
 }
+
+int IListView::GetSelectedCount() const {
+    int count;
+    return S_OK == GetSelectedCount(&count) ? count : 0;
+}
+
+UINT IListView::GetHoverTime() const {
+    UINT hover;
+    return S_OK == GetHoverTime(&hover) ? hover : 0;
+}
+
+int IListView::GetColumnWidth(int columnIndex) const {
+    int width;
+    return S_OK == GetColumnWidth(columnIndex, &width) ? width : -1;
+}
+
+HWND IListView::GetHeader() const {
+    HWND h;
+    return S_OK == GetHeaderControl(&h) ? h : nullptr;
+}

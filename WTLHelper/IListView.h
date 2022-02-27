@@ -250,13 +250,13 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	virtual HRESULT __stdcall SetColumn(int columnIndex, LVCOLUMNW* const pColumn) = 0;
 	virtual HRESULT __stdcall GetColumnOrderArray(int numberOfColumns, PINT pColumns) = 0;
 	virtual HRESULT __stdcall SetColumnOrderArray(int numberOfColumns, int const* pColumns) = 0;
-	virtual HRESULT __stdcall GetHeaderControl(HWND* pHWndHeader) = 0;
+	virtual HRESULT __stdcall GetHeaderControl(HWND* pHWndHeader) const = 0;
 	virtual HRESULT __stdcall InsertColumn(int insertAt, LVCOLUMNW* const pColumn, PINT pColumnIndex) = 0;
 	virtual HRESULT __stdcall DeleteColumn(int columnIndex) = 0;
 	virtual HRESULT __stdcall CreateDragImage(int itemIndex, POINT const* pUpperLeft, HIMAGELIST* pHImageList) = 0;
 	virtual HRESULT __stdcall GetViewRect(RECT* pRectangle) const = 0;
 	virtual HRESULT __stdcall GetClientRect(BOOL unknown, RECT* pClientRectangle) const = 0;
-	virtual HRESULT __stdcall GetColumnWidth(int columnIndex, PINT pWidth) = 0;
+	virtual HRESULT __stdcall GetColumnWidth(int columnIndex, PINT pWidth) const = 0;
 	virtual HRESULT __stdcall SetColumnWidth(int columnIndex, int width) = 0;
 	virtual HRESULT __stdcall GetCallbackMask(ULONG* pMask) = 0;
 	virtual HRESULT __stdcall SetCallbackMask(ULONG mask) = 0;
@@ -342,4 +342,8 @@ struct __declspec(uuid("{E5B16AF2-3990-4681-A609-1F060CD14269}")) IListView : IO
 	CString GetItemText(int row, int column) const;
 	ULONG GetItemState(int row, ULONG mask) const;
 	int GetNextItem(int item, ULONG mask) const;
+	int GetSelectedCount() const;
+	UINT GetHoverTime() const;
+	int GetColumnWidth(int columnIndex) const;
+	HWND GetHeader() const;
 };
