@@ -117,7 +117,7 @@ struct CVirtualListView {
 		auto pT = static_cast<T*>(this);
 		int index = header.HitTest(&hti);
 		if (index >= 0) {
-			handled = pT->OnRightClickHeader(index, pt2);
+			handled = pT->OnRightClickHeader(hdr->hwndFrom, index, pt2);
 		}
 		else {
 			LVHITTESTINFO info{};
@@ -128,15 +128,15 @@ struct CVirtualListView {
 		return 0;
 	}
 
-	bool OnRightClickHeader(int index, POINT& pt) {
+	bool OnRightClickHeader(HWND, int index, POINT const& pt) const {
 		return false;
 	}
 
-	bool OnRightClickList(HWND, int row, int col, const POINT& pt) const {
+	bool OnRightClickList(HWND, int row, int col, POINT const& pt) const {
 		return false;
 	}
 
-	bool OnDoubleClickList(HWND, int row, int col, const POINT& pt) const {
+	bool OnDoubleClickList(HWND, int row, int col, POINT const& pt) const {
 		return false;
 	}
 
