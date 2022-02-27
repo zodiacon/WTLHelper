@@ -202,7 +202,7 @@ protected:
 		if (item.mask & LVIF_INDENT)
 			item.iIndent = p->GetRowIndent(hdr->hwndFrom, item.iItem);
 		if ((ListView_GetExtendedListViewStyle(hdr->hwndFrom) & LVS_EX_CHECKBOXES) && item.iSubItem == 0 && (item.mask & LVIF_STATE)) {
-			item.state = INDEXTOSTATEIMAGEMASK((int)p->IsRowChecked(item.iItem));
+			item.state = INDEXTOSTATEIMAGEMASK((int)p->IsRowChecked(hdr->hwndFrom, item.iItem));
 			item.stateMask = LVIS_STATEIMAGEMASK;
 
 			if (item.iItem == m_Selected) {
@@ -210,7 +210,7 @@ protected:
 				item.stateMask |= LVIS_SELECTED;
 			}
 		}
-		if (item.mask & LVIF_STATE)
+		else if (item.mask & LVIF_STATE)
 			item.state = p->GetListViewItemState(hdr->hwndFrom, item.iItem);
 		return 0;
 	}
