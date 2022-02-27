@@ -88,12 +88,12 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		win->Init(cs->hwnd);
 	}
 	else if (name.CompareNoCase(REBARCLASSNAME) == 0) {
-		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+		//::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 		auto win = new CCustomRebar;
 		win->SubclassWindow(cs->hwnd);
 	}
 	else if (name.CompareNoCase(TOOLBARCLASSNAME) == 0) {
-		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+		//::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 	}
 	else if (name.CompareNoCase(WC_HEADER) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
