@@ -105,6 +105,9 @@
     <ClInclude Include="CustomTabView.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="ColorHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
@@ -166,6 +169,9 @@
     </ClCompile>
     <ClCompile Include="CustomTabView.cpp">
       <Filter>Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="ColorHelper.cpp">
+      <Filter>Helpers</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

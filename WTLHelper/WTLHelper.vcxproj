@@ -231,6 +231,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="ClipboardHelper.h" />
+    <ClInclude Include="ColorHelper.h" />
     <ClInclude Include="ColumnManager.h" />
     <ClInclude Include="CompoundFile.h" />
     <ClInclude Include="CompoundFileReaderWriter.h" />
@@ -259,6 +260,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ClipboardHelper.cpp" />
+    <ClCompile Include="ColorHelper.cpp" />
     <ClCompile Include="ColumnManager.cpp" />
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
