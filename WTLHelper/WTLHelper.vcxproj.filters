@@ -108,6 +108,9 @@
     <ClInclude Include="ColorHelper.h">
       <Filter>Helpers</Filter>
     </ClInclude>
+    <ClInclude Include="StandardColors.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
