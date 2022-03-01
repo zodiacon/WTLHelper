@@ -3,14 +3,12 @@
 #include "Theme.h"
 #include "ThemeHelper.h"
 
-class CCustomHeader : 
+class CCustomHeader :
 	public CWindowImpl<CCustomHeader, CHeaderCtrl> {
 public:
 	BEGIN_MSG_MAP(CCustomHeader)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
-		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 	END_MSG_MAP()
-
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		if (ThemeHelper::IsDefault()) {
@@ -20,24 +18,6 @@ public:
 		return 1;
 	}
 
-	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (ThemeHelper::IsDefault()) {
-			bHandled = FALSE;
-			return 0;
-		}
-		DefWindowProc();
-		CClientDC dc(*this);
-		CRect rc;
-		GetClientRect(&rc);
-		RECT rcItem;
-		if (GetItemCount()) {
-			GetItemRect(GetItemCount() - 1, &rcItem);
-			rc.left = rcItem.right;
-			if (rc.right > rc.left)
-				dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
-		}
-		return 0;
-	}
 };
 
 class CCustomHeaderParent :
@@ -45,6 +25,7 @@ class CCustomHeaderParent :
 	public CCustomDraw<CCustomHeaderParent> {
 public:
 	BEGIN_MSG_MAP(CCustomHeaderParent)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		CHAIN_MSG_MAP(CCustomDraw<CCustomHeaderParent>)
 	END_MSG_MAP()
 
@@ -56,26 +37,39 @@ public:
 		delete this;
 	}
 
-	DWORD OnPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
-		if (cd->hdr.hwndFrom != m_Header || ThemeHelper::IsDefault())
-			return CDRF_DODEFAULT;
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		if (!ThemeHelper::IsDefault()) {
+			CClientDC dc(m_Header);
+			CRect rc;
+			m_Header.GetClientRect(&rc);
+			if (m_Header.GetItemCount()) {
+				CRect rc2;
+				m_Header.GetItemRect(m_Header.GetItemCount() - 1, &rc2);
+				rc.left = rc2.right;
+			}
+			if (rc.Width() > 0)
+				dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
+		}
+		return 1;
+	}
 
-		if (cd->hdr.hwndFrom != m_Header) {
+	DWORD OnPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
+		if (cd->hdr.hwndFrom != m_Header || ThemeHelper::IsDefault()) {
 			SetMsgHandled(FALSE);
 			return CDRF_DODEFAULT;
 		}
-		CDCHandle dc((HDC)cd->hdc);
-		dc.FillSolidRect(&cd->rc, ThemeHelper::GetCurrentTheme()->BackColor);
+
 		return CDRF_NOTIFYITEMDRAW;
 	}
 
 	DWORD OnItemPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
+		ATLASSERT(cd->hdr.hwndFrom == m_Header);
 		HDITEM item;
 		item.mask = HDI_TEXT | HDI_FORMAT;
 		WCHAR text[64];
 		item.pszText = text;
 		item.cchTextMax = _countof(text);
-		m_Header.GetItem((int)cd->dwItemSpec, &item);
+		ATLVERIFY(m_Header.GetItem((int)cd->dwItemSpec, &item));
 
 		CDCHandle dc(cd->hdc);
 		dc.SelectStockPen(WHITE_PEN);
