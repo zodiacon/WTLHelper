@@ -7,8 +7,30 @@ class CCustomHeader :
 	public CWindowImpl<CCustomHeader, CHeaderCtrl> {
 public:
 	BEGIN_MSG_MAP(CCustomHeader)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 	END_MSG_MAP()
+
+	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		if (ThemeHelper::IsDefault()) {
+			bHandled = FALSE;
+			return 0;
+		}
+		DefWindowProc();
+		CClientDC dc(*this);
+		CRect rc;
+		GetClientRect(&rc);
+		RECT rcItem;
+		if (GetItemCount()) {
+			std::vector<int> order(GetItemCount());
+			GetOrderArray(GetItemCount(), order.data());
+			GetItemRect(order.back(), &rcItem);
+			rc.left = rcItem.right;
+			if (rc.right > rc.left)
+				dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
+		}
+		return 0;
+	}
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		if (ThemeHelper::IsDefault()) {
@@ -18,6 +40,7 @@ public:
 		return 1;
 	}
 
+	int m_Width{ 0 };
 };
 
 class CCustomHeaderParent :
@@ -25,7 +48,6 @@ class CCustomHeaderParent :
 	public CCustomDraw<CCustomHeaderParent> {
 public:
 	BEGIN_MSG_MAP(CCustomHeaderParent)
-		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		CHAIN_MSG_MAP(CCustomDraw<CCustomHeaderParent>)
 	END_MSG_MAP()
 
@@ -35,22 +57,6 @@ public:
 
 	void OnFinalMessage(HWND) override {
 		delete this;
-	}
-
-	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (!ThemeHelper::IsDefault()) {
-			CClientDC dc(m_Header);
-			CRect rc;
-			m_Header.GetClientRect(&rc);
-			if (m_Header.GetItemCount()) {
-				CRect rc2;
-				m_Header.GetItemRect(m_Header.GetItemCount() - 1, &rc2);
-				rc.left = rc2.right;
-			}
-			if (rc.Width() > 0)
-				dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
-		}
-		return 1;
 	}
 
 	DWORD OnPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
