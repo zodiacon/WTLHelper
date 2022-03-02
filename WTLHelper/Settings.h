@@ -47,7 +47,7 @@ struct Setting {
 	}
 };
 
-#define BEGIN_SETTINGS(className)	\
+#define BEGINm_settings(className)	\
 	inline static className* _instance;	\
 	className() { \
 		if(_instance == nullptr) _instance = this;	\
@@ -58,10 +58,10 @@ struct Setting {
 	}	\
 	void InitSettings() {	\
 
-#define END_SETTINGS } 
+#define ENDm_settings } 
 
-#define SETTING_STRING(name, value)	_settings.insert({ L#name, Setting(L#name, value) })
-#define SETTING(name, value, type)	_settings.insert({ L#name, Setting(L#name, value, type) })
+#define SETTING_STRING(name, value)	m_settings.insert({ L#name, Setting(L#name, value) })
+#define SETTING(name, value, type)	m_settings.insert({ L#name, Setting(L#name, value, type) })
 #define DEF_SETTING_STRING(name) \
 	std::wstring name() const { return GetString(L#name); }	\
 	void name(const std::wstring& value) { SetString(L#name, value.c_str()); }
