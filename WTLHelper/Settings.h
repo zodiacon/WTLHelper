@@ -58,7 +58,7 @@ struct Setting {
 	}	\
 	void InitSettings() {	\
 
-#define ENDm_settings } 
+#define END_SETTINGS } 
 
 #define SETTING_STRING(name, value)	m_settings.insert({ L#name, Setting(L#name, value) })
 #define SETTING(name, value, type)	m_settings.insert({ L#name, Setting(L#name, value, type) })
