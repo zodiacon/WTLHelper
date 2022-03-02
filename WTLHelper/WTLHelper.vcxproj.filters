@@ -111,6 +111,9 @@
     <ClInclude Include="StandardColors.h">
       <Filter>Helpers</Filter>
     </ClInclude>
+    <ClInclude Include="SortedFilteredVector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">

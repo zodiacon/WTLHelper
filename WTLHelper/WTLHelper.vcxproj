@@ -252,6 +252,7 @@
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Settings.h" />
+    <ClInclude Include="SortedFilteredVector.h" />
     <ClInclude Include="StandardColors.h" />
     <ClInclude Include="ToolbarHelper.h" />
     <ClInclude Include="TreeListViewCtrl.h" />
