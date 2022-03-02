@@ -47,7 +47,7 @@ struct Setting {
 	}
 };
 
-#define BEGINm_settings(className)	\
+#define BEGIN_SETTINGS(className)	\
 	inline static className* _instance;	\
 	className() { \
 		if(_instance == nullptr) _instance = this;	\
