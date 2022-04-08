@@ -11,20 +11,23 @@ enum class ListViewRowCheck {
 template<typename T>
 struct CVirtualListView {
 	BEGIN_MSG_MAP(CVirtualListView)
+		NOTIFY_CODE_HANDLER(LVN_ODSTATECHANGED, OnStateChanged)
 		NOTIFY_CODE_HANDLER(LVN_COLUMNCLICK, OnColumnClick)
+		NOTIFY_CODE_HANDLER(LVN_ITEMCHANGED, OnItemStateChanged)
 		NOTIFY_CODE_HANDLER(LVN_ODFINDITEM, OnFindItem)
 		NOTIFY_CODE_HANDLER(LVN_GETDISPINFO, OnGetDispInfo)
+		NOTIFY_CODE_HANDLER(NM_CLICK, OnClick)
 		NOTIFY_CODE_HANDLER(NM_RCLICK, OnRightClick)
 		NOTIFY_CODE_HANDLER(NM_DBLCLK, OnDoubleClick)
-
-		//NOTIFY_CODE_HANDLER(LVN_ITEMCHANGED, OnItemChanged)
 		ALT_MSG_MAP(1)
 		REFLECTED_NOTIFY_CODE_HANDLER(LVN_GETDISPINFO, OnGetDispInfo)
 		REFLECTED_NOTIFY_CODE_HANDLER(LVN_COLUMNCLICK, OnColumnClick)
+		REFLECTED_NOTIFY_CODE_HANDLER(LVN_ODSTATECHANGED, OnStateChanged)
+		REFLECTED_NOTIFY_CODE_HANDLER(LVN_ITEMCHANGED, OnItemStateChanged)
 		REFLECTED_NOTIFY_CODE_HANDLER(LVN_ODFINDITEM, OnFindItem)
 		REFLECTED_NOTIFY_CODE_HANDLER(NM_RCLICK, OnRightClick)
+		REFLECTED_NOTIFY_CODE_HANDLER(NM_CLICK, OnClick)
 		REFLECTED_NOTIFY_CODE_HANDLER(NM_DBLCLK, OnDoubleClick)
-		//REFLECTED_NOTIFY_CODE_HANDLER(LVN_ITEMCHANGED, OnItemChanged)
 	END_MSG_MAP()
 
 	struct SortInfo {
@@ -67,6 +70,13 @@ struct CVirtualListView {
 		return true;
 	}
 
+	LRESULT OnClick(int, LPNMHDR hdr, BOOL& handled) {
+		auto lv = (NMITEMACTIVATE*)hdr;
+		auto pT = static_cast<T*>(this);
+		pT->OnListViewClick(hdr->hwndFrom, lv->iItem, lv->iSubItem, lv->ptAction);
+		return 0;
+	}
+
 	LRESULT OnDoubleClick(int, LPNMHDR hdr, BOOL& handled) {
 		WCHAR className[16];
 		if (::GetClassName(hdr->hwndFrom, className, _countof(className)) && _wcsicmp(className, WC_LISTVIEW)) {
@@ -92,43 +102,47 @@ struct CVirtualListView {
 			handled = FALSE;
 			return 0;
 		}
-		if (::wcscmp(className, WC_LISTVIEW)) {
-			handled = FALSE;
-			return 0;
-		}
-		CListViewCtrl lv(hdr->hwndFrom);
 		POINT pt;
 		::GetCursorPos(&pt);
 		POINT pt2(pt);
-		auto header = lv.GetHeader();
-		ATLASSERT(header);
-		header.ScreenToClient(&pt);
-		HDHITTESTINFO hti;
-		hti.pt = pt;
 		auto pT = static_cast<T*>(this);
-		int index = header.HitTest(&hti);
-		if (index >= 0) {
-			handled = pT->OnRightClickHeader(index, pt2);
-		}
-		else {
+		if (::wcscmp(className, WC_LISTVIEW) == 0) {
+			CListViewCtrl lv(hdr->hwndFrom);
+			lv.ScreenToClient(&pt);
 			LVHITTESTINFO info{};
 			info.pt = pt;
 			lv.SubItemHitTest(&info);
 			handled = pT->OnRightClickList(hdr->hwndFrom, info.iItem, info.iSubItem, pt2);
 		}
+		else if (::wcscmp(className, WC_HEADER) == 0) {
+			CHeaderCtrl header(hdr->hwndFrom);
+			header.ScreenToClient(&pt);
+			HDHITTESTINFO hti;
+			hti.pt = pt;
+			int index = header.HitTest(&hti);
+			if (index >= 0) {
+				handled = pT->OnRightClickHeader(hdr->hwndFrom, index, pt2);
+			}
+		}
+		else {
+			handled = FALSE;
+		}
 		return 0;
 	}
 
-	bool OnRightClickHeader(int index, POINT& pt) {
+	bool OnRightClickHeader(HWND, int index, POINT const& pt) const {
 		return false;
 	}
 
-	bool OnRightClickList(HWND, int row, int col, const POINT& pt) const {
+	bool OnRightClickList(HWND, int row, int col, POINT const& pt) const {
 		return false;
 	}
 
-	bool OnDoubleClickList(HWND, int row, int col, const POINT& pt) const {
+	bool OnDoubleClickList(HWND, int row, int col, POINT const& pt) const {
 		return false;
+	}
+
+	void OnListViewClick(HWND, int row, int col, POINT const& pt) const {
 	}
 
 protected:
@@ -156,6 +170,20 @@ protected:
 		return cm ? cm->GetRealColumn(column) : column;
 	}
 
+	LRESULT OnStateChanged(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
+		auto lv = (NMLVODSTATECHANGE*)hdr;
+		auto p = static_cast<T*>(this);
+		p->OnStateChanged(hdr->hwndFrom, lv->iFrom, lv->iTo, lv->uOldState, lv->uNewState);
+		return 0;
+	}
+
+	LRESULT OnItemStateChanged(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
+		auto lv = (NMLISTVIEW*)hdr;
+		auto p = static_cast<T*>(this);
+		p->OnStateChanged(hdr->hwndFrom, lv->iItem, lv->iItem, lv->uOldState, lv->uNewState);
+		return 0;
+	}
+
 	LRESULT OnGetDispInfo(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
 		auto lv = (NMLVDISPINFO*)hdr;
 		auto& item = lv->item;
@@ -170,10 +198,13 @@ protected:
 		if (item.mask & LVIF_IMAGE) {
 			item.iImage = p->GetRowImage(hdr->hwndFrom, item.iItem, col);
 		}
+		if (item.mask & LVIF_PARAM) {
+			item.lParam = p->GetRowParam(hdr->hwndFrom, item.iItem);
+		}
 		if (item.mask & LVIF_INDENT)
-			item.iIndent = p->GetRowIndent(item.iItem);
+			item.iIndent = p->GetRowIndent(hdr->hwndFrom, item.iItem);
 		if ((ListView_GetExtendedListViewStyle(hdr->hwndFrom) & LVS_EX_CHECKBOXES) && item.iSubItem == 0 && (item.mask & LVIF_STATE)) {
-			item.state = INDEXTOSTATEIMAGEMASK((int)p->IsRowChecked(item.iItem));
+			item.state = INDEXTOSTATEIMAGEMASK((int)p->IsRowChecked(hdr->hwndFrom, item.iItem));
 			item.stateMask = LVIS_STATEIMAGEMASK;
 
 			if (item.iItem == m_Selected) {
@@ -181,22 +212,16 @@ protected:
 				item.stateMask |= LVIS_SELECTED;
 			}
 		}
+		else if (item.mask & LVIF_STATE)
+			item.state = p->GetListViewItemState(hdr->hwndFrom, item.iItem);
 		return 0;
 	}
-
-	int m_Selected = -1;
 
 	PCWSTR GetExistingColumnText(HWND hWnd, int row, int column) const {
 		return nullptr;
 	}
 
-	LRESULT OnItemChanged(int /*idCtrl*/, LPNMHDR hdr, BOOL& bHandled) {
-		auto lv = (NMLISTVIEW*)hdr;
-		if (lv->uChanged & LVIF_STATE) {
-			if (lv->uNewState & LVIS_SELECTED)
-				m_Selected = lv->iItem;
-		}
-		return 0;
+	void OnStateChanged(HWND, int from, int to, UINT oldState, UINT newState) const {
 	}
 
 	LRESULT OnFindItem(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
@@ -205,22 +230,42 @@ protected:
 		auto len = ::wcslen(text);
 		auto list = fi->hdr.hwndFrom;
 
-		if (ListView_GetSelectedCount(list) == 0)
-			return -1;
-
-		int selected = ListView_GetNextItem(list, -1, LVIS_SELECTED);
+		int selected = fi->iStart;
 		int start = selected + 1;
 		int count = ListView_GetItemCount(list);
-		WCHAR name[256];
-		for (int i = start; i < count + start; i++) {
+		WCHAR name[128]{};
+		if (len >= _countof(name))
+			len = _countof(name) - 1;
+		int end = (fi->lvfi.flags & LVFI_WRAP) ? (count + start) : count;
+		bool partial = fi->lvfi.flags & (LVFI_PARTIAL | LVFI_SUBSTRING);
+		for (int i = start; i < end; i++) {
 			ListView_GetItemText(list, i % count, 0, name, _countof(name));
-			if (::_wcsnicmp(name, text, len) == 0)
-				return i % count;
+			if (partial) {
+				if (::_wcsnicmp(name, text, len) == 0)
+					return i % count;
+			}
+			else {
+				if (::_wcsicmp(name, text) == 0)
+					return i % count;
+			}
 		}
 		return -1;
 	}
 
+	void Sort(SortInfo const* si) {
+		ATLASSERT(si);
+		auto p = static_cast<T*>(this);
+		p->PreSort(si->hWnd);
+		p->DoSort(si);
+		p->PostSort(si->hWnd);
+	}
+
+	void IsSorting(bool sorting) {
+		m_IsSorting = sorting;
+	}
+
 	LRESULT OnColumnClick(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
+		IsSorting(true);
 		auto lv = (NMLISTVIEW*)hdr;
 		auto col = GetRealColumn(hdr->hwndFrom, lv->iSubItem);
 
@@ -269,7 +314,8 @@ protected:
 		//	header.SetItem(oldSortColumn, &h);
 		//}
 
-		static_cast<T*>(this)->DoSort(si);
+		Sort(si);
+		IsSorting(false);
 		list.RedrawItems(list.GetTopIndex(), list.GetTopIndex() + list.GetCountPerPage());
 
 		return 0;
@@ -285,9 +331,16 @@ protected:
 			list.RedrawItems(list.GetTopIndex(), list.GetTopIndex() + list.GetCountPerPage());
 	}
 
+	bool IsSorting() const {
+		return m_IsSorting;
+	}
+
 	bool IsSortable(HWND, int) const {
 		return true;
 	}
+
+	void PostSort(HWND) const {}
+	void PreSort(HWND) const {}
 
 	int GetSortColumn(HWND hWnd, UINT_PTR id = 0) const {
 		auto si = FindById(id);
@@ -315,15 +368,23 @@ protected:
 		return L"";
 	}
 
+	LPARAM GetRowParam(HWND, int row) const {
+		return 0;
+	}
+
 	int GetRowImage(HWND hWnd, int row, int col) const {
 		return -1;
 	}
 
-	int GetRowIndent(int row) const {
+	int GetRowIndent(HWND, int row) const {
 		return 0;
 	}
 
-	ListViewRowCheck IsRowChecked(int row) const {
+	DWORD GetListViewItemState(HWND, int row) const {
+		return 0;
+	}
+
+	ListViewRowCheck IsRowChecked(HWND, int row) const {
 		return ListViewRowCheck::None;
 	}
 
@@ -348,4 +409,6 @@ private:
 
 	mutable std::vector<SortInfo> m_Controls;
 	mutable std::vector<std::unique_ptr<ColumnManager>> m_Columns;
+	int m_Selected = -1;
+	bool m_IsSorting{ false };
 };

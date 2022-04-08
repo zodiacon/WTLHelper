@@ -93,6 +93,27 @@
     <ClInclude Include="ToolbarHelper.h">
       <Filter>Helpers</Filter>
     </ClInclude>
+    <ClInclude Include="IListView.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomListView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomTabControl.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomTabView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="ColorHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="StandardColors.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="SortedFilteredVector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
@@ -147,6 +168,15 @@
       <Filter>Controls</Filter>
     </ClCompile>
     <ClCompile Include="ToolbarHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="IListView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CustomTabView.cpp">
+      <Filter>Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="ColorHelper.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
   </ItemGroup>

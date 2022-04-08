@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <string>
+
 enum class SettingType {
 	String = REG_SZ,
 	Int32 = REG_DWORD,
@@ -57,8 +60,8 @@ struct Setting {
 
 #define END_SETTINGS } 
 
-#define SETTING_STRING(name, value)	_settings.insert({ L#name, Setting(L#name, value) })
-#define SETTING(name, value, type)	_settings.insert({ L#name, Setting(L#name, value, type) })
+#define SETTING_STRING(name, value)	m_settings.insert({ L#name, Setting(L#name, value) })
+#define SETTING(name, value, type)	m_settings.insert({ L#name, Setting(L#name, value, type) })
 #define DEF_SETTING_STRING(name) \
 	std::wstring name() const { return GetString(L#name); }	\
 	void name(const std::wstring& value) { SetString(L#name, value.c_str()); }
@@ -83,13 +86,13 @@ public:
 
 	template<typename T>
 	void Set(const std::wstring& name, const T& value, SettingType type = SettingType::Binary) {
-		auto it = _settings.find(name);
-		if (it != _settings.end()) {
+		auto it = m_settings.find(name);
+		if (it != m_settings.end()) {
 			it->second.Set(value);
 		}
 		else {
 			Setting s(name, value, type);
-			_settings.insert({ name, std::move(s) });
+			m_settings.insert({ name, std::move(s) });
 		}
 	}
 
@@ -102,24 +105,24 @@ public:
 
 	template<typename T>
 	T GetValue(PCWSTR name) const {
-		auto it = _settings.find(name);
-		ATLASSERT(it != _settings.end());
+		auto it = m_settings.find(name);
+		ATLASSERT(it != m_settings.end());
 		ATLASSERT(it->second.Size == sizeof(T));
 		return *(T*)it->second.Buffer.get();
 	}
 
 	template<typename T>
 	T& GetValueRef(PCWSTR name) const {
-		auto it = _settings.find(name);
-		ATLASSERT(it != _settings.end());
+		auto it = m_settings.find(name);
+		ATLASSERT(it != m_settings.end());
 		ATLASSERT(it->second.Size == sizeof(T));
 		return *(T*)it->second.Buffer.get();
 	}
 
 	template<typename T>
 	T GetValueOrDefault(PCWSTR name, const T& def = T()) const {
-		auto it = _settings.find(name);
-		if (it == _settings.end())
+		auto it = m_settings.find(name);
+		if (it == m_settings.end())
 			return def;
 		ATLASSERT(it->second.Size >= sizeof(T));
 		return *(T*)it->second.Buffer.get();
@@ -129,8 +132,8 @@ public:
 
 	template<typename T>
 	const T* GetBinary(PCWSTR name) const {
-		auto it = _settings.find(name);
-		if (it == _settings.end())
+		auto it = m_settings.find(name);
+		if (it == m_settings.end())
 			return nullptr;
 		ATLASSERT(it->second.Size == sizeof(T));
 		return (T*)it->second.Buffer.get();
@@ -142,7 +145,7 @@ protected:
 			return ::_wcsicmp(s1.c_str(), s2.c_str()) < 0;
 		}
 	};
-	std::map<std::wstring, Setting, LessNoCase> _settings;
-	std::wstring _path;
+	std::map<std::wstring, Setting, LessNoCase> m_settings;
+	std::wstring m_path;
 };
 

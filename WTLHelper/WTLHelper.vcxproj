@@ -231,6 +231,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="ClipboardHelper.h" />
+    <ClInclude Include="ColorHelper.h" />
     <ClInclude Include="ColumnManager.h" />
     <ClInclude Include="CompoundFile.h" />
     <ClInclude Include="CompoundFileReaderWriter.h" />
@@ -238,15 +239,21 @@
     <ClInclude Include="CustomDialog.h" />
     <ClInclude Include="CustomEdit.h" />
     <ClInclude Include="CustomHeader.h" />
+    <ClInclude Include="CustomListView.h" />
     <ClInclude Include="CustomRebar.h" />
     <ClInclude Include="CustomStatusBar.h" />
+    <ClInclude Include="CustomTabControl.h" />
+    <ClInclude Include="CustomTabView.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="IconHelper.h" />
+    <ClInclude Include="IListView.h" />
     <ClInclude Include="IniFile.h" />
     <ClInclude Include="ListViewhelper.h" />
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="Settings.h" />
+    <ClInclude Include="SortedFilteredVector.h" />
+    <ClInclude Include="StandardColors.h" />
     <ClInclude Include="ToolbarHelper.h" />
     <ClInclude Include="TreeListViewCtrl.h" />
     <ClInclude Include="TreeViewHelper.h" />
@@ -255,10 +262,13 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ClipboardHelper.cpp" />
+    <ClCompile Include="ColorHelper.cpp" />
     <ClCompile Include="ColumnManager.cpp" />
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
+    <ClCompile Include="CustomTabView.cpp" />
     <ClCompile Include="IconHelper.cpp" />
+    <ClCompile Include="IListView.cpp" />
     <ClCompile Include="IniFile.cpp" />
     <ClCompile Include="ListViewhelper.cpp" />
     <ClCompile Include="OwnerDrawnMenu.cpp" />

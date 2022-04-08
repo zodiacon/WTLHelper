@@ -3,22 +3,13 @@
 #include "Theme.h"
 #include "ThemeHelper.h"
 
-class CCustomHeader : 
+class CCustomHeader :
 	public CWindowImpl<CCustomHeader, CHeaderCtrl> {
 public:
 	BEGIN_MSG_MAP(CCustomHeader)
-		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 	END_MSG_MAP()
-
-
-	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (ThemeHelper::IsDefault()) {
-			bHandled = FALSE;
-			return 0;
-		}
-		return 1;
-	}
 
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		if (ThemeHelper::IsDefault()) {
@@ -31,13 +22,25 @@ public:
 		GetClientRect(&rc);
 		RECT rcItem;
 		if (GetItemCount()) {
-			GetItemRect(GetItemCount() - 1, &rcItem);
+			std::vector<int> order(GetItemCount());
+			GetOrderArray(GetItemCount(), order.data());
+			GetItemRect(order.back(), &rcItem);
 			rc.left = rcItem.right;
 			if (rc.right > rc.left)
 				dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
 		}
 		return 0;
 	}
+
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		if (ThemeHelper::IsDefault()) {
+			bHandled = FALSE;
+			return 0;
+		}
+		return 1;
+	}
+
+	int m_Width{ 0 };
 };
 
 class CCustomHeaderParent :
@@ -57,25 +60,22 @@ public:
 	}
 
 	DWORD OnPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
-		if (ThemeHelper::IsDefault())
-			return CDRF_DODEFAULT;
-
-		if (cd->hdr.hwndFrom != m_Header) {
+		if (cd->hdr.hwndFrom != m_Header || ThemeHelper::IsDefault()) {
 			SetMsgHandled(FALSE);
 			return CDRF_DODEFAULT;
 		}
-		CDCHandle dc((HDC)cd->hdc);
-		dc.FillSolidRect(&cd->rc, ThemeHelper::GetCurrentTheme()->BackColor);
+
 		return CDRF_NOTIFYITEMDRAW;
 	}
 
 	DWORD OnItemPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
+		ATLASSERT(cd->hdr.hwndFrom == m_Header);
 		HDITEM item;
 		item.mask = HDI_TEXT | HDI_FORMAT;
 		WCHAR text[64];
 		item.pszText = text;
 		item.cchTextMax = _countof(text);
-		m_Header.GetItem((int)cd->dwItemSpec, &item);
+		ATLVERIFY(m_Header.GetItem((int)cd->dwItemSpec, &item));
 
 		CDCHandle dc(cd->hdc);
 		dc.SelectStockPen(WHITE_PEN);

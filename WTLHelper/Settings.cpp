@@ -4,9 +4,9 @@
 
 bool Settings::LoadFromKey(PCWSTR registryPath) {
 	if (registryPath == nullptr)
-		registryPath = _path.c_str();
+		registryPath = m_path.c_str();
 	else
-		_path = registryPath;
+		m_path = registryPath;
 	ATLASSERT(registryPath);
 	if (registryPath == nullptr)
 		return false;
@@ -27,9 +27,9 @@ bool Settings::LoadFromKey(PCWSTR registryPath) {
 		if (error != ERROR_SUCCESS)
 			continue;
 
-		auto it = _settings.find(name);
-		if (it == _settings.end())
-			_settings.insert({ name, Setting(name, (BYTE*)value, lvalue, (SettingType)type) });
+		auto it = m_settings.find(name);
+		if (it == m_settings.end())
+			m_settings.insert({ name, Setting(name, (BYTE*)value, lvalue, (SettingType)type) });
 		else
 			it->second.Set(value, lvalue);
 	}
@@ -38,7 +38,7 @@ bool Settings::LoadFromKey(PCWSTR registryPath) {
 
 bool Settings::SaveToKey(PCWSTR registryPath) const {
 	if (registryPath == nullptr)
-		registryPath = _path.c_str();
+		registryPath = m_path.c_str();
 
 	ATLASSERT(registryPath);
 	if (registryPath == nullptr)
@@ -49,7 +49,7 @@ bool Settings::SaveToKey(PCWSTR registryPath) const {
 	if (!key)
 		return false;
 
-	for (auto& [name, setting] : _settings) {
+	for (auto& [name, setting] : m_settings) {
 		key.SetValue(name.c_str(), (DWORD)setting.Type, setting.Buffer.get(), setting.Size);
 	}
 	return true;
@@ -57,20 +57,20 @@ bool Settings::SaveToKey(PCWSTR registryPath) const {
 
 bool Settings::LoadFromFile(PCWSTR path) {
 	if (path == nullptr)
-		path = _path.c_str();
+		path = m_path.c_str();
 
 	ATLASSERT(path);
 	if (path == nullptr)
 		return false;
 	else
-		_path = path;
+		m_path = path;
 
 	IniFile file(path);
 	if (!file.IsValid())
 		return false;
 
 	PCWSTR section = L"General";
-	for (auto& [name, setting] : _settings) {
+	for (auto& [name, setting] : m_settings) {
 		switch (setting.Type) {
 			case SettingType::String:
 				setting.SetString(file.ReadString(section, name.c_str()));
@@ -94,7 +94,7 @@ bool Settings::LoadFromFile(PCWSTR path) {
 
 bool Settings::SaveToFile(PCWSTR path) const {
 	if (path == nullptr)
-		path = _path.c_str();
+		path = m_path.c_str();
 
 	ATLASSERT(path);
 	if (path == nullptr)
@@ -103,7 +103,7 @@ bool Settings::SaveToFile(PCWSTR path) const {
 	IniFile file(path);
 
 	PCWSTR section = L"General";
-	for (auto& [name, setting] : _settings) {
+	for (auto& [name, setting] : m_settings) {
 		switch (setting.Type) {
 			case SettingType::String:
 				file.WriteString(section, name.c_str(), (PCWSTR)setting.Buffer.get());
@@ -134,10 +134,10 @@ bool Settings::Load(PCWSTR path) {
 }
 
 bool Settings::Save() const {
-	if (_path.empty())
+	if (m_path.empty())
 		return false;
 
-	return _path[1] == L':' ? SaveToFile() : SaveToKey();
+	return m_path[1] == L':' ? SaveToFile() : SaveToKey();
 }
 
 void Settings::Set(PCWSTR name, int value) {
@@ -145,13 +145,13 @@ void Settings::Set(PCWSTR name, int value) {
 }
 
 void Settings::SetString(PCWSTR name, PCWSTR value) {
-	auto it = _settings.find(name);
-	if (it != _settings.end()) {
+	auto it = m_settings.find(name);
+	if (it != m_settings.end()) {
 		it->second.SetString(value);
 	}
 	else {
 		Setting s(name, value);
-		_settings.insert({ name, std::move(s) });
+		m_settings.insert({ name, std::move(s) });
 	}
 }
 
@@ -174,8 +174,8 @@ bool Settings::LoadWindowPosition(HWND hWnd, PCWSTR name) const {
 }
 
 std::wstring Settings::GetString(PCWSTR name) const {
-	auto it = _settings.find(name);
-	if (it == _settings.end())
+	auto it = m_settings.find(name);
+	if (it == m_settings.end())
 		return L"";
 	return (PCWSTR)it->second.Buffer.get();
 }

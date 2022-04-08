@@ -21,7 +21,8 @@ struct ThemeHelper abstract final {
 
 	static const Theme* GetCurrentTheme();
 	static bool IsDefault();
-	static void SetCurrentTheme(const Theme& theme);
+	static void SetCurrentTheme(const Theme& theme, HWND hWnd = nullptr);
 	static void UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark);
+	static void SendMessageToDescendants(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 };
 

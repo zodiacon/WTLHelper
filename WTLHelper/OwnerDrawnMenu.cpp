@@ -21,7 +21,7 @@ void COwnerDrawnMenuBase::SetSeparatorColor(COLORREF color) {
 	m_SeparatorColor = color;
 }
 
-void COwnerDrawnMenuBase::UpdateMenu(CMenuHandle menu, bool subMenus) {
+void COwnerDrawnMenuBase::UpdateMenuBase(CMenuHandle menu, bool subMenus) {
 	MENUINFO mi = { sizeof(mi) };
 	mi.fMask = MIM_BACKGROUND | (subMenus ? MIM_APPLYTOSUBMENUS : 0);
 	CBrush brush;
@@ -49,7 +49,7 @@ void COwnerDrawnMenuBase::AddCommand(UINT id, UINT iconId) {
 bool COwnerDrawnMenuBase::AddMenu(HMENU hMenu) {
 	ATLASSERT(::IsMenu(hMenu));
 	CMenuHandle menu(hMenu);
-	UpdateMenu(menu, true);
+	UpdateMenuBase(menu, true);
 	auto count = menu.GetMenuItemCount();
 	MENUITEMINFO mii = { sizeof(mii) };
 	WCHAR text[16];
@@ -73,7 +73,7 @@ bool COwnerDrawnMenuBase::AddMenu(HMENU hMenu) {
 }
 
 void COwnerDrawnMenuBase::AddSubMenu(CMenuHandle menu) {
-	UpdateMenu(menu);
+	UpdateMenuBase(menu);
 	auto count = menu.GetMenuItemCount();
 	MENUITEMINFO mii = { sizeof(mii) };
 	WCHAR text[64];
