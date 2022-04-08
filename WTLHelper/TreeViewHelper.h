@@ -81,6 +81,17 @@ struct CTreeViewHelper {
 		return hItem;
 	}
 
+	static CString GetFullItemPath(CTreeViewCtrl const& tree, HTREEITEM hItem) {
+		CString path;
+		while (hItem) {
+			CString name;
+			tree.GetItemText(hItem, name);
+			path = name + (path.IsEmpty() ? CString() : (L"\\" + path));
+			hItem = tree.GetParentItem(hItem);
+		}
+		return path.TrimRight(L'\\');
+	}
+
 protected:
 	BEGIN_MSG_MAP(CTreeViewHelper)
 		NOTIFY_CODE_HANDLER(TVN_SELCHANGED, OnSelChanged)
