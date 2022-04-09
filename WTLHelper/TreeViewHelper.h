@@ -20,7 +20,7 @@ struct CTreeViewHelper {
 		return static_cast<TData>(tree.GetItemData(hItem));
 	}
 
-	HTREEITEM FindItem(CTreeViewCtrl& tree, HTREEITEM hParent, PCWSTR path) {
+	static HTREEITEM FindItem(CTreeViewCtrl& tree, HTREEITEM hParent, PCWSTR path) {
 		int start = 0;
 		CString spath(path);
 		if (spath[0] == L'\\') {
@@ -33,7 +33,7 @@ struct CTreeViewHelper {
 			if (name.IsEmpty())
 				break;
 			tree.Expand(hParent, TVE_EXPAND);
-			hItem = FindChild(hParent, name);
+			hItem = FindChild(tree, hParent, name);
 			if (!hItem)
 				break;
 			hParent = hItem;
@@ -41,7 +41,7 @@ struct CTreeViewHelper {
 		return hItem;
 	}
 
-	HTREEITEM FindChild(CTreeViewCtrl& tree, HTREEITEM item, PCWSTR name) const {
+	static HTREEITEM FindChild(CTreeViewCtrl& tree, HTREEITEM item, PCWSTR name) {
 		item = tree.GetChildItem(item);
 		while (item) {
 			CString text;
@@ -54,7 +54,7 @@ struct CTreeViewHelper {
 	}
 
 	template<typename TData>
-	HTREEITEM FindChildByData(CTreeViewCtrl& tree, HTREEITEM item, TData const& data) const {
+	static HTREEITEM FindChildByData(CTreeViewCtrl& tree, HTREEITEM item, TData const& data) {
 		item = tree.GetChildItem(item);
 		while (item) {
 			if (GetItemData<TData>(tree, item) == data)

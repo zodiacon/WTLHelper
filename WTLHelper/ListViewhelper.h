@@ -13,7 +13,7 @@ struct ListViewHelper abstract final {
 
 struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
 	struct Iterator {
-		Iterator(SelectedItemsView& view, bool end = false) : _view(view), _end(end) {
+		Iterator(SelectedItemsView const& view, bool end = false) : _view(view), _end(end) {
 			if(!end)
 				_index = view._lv.GetNextItem(-1, LVNI_SELECTED);
 		}
@@ -43,7 +43,7 @@ struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
 		}
 
 		int _index{ -1 };
-		SelectedItemsView& _view;
+		SelectedItemsView const& _view;
 		bool _end;
 	};
 
@@ -54,6 +54,13 @@ struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
 		return Iterator(*this);
 	}
 	Iterator end() {
+		return Iterator(*this, true);
+	}
+
+	Iterator const begin() const {
+		return Iterator(*this);
+	}
+	Iterator const end() const {
 		return Iterator(*this, true);
 	}
 
