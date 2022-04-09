@@ -5,8 +5,8 @@ struct IListView;
 struct ListViewHelper abstract final {
 	static bool SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders = true);
 	static bool SaveAllToKey(CRegKey& key, CListViewCtrl& lv, bool includeHeaders = true);
-	static CString GetRowAsString(CListViewCtrl& lv, int row, PCWSTR separator = L"\t");
-	static CString GetSelectedRowsAsString(CListViewCtrl& lv, PCWSTR separator = L"\t");
+	static CString GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR separator = L"\t");
+	static CString GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t");
 	static int FindItem(CListViewCtrl& lv, PCWSTR text, bool partial);
 	static IListView* GetIListView(HWND hListView);
 };
@@ -48,7 +48,7 @@ struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
 	};
 
 	SelectedItemsView() = default;
-	explicit SelectedItemsView(CListViewCtrl& lv) : _lv(lv), _count(lv.GetSelectedCount()) {}
+	explicit SelectedItemsView(CListViewCtrl const& lv) : _lv(lv), _count(lv.GetSelectedCount()) {}
 
 	Iterator begin() {
 		return Iterator(*this);
@@ -62,6 +62,6 @@ struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
 	}
 
 private:
-	CListViewCtrl& _lv;
+	CListViewCtrl const& _lv;
 	int _count;
 };

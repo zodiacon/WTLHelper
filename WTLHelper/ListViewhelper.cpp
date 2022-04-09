@@ -39,7 +39,7 @@ bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders
 	return true;
 }
 
-CString ListViewHelper::GetRowAsString(CListViewCtrl& lv, int row, PCWSTR separator) {
+CString ListViewHelper::GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR separator) {
 	auto count = lv.GetHeader().GetItemCount();
 	if (count == 0)
 		return L"";
@@ -55,7 +55,7 @@ CString ListViewHelper::GetRowAsString(CListViewCtrl& lv, int row, PCWSTR separa
 	return text;
 }
 
-CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl& lv, PCWSTR separator) {
+CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator) {
 	CString text;
 	for (auto line : SelectedItemsView(lv)) {
 		text += GetRowAsString(lv, line, separator) += L"\r\n";
