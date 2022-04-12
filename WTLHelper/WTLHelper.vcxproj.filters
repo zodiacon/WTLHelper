@@ -114,6 +114,9 @@
     <ClInclude Include="SortedFilteredVector.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="QuickFindEdit.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">

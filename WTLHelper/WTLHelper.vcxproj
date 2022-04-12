@@ -251,6 +251,7 @@
     <ClInclude Include="ListViewhelper.h" />
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="QuickFindEdit.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SortedFilteredVector.h" />
     <ClInclude Include="StandardColors.h" />
