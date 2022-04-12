@@ -54,11 +54,11 @@ public:
 			i = c++;
 	}
 
-	typename std::vector<T>::constm_iterator begin() const {
+	typename std::vector<T>::const_iterator begin() const {
 		return m_items.begin();
 	}
 
-	typename std::vector<T>::constm_iterator end() const {
+	typename std::vector<T>::const_iterator end() const {
 		return m_items.end();
 	}
 
