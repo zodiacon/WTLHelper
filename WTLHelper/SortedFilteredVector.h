@@ -53,8 +53,10 @@ public:
 		auto realIndex = m_indices[index];
 		m_items.erase(m_items.begin() + realIndex);
 		m_indices.erase(m_indices.begin() + index);
-		for (size_t i = index; i < m_indices.size(); i++)
-			m_indices[i]--;
+		for (size_t i = 0; i < m_indices.size(); i++) {
+			if (m_indices[i] >= realIndex)
+				m_indices[i]--;
+		}
 	}
 
 	void ClearSort() {
