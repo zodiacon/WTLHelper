@@ -65,7 +65,7 @@ CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR 
 	return text;
 }
 
-int ListViewHelper::FindItem(CListViewCtrl& lv, PCWSTR text, bool partial) {
+int ListViewHelper::FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial) {
 	auto columns = lv.GetHeader().GetItemCount();
 	CString stext(text);
 	stext.MakeLower();

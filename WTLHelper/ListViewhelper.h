@@ -7,7 +7,7 @@ struct ListViewHelper abstract final {
 	static bool SaveAllToKey(CRegKey& key, CListViewCtrl& lv, bool includeHeaders = true);
 	static CString GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR separator = L"\t");
 	static CString GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t");
-	static int FindItem(CListViewCtrl& lv, PCWSTR text, bool partial);
+	static int FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial);
 	static IListView* GetIListView(HWND hListView);
 };
 

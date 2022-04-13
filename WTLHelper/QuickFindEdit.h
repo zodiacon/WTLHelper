@@ -11,12 +11,21 @@ public:
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 	END_MSG_MAP()
 
+	~CQuickFindEdit() {
+		if (m_hIcon)
+			::DestroyIcon(m_hIcon);
+	}
+
 	void SetWatermark(PCWSTR watermark) {
 		m_Watermark = watermark;
 	}
 
 	void SetTextChangeDelay(UINT ms) {
 		m_Delay = ms;
+	}
+
+	void SetWatermarkIcon(HICON hIcon) {
+		m_hIcon = hIcon;
 	}
 
 	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
@@ -37,6 +46,10 @@ public:
 			CRect rc;
 			GetClientRect(&rc);
 			rc.left += 4;
+			if (m_hIcon) {
+				dc.DrawIconEx(rc.left, rc.Height() / 2 - 8, m_hIcon, 16, 16);
+				rc.left += 20;
+			}
 			dc.DrawText(m_Watermark, -1, &rc, DT_VCENTER | DT_SINGLELINE);
 		}
 		return 0;
@@ -64,4 +77,5 @@ private:
 	CString m_Watermark;
 	COLORREF m_WatermarkColor{ RGB(128, 128, 128) };
 	UINT m_Delay{ 250 };
+	HICON m_hIcon{ nullptr };
 };

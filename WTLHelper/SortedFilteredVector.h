@@ -11,6 +11,15 @@ public:
 		reserve(capacity);
 	}
 
+	SortedFilteredVector& operator=(std::vector<T> const& other) {
+		m_items = other;
+		size_t count;
+		m_indices.resize(count = other.size());
+		for (size_t i = 0; i < count; i++)
+			m_indices[i] = i;
+		return *this;
+	}
+
 	void reserve(size_t capacity) {
 		m_items.reserve(capacity);
 		m_indices.reserve(capacity);
