@@ -1,5 +1,5 @@
 #include "pch.h"
-#include "detours.h"
+#include <detours.h>
 #include "ThemeHelper.h"
 #include "Theme.h"
 #include "CustomEdit.h"
@@ -93,7 +93,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		win->SubclassWindow(cs->hwnd);
 	}
 	else if (name.CompareNoCase(TOOLBARCLASSNAME) == 0) {
-		//::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 	}
 	else if (name.CompareNoCase(WC_HEADER) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
