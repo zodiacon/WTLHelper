@@ -5,6 +5,7 @@ class CQuickFindEdit : public CWindowImpl<CQuickFindEdit, CEdit> {
 public:
 	BEGIN_MSG_MAP(CQuickFindEdit)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_CHAR, OnChar)
@@ -26,6 +27,10 @@ public:
 
 	void SetWatermarkIcon(HICON hIcon) {
 		m_hIcon = hIcon;
+	}
+
+	LRESULT OnGetDlgCode(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		return wParam == VK_TAB ? 0 : DLGC_WANTALLKEYS;
 	}
 
 	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
