@@ -5,6 +5,7 @@ class CQuickFindEdit : public CWindowImpl<CQuickFindEdit, CEdit> {
 public:
 	BEGIN_MSG_MAP(CQuickFindEdit)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_HOTKEY, OnHotKey)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnKillFocus)
@@ -15,6 +16,16 @@ public:
 	~CQuickFindEdit() {
 		if (m_hIcon)
 			::DestroyIcon(m_hIcon);
+	}
+
+	bool SetHotKey(UINT modifiers, UINT virtKey) {
+		if (m_HotKeyId)
+			::UnregisterHotKey(m_hWnd, 1);
+		auto ok = ::RegisterHotKey(m_hWnd, 1, modifiers, virtKey);
+		if (ok) {
+			m_HotKeyId = 1;
+		}
+		return ok;
 	}
 
 	void SetWatermark(PCWSTR watermark) {
@@ -31,6 +42,12 @@ public:
 
 	LRESULT OnGetDlgCode(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		return wParam == VK_TAB ? 0 : DLGC_WANTALLKEYS;
+	}
+
+	LRESULT OnHotKey(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		if (wParam == 1)
+			SetFocus();
+		return 0;
 	}
 
 	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
@@ -83,4 +100,5 @@ private:
 	COLORREF m_WatermarkColor{ RGB(128, 128, 128) };
 	UINT m_Delay{ 250 };
 	HICON m_hIcon{ nullptr };
+	UINT m_HotKeyId{ 0 };
 };
