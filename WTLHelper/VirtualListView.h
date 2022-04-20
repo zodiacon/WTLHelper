@@ -253,7 +253,8 @@ protected:
 	}
 
 	void Sort(SortInfo const* si) {
-		ATLASSERT(si);
+		if (si == nullptr)
+			return;
 		auto p = static_cast<T*>(this);
 		p->PreSort(si->hWnd);
 		p->DoSort(si);
