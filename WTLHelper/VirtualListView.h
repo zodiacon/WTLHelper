@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ColumnManager.h"
+#include "ListViewhelper.h"
 
 enum class ListViewRowCheck {
 	None,
@@ -340,8 +341,25 @@ protected:
 		return true;
 	}
 
-	void PostSort(HWND) const {}
-	void PreSort(HWND) const {}
+	int m_SaveSelected{ -1 };
+	CString m_SaveSelectedText;
+
+	void PreSort(HWND h) {
+		CListViewCtrl lv(h);
+		m_SaveSelected = (lv.GetStyle() & LVS_SINGLESEL) ? lv.GetSelectedIndex() : lv.GetSelectionMark();
+		if (m_SaveSelected >= 0)
+			lv.GetItemText(m_SaveSelected, 0, m_SaveSelectedText);
+	}
+
+	void PostSort(HWND h) {
+		if (m_SaveSelected >= 0) {
+			CListViewCtrl lv(h);
+			int index = ListViewHelper::FindItem(lv, m_SaveSelectedText, false);
+			ATLASSERT(index >= 0);
+			lv.SelectAllItems(false);
+			lv.SelectItem(index);
+		}
+	}
 
 	int GetSortColumn(HWND hWnd, UINT_PTR id = 0) const {
 		auto si = FindById(id);
