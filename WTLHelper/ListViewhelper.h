@@ -8,6 +8,7 @@ struct ListViewHelper abstract final {
 	static CString GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR separator = L"\t");
 	static CString GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t");
 	static int FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial);
+	static int FindRow(CListViewCtrl const& lv, PCWSTR rowText, int start = -1);
 	static IListView* GetIListView(HWND hListView);
 };
 

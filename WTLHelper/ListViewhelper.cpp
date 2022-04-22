@@ -84,6 +84,15 @@ int ListViewHelper::FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial)
 	return -1;
 }
 
+int ListViewHelper::FindRow(CListViewCtrl const& lv, PCWSTR rowText, int start) {
+	auto count = lv.GetItemCount();
+	for (int i = start + 1; i < count; i++)
+		if (GetRowAsString(lv, i) == rowText)
+			return i;
+
+	return -1;
+}
+
 IListView* ListViewHelper::GetIListView(HWND hListView) {
 	IListView* p{ nullptr };
 	::SendMessage(hListView, LVM_QUERYINTERFACE, reinterpret_cast<WPARAM>(&__uuidof(IListView)), reinterpret_cast<LPARAM>(&p));

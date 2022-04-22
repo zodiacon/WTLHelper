@@ -348,15 +348,16 @@ protected:
 		CListViewCtrl lv(h);
 		m_SaveSelected = (lv.GetStyle() & LVS_SINGLESEL) ? lv.GetSelectedIndex() : lv.GetSelectionMark();
 		if (m_SaveSelected >= 0)
-			lv.GetItemText(m_SaveSelected, 0, m_SaveSelectedText);
+			m_SaveSelectedText = ListViewHelper::GetRowAsString(lv, m_SaveSelected);
 	}
 
 	void PostSort(HWND h) {
 		if (m_SaveSelected >= 0) {
 			CListViewCtrl lv(h);
-			int index = ListViewHelper::FindItem(lv, m_SaveSelectedText, false);
+			int index = ListViewHelper::FindRow(lv, m_SaveSelectedText);
 			ATLASSERT(index >= 0);
-			lv.SelectAllItems(false);
+			if((lv.GetStyle() & LVS_SINGLESEL) == 0)
+				lv.SelectAllItems(false);
 			lv.SelectItem(index);
 		}
 	}
