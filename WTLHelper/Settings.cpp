@@ -144,6 +144,12 @@ void Settings::Set(PCWSTR name, int value) {
 	return Set(name, value, SettingType::Int32);
 }
 
+void Settings::Set(PCWSTR name, std::vector<std::wstring> const& values) {
+	Setting s(name, values);
+	m_settings.erase(name);
+	m_settings.insert({ name, std::move(s) });
+}
+
 void Settings::SetString(PCWSTR name, PCWSTR value) {
 	auto it = m_settings.find(name);
 	if (it != m_settings.end()) {
