@@ -21,3 +21,12 @@ HWND ToolbarHelper::CreateAndInitToolBar(HWND hWnd, const ToolBarButtonInfo* but
 	}
 	return hWndToolBar;
 }
+
+POINT ToolbarHelper::GetDropdownMenuPoint(HWND hToolBar, UINT buttonId) {
+	CToolBarCtrl tb(hToolBar);
+	CRect rect;
+	tb.GetItemRect(tb.CommandToIndex(buttonId), &rect);
+	CPoint pt(rect.left, rect.bottom);
+	tb.MapWindowPoints(HWND_DESKTOP, &pt, 1);
+	return pt;
+}
