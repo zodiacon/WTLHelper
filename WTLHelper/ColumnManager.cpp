@@ -155,6 +155,7 @@ bool ColumnManager::DeleteColumn(int col) {
 		return false;
 
 	m_Columns.erase(m_Columns.begin() + col);
+	m_ListView.DeleteColumn(0);
 	HDITEM hdi;
 	hdi.mask = HDI_LPARAM;
 	auto header = m_ListView.GetHeader();
