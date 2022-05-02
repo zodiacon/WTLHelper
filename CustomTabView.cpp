@@ -59,7 +59,7 @@ void CCustomTabView::BuildWindowMenu(HMENU hMenu, int nMenuItemsCount, bool bEmp
 	ATLASSERT(::IsWindow(this->m_hWnd));
 
 	CMenuHandle menu = hMenu;
-	int nFirstPos = 0;
+	int nFirstPos = 2;
 
 	BOOL bRet = TRUE;
 	while (bRet)

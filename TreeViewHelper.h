@@ -2,17 +2,17 @@
 
 template<typename T>
 struct CTreeViewHelper {
-	template<typename TData>
-	HTREEITEM InsertTreeItem(CTreeViewCtrl& tree, PCWSTR text, int image, int selectedImage, TData const& data, HTREEITEM hParent = TVI_ROOT, HTREEITEM hAfter = TVI_LAST) {
-		auto hItem = tree.InsertItem(text, image, selectedImage, hParent, hAfter);
+	template<typename TData, typename TIcon>
+	HTREEITEM InsertTreeItem(CTreeViewCtrl& tree, PCWSTR text, TIcon image, TIcon selectedImage, TData const& data, HTREEITEM hParent = TVI_ROOT, HTREEITEM hAfter = TVI_LAST) {
+		auto hItem = tree.InsertItem(text, static_cast<int>(image), static_cast<int>(selectedImage), hParent, hAfter);
 		if(hItem)
 			tree.SetItemData(hItem, static_cast<DWORD_PTR>(data));
 		return hItem;
 	}
 
-	template<typename TData>
-	HTREEITEM InsertTreeItem(CTreeViewCtrl& tree, PCWSTR text, int image, TData const& data, HTREEITEM hParent = TVI_ROOT, HTREEITEM hAfter = TVI_LAST) {
-		return InsertTreeItem(tree, text, image, image, data, hParent, hAfter);
+	template<typename TData, typename TIcon>
+	HTREEITEM InsertTreeItem(CTreeViewCtrl& tree, PCWSTR text, TIcon image, TData const& data, HTREEITEM hParent = TVI_ROOT, HTREEITEM hAfter = TVI_LAST) {
+		return InsertTreeItem(tree, text, static_cast<int>(image), static_cast<int>(image), data, hParent, hAfter);
 	}
 
 	template<typename TData>

@@ -29,6 +29,7 @@ public:
 		auto theme = ThemeHelper::GetCurrentTheme();
 		dc.FillSolidRect(&cd->rc, (cd->uItemState & (CDIS_DISABLED | CDIS_GRAYED)) ? ::GetSysColor(COLOR_GRAYTEXT) : theme->BackColor);
 		dc.DrawEdge(&cd->rc, (cd->uItemState & CDIS_SELECTED) ? EDGE_SUNKEN : EDGE_BUMP, BF_RECT);
+		dc.SetBkMode(TRANSPARENT);
 
 		return CDRF_DODEFAULT;
 	}
