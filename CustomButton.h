@@ -33,5 +33,4 @@ public:
 
 		return CDRF_DODEFAULT;
 	}
-
 };
