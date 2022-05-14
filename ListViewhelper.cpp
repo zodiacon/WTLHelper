@@ -55,6 +55,23 @@ CString ListViewHelper::GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR 
 	return text;
 }
 
+CString ListViewHelper::GetRowColumnsAsString(CListViewCtrl const& lv, int row, int start, int count, PCWSTR separator) {
+	if(count == 0)
+		count = lv.GetHeader().GetItemCount();
+	if (count == 0)
+		return L"";
+
+	CString text, item;
+	for (int c = 0; c < count; c++) {
+		if (lv.GetItemText(row, c + start, item))
+			item.Trim(L"\n\r");
+		text += item;
+		if (c < count - 1)
+			text += separator;
+	}
+	return text;
+}
+
 CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator) {
 	CString text;
 	for (auto line : SelectedItemsView(lv)) {
@@ -90,6 +107,16 @@ int ListViewHelper::FindRow(CListViewCtrl const& lv, PCWSTR rowText, int start) 
 		if (GetRowAsString(lv, i) == rowText)
 			return i;
 
+	return -1;
+}
+
+int ListViewHelper::FindRow(CListViewCtrl const& lv, int colStart, int colCount, PCWSTR rowText, int start) {
+	if (colCount == 0)
+		colCount = lv.GetHeader().GetItemCount();
+	auto count = lv.GetItemCount();
+	for (int i = start + 1; i < count; i++)
+		if (GetRowColumnsAsString(lv, i, colStart, colCount) == rowText)
+			return i;
 	return -1;
 }
 
