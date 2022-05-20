@@ -13,6 +13,7 @@
 #include "OwnerDrawnMenu.h"
 #include "CustomTabControl.h"
 #include <unordered_map>
+#include "CustomTreeView.h"
 
 const Theme* CurrentTheme;
 Theme g_DefaultTheme{ true };
@@ -82,6 +83,8 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+		auto win = new CCustomTreeView;
+		win->SubclassWindow(cs->hwnd);
 	}
 	else if (name.CompareNoCase(WC_TABCONTROL) == 0 || name.CompareNoCase(L"ATL:" WC_TABCONTROL) == 0) {
 		auto win = new CCustomTabControlParent;
