@@ -15,6 +15,7 @@
 #include <unordered_map>
 
 const Theme* CurrentTheme;
+Theme g_DefaultTheme{ true };
 std::atomic<int> SuspendCount;
 
 static decltype(::GetSysColor)* OrgGetSysColor = ::GetSysColor;
@@ -161,6 +162,8 @@ bool ThemeHelper::Init(HANDLE hThread) {
 	DetourAttach((PVOID*)&OrgReleaseDC, HookedReleaseDC);
 	auto error = DetourTransactionCommit();
 	ATLASSERT(error == NOERROR);
+	if (CurrentTheme == nullptr)
+		CurrentTheme = &g_DefaultTheme;
 	return error == NOERROR;
 }
 
@@ -196,6 +199,10 @@ void ThemeHelper::SetCurrentTheme(const Theme& theme, HWND hWnd) {
 		SendMessageToDescendants(hWnd, ::RegisterWindowMessage(L"WTLHelperUpdateTheme"), 0, reinterpret_cast<LPARAM>(&theme));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_ALLCHILDREN | RDW_INTERNALPAINT | RDW_INVALIDATE | RDW_UPDATENOW);
 	}
+}
+
+void ThemeHelper::SetDefaultTheme(HWND hWnd) {
+	SetCurrentTheme(g_DefaultTheme, hWnd);
 }
 
 void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
