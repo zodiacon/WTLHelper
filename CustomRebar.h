@@ -23,7 +23,7 @@ public:
 
 	LRESULT OnColorEdit(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme == nullptr || theme->IsDefault()) {
+		if (theme->IsDefault()) {
 			return DefWindowProc();
 		}
 		CDCHandle dc((HDC)wp);

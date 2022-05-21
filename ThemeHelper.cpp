@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <unordered_map>
 #include <detours.h>
 #include "ThemeHelper.h"
 #include "Theme.h"
@@ -12,8 +13,8 @@
 #include "CustomListView.h"
 #include "OwnerDrawnMenu.h"
 #include "CustomTabControl.h"
-#include <unordered_map>
 #include "CustomTreeView.h"
+#include "CustomToolBar.h"
 
 const Theme* CurrentTheme;
 Theme g_DefaultTheme{ true };
@@ -98,6 +99,8 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	else if (name.CompareNoCase(TOOLBARCLASSNAME) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
+		auto win = new CCustomToolBarParent;
+		win->Init(cs->hwnd);
 	}
 	else if (name.CompareNoCase(WC_HEADER) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
@@ -112,7 +115,9 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	else if (name.CompareNoCase(STATUSCLASSNAME) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 		auto win = new CCustomStatusBar;
-		ATLVERIFY(win->SubclassWindow(cs->hwnd));
+		win->Init(cs->hwnd, reinterpret_cast<LPCREATESTRUCT>(cs->lParam));
+		auto pwin = new CCustomStatusBarParent;
+		pwin->Init(cs->hwnd, ::GetParent(cs->hwnd));
 	}
 	else if (name.CompareNoCase(L"ScrollBar") == 0) {
 		if (lpcs->style & (SBS_SIZEBOX | SBS_SIZEGRIP)) {

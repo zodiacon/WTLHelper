@@ -120,6 +120,9 @@
     <ClInclude Include="CustomTreeView.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="CustomToolBar.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
