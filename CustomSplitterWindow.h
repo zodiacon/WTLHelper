@@ -8,13 +8,20 @@ public:
 	DECLARE_WND_CLASS_EX2(_T("WTL_SplitterWindow"), CSplitterWindowT<t_bVertical>, CS_DBLCLKS, COLOR_WINDOW)
 
 	BEGIN_MSG_MAP(CCustomSplitterWindowT)
+		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		CHAIN_MSG_MAP(CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>>)
 		FORWARD_NOTIFICATIONS()
 	END_MSG_MAP()
 
 	CCustomSplitterWindowT() : CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>>(t_bVertical) {
 		this->m_dwExtendedStyle |= SPLIT_FIXEDBARSIZE;
-		this->m_cxySplitBar = 2;
+	}
+
+	LRESULT OnCreate(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
+		auto lpcs = (LPCREATESTRUCT)lp;
+		this->m_cxySplitBar = (lpcs->dwExStyle & WS_EX_CLIENTEDGE) ? 2 : 6;
+		handled = FALSE;
+		return 0;
 	}
 
 	void DrawSplitterBar(CDCHandle dc) {
