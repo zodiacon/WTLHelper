@@ -123,6 +123,9 @@
     <ClInclude Include="CustomToolBar.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="CustomSplitterWindow.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">

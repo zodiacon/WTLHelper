@@ -14,7 +14,7 @@ public:
 
 	CCustomSplitterWindowT() : CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>>(t_bVertical) {
 		this->m_dwExtendedStyle |= SPLIT_FIXEDBARSIZE;
-		this->m_cxySplitBar = 6;
+		this->m_cxySplitBar = 2;
 	}
 
 	void DrawSplitterBar(CDCHandle dc) {
@@ -54,4 +54,4 @@ public:
 };
 
 using CCustomSplitterWindow = CCustomSplitterWindowT<true>;
-using CCustomSplitterHorWindow = CCustomSplitterWindowT<false>;
+using CCustomHorSplitterWindow = CCustomSplitterWindowT<false>;
