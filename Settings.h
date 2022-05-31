@@ -17,7 +17,7 @@ struct Setting {
 	std::wstring Name;
 	SettingType Type{ SettingType::String };
 	std::unique_ptr<uint8_t[]> Buffer;
-	int Size;
+	uint32_t Size;
 
 	Setting(std::wstring name, const std::wstring& value) : Name(std::move(name)) {
 		Buffer = std::make_unique<uint8_t[]>(Size = (1 + (int)value.size()) * sizeof(wchar_t));
@@ -35,10 +35,9 @@ struct Setting {
 	}
 
 	Setting(std::wstring name, std::vector<std::wstring> const& value) : Name(std::move(name)), Type(SettingType::MultiString) {
-		size_t size = 0;
+		size_t size = sizeof(WCHAR);
 		std::for_each(value.begin(), value.end(), [&](auto& str) { size += sizeof(WCHAR) * (1 + str.length()); });
-		size += sizeof(WCHAR);
-		Buffer = std::make_unique<uint8_t[]>(Size = (int)size);
+		Buffer = std::make_unique<uint8_t[]>(Size = (uint32_t)size);
 		auto p = Buffer.get();
 		std::for_each(value.begin(), value.end(), [&](auto& str) {
 			auto count = (str.length() + 1) * sizeof(WCHAR);

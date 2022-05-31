@@ -15,12 +15,13 @@ bool Settings::LoadFromKey(PCWSTR registryPath) {
 	if (ERROR_SUCCESS != key.Open(HKEY_CURRENT_USER, registryPath))
 		return false;
 
-	WCHAR name[64];
-	BYTE value[512];
+	WCHAR name[128];
+	auto size = 1 << 16;
+	auto value = std::make_unique<BYTE[]>(size);
 	DWORD type;
 	for (DWORD i = 0;; ++i) {
-		DWORD lname = _countof(name), lvalue = sizeof(value);
-		auto error = ::RegEnumValue(key, i, name, &lname, nullptr, &type, value, &lvalue);
+		DWORD lname = _countof(name), lvalue = size;
+		auto error = ::RegEnumValue(key, i, name, &lname, nullptr, &type, value.get(), &lvalue);
 		if (ERROR_NO_MORE_ITEMS == error)
 			break;
 
@@ -29,9 +30,9 @@ bool Settings::LoadFromKey(PCWSTR registryPath) {
 
 		auto it = m_settings.find(name);
 		if (it == m_settings.end())
-			m_settings.insert({ name, Setting(name, (BYTE*)value, lvalue, (SettingType)type) });
+			m_settings.insert({ name, Setting(name, value.get(), lvalue, (SettingType)type) });
 		else
-			it->second.Set(value, lvalue);
+			it->second.Set(value.get(), lvalue);
 	}
 	return true;
 }
