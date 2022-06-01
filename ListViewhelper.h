@@ -12,6 +12,7 @@ struct ListViewHelper abstract final {
 	static int FindRow(CListViewCtrl const& lv, int colStart, int count, PCWSTR rowText, int start = -1);
 	static IListView* GetIListView(HWND hListView);
 	static CString GetRowColumnsAsString(CListViewCtrl const& lv, int row, int start, int count, PCWSTR separator = L"\t");
+	static CString GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t");
 };
 
 struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
