@@ -78,12 +78,10 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	//	ATLVERIFY(win->SubclassWindow(cs->hwnd));
 	//}
 	if (name.CompareNoCase(WC_LISTVIEW) == 0) {
-		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 		auto win = new CCustomListView;
 		win->SubclassWindow(cs->hwnd);
 	}
 	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
-		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 		auto win = new CCustomTreeView;
 		win->SubclassWindow(cs->hwnd);
 	}
@@ -129,11 +127,11 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 			//win->SubclassWindow(cs->hwnd);
 		}
 	}
-	else if (name.CompareNoCase(L"BUTTON") == 0) {
+	else if (name.CompareNoCase(WC_BUTTON) == 0) {
 		auto type = lpcs->style & BS_TYPEMASK;
 		if (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON) {
 			auto win = new CCustomButtonParent;
-			ATLVERIFY(win->SubclassWindow(::GetParent(cs->hwnd)));
+			win->Init(cs->hwnd);
 		}
 	}
 }

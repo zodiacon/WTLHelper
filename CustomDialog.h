@@ -27,26 +27,26 @@ public:
 
 	LRESULT OnStaticColor(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme == nullptr || theme->IsDefault()) {
+		if (theme->IsDefault()) {
 			return DefWindowProc();
 		}
 		CDCHandle dc((HDC)wp);
 		dc.SetBkMode(OPAQUE);
 		dc.SetTextColor(theme->TextColor);
 		dc.SetBkColor(theme->BackColor);
-		return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
+		return (LRESULT)theme->GetSysBrush(COLOR_WINDOW);
 	}
 
 	LRESULT OnEditColor(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme == nullptr || theme->IsDefault()) {
+		if (theme->IsDefault()) {
 			return DefWindowProc();
 		}
 		CDCHandle dc((HDC)wp);
 		dc.SetBkMode(OPAQUE);
 		dc.SetTextColor(theme->TextColor);
 		dc.SetBkColor(theme->BackColor);
-		return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
+		return (LRESULT)theme->GetSysBrush(COLOR_WINDOW);
 	}
 
 };
