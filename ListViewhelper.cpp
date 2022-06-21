@@ -125,3 +125,13 @@ IListView* ListViewHelper::GetIListView(HWND hListView) {
 	::SendMessage(hListView, LVM_QUERYINTERFACE, reinterpret_cast<WPARAM>(&__uuidof(IListView)), reinterpret_cast<LPARAM>(&p));
 	return p;
 }
+
+CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator) {
+	CString text;
+	for (int i = 0; i < lv.GetItemCount(); i++) {
+		text += GetRowAsString(lv, i, separator) += L"\r\n";
+	}
+	if (!text.IsEmpty())
+		text = text.Left(text.GetLength() - 2);
+	return text;
+}

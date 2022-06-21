@@ -31,7 +31,7 @@ public:
 		dc.SetBkMode(OPAQUE);
 		dc.SetTextColor(theme->TextColor);
 		dc.SetBkColor(theme->BackColor);
-		return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
+		return (LRESULT)theme->GetSysBrush(COLOR_WINDOW);
 	}
 
 	LRESULT OnEditColor(UINT, WPARAM wp, LPARAM lp, BOOL&) {
@@ -40,7 +40,7 @@ public:
 		dc.SetBkMode(OPAQUE);
 		dc.SetTextColor(theme->TextColor);
 		dc.SetBkColor(theme->BackColor);
-		return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
+		return (LRESULT)theme->GetSysBrush(COLOR_WINDOW);
 	}
 
 };
