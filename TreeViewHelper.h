@@ -16,7 +16,7 @@ struct CTreeViewHelper {
 	}
 
 	template<typename TData>
-	static TData GetItemData(CTreeViewCtrl& tree, HTREEITEM hItem) {
+	static TData GetItemData(CTreeViewCtrl const& tree, HTREEITEM hItem) {
 		return static_cast<TData>(tree.GetItemData(hItem));
 	}
 

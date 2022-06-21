@@ -27,9 +27,6 @@ public:
 
 	LRESULT OnStaticColor(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme == nullptr || theme->IsDefault()) {
-			return DefWindowProc();
-		}
 		CDCHandle dc((HDC)wp);
 		dc.SetBkMode(OPAQUE);
 		dc.SetTextColor(theme->TextColor);
@@ -39,9 +36,6 @@ public:
 
 	LRESULT OnEditColor(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme == nullptr || theme->IsDefault()) {
-			return DefWindowProc();
-		}
 		CDCHandle dc((HDC)wp);
 		dc.SetBkMode(OPAQUE);
 		dc.SetTextColor(theme->TextColor);
