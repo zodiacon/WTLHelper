@@ -120,3 +120,6 @@ void COwnerDrawnMenuBase::SetCheckIcon(HICON hIcon, HICON hRadioIcon) {
 		m_RadioIcon = m_Images.AddIcon(hRadioIcon);
 }
 
+void COwnerDrawnMenuBase::SetCheckIcon(UINT iconId, UINT radioId) {
+	SetCheckIcon(AtlLoadIconImage(iconId, 0, 16, 16), radioId ? AtlLoadIconImage(radioId, 0, 16, 16) : nullptr);
+}
