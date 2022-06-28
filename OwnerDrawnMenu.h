@@ -11,8 +11,10 @@ struct COwnerDrawnMenuBase {
 	void AddCommand(UINT id, HICON hIcon);
 	void AddCommand(UINT id, UINT iconId);
 	bool AddMenu(HMENU hMenu);
+	bool AddMenu(UINT id);
 	void AddSubMenu(CMenuHandle menu);
 	void SetCheckIcon(HICON hicon, HICON hRadioIcon = nullptr);
+	void SetCheckIcon(UINT iconId, UINT radioId = 0);
 	void UpdateMenuBase(CMenuHandle menu, bool subMenus = false);
 
 protected:
