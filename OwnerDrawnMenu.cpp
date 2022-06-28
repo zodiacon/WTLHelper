@@ -46,6 +46,11 @@ void COwnerDrawnMenuBase::AddCommand(UINT id, UINT iconId) {
 	AddCommand(id, hIcon);
 }
 
+bool COwnerDrawnMenuBase::AddMenu(UINT id) {
+	CMenu menu;
+	return menu.LoadMenu(id) && AddMenu(menu);
+}
+
 bool COwnerDrawnMenuBase::AddMenu(HMENU hMenu) {
 	ATLASSERT(::IsMenu(hMenu));
 	CMenuHandle menu(hMenu);
