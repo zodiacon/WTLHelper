@@ -31,9 +31,8 @@ public:
 
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme && theme->IsDefault()) {
-			bHandled = FALSE;
-			return 0;
+		if (theme->IsDefault()) {
+			DefWindowProc();
 		}
 
 		if (GetStyle() & (SBS_SIZEBOX | SBS_SIZEGRIP)) {
