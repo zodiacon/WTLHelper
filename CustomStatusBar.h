@@ -69,7 +69,7 @@ public:
 		auto theme = ThemeHelper::GetCurrentTheme();
 		CRect rc;
 		GetClientRect(&rc);
-		if (m_Text.size() == 1) {
+		if (m_Text.size() == 1 && !m_Text[0].empty()) {
 			CPaintDC dc(m_hWnd);
 			dc.SelectFont(GetFont());
 			dc.SetTextColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
@@ -108,13 +108,20 @@ class CCustomStatusBarParent :
 			return;
 		}
 		CDCHandle dc(dis->hDC);
-		dc.SetTextColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
-		dc.SetBkMode(OPAQUE);
-		dc.SetBkColor(ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
-		int type;
-		CString text;
-		m_sb.GetText(dis->itemID, text, &type);
-		dc.DrawText(L" " + text, -1, &dis->rcItem, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+		auto hIcon = m_sb.GetIcon(dis->itemID);
+		if (hIcon) {
+			auto pt = CRect(dis->rcItem).CenterPoint();
+			dc.DrawIconEx(dis->rcItem.left + 2, pt.y - 8, hIcon, 16, 16);
+		}
+		else {
+			dc.SetTextColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
+			dc.SetBkMode(OPAQUE);
+			dc.SetBkColor(ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
+			int type;
+			CString text;
+			m_sb.GetText(dis->itemID, text, &type);
+			dc.DrawText(L" " + text, -1, &dis->rcItem, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+		}
 	}
 
 	void MeasureItem(LPMEASUREITEMSTRUCT ) {
