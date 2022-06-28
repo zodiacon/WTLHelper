@@ -72,13 +72,13 @@ public:
 		if (m_Text.size() == 1 && !m_Text[0].empty()) {
 			CPaintDC dc(m_hWnd);
 			dc.SelectFont(GetFont());
-			dc.SetTextColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
+			dc.SetTextColor(theme->StatusBar.TextColor);
 			dc.SetBkMode(TRANSPARENT);
 			rc.left += 2;
 			dc.DrawText(m_Text[0].c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 			rc.left -= 2;
 			dc.SelectStockPen(DC_PEN);
-			dc.SetDCPenColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
+			dc.SetDCPenColor(theme->StatusBar.TextColor);
 			dc.MoveTo(0, 0); dc.LineTo(rc.right, 0);
 		}
 		else {
