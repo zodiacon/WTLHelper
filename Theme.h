@@ -16,6 +16,7 @@ struct Theme {
 		COLORREF SelectionBackColor{ ::GetSysColor(COLOR_HIGHLIGHT) };
 		COLORREF SeparatorColor{ ::GetSysColor(COLOR_GRAYTEXT) };
 	} Menu;
+	
 	struct {
 		COLORREF BackColor{ CLR_INVALID };
 		COLORREF TextColor{ CLR_INVALID };
@@ -23,7 +24,12 @@ struct Theme {
 		COLORREF SelectedBackColor{ CLR_INVALID };
 	} ListView;
 
-	COLORREF SysColors[32];
+	struct {
+		COLORREF TextColor{ ::GetSysColor(COLOR_WINDOWTEXT) };
+		COLORREF BackColor{ ::GetSysColor(COLOR_WINDOW) };
+	} StatusBar;
+
+	mutable COLORREF SysColors[32];
 
 	HBRUSH GetSysBrush(int index) const;
 	COLORREF GetSysColor(int index) const;

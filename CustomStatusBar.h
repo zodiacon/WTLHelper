@@ -13,7 +13,7 @@ public:
 		MESSAGE_HANDLER(SB_GETTEXTLENGTH, OnGetTextLength)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
-		CHAIN_MSG_MAP_ALT(COwnerDraw<CCustomStatusBar>, 1)
+		CHAIN_MSG_MAP_ALT(COwnerDraw<CCustomStatusBar>, 0)
 	END_MSG_MAP()
 
 	void OnFinalMessage(HWND) override {
@@ -56,23 +56,12 @@ public:
 		return TRUE;
 	}
 
-	void DrawItem(LPDRAWITEMSTRUCT dis) {
-		if (dis->hwndItem != m_hWnd) {
-			SetMsgHandled(FALSE);
-			return;
-		}
-		CDCHandle dc(dis->hDC);
-		dc.SetTextColor(ThemeHelper::GetCurrentTheme()->TextColor);
-		dc.SetBkMode(TRANSPARENT);
-		SetMsgHandled(FALSE);
-	}
-
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		auto theme = ThemeHelper::GetCurrentTheme();
 		CDCHandle dc((HDC)wParam);
 		CRect rc;
 		GetClientRect(&rc);
-		dc.FillSolidRect(&rc, theme->BackColor);
+		dc.FillSolidRect(&rc, theme->StatusBar.BackColor);
 		return 1;
 	}
 
@@ -85,7 +74,12 @@ public:
 			dc.SelectFont(GetFont());
 			dc.SetTextColor(ThemeHelper::GetCurrentTheme()->TextColor);
 			dc.SetBkMode(TRANSPARENT);
-			::DrawStatusText(dc.m_hDC, &rc, m_Text[0].c_str(), 0);
+			rc.left += 2;
+			dc.DrawText(m_Text[0].c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+			rc.left -= 2;
+			dc.SelectStockPen(DC_PEN);
+			dc.SetDCPenColor(ThemeHelper::GetCurrentTheme()->TextColor);
+			dc.MoveTo(0, 0); dc.LineTo(rc.right, 0);
 		}
 		else {
 			DefWindowProc();
@@ -115,7 +109,8 @@ class CCustomStatusBarParent :
 		}
 		CDCHandle dc(dis->hDC);
 		dc.SetTextColor(ThemeHelper::GetCurrentTheme()->TextColor);
-		dc.SetBkMode(TRANSPARENT);
+		dc.SetBkMode(OPAQUE);
+		dc.SetBkColor(ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
 		int type;
 		CString text;
 		m_sb.GetText(dis->itemID, text, &type);

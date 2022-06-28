@@ -14,8 +14,8 @@ public:
 
 	static void DrawSizeGrip(CWindow win, CRect& rc) {
 		CClientDC dc(win);
-		auto color = ThemeHelper::GetCurrentTheme()->TextColor;
-		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
+		auto color = ThemeHelper::GetCurrentTheme()->StatusBar.TextColor;
+		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
 		CPoint start(rc.left + 5, rc.top + 5);
 
 		for (int y = 0; y < 3; y++) {
@@ -31,10 +31,7 @@ public:
 
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		auto theme = ThemeHelper::GetCurrentTheme();
-		if (theme && theme->IsDefault()) {
-			bHandled = FALSE;
-			return 0;
-		}
+		ATLASSERT(theme);
 
 		if (GetStyle() & (SBS_SIZEBOX | SBS_SIZEGRIP)) {
 			CRect rc;
