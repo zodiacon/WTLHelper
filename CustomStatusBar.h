@@ -72,13 +72,13 @@ public:
 		if (m_Text.size() == 1) {
 			CPaintDC dc(m_hWnd);
 			dc.SelectFont(GetFont());
-			dc.SetTextColor(ThemeHelper::GetCurrentTheme()->TextColor);
+			dc.SetTextColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
 			dc.SetBkMode(TRANSPARENT);
 			rc.left += 2;
 			dc.DrawText(m_Text[0].c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 			rc.left -= 2;
 			dc.SelectStockPen(DC_PEN);
-			dc.SetDCPenColor(ThemeHelper::GetCurrentTheme()->TextColor);
+			dc.SetDCPenColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
 			dc.MoveTo(0, 0); dc.LineTo(rc.right, 0);
 		}
 		else {
@@ -108,13 +108,13 @@ class CCustomStatusBarParent :
 			return;
 		}
 		CDCHandle dc(dis->hDC);
-		dc.SetTextColor(ThemeHelper::GetCurrentTheme()->TextColor);
+		dc.SetTextColor(ThemeHelper::GetCurrentTheme()->StatusBar.TextColor);
 		dc.SetBkMode(OPAQUE);
 		dc.SetBkColor(ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
 		int type;
 		CString text;
 		m_sb.GetText(dis->itemID, text, &type);
-		::DrawStatusText(dc.m_hDC, &dis->rcItem, text, 0);
+		dc.DrawText(L" " + text, -1, &dis->rcItem, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 	}
 
 	void MeasureItem(LPMEASUREITEMSTRUCT ) {
