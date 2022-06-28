@@ -83,10 +83,10 @@ public:
 		}
 		else {
 			DefWindowProc();
-		}		
+		}
 		rc.left = rc.right - 20;
 		rc.top = rc.bottom - 20;
-		CSizeGrip::DrawSizeGrip(*this, rc);
+		//CSizeGrip::DrawSizeGrip(*this, rc);
 
 		return 0;
 	}

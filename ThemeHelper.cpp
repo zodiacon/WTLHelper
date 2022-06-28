@@ -118,7 +118,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		pwin->Init(cs->hwnd, ::GetParent(cs->hwnd));
 	}
 	else if (name.CompareNoCase(L"ScrollBar") == 0) {
-		if (lpcs->style & (SBS_SIZEBOX | SBS_SIZEGRIP)) {
+		if (lpcs->style & SBS_SIZEGRIP) {
 			auto win = new CSizeGrip;
 			ATLVERIFY(win->SubclassWindow(cs->hwnd));
 		}

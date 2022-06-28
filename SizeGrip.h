@@ -15,7 +15,7 @@ public:
 	static void DrawSizeGrip(CWindow win, CRect& rc) {
 		CClientDC dc(win);
 		auto color = ThemeHelper::GetCurrentTheme()->StatusBar.TextColor;
-		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
+		//dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
 		CPoint start(rc.left + 5, rc.top + 5);
 
 		for (int y = 0; y < 3; y++) {
