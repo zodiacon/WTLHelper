@@ -54,7 +54,7 @@ struct CTreeViewHelper {
 	}
 
 	template<typename TData>
-	static HTREEITEM FindChildByData(CTreeViewCtrl& tree, HTREEITEM item, TData const& data) {
+	static HTREEITEM FindChildByData(CTreeViewCtrl const& tree, HTREEITEM item, TData const& data) {
 		item = tree.GetChildItem(item);
 		while (item) {
 			if (GetItemData<TData>(tree, item) == data)
@@ -69,7 +69,7 @@ struct CTreeViewHelper {
 	}
 
 	template<typename TData>
-	HTREEITEM FindItemByData(CTreeViewCtrl& tree, HTREEITEM hParent, TData const& data) const {
+	HTREEITEM FindItemByData(CTreeViewCtrl const& tree, HTREEITEM hParent, TData const& data) const {
 		int start = 0;
 		HTREEITEM hItem = nullptr;
 		while (hParent) {
