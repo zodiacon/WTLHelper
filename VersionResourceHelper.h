@@ -5,18 +5,18 @@
 
 class VersionResourceHelper {
 public:
-	VersionResourceHelper(PCWSTR path);
+	explicit VersionResourceHelper(PCWSTR path = nullptr);
 	bool IsValid() const;
 	operator bool() const {
 		return IsValid();
 	}
 	CString GetValue(const std::wstring& name) const;
 	const CString& GetPath() const {
-		return _path;
+		return m_path;
 	}
 
 private:
-	std::unique_ptr<BYTE[]> _buffer;
-	CString _path;
+	std::unique_ptr<BYTE[]> m_buffer;
+	CString m_path;
 };
 
