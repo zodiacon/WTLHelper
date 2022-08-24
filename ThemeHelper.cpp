@@ -73,10 +73,10 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		if ((lpcs->style & (WS_THICKFRAME | WS_CAPTION | WS_POPUP | WS_DLGFRAME)) == 0)
 			::SetWindowTheme(cs->hwnd, L" ", L"");
 	}
-	//if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
-	//	auto win = new CCustomEdit;
-	//	ATLVERIFY(win->SubclassWindow(cs->hwnd));
-	//}
+	if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
+		auto win = new CCustomEdit;
+		ATLVERIFY(win->SubclassWindow(cs->hwnd));
+	}
 	if (name.CompareNoCase(WC_LISTVIEW) == 0) {
 		auto win = new CCustomListView;
 		win->SubclassWindow(cs->hwnd);

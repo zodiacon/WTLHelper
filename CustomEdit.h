@@ -13,7 +13,7 @@ public:
 	END_MSG_MAP()
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& /*bHandled*/) {
-		CClientDC dc(m_hWnd);
+		CDCHandle dc((HDC)wParam);
 		CRect rc;
 		GetClientRect(&rc);
 		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
