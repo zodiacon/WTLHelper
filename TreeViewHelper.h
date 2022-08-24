@@ -95,13 +95,21 @@ struct CTreeViewHelper {
 protected:
 	BEGIN_MSG_MAP(CTreeViewHelper)
 		NOTIFY_CODE_HANDLER(TVN_SELCHANGED, OnSelChanged)
+		NOTIFY_CODE_HANDLER(TVN_ITEMEXPANDING, OnItemExpanding)
 		NOTIFY_CODE_HANDLER(NM_RCLICK, OnRightClick)
 		NOTIFY_CODE_HANDLER(NM_DBLCLK, OnDoubleClick)
 	ALT_MSG_MAP(1)
 		REFLECTED_NOTIFY_CODE_HANDLER(TVN_SELCHANGED, OnSelChanged)
+		REFLECTED_NOTIFY_CODE_HANDLER(TVN_ITEMEXPANDING, OnItemExpanding)
 		REFLECTED_NOTIFY_CODE_HANDLER(NM_RCLICK, OnRightClick)
 		REFLECTED_NOTIFY_CODE_HANDLER(NM_DBLCLK, OnDoubleClick)
 	END_MSG_MAP()
+
+	LRESULT OnItemExpanding(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
+		auto pT = static_cast<T*>(this);
+		auto tv = (NMTREEVIEW*)hdr;
+		return pT->OnTreeItemExpanding(hdr->hwndFrom, tv->itemNew.hItem, tv->itemNew.state, tv->action);
+	}
 
 	LRESULT OnSelChanged(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
 		auto pT = static_cast<T*>(this);
@@ -137,9 +145,14 @@ private:
 	// overridables
 
 	void OnTreeSelChanged(HWND tree, HTREEITEM hOld, HTREEITEM hNew) {}
+	bool OnTreeItemExpanding(HWND tree, HTREEITEM hItem, DWORD state, DWORD action) {
+		return false;
+	}
+
 	bool OnTreeRightClick(HWND tree, HTREEITEM hItem, POINT const& pt) {
 		return false;
 	}
+
 	bool OnTreeDoubleClick(HWND tree, HTREEITEM hItem) {
 		return false;
 	}
