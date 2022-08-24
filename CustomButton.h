@@ -17,15 +17,15 @@ public:
 	END_MSG_MAP()
 
 	DWORD OnPreErase(int, LPNMCUSTOMDRAW cd) {
-		if (cd->hdr.hwndFrom != m_hWnd) {
+		if (cd->hdr.hwndFrom != m_Button) {
 			SetMsgHandled(FALSE);
 			return CDRF_DODEFAULT;
 		}
-		return ThemeHelper::IsDefault() ? CDRF_DODEFAULT : CDRF_NOTIFYPOSTERASE;
+		return CDRF_NOTIFYPOSTERASE;
 	}
 
 	DWORD OnPostErase(int, LPNMCUSTOMDRAW cd) {
-		if (cd->hdr.hwndFrom != m_hWnd) {
+		if (cd->hdr.hwndFrom != m_Button) {
 			SetMsgHandled(FALSE);
 			return CDRF_DODEFAULT;
 		}
@@ -35,14 +35,15 @@ public:
 		dc.DrawEdge(&cd->rc, (cd->uItemState & CDIS_SELECTED) ? EDGE_SUNKEN : EDGE_BUMP, BF_RECT);
 		dc.SetBkMode(TRANSPARENT);
 		dc.SetTextColor(theme->TextColor);
-
 		return CDRF_DODEFAULT;
 	}
 
 	void Init(HWND hWnd) {
-		m_hWnd = hWnd;
+		m_Button.Attach(hWnd);
+		m_Button.ModifyStyleEx(WS_EX_NOPARENTNOTIFY, 0);
 		ATLVERIFY(SubclassWindow(::GetParent(hWnd)));
 	}
 
-	HWND m_hWnd;
+	CButton m_Button;
 };
+

@@ -11,6 +11,12 @@ struct CCustomTreeView : CWindowImpl<CWindow, CTreeViewCtrl> {
 		delete this;
 	}
 
+	void Init() {
+		auto theme = ThemeHelper::GetCurrentTheme();
+		SetBkColor(theme->BackColor);
+		SetTextColor(theme->TextColor);
+	}
+
 	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/) {
 		auto theme = reinterpret_cast<Theme*>(lParam);
 		SetBkColor(theme->BackColor);
