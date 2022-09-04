@@ -15,6 +15,7 @@ struct ThemeHelper abstract final {
 	static bool SaveToFile(Theme const& theme, PCWSTR path);
 	static bool Init(HANDLE hThread = ::GetCurrentThread());
 	static int Suspend();
+	static bool IsSuspended();
 	static int Resume();
 	static bool SuspendDCOperation(DCOperation op, HDC hdc);
 	static bool ResumeDCOperation(DCOperation op, HDC hdc);

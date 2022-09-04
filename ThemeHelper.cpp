@@ -73,10 +73,10 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		if ((lpcs->style & (WS_THICKFRAME | WS_CAPTION | WS_POPUP | WS_DLGFRAME)) == 0)
 			::SetWindowTheme(cs->hwnd, L" ", L"");
 	}
-	//if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
-	//	auto win = new CCustomEdit;
-	//	ATLVERIFY(win->SubclassWindow(cs->hwnd));
-	//}
+	if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
+		auto win = new CCustomEdit;
+		ATLVERIFY(win->SubclassWindow(cs->hwnd));
+	}
 	if (name.CompareNoCase(WC_LISTVIEW) == 0) {
 		auto win = new CCustomListView;
 		win->SubclassWindow(cs->hwnd);
@@ -84,6 +84,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
 		auto win = new CCustomTreeView;
 		win->SubclassWindow(cs->hwnd);
+		win->Init();
 	}
 	else if (name.CompareNoCase(WC_TABCONTROL) == 0 || name.CompareNoCase(L"ATL:" WC_TABCONTROL) == 0) {
 		auto win = new CCustomTabControlParent;
@@ -109,6 +110,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	else if (name.CompareNoCase(L"#32770") == 0) {		// dialog
 		auto win = new CCustomDialog;
 		ATLVERIFY(win->SubclassWindow(cs->hwnd));
+		//win->ModifyStyle(WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0);
 	}
 	else if (name.CompareNoCase(STATUSCLASSNAME) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
@@ -129,7 +131,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	else if (name.CompareNoCase(WC_BUTTON) == 0) {
 		auto type = lpcs->style & BS_TYPEMASK;
-		if (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON) {
+		if (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON || type == BS_GROUPBOX) {
 			auto win = new CCustomButtonParent;
 			win->Init(cs->hwnd);
 		}
@@ -150,7 +152,6 @@ LRESULT CALLBACK CallWndProc(int action, WPARAM wp, LPARAM lp) {
 
 	return ::CallNextHookEx(nullptr, action, wp, lp);
 }
-
 
 bool ThemeHelper::Init(HANDLE hThread) {
 	auto hook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, CallWndProc, nullptr, ::GetThreadId(hThread));
@@ -175,6 +176,10 @@ bool ThemeHelper::Init(HANDLE hThread) {
 
 int ThemeHelper::Suspend() {
 	return ++SuspendCount;
+}
+
+bool ThemeHelper::IsSuspended() {
+	return SuspendCount > 0;
 }
 
 int ThemeHelper::Resume() {

@@ -4,30 +4,35 @@
 
 #pragma comment(lib, "version")
 
-VersionResourceHelper::VersionResourceHelper(PCWSTR path) : _path(path) {
+VersionResourceHelper::VersionResourceHelper(PCWSTR path) : m_path(path) {
+	if (path == nullptr) {
+		WCHAR exepath[MAX_PATH];
+		::GetModuleFileName(nullptr, exepath, _countof(exepath));
+		m_path = exepath;
+	}
 	DWORD zero;
-	auto infoSize = ::GetFileVersionInfoSize(path, &zero);
+	auto infoSize = ::GetFileVersionInfoSize(m_path, &zero);
 	if (infoSize) {
-		_buffer = std::make_unique<BYTE[]>(infoSize);
-		if (!::GetFileVersionInfo(path, 0, infoSize, _buffer.get()))
-			_buffer.reset();
+		m_buffer = std::make_unique<BYTE[]>(infoSize);
+		if (!::GetFileVersionInfo(m_path, 0, infoSize, m_buffer.get()))
+			m_buffer.reset();
 	}
 }
 
 bool VersionResourceHelper::IsValid() const {
-	return _buffer != nullptr;
+	return m_buffer != nullptr;
 }
 
 CString VersionResourceHelper::GetValue(const std::wstring& name) const {
 	CString result;
-	if (_buffer) {
+	if (m_buffer) {
 		WORD* langAndCodePage;
 		UINT len;
-		if (::VerQueryValue(_buffer.get(), L"\\VarFileInfo\\Translation", (void**)&langAndCodePage, &len)) {
+		if (::VerQueryValue(m_buffer.get(), L"\\VarFileInfo\\Translation", (void**)&langAndCodePage, &len)) {
 			WCHAR text[256];
 			::StringCchPrintf(text, _countof(text), L"\\StringFileInfo\\%04x%04x\\%s", langAndCodePage[0], langAndCodePage[1], name.c_str());
 			WCHAR* desc;
-			if (::VerQueryValue(_buffer.get(), text, (void**)&desc, &len))
+			if (::VerQueryValue(m_buffer.get(), text, (void**)&desc, &len))
 				result = desc;
 		}
 	}

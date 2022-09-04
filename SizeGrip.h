@@ -14,8 +14,13 @@ public:
 
 	static void DrawSizeGrip(CWindow win, CRect& rc) {
 		CClientDC dc(win);
+		DrawSizeGrip(dc.m_hDC, rc);
+		win.ValidateRect(nullptr);
+	}
+
+	static void DrawSizeGrip(CDCHandle dc, CRect& rc) {
 		auto color = ThemeHelper::GetCurrentTheme()->StatusBar.TextColor;
-		//dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
+		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->StatusBar.BackColor);
 		CPoint start(rc.left + 5, rc.top + 5);
 
 		for (int y = 0; y < 3; y++) {
@@ -26,7 +31,6 @@ public:
 				dc.FillSolidRect(&r, color);
 			}
 		}
-		win.ValidateRect(nullptr);
 	}
 
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
@@ -36,7 +40,8 @@ public:
 		if (GetStyle() & (SBS_SIZEBOX | SBS_SIZEGRIP)) {
 			CRect rc;
 			GetClientRect(&rc);
-			DrawSizeGrip(m_hWnd, rc);
+			CPaintDC dc(m_hWnd);
+			DrawSizeGrip(dc.m_hDC, rc);
 		}
 		else {
 			bHandled = FALSE;

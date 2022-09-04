@@ -1,6 +1,10 @@
 #pragma once
 
+#include "ThemeHelper.h"
+#include "Theme.h"
+
 const UINT EN_DELAYCHANGE = EN_CHANGE + 1;
+
 class CQuickFindEdit : public CWindowImpl<CQuickFindEdit, CEdit> {
 public:
 	BEGIN_MSG_MAP(CQuickFindEdit)
@@ -10,6 +14,9 @@ public:
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_CHAR, OnChar)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnDialogColor)
+		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnDialogColor)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 	END_MSG_MAP()
 
@@ -50,6 +57,14 @@ public:
 		return 0;
 	}
 
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& /*bHandled*/) {
+		CDCHandle dc((HDC)wParam);
+		CRect rc;
+		GetClientRect(&rc);
+		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
+		return 1;
+	}
+
 	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		if (wParam == 1) {
 			KillTimer(1);
@@ -58,10 +73,13 @@ public:
 		return 0;
 	}
 
+	LRESULT OnDialogColor(UINT, WPARAM, LPARAM, BOOL&) {
+		return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
+	}
+
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		DefWindowProc();
 		if (GetWindowTextLength() == 0 && !m_Watermark.IsEmpty() && ::GetFocus() != m_hWnd) {
-			CClientDC dc(m_hWnd);
+			CPaintDC dc(m_hWnd);
 			dc.SetBkMode(TRANSPARENT);
 			dc.SetTextColor(m_WatermarkColor);
 			dc.SelectFont(GetFont());
@@ -73,6 +91,9 @@ public:
 				rc.left += 20;
 			}
 			dc.DrawText(m_Watermark, -1, &rc, DT_VCENTER | DT_SINGLELINE);
+		}
+		else {
+			DefWindowProc();
 		}
 		return 0;
 	}
