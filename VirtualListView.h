@@ -349,7 +349,7 @@ protected:
 		int count = static_cast<T*>(this)->GetSaveColumnRange(start);
 		CListViewCtrl lv(h);
 		m_SaveSelected = (lv.GetStyle() & LVS_SINGLESEL) ? lv.GetSelectedIndex() : lv.GetSelectionMark();
-		if (m_SaveSelected >= 0)
+		if (m_SaveSelected >= 0 && count >= 0)
 			m_SaveSelectedText = ListViewHelper::GetRowColumnsAsString(lv, m_SaveSelected, start, count);
 	}
 
@@ -357,12 +357,14 @@ protected:
 		if (m_SaveSelected >= 0) {
 			int start = 0;
 			int count = static_cast<T*>(this)->GetSaveColumnRange(start);
-			CListViewCtrl lv(h);
-			int index = ListViewHelper::FindRow(lv, start, count, m_SaveSelectedText);
-			ATLASSERT(index >= 0);
-			if((lv.GetStyle() & LVS_SINGLESEL) == 0)
-				lv.SelectAllItems(false);
-			lv.SelectItem(index);
+			if (count >= 0) {
+				CListViewCtrl lv(h);
+				int index = ListViewHelper::FindRow(lv, start, count, m_SaveSelectedText);
+				ATLASSERT(index >= 0);
+				if ((lv.GetStyle() & LVS_SINGLESEL) == 0)
+					lv.SelectAllItems(false);
+				lv.SelectItem(index);
+			}
 		}
 	}
 
