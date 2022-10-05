@@ -9,6 +9,15 @@ enum class ListViewRowCheck {
 	Checked
 };
 
+struct ColumnsState {
+	int Count{ 0 };
+	int SortColumn{ -1 };
+	bool SortAscending{ true };
+	std::unique_ptr<int[]> Order;
+	std::unique_ptr<LVCOLUMN[]> Columns;
+	std::unique_ptr<std::wstring[]> Text;
+};
+
 template<typename T>
 struct CVirtualListView {
 	BEGIN_MSG_MAP(CVirtualListView)
@@ -341,6 +350,64 @@ protected:
 		return true;
 	}
 
+	bool LoadState(HWND h, ColumnsState const& state) {
+		if (state.Columns == 0)
+			return false;
+		CListViewCtrl lv(h);
+		lv.SetColumnOrderArray(state.Count, state.Order.get());
+		auto empty = lv.GetHeader().GetItemCount() == 0;
+
+		for (int i = 0; i < state.Count; i++) {
+			if (state.Text) {
+				state.Columns[i].pszText = state.Text[i].data();
+			}
+			if(empty)
+				lv.InsertColumn(i, state.Columns.get() + i);
+			else
+				lv.SetColumn(i, state.Columns.get() + i);
+		}
+		if (state.SortColumn < 0)
+			ClearSort(h);
+		else {
+			auto si = GetSortInfo(h);
+			si->SortAscending = state.SortAscending;
+			si->SortColumn = state.SortColumn;
+		}
+		return true;
+	}
+
+	ColumnsState SaveState(HWND h, bool names = true) {
+		CListViewCtrl lv(h);
+		ColumnsState state;
+		auto si = GetSortInfo(h);
+		auto count = lv.GetHeader().GetItemCount();
+		state.Order = std::make_unique<int[]>(count);
+		state.Columns = std::make_unique<LVCOLUMN[]>(count);
+		if (names)
+			state.Text = std::make_unique<std::wstring[]>(count);
+		if (si) {
+			state.SortColumn = si->SortColumn;
+			state.SortAscending = si->SortAscending;
+		}
+		lv.GetHeader().GetOrderArray(count, state.Order.get());
+		LVCOLUMN lvc;
+		lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_MINWIDTH | (names ? LVCF_TEXT : 0);
+		state.Count = count;
+		WCHAR text[128];
+		for (int i = 0; i < count; i++) {
+			state.Columns[i].mask = lvc.mask;
+			if (names) {
+				state.Columns[i].cchTextMax = _countof(text);
+				state.Columns[i].pszText = text;
+			}
+			lv.GetColumn(i, &state.Columns[i]);
+			if (names)
+				state.Text[i] = state.Columns[i].pszText;
+		}
+		return state;
+	}
+
+
 	int m_SaveSelected{ -1 };
 	CString m_SaveSelectedText;
 
@@ -376,12 +443,6 @@ protected:
 		auto si = FindById(id);
 		return si ? si->SortAscending : false;
 	}
-
-	//SortInfo* GetSortInfo(UINT_PTR id = 0) {
-	//	if (id == 0 && m_Controls.empty())
-	//		return nullptr;
-	//	return id == 0 ? &m_Controls[0] : FindById(id);
-	//}
 
 	SortInfo* GetSortInfo(HWND h = nullptr) {
 		if (h == nullptr && m_Controls.empty())

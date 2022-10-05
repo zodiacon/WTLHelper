@@ -135,3 +135,4 @@ CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separ
 		text = text.Left(text.GetLength() - 2);
 	return text;
 }
+
