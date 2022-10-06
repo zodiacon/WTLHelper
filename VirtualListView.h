@@ -356,6 +356,8 @@ protected:
 			return false;
 
 		CListViewCtrl lv(h);
+		while (lv.DeleteColumn(0))
+			;
 		lv.SetColumnOrderArray(state.Count, state.Order.get());
 		auto header = lv.GetHeader();
 		auto empty = header.GetItemCount() == 0;
