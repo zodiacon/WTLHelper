@@ -16,6 +16,7 @@ struct ColumnsState {
 	std::unique_ptr<int[]> Order;
 	std::unique_ptr<LVCOLUMN[]> Columns;
 	std::unique_ptr<std::wstring[]> Text;
+	std::unique_ptr<int[]> Tags;
 };
 
 template<typename T>
@@ -351,12 +352,15 @@ protected:
 	}
 
 	bool LoadState(HWND h, ColumnsState const& state) {
-		if (state.Columns == 0)
+		if (state.Count == 0)
 			return false;
+
 		CListViewCtrl lv(h);
 		lv.SetColumnOrderArray(state.Count, state.Order.get());
-		auto empty = lv.GetHeader().GetItemCount() == 0;
-
+		auto header = lv.GetHeader();
+		auto empty = header.GetItemCount() == 0;
+		HDITEM hdi;
+		hdi.mask = HDI_LPARAM;
 		for (int i = 0; i < state.Count; i++) {
 			if (state.Text) {
 				state.Columns[i].pszText = state.Text[i].data();
@@ -365,6 +369,8 @@ protected:
 				lv.InsertColumn(i, state.Columns.get() + i);
 			else
 				lv.SetColumn(i, state.Columns.get() + i);
+			hdi.lParam = state.Tags[i];
+			header.SetItem(i, &hdi);
 		}
 		if (state.SortColumn < 0)
 			ClearSort(h);
@@ -373,6 +379,7 @@ protected:
 			si->SortAscending = state.SortAscending;
 			si->SortColumn = state.SortColumn;
 		}
+		GetColumnManager(h)->AddFromControl();
 		return true;
 	}
 
@@ -380,9 +387,11 @@ protected:
 		CListViewCtrl lv(h);
 		ColumnsState state;
 		auto si = GetSortInfo(h);
-		auto count = lv.GetHeader().GetItemCount();
+		auto header = lv.GetHeader();
+		auto count = header.GetItemCount();
 		state.Order = std::make_unique<int[]>(count);
 		state.Columns = std::make_unique<LVCOLUMN[]>(count);
+		state.Tags = std::make_unique<int[]>(count);
 		if (names)
 			state.Text = std::make_unique<std::wstring[]>(count);
 		if (si) {
@@ -394,6 +403,8 @@ protected:
 		lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_MINWIDTH | (names ? LVCF_TEXT : 0);
 		state.Count = count;
 		WCHAR text[128];
+		HDITEM hdi;
+		hdi.mask = HDI_LPARAM;
 		for (int i = 0; i < count; i++) {
 			state.Columns[i].mask = lvc.mask;
 			if (names) {
@@ -403,6 +414,8 @@ protected:
 			lv.GetColumn(i, &state.Columns[i]);
 			if (names)
 				state.Text[i] = state.Columns[i].pszText;
+			header.GetItem(i, &hdi);
+			state.Tags[i] = (int)hdi.lParam;
 		}
 		return state;
 	}
