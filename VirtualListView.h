@@ -358,7 +358,6 @@ protected:
 		CListViewCtrl lv(h);
 		while (lv.DeleteColumn(0))
 			;
-		lv.SetColumnOrderArray(state.Count, state.Order.get());
 		auto header = lv.GetHeader();
 		auto empty = header.GetItemCount() == 0;
 		HDITEM hdi;
@@ -382,6 +381,7 @@ protected:
 			si->SortColumn = state.SortColumn;
 		}
 		GetColumnManager(h)->AddFromControl();
+		lv.SetColumnOrderArray(state.Count, state.Order.get());
 		return true;
 	}
 
@@ -400,7 +400,7 @@ protected:
 			state.SortColumn = si->SortColumn;
 			state.SortAscending = si->SortAscending;
 		}
-		lv.GetHeader().GetOrderArray(count, state.Order.get());
+		lv.GetColumnOrderArray(count, state.Order.get());
 		LVCOLUMN lvc;
 		lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_MINWIDTH | (names ? LVCF_TEXT : 0);
 		state.Count = count;

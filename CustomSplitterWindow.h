@@ -10,7 +10,6 @@ public:
 	BEGIN_MSG_MAP(CCustomSplitterWindowT)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		CHAIN_MSG_MAP(CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>>)
-		FORWARD_NOTIFICATIONS()
 	END_MSG_MAP()
 
 	CCustomSplitterWindowT() : CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>>(t_bVertical) {

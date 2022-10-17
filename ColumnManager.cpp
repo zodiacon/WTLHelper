@@ -36,6 +36,12 @@ public:
 	}
 };
 
+HWND ColumnManager::Attach(HWND hListView) {
+	auto h = m_ListView;
+	m_ListView = hListView;
+	return h;
+}
+
 ColumnManager::~ColumnManager() = default;
 
 bool ColumnManager::CopyTo(ColumnManager & other) const {
