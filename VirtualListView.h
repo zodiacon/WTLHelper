@@ -428,7 +428,7 @@ protected:
 
 	void PreSort(HWND h) {
 		int start = 0;
-		int count = static_cast<T*>(this)->GetSaveColumnRange(start);
+		int count = static_cast<T*>(this)->GetSaveColumnRange(h, start);
 		CListViewCtrl lv(h);
 		m_SaveSelected = (lv.GetStyle() & LVS_SINGLESEL) ? lv.GetSelectedIndex() : lv.GetSelectionMark();
 		if (m_SaveSelected >= 0 && count >= 0)
@@ -438,7 +438,7 @@ protected:
 	void PostSort(HWND h) {
 		if (m_SaveSelected >= 0) {
 			int start = 0;
-			int count = static_cast<T*>(this)->GetSaveColumnRange(start);
+			int count = static_cast<T*>(this)->GetSaveColumnRange(h, start);
 			if (count >= 0) {
 				CListViewCtrl lv(h);
 				int index = ListViewHelper::FindRow(lv, start, count, m_SaveSelectedText);
@@ -490,7 +490,7 @@ protected:
 		return ListViewRowCheck::None;
 	}
 
-	int GetSaveColumnRange(int&) const {
+	int GetSaveColumnRange(HWND, int&) const {
 		return 0;
 	}
 
