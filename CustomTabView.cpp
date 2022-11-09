@@ -125,4 +125,5 @@ void CCustomTabView::BuildWindowMenu(HMENU hMenu, int nMenuItemsCount, bool bEmp
 
 	if (bWindowsMenuItem)
 		menu.AppendMenu(MF_BYPOSITION | MF_STRING, ID_WINDOW_SHOWTABLIST, L"Tabs...");
+	GetParent().SendMessage(WM_WINDOW_MENU_BUILT);
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#define WM_WINDOW_MENU_BUILT (WM_APP+111)
+
 class CCustomTabView : public CTabViewImpl<CCustomTabView> {
 public:
 	DECLARE_WND_CLASS_EX(_T("WTL_TabView"), 0, COLOR_APPWORKSPACE)
