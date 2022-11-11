@@ -9,12 +9,29 @@ class CCustomButtonParent :
 	public CCustomDraw<CCustomButtonParent> {
 public:
 	void OnFinalMessage(HWND) override {
+		m_Button.Detach();
 		delete this;
 	}
 
 	BEGIN_MSG_MAP(CCustomButtonParent)
 		CHAIN_MSG_MAP(CCustomDraw<CCustomButtonParent>)
 	END_MSG_MAP()
+
+	DWORD OnPrePaint(int, LPNMCUSTOMDRAW cd) {
+		if (cd->hdr.hwndFrom != m_Button) {
+			SetMsgHandled(FALSE);
+			return CDRF_DODEFAULT;
+		}
+		return CDRF_NOTIFYPOSTERASE;
+	}
+
+	DWORD OnItemPrePaint(int, LPNMCUSTOMDRAW cd) {
+		if (cd->hdr.hwndFrom != m_Button) {
+			SetMsgHandled(FALSE);
+			return CDRF_DODEFAULT;
+		}
+		return CDRF_NOTIFYPOSTERASE;
+	}
 
 	DWORD OnPreErase(int, LPNMCUSTOMDRAW cd) {
 		if (cd->hdr.hwndFrom != m_Button) {
