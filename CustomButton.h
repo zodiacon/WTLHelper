@@ -33,6 +33,11 @@ public:
 		return CDRF_NOTIFYPOSTERASE;
 	}
 
+	DWORD OnSubItemPrePaint(int, LPNMCUSTOMDRAW cd) {
+		SetMsgHandled(FALSE);
+		return CDRF_DODEFAULT;
+	}
+
 	DWORD OnPreErase(int, LPNMCUSTOMDRAW cd) {
 		if (cd->hdr.hwndFrom != m_Button) {
 			SetMsgHandled(FALSE);
