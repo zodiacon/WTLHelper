@@ -15,6 +15,7 @@
 #include "CustomTabControl.h"
 #include "CustomTreeView.h"
 #include "CustomToolBar.h"
+#include "CustomComboBox.h"
 
 const Theme* CurrentTheme;
 Theme g_DefaultTheme{ true };
@@ -72,6 +73,8 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	if (name.CompareNoCase(WC_COMBOBOX) != 0) {
 		if ((lpcs->style & (WS_THICKFRAME | WS_CAPTION | WS_POPUP | WS_DLGFRAME)) == 0)
 			::SetWindowTheme(cs->hwnd, L" ", L"");
+		auto win = new CCustomComboBox;
+		ATLVERIFY(win->SubclassWindow(cs->hwnd));
 	}
 	if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
 		auto win = new CCustomEdit;

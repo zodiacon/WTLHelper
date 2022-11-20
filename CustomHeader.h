@@ -52,10 +52,11 @@ public:
 	END_MSG_MAP()
 
 	void Init(HWND hWnd) {
-		m_Header.SubclassWindow(hWnd);
+		m_Header.Attach(hWnd);
 	}
 
 	void OnFinalMessage(HWND) override {
+		m_Header.Detach();
 		delete this;
 	}
 
@@ -69,7 +70,11 @@ public:
 	}
 
 	DWORD OnItemPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW cd) {
-		ATLASSERT(cd->hdr.hwndFrom == m_Header);
+		if (cd->hdr.hwndFrom != m_Header) {
+			SetMsgHandled(FALSE);
+			return CDRF_DODEFAULT;
+		}
+
 		HDITEM item;
 		item.mask = HDI_TEXT | HDI_FORMAT;
 		WCHAR text[64];
