@@ -20,6 +20,11 @@ struct CTreeViewHelper {
 		return static_cast<TData>(tree.GetItemData(hItem));
 	}
 
+	template<typename TData>
+	static void SetItemData(CTreeViewCtrl& tree, HTREEITEM hItem, TData const& data) {
+		tree.SetItemData(hItem, static_cast<DWORD_PTR>(data));
+	}
+
 	static HTREEITEM FindItem(CTreeViewCtrl& tree, HTREEITEM hParent, PCWSTR path) {
 		int start = 0;
 		CString spath(path);

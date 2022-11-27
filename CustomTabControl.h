@@ -61,22 +61,23 @@ struct CCustomTabControlParent :
 		dc.FillSolidRect(&rc, theme->BackColor);
 		dc.SetTextColor(theme->TextColor);
 		dc.SetBkMode(TRANSPARENT);
-		int space = 0;
 		if (tci.iImage >= 0) {
 			CSize size;
 			::GetTextExtentPoint32(dc.m_hDC, tci.pszText, (int)wcslen(tci.pszText), &size);
-			space = 12;
 			CRect irc(rc);
 			irc.top += 4;
 			irc.bottom = irc.top + 16;
-			irc.left += (irc.Width() - size.cx) / 2 - space;
+			irc.left += 4;
 			irc.right = irc.left + 16;
 
 			m_Tab.GetImageList().DrawEx(tci.iImage, dc.m_hDC, irc, CLR_NONE, CLR_NONE, ILD_NORMAL);
-			rc.left += space * 2;
+			rc.left += 24;
 			rc.top += 2;
 		}
-		dc.DrawText(tci.pszText, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		else {
+			rc.left += 4;
+		}
+		dc.DrawText(tci.pszText, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 	}
 
 	void Init(HWND hWnd) {
