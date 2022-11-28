@@ -7,11 +7,6 @@ public:
 	END_MSG_MAP()
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (ThemeHelper::IsDefault()) {
-			bHandled = FALSE;
-			return 0;
-		}
-
 		CDCHandle dc((HDC)wParam);
 		CRect rc;
 		GetClientRect(&rc);
