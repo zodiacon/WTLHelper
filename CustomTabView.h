@@ -6,6 +6,13 @@ class CCustomTabView : public CTabViewImpl<CCustomTabView> {
 public:
 	DECLARE_WND_CLASS(L"WTL_TabView")
 
+	//BEGIN_MSG_MAP(CCustomTabView)
+	//	CHAIN_MSG_MAP(CTabViewImpl<CCustomTabView>)
+	//	FORWARD_NOTIFICATIONS()
+	//ALT_MSG_MAP(1)
+	//	CHAIN_MSG_MAP_ALT(CTabViewImpl<CCustomTabView>, 1)
+	//END_MSG_MAP()
+
 	bool CreateTabControl();
 	void UpdateLayout();
 	void SetRedraw(bool redraw);

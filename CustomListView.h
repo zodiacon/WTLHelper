@@ -2,7 +2,8 @@
 
 #include "Theme.h"
 
-struct CCustomListView : CWindowImpl<CWindow, CListViewCtrl> {
+class CCustomListView : public CWindowImpl<CCustomListView, CListViewCtrl> {
+public:
 	BEGIN_MSG_MAP(CCustomListView)
 		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
 	END_MSG_MAP()

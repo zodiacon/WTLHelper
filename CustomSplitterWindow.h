@@ -5,7 +5,7 @@
 template <bool t_bVertical>
 class CCustomSplitterWindowT : public CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>> {
 public:
-	DECLARE_WND_CLASS_EX2(_T("WTL_SplitterWindow"), CSplitterWindowT<t_bVertical>, CS_DBLCLKS, COLOR_WINDOW)
+	DECLARE_WND_CLASS2(_T("WTL_SplitterWindow"), CSplitterWindowT<t_bVertical>)
 
 	BEGIN_MSG_MAP(CCustomSplitterWindowT)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
