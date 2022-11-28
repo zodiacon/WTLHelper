@@ -1,6 +1,7 @@
 #pragma once
 
 struct IListView;
+struct ColumnsState;
 
 struct ListViewHelper abstract final {
 	static bool SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders = true);
@@ -13,6 +14,8 @@ struct ListViewHelper abstract final {
 	static IListView* GetIListView(HWND hListView);
 	static CString GetRowColumnsAsString(CListViewCtrl const& lv, int row, int start, int count, PCWSTR separator = L"\t");
 	static CString GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t");
+	static bool WriteColumnsState(ColumnsState const& state, IStream* stm);
+	static bool ReadColumnsState(ColumnsState& state, IStream* stm);
 };
 
 struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {

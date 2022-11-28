@@ -1,6 +1,6 @@
 #pragma once
 
-template<typename T, typename TFrame>
+template<typename T, typename TFrame, bool dynamic = true>
 class CFrameView abstract :
 	public CFrameWindowImpl<T, CWindow, CControlWinTraits> {
 public:
@@ -12,7 +12,8 @@ public:
 	}
 
 	void OnFinalMessage(HWND) override {
-		delete this;
+		if(dynamic)
+			delete this;
 	}
 
 	BEGIN_MSG_MAP(CFrameView)

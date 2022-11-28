@@ -422,7 +422,6 @@ protected:
 		return state;
 	}
 
-
 	int m_SaveSelected{ -1 };
 	CString m_SaveSelectedText;
 

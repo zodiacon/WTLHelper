@@ -12,7 +12,7 @@ public:
 		MESSAGE_HANDLER(SB_GETTEXT, OnGetText)
 		MESSAGE_HANDLER(SB_GETTEXTLENGTH, OnGetTextLength)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
-		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		//MESSAGE_HANDLER(WM_PAINT, OnPaint)
 		CHAIN_MSG_MAP_ALT(COwnerDraw<CCustomStatusBar>, 0)
 	END_MSG_MAP()
 
@@ -49,9 +49,8 @@ public:
 		}
 		m_Text.resize(pane + 1);
 		m_Text[pane] = (PCWSTR)lParam;
-		DefWindowProc(uMsg, wParam | SBT_OWNERDRAW, lParam);
-		if(simple)
-			Invalidate();
+		DefWindowProc(uMsg, wParam | 0*SBT_OWNERDRAW, lParam);
+		Invalidate();
 
 		return TRUE;
 	}
@@ -62,6 +61,9 @@ public:
 		CRect rc;
 		GetClientRect(&rc);
 		dc.FillSolidRect(&rc, theme->StatusBar.BackColor);
+		//rc.left = rc.right - 20;
+		//rc.top = rc.bottom - 20;
+		//CSizeGrip::DrawSizeGrip(dc, rc);
 		return 1;
 	}
 
@@ -84,10 +86,6 @@ public:
 		else {
 			DefWindowProc();
 		}
-		rc.left = rc.right - 20;
-		rc.top = rc.bottom - 20;
-		//CSizeGrip::DrawSizeGrip(*this, rc);
-
 		return 0;
 	}
 

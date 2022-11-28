@@ -4,7 +4,7 @@
 
 class CCustomTabView : public CTabViewImpl<CCustomTabView> {
 public:
-	DECLARE_WND_CLASS_EX(_T("WTL_TabView"), 0, COLOR_APPWORKSPACE)
+	DECLARE_WND_CLASS(L"WTL_TabView")
 
 	bool CreateTabControl();
 	void UpdateLayout();

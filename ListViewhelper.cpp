@@ -2,6 +2,7 @@
 #include "ListViewHelper.h"
 #include "IListView.h"
 #include <wil\resource.h>
+#include "VirtualListView.h"
 
 bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders) {
 	wil::unique_handle hFile(::CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr));
@@ -136,3 +137,53 @@ CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separ
 	return text;
 }
 
+bool ListViewHelper::WriteColumnsState(ColumnsState const& state, IStream* stm) {
+	auto count = state.Count;
+	stm->Write(&count, sizeof(count), nullptr);
+	stm->Write(&state.SortColumn, sizeof(state.SortColumn), nullptr);
+	stm->Write(&state.SortAscending, sizeof(state.SortAscending), nullptr);
+	stm->Write(state.Order.get(), sizeof(int) * count, nullptr);
+	stm->Write(state.Columns.get(), sizeof(LVCOLUMN) * count, nullptr);
+	stm->Write(state.Tags.get(), sizeof(int) * count, nullptr);
+	if (state.Text) {
+		for (int i = 0; i < count; i++) {
+			auto len = (uint16_t)state.Text[i].length();
+			stm->Write(&len, sizeof(len), nullptr);
+			if (len) {
+				stm->Write(state.Text[i].c_str(), len * sizeof(WCHAR), nullptr);
+			}
+		}
+	}
+	uint32_t end = 0xffff;
+	stm->Write(&end, sizeof(end), nullptr);
+	return true;
+}
+
+bool ListViewHelper::ReadColumnsState(ColumnsState& state, IStream* stm) {
+	int count = 0;
+	stm->Read(&count, sizeof(count), nullptr);
+	if (count == 0)
+		return false;
+
+	stm->Read(&state.SortColumn, sizeof(state.SortColumn), nullptr);
+	stm->Read(&state.SortAscending, sizeof(state.SortAscending), nullptr);
+	state.Order = std::make_unique<int[]>(count);
+	stm->Read(state.Order.get(), sizeof(int) * count, nullptr);
+	state.Columns = std::make_unique<LVCOLUMN[]>(count);
+	stm->Read(state.Order.get(), sizeof(LVCOLUMN) * count, nullptr);
+	state.Tags = std::make_unique<int[]>(count);
+	stm->Read(state.Tags.get(), sizeof(int) * count, nullptr);
+
+	uint16_t len = 0;
+	stm->Read(&len, sizeof(len), nullptr);
+	if (len != 0xffff) {
+		state.Text = std::make_unique<std::wstring[]>(count);
+		for (int i = 0; i < count; i++) {
+			state.Text[i].resize(len);
+			stm->Read(state.Text[i].data(), len * sizeof(WCHAR), nullptr);
+			stm->Read(&len, sizeof(len), nullptr);
+		}
+		ATLASSERT(len == 0xffff);
+	}
+	return true;
+}
