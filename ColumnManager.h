@@ -29,8 +29,10 @@ public:
 		void SetVisible(bool);
 	};
 
-	ColumnManager(HWND hListView) : m_ListView(hListView) {}
+	explicit ColumnManager(HWND hListView = nullptr) : m_ListView(hListView) {}
+	HWND Attach(HWND hListView);
 	~ColumnManager();
+
 	ColumnManager(const ColumnManager&) = default;
 	ColumnManager& operator=(const ColumnManager&) = delete;
 

@@ -36,6 +36,12 @@ public:
 	}
 };
 
+HWND ColumnManager::Attach(HWND hListView) {
+	auto h = m_ListView;
+	m_ListView = hListView;
+	return h;
+}
+
 ColumnManager::~ColumnManager() = default;
 
 bool ColumnManager::CopyTo(ColumnManager & other) const {
@@ -58,13 +64,14 @@ void ColumnManager::AddFromControl(HWND hWnd) {
 	WCHAR text[64];
 	item.pszText = text;
 	item.cchTextMax = _countof(text);
-	item.mask = HDI_FORMAT | HDI_WIDTH | HDI_TEXT;
+	item.mask = HDI_FORMAT | HDI_WIDTH | HDI_TEXT | HDI_LPARAM;
 	for (int i = 0; i < count; i++) {
 		ATLVERIFY(header.GetItem(i, &item));
 		ColumnInfo info;
 		info.DefaultWidth = item.cxy;
 		info.Flags = (info.DefaultWidth <= 1 && ((item.fmt & HDF_FIXEDWIDTH) > 0) ? ColumnFlags::Visible : ColumnFlags::None);
 		info.Name = item.pszText;
+		info.Tag = (int)item.lParam;
 		m_Columns.push_back(info);
 	}
 }
@@ -102,6 +109,10 @@ void ColumnManager::Clear() {
 }
 
 void ColumnManager::UpdateColumns() {
+	if (GetCount() == 0) {
+		Clear();
+		return;
+	}
 	auto header = m_ListView.GetHeader();
 	HDITEM hdi;
 	hdi.mask = HDI_LPARAM;

@@ -2,7 +2,7 @@
 #include "CustomTabView.h"
 
 bool CCustomTabView::CreateTabControl() {
-	m_tab.Create(this->m_hWnd, this->rcDefault, nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED,
+	m_tab.Create(this->m_hWnd, this->rcDefault, nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_FOCUSNEVER | TCS_HOTTRACK | TCS_OWNERDRAWFIXED | TCS_TOOLTIPS,
 		0, m_nTabID);
 	ATLASSERT(m_tab.m_hWnd != NULL);
 	if (m_tab.m_hWnd == NULL)
@@ -125,4 +125,5 @@ void CCustomTabView::BuildWindowMenu(HMENU hMenu, int nMenuItemsCount, bool bEmp
 
 	if (bWindowsMenuItem)
 		menu.AppendMenu(MF_BYPOSITION | MF_STRING, ID_WINDOW_SHOWTABLIST, L"Tabs...");
+	GetParent().SendMessage(WM_WINDOW_MENU_BUILT);
 }

@@ -9,16 +9,18 @@ class CCustomToolBarParent :
 	END_MSG_MAP()
 
 	DWORD OnPrePaint(int, LPNMCUSTOMDRAW cd) {
-		if (cd->hdr.hwndFrom != m_ToolBar)
+		if (cd->hdr.hwndFrom != m_ToolBar) {
+			SetMsgHandled(FALSE);
 			return CDRF_DODEFAULT;
-
+		}
 		return CDRF_NOTIFYITEMDRAW;
 	}
 
 	DWORD OnItemPrePaint(int, LPNMCUSTOMDRAW cd) {
-		if (cd->hdr.hwndFrom != m_ToolBar)
+		if (cd->hdr.hwndFrom != m_ToolBar) {
+			SetMsgHandled(FALSE);
 			return CDRF_DODEFAULT;
-
+		}
 		auto tb = (NMTBCUSTOMDRAW*)cd;
 		tb->clrText = ThemeHelper::GetCurrentTheme()->TextColor;
 		tb->clrBtnHighlight = ::GetSysColor(COLOR_BTNHIGHLIGHT);
