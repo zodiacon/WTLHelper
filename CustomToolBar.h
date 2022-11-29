@@ -16,10 +16,14 @@ class CCustomToolBarParent :
 	}
 
 	DWORD OnItemPrePaint(int, LPNMCUSTOMDRAW cd) {
+		if (cd->hdr.hwndFrom != m_ToolBar)
+			return CDRF_DODEFAULT;
+
 		auto tb = (NMTBCUSTOMDRAW*)cd;
 		tb->clrText = ThemeHelper::GetCurrentTheme()->TextColor;
-
-		return CDRF_DODEFAULT | TBCDRF_USECDCOLORS;
+		tb->clrBtnHighlight = ::GetSysColor(COLOR_BTNHIGHLIGHT);
+	
+		return TBCDRF_USECDCOLORS;
 	}
 
 	void OnFinalMessage(HWND) override {
@@ -29,6 +33,7 @@ class CCustomToolBarParent :
 	void Init(HWND tb) {
 		SubclassWindow(::GetParent(tb));
 		m_ToolBar.Attach(tb);
+		::SetWindowTheme(tb, L" ", nullptr);
 	}
 
 	CToolBarCtrl m_ToolBar;

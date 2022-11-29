@@ -57,7 +57,7 @@ bool COwnerDrawnMenuBase::AddMenu(HMENU hMenu) {
 	UpdateMenuBase(menu, true);
 	auto count = menu.GetMenuItemCount();
 	MENUITEMINFO mii = { sizeof(mii) };
-	WCHAR text[16];
+	WCHAR text[64];
 	for (decltype(count) i = 0; i < count; i++) {
 		mii.fMask = MIIM_SUBMENU | MIIM_ID;
 		if (menu.GetMenuItemInfo(i, TRUE, &mii) && mii.hSubMenu) {
