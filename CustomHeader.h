@@ -52,7 +52,7 @@ public:
 	END_MSG_MAP()
 
 	void Init(HWND hWnd) {
-		m_Header.Attach(hWnd);
+		m_Header.SubclassWindow(hWnd);
 	}
 
 	void OnFinalMessage(HWND) override {
