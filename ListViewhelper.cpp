@@ -4,7 +4,7 @@
 #include <wil\resource.h>
 #include "VirtualListView.h"
 
-bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders) {
+bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, PCWSTR separator = L",", bool includeHeaders) {
 	wil::unique_handle hFile(::CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr));
 	if (!hFile)
 		return false;
@@ -23,7 +23,7 @@ bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders
 		hdi.mask = HDI_TEXT;
 		for (int i = 0; i < columns; i++) {
 			header.GetItem(i, &hdi);
-			::wcscat_s(text, i == columns - 1 ? L"\n" : L"\t");
+			::wcscat_s(text, i == columns - 1 ? L"\n" : separator);
 			::WriteFile(hFile.get(), text, (DWORD)::wcslen(text) * sizeof(WCHAR), &written, nullptr);
 		}
 	}
@@ -32,7 +32,7 @@ bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, bool includeHeaders
 		for (int c = 0; c < columns; c++) {
 			text.Empty();
 			lv.GetItemText(i, c, text);
-			text += c == columns - 1 ? L"\n" : L"\t";
+			text += c == columns - 1 ? L"\n" : separator;
 			::WriteFile(hFile.get(), text.GetBuffer(), text.GetLength() * sizeof(WCHAR), &written, nullptr);
 		}
 	}
@@ -73,10 +73,10 @@ CString ListViewHelper::GetRowColumnsAsString(CListViewCtrl const& lv, int row, 
 	return text;
 }
 
-CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator) {
+CString ListViewHelper::GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator, PCWSTR cr) {
 	CString text;
 	for (auto line : SelectedItemsView(lv)) {
-		text += GetRowAsString(lv, line, separator) += L"\r\n";
+		text += GetRowAsString(lv, line, separator) += cr;
 	}
 	if (!text.IsEmpty())
 		text = text.Left(text.GetLength() - 2);
@@ -127,10 +127,10 @@ IListView* ListViewHelper::GetIListView(HWND hListView) {
 	return p;
 }
 
-CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator) {
+CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator, PCWSTR cr) {
 	CString text;
 	for (int i = 0; i < lv.GetItemCount(); i++) {
-		text += GetRowAsString(lv, i, separator) += L"\r\n";
+		text += GetRowAsString(lv, i, separator) += cr;
 	}
 	if (!text.IsEmpty())
 		text = text.Left(text.GetLength() - 2);

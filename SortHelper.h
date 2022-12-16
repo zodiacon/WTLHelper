@@ -8,6 +8,7 @@ struct SortHelper final abstract {
 	static bool Sort(const std::string& s1, const std::string& s2, bool ascending);
 	static bool Sort(const std::wstring& s1, const std::wstring& s2, bool ascending);
 	static bool Sort(PCWSTR s1, PCWSTR s2, bool ascending);
+	static bool Sort(PWSTR s1, PWSTR s2, bool ascending);
 	static bool Sort(bool a, bool b, bool asc);
 
 	template<typename Number>
