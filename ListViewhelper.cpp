@@ -4,7 +4,7 @@
 #include <wil\resource.h>
 #include "VirtualListView.h"
 
-bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, PCWSTR separator = L",", bool includeHeaders) {
+bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, PCWSTR separator, bool includeHeaders) {
 	wil::unique_handle hFile(::CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr));
 	if (!hFile)
 		return false;
