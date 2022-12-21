@@ -48,6 +48,18 @@ bool SortHelper::Sort(PCWSTR s1, PCWSTR s2, bool ascending) {
 	return ascending ? compare > 0 : compare < 0;
 }
 
+bool SortHelper::Sort(PWSTR s1, PWSTR s2, bool ascending) {
+	if ((s1 == nullptr || *s1 == 0) && (s2 == nullptr || *s2 == 0))
+		return false;
+	if (s1 == nullptr || *s1 == 0)
+		return false;
+	if (s2 == nullptr || *s2 == 0)
+		return true;
+
+	auto compare = ::_wcsicmp(s2, s1);
+	return ascending ? compare > 0 : compare < 0;
+}
+
 bool SortHelper::Sort(bool a, bool b, bool asc) {
 	return asc ? b > a : a > b;
 }
