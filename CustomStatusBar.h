@@ -12,12 +12,16 @@ public:
 		MESSAGE_HANDLER(SB_GETTEXT, OnGetText)
 		MESSAGE_HANDLER(SB_GETTEXTLENGTH, OnGetTextLength)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
 		//MESSAGE_HANDLER(WM_PAINT, OnPaint)
 		CHAIN_MSG_MAP_ALT(COwnerDraw<CCustomStatusBar>, 0)
 	END_MSG_MAP()
 
-	void OnFinalMessage(HWND) override {
-		delete this;
+	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/) {
+		auto theme = reinterpret_cast<Theme*>(lParam);
+		SetBkColor(theme->StatusBar.BackColor);
+
+		return 0;
 	}
 
 	void Init(HWND hWnd, LPCREATESTRUCT cs) {
@@ -49,7 +53,7 @@ public:
 		}
 		m_Text.resize(pane + 1);
 		m_Text[pane] = (PCWSTR)lParam;
-		DefWindowProc(uMsg, wParam | 0*SBT_OWNERDRAW, lParam);
+		DefWindowProc(uMsg, wParam | SBT_OWNERDRAW, lParam);
 		Invalidate();
 
 		return TRUE;
@@ -132,9 +136,9 @@ class CCustomStatusBarParent :
 
 	void Init(HWND hWnd, HWND hParent) {
 		SubclassWindow(hParent);
-		m_sb.Attach(hWnd);
+		m_sb.SubclassWindow(hWnd);
 	}
 
-	CStatusBarCtrl m_sb;
+	CCustomStatusBar m_sb;
 };
 

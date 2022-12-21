@@ -119,8 +119,6 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	else if (name.CompareNoCase(STATUSCLASSNAME) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
-		auto win = new CCustomStatusBar;
-		win->Init(cs->hwnd, reinterpret_cast<LPCREATESTRUCT>(cs->lParam));
 		auto pwin = new CCustomStatusBarParent;
 		pwin->Init(cs->hwnd, ::GetParent(cs->hwnd));
 	}
