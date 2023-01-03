@@ -285,7 +285,7 @@ protected:
 		if (!p->IsSortable(hdr->hwndFrom, col))
 			return 0;
 
-		auto si = FindById(hdr->idFrom);
+		auto si = FindByHwnd(hdr->hwndFrom);
 		if (si == nullptr) {
 			SortInfo s;
 			s.hWnd = hdr->hwndFrom;
