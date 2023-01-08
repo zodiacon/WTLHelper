@@ -19,20 +19,24 @@ VersionResourceHelper::VersionResourceHelper(PCWSTR path) : m_path(path) {
 	}
 }
 
+VersionResourceHelper::VersionResourceHelper(PVOID data) : m_Data((BYTE const*)data) {
+}
+
 bool VersionResourceHelper::IsValid() const {
-	return m_buffer != nullptr;
+	return m_buffer != nullptr || m_Data != nullptr;
 }
 
 CString VersionResourceHelper::GetValue(const std::wstring& name) const {
 	CString result;
-	if (m_buffer) {
+	BYTE const* p = m_Data ? m_Data : m_buffer.get();
+	if (p) {
 		WORD* langAndCodePage;
 		UINT len;
-		if (::VerQueryValue(m_buffer.get(), L"\\VarFileInfo\\Translation", (void**)&langAndCodePage, &len)) {
+		if (::VerQueryValue(p, L"\\VarFileInfo\\Translation", (void**)&langAndCodePage, &len)) {
 			WCHAR text[256];
 			::StringCchPrintf(text, _countof(text), L"\\StringFileInfo\\%04x%04x\\%s", langAndCodePage[0], langAndCodePage[1], name.c_str());
 			WCHAR* desc;
-			if (::VerQueryValue(m_buffer.get(), text, (void**)&desc, &len))
+			if (::VerQueryValue(p, text, (void**)&desc, &len))
 				result = desc;
 		}
 	}

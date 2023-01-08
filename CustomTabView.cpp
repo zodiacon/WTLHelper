@@ -1,5 +1,25 @@
 #include "pch.h"
 #include "CustomTabView.h"
+#include "ThemeHelper.h"
+#include "Theme.h"
+
+LRESULT CCustomTabView::OnEraseBkgnd(UINT, WPARAM wp, LPARAM, BOOL& handled) const {
+	if (GetPageCount() > 0) {
+		handled = FALSE;
+		return 0;
+	}
+	CDCHandle dc((HDC)wp);
+	CRect rc;
+	GetClientRect(&rc);
+	dc.FillRect(&rc, ThemeHelper::GetCurrentTheme()->GetSysBrush(COLOR_WINDOW));
+
+	return 1;
+}
+
+LRESULT CCustomTabView::OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/) {
+	Invalidate();
+	return 0;
+}
 
 bool CCustomTabView::CreateTabControl() {
 	m_tab.Create(this->m_hWnd, this->rcDefault, nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_FOCUSNEVER | TCS_HOTTRACK | TCS_OWNERDRAWFIXED | TCS_TOOLTIPS,
@@ -61,16 +81,16 @@ void CCustomTabView::BuildWindowMenu(HMENU hMenu, int nMenuItemsCount, bool bEmp
 	CMenuHandle menu = hMenu;
 	int nFirstPos = 2;
 
-	BOOL bRet = TRUE;
-	while (bRet)
-		bRet = menu.DeleteMenu(nFirstPos, MF_BYPOSITION);
-
 	// Find first menu item in our range
 	for (nFirstPos = 0; nFirstPos < menu.GetMenuItemCount(); nFirstPos++) {
 		UINT nID = menu.GetMenuItemID(nFirstPos);
 		if (((nID >= ID_WINDOW_TABFIRST) && (nID <= ID_WINDOW_TABLAST)) || (nID == ID_WINDOW_SHOWTABLIST))
 			break;
 	}
+
+	BOOL bRet = TRUE;
+	while (bRet)
+		bRet = menu.DeleteMenu(nFirstPos, MF_BYPOSITION);
 
 	// Add separator if it's not already there
 	int nPageCount = GetPageCount();

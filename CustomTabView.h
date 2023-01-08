@@ -6,12 +6,16 @@ class CCustomTabView : public CTabViewImpl<CCustomTabView> {
 public:
 	DECLARE_WND_CLASS(L"WTL_TabView")
 
-	//BEGIN_MSG_MAP(CCustomTabView)
-	//	CHAIN_MSG_MAP(CTabViewImpl<CCustomTabView>)
-	//	FORWARD_NOTIFICATIONS()
-	//ALT_MSG_MAP(1)
-	//	CHAIN_MSG_MAP_ALT(CTabViewImpl<CCustomTabView>, 1)
-	//END_MSG_MAP()
+	BEGIN_MSG_MAP(CCustomTabView)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
+		CHAIN_MSG_MAP(CTabViewImpl<CCustomTabView>)
+	ALT_MSG_MAP(1)
+		CHAIN_MSG_MAP_ALT(CTabViewImpl<CCustomTabView>, 1)
+	END_MSG_MAP()
+
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) const;
+	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/);
 
 	bool CreateTabControl();
 	void UpdateLayout();

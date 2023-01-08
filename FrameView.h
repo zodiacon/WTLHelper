@@ -1,13 +1,13 @@
 #pragma once
 
-template<typename T, typename TFrame>
+template<typename T, typename TFrame, typename TBase = CWindow>
 class CFrameView abstract :
-	public CFrameWindowImpl<T, CWindow, CControlWinTraits> {
+	public CFrameWindowImpl<T, TBase, CControlWinTraits> {
 public:
-	using BaseFrame = CFrameWindowImpl<T, CWindow, CControlWinTraits>;
+	using BaseFrame = CFrameWindowImpl<T, TBase, CControlWinTraits>;
 	explicit CFrameView(TFrame* frame) : m_pFrame(frame) {}
 
-	void SetStatic(bool s) {
+	void SetStatic(bool s = true) {
 		m_Static = s;
 	}
 

@@ -6,6 +6,8 @@
 class VersionResourceHelper {
 public:
 	explicit VersionResourceHelper(PCWSTR path = nullptr);
+	explicit VersionResourceHelper(PVOID data);
+
 	bool IsValid() const;
 	operator bool() const {
 		return IsValid();
@@ -17,6 +19,7 @@ public:
 
 private:
 	std::unique_ptr<BYTE[]> m_buffer;
+	BYTE const* m_Data{ nullptr };
 	CString m_path;
 };
 
