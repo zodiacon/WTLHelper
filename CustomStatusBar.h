@@ -54,7 +54,6 @@ public:
 		m_Text.resize(pane + 1);
 		m_Text[pane] = (PCWSTR)lParam;
 		DefWindowProc(uMsg, wParam | SBT_OWNERDRAW, lParam);
-		Invalidate();
 
 		return TRUE;
 	}
