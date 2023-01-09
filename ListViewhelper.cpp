@@ -102,6 +102,39 @@ int ListViewHelper::FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial)
 	return -1;
 }
 
+int ListViewHelper::SearchItem(CListViewCtrl const& lv, PCWSTR textToFind, bool searchDown, bool caseSenstive) {
+	int start = lv.GetNextItem(-1, LVIS_SELECTED);
+	CString find(textToFind);
+	auto ignoreCase = !caseSenstive;
+	if (ignoreCase)
+		find.MakeLower();
+
+	auto columns = lv.GetHeader().GetItemCount();
+	auto count = lv.GetItemCount();
+	int from = searchDown ? start + 1 : start - 1 + count;
+	int to = searchDown ? count + start : start + 1;
+	int step = searchDown ? 1 : -1;
+
+	int findIndex = -1;
+	CString text;
+	for (int i = from; i != to; i += step) {
+		int index = i % count;
+		for (int c = 0; c < columns; c++) {
+			lv.GetItemText(index, c, text);
+			if (ignoreCase)
+				text.MakeLower();
+			if (text.Find(find) >= 0) {
+				findIndex = index;
+				break;
+			}
+		}
+		if (findIndex >= 0)
+			return findIndex;
+	}
+
+	return -1;
+}
+
 int ListViewHelper::FindRow(CListViewCtrl const& lv, PCWSTR rowText, int start) {
 	auto count = lv.GetItemCount();
 	for (int i = start + 1; i < count; i++)

@@ -1,18 +1,22 @@
 #pragma once
 
-template<typename T, typename TFrame, bool dynamic = true>
+template<typename T, typename TFrame, typename TBase = CWindow>
 class CFrameView abstract :
-	public CFrameWindowImpl<T, CWindow, CControlWinTraits> {
+	public CFrameWindowImpl<T, TBase, CControlWinTraits> {
 public:
-	using BaseFrame = CFrameWindowImpl<T, CWindow, CControlWinTraits>;
+	using BaseFrame = CFrameWindowImpl<T, TBase, CControlWinTraits>;
 	explicit CFrameView(TFrame* frame) : m_pFrame(frame) {}
+
+	void SetStatic(bool s = true) {
+		m_Static = s;
+	}
 
 	TFrame* Frame() const {
 		return m_pFrame;
 	}
 
 	void OnFinalMessage(HWND) override {
-		if(dynamic)
+		if(!m_Static)
 			delete this;
 	}
 
@@ -27,4 +31,5 @@ private:
 	//	LRESULT NotifyHandler(int /*idCtrl*/, LPNMHDR /*pnmh*/, BOOL& /*bHandled*/)
 
 	TFrame* m_pFrame;
+	bool m_Static{ false };
 };

@@ -86,7 +86,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		auto win = new CCustomListView;
 		win->SubclassWindow(cs->hwnd);
 	}
-	else if (name.CompareNoCase(WC_TREEVIEW) == 0) {
+	else if (name.CompareNoCase(WC_TREEVIEW) == 0 || name.CompareNoCase(CString(L"ATL:") + WC_TREEVIEW) == 0) {
 		auto win = new CCustomTreeView;
 		win->SubclassWindow(cs->hwnd);
 		win->Init();
