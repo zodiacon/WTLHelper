@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ThemeHelper.h"
+#include "Theme.h"
 
 template <bool t_bVertical>
 class CCustomSplitterWindowT : public CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>> {
@@ -53,7 +54,17 @@ public:
 				dc.GradientFillRect(rect2, ::GetSysColor(COLOR_3DFACE), ::GetSysColor(COLOR_3DSHADOW), t_bVertical);
 			}
 
-			dc.DrawEdge(&rect, EDGE_ETCHED, t_bVertical ? (BF_LEFT | BF_RIGHT) : (BF_TOP | BF_BOTTOM));
+			//dc.DrawEdge(&rect, EDGE_ETCHED, t_bVertical ? (BF_LEFT | BF_RIGHT) : (BF_TOP | BF_BOTTOM));
+			dc.FillRect(&rect, ::GetSysColorBrush(COLOR_WINDOW));
+			if constexpr (t_bVertical) {
+				rect.top--;
+				rect.bottom++;
+			}
+			else {
+				rect.left--;
+				rect.right++;
+			}
+			dc.FrameRect(&rect, ::GetSysColorBrush(COLOR_WINDOWTEXT));
 		}
 	}
 
