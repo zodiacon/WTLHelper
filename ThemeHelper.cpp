@@ -210,7 +210,7 @@ bool ThemeHelper::IsDefault() {
 void ThemeHelper::SetCurrentTheme(const Theme& theme, HWND hWnd) {
 	CurrentTheme = &theme;
 	if (hWnd) {
-		SendMessageToDescendants(hWnd, ::RegisterWindowMessage(L"WTLHelperUpdateTheme"), 0, reinterpret_cast<LPARAM>(&theme));
+		CWindow(hWnd).SendMessageToDescendants(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), 0, reinterpret_cast<LPARAM>(&theme));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_ALLCHILDREN | RDW_INTERNALPAINT | RDW_INVALIDATE | RDW_UPDATENOW);
 	}
 }
@@ -232,11 +232,3 @@ void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
 	menu.SetSeparatorColor(mtheme.SeparatorColor);
 }
 
-void ThemeHelper::SendMessageToDescendants(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
-	for (auto hWndChild = ::GetTopWindow(hWnd); hWndChild; hWndChild = ::GetNextWindow(hWndChild, GW_HWNDNEXT)) {
-		::SendMessage(hWndChild, message, wParam, lParam);
-		if (::GetTopWindow(hWndChild)) {
-			SendMessageToDescendants(hWndChild, message, wParam, lParam);
-		}
-	}
-}
