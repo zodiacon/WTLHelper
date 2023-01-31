@@ -297,21 +297,9 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-<<<<<<< HEAD:WTLHelper.vcxproj
-    <Import Project="..\..\packages\wtl.10.0.10320\build\native\wtl.targets" Condition="Exists('..\..\packages\wtl.10.0.10320\build\native\wtl.targets')" />
-    <Import Project="..\..\packages\Microsoft.Windows.ImplementationLibrary.1.0.220914.1\build\native\Microsoft.Windows.ImplementationLibrary.targets" Condition="Exists('..\..\packages\Microsoft.Windows.ImplementationLibrary.1.0.220914.1\build\native\Microsoft.Windows.ImplementationLibrary.targets')" />
-    <Import Project="..\..\packages\Detours.4.0.1\build\native\Detours.targets" Condition="Exists('..\..\packages\Detours.4.0.1\build\native\Detours.targets')" />
-=======
->>>>>>> 56ae0baca77a02f9b2dec9d7870abd8c81a3edf1:WTLHelper/WTLHelper.vcxproj
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
     </PropertyGroup>
-<<<<<<< HEAD:WTLHelper.vcxproj
-    <Error Condition="!Exists('..\..\packages\wtl.10.0.10320\build\native\wtl.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\wtl.10.0.10320\build\native\wtl.targets'))" />
-    <Error Condition="!Exists('..\..\packages\Microsoft.Windows.ImplementationLibrary.1.0.220914.1\build\native\Microsoft.Windows.ImplementationLibrary.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\Microsoft.Windows.ImplementationLibrary.1.0.220914.1\build\native\Microsoft.Windows.ImplementationLibrary.targets'))" />
-    <Error Condition="!Exists('..\..\packages\Detours.4.0.1\build\native\Detours.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\Detours.4.0.1\build\native\Detours.targets'))" />
-=======
->>>>>>> 56ae0baca77a02f9b2dec9d7870abd8c81a3edf1:WTLHelper/WTLHelper.vcxproj
   </Target>
 </Project>
