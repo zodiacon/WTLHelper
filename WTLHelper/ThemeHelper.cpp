@@ -1,6 +1,6 @@
 #include "pch.h"
 #include <unordered_map>
-#include <detours.h>
+#include <detours/detours.h>
 #include "ThemeHelper.h"
 #include "Theme.h"
 #include "CustomEdit.h"

@@ -20,7 +20,7 @@
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
-    <ProjectGuid>{1A4BDBA7-9687-4888-A0C3-A32020BD7FFE}</ProjectGuid>
+    <ProjectGuid>{C71B89A7-CB7B-4C30-A180-24561E77913C}</ProjectGuid>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -90,7 +90,6 @@
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>_WINDOWS;STRICT;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>..\WTLHelper</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -105,11 +104,11 @@
     <Midl>
       <MkTypLibCompatible>false</MkTypLibCompatible>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <HeaderFileName>BasicDemo.h</HeaderFileName>
-      <InterfaceIdentifierFileName>BasicDemo_i.c</InterfaceIdentifierFileName>
-      <ProxyFileName>BasicDemo_p.c</ProxyFileName>
+      <HeaderFileName>HexTest.h</HeaderFileName>
+      <InterfaceIdentifierFileName>HexTest_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>HexTest_p.c</ProxyFileName>
       <GenerateStublessProxies>true</GenerateStublessProxies>
-      <TypeLibraryName>$(IntDir)/BasicDemo.tlb</TypeLibraryName>
+      <TypeLibraryName>$(IntDir)/HexTest.tlb</TypeLibraryName>
       <DllDataFileName />
     </Midl>
   </ItemDefinitionGroup>
@@ -122,7 +121,6 @@
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_WINDOWS;STRICT;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>..\WTLHelper</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -138,11 +136,11 @@
       <MkTypLibCompatible>false</MkTypLibCompatible>
       <TargetEnvironment>Win32</TargetEnvironment>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <HeaderFileName>BasicDemo.h</HeaderFileName>
-      <InterfaceIdentifierFileName>BasicDemo_i.c</InterfaceIdentifierFileName>
-      <ProxyFileName>BasicDemo_p.c</ProxyFileName>
+      <HeaderFileName>HexTest.h</HeaderFileName>
+      <InterfaceIdentifierFileName>HexTest_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>HexTest_p.c</ProxyFileName>
       <GenerateStublessProxies>true</GenerateStublessProxies>
-      <TypeLibraryName>$(IntDir)/BasicDemo.tlb</TypeLibraryName>
+      <TypeLibraryName>$(IntDir)/HexTest.tlb</TypeLibraryName>
       <DllDataFileName />
     </Midl>
   </ItemDefinitionGroup>
@@ -154,7 +152,6 @@
       <ExceptionHandling />
       <DebugInformationFormat />
       <PreprocessorDefinitions>WIN32;_WINDOWS;STRICT;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>..\WTLHelper</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -169,11 +166,11 @@
       <MkTypLibCompatible>false</MkTypLibCompatible>
       <TargetEnvironment>Win32</TargetEnvironment>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <HeaderFileName>BasicDemo.h</HeaderFileName>
-      <InterfaceIdentifierFileName>BasicDemo_i.c</InterfaceIdentifierFileName>
-      <ProxyFileName>BasicDemo_p.c</ProxyFileName>
+      <HeaderFileName>HexTest.h</HeaderFileName>
+      <InterfaceIdentifierFileName>HexTest_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>HexTest_p.c</ProxyFileName>
       <GenerateStublessProxies>true</GenerateStublessProxies>
-      <TypeLibraryName>$(IntDir)/BasicDemo.tlb</TypeLibraryName>
+      <TypeLibraryName>$(IntDir)/HexTest.tlb</TypeLibraryName>
       <DllDataFileName />
     </Midl>
   </ItemDefinitionGroup>
@@ -185,7 +182,6 @@
       <ExceptionHandling />
       <DebugInformationFormat />
       <PreprocessorDefinitions>_WINDOWS;STRICT;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>..\WTLHelper</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -199,46 +195,46 @@
     <Midl>
       <MkTypLibCompatible>false</MkTypLibCompatible>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <HeaderFileName>BasicDemo.h</HeaderFileName>
-      <InterfaceIdentifierFileName>BasicDemo_i.c</InterfaceIdentifierFileName>
-      <ProxyFileName>BasicDemo_p.c</ProxyFileName>
+      <HeaderFileName>HexTest.h</HeaderFileName>
+      <InterfaceIdentifierFileName>HexTest_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>HexTest_p.c</ProxyFileName>
       <GenerateStublessProxies>true</GenerateStublessProxies>
-      <TypeLibraryName>$(IntDir)/BasicDemo.tlb</TypeLibraryName>
+      <TypeLibraryName>$(IntDir)/HexTest.tlb</TypeLibraryName>
       <DllDataFileName />
     </Midl>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="AboutDlg.cpp" />
-    <ClCompile Include="BasicDemo.cpp" />
+    <ClCompile Include="HexTest.cpp" />
     <ClCompile Include="MainFrm.cpp" />
-    <ClCompile Include="pch.cpp">
+    <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="ProcessTreeListView.cpp" />
+    <ClCompile Include="View.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AboutDlg.h" />
     <ClInclude Include="MainFrm.h" />
     <ClInclude Include="resource.h" />
-    <ClInclude Include="pch.h" />
-    <ClInclude Include="ProcessTreeListView.h" />
+    <ClInclude Include="stdafx.h" />
+    <ClInclude Include="View.h" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="BasicDemo.rc" />
+    <ResourceCompile Include="HexTest.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="res\BasicDemo.ico" />
+    <Image Include="res\HexTest.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\WTLHelper\WTLHelper.vcxproj">
       <Project>{ae53419f-a769-4548-8e15-e311904df7df}</Project>
     </ProjectReference>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="packages.config" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
