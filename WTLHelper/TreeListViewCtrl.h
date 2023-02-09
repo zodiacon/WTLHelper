@@ -10,12 +10,12 @@ class CTreeListView : public CWindowImpl<CTreeListView, CListViewCtrl> {
 public:
 	DECLARE_WND_SUPERCLASS(NULL, CListViewCtrl::GetWndClassName())
 
-		HTLItem AddChildItem(HTLItem index, PCWSTR text, int image);
+	HTLItem AddChildItem(HTLItem index, PCWSTR text, int image);
 	HTLItem AddItem(PCWSTR text, int image);
 	bool IsExpanded(HTLItem hItem) const;
 	bool CollapseItem(HTLItem hItem);
 	bool ExpandItem(HTLItem hItem);
-	bool SetIcon(HICON hIcon, bool expanded);
+	bool SetIcons(HICON hIconExpanded, HICON hIconCollapsed);
 	bool SetItemText(HTLItem hItem, int subItem, PCWSTR text);
 
 protected:
@@ -48,7 +48,7 @@ protected:
 
 	void SuspendSetItemText(bool suspend = true);
 	bool DoSetItemText(HTLItem n, int subitem, PCWSTR text);
-	HTLItem SaveItem(int index);
+	HTLItem SaveItem(HTLItem index);
 
 	// Handler prototypes (uncomment arguments if needed):
 	//	LRESULT MessageHandler(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)

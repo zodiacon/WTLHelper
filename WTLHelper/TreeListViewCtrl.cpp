@@ -24,7 +24,7 @@ HTLItem CTreeListView::AddChildItem(HTLItem hItem, PCWSTR text, int image) {
 		//
 		// collapsed parent, add to data only
 		//
-		it->second.push_back(SaveItem(n));
+		it->second.push_back(SaveItem(id));
 		SetItemState(MapIDToIndex(hItem), INDEXTOSTATEIMAGEMASK(2), LVIS_STATEIMAGEMASK);
 	}
 	else {
@@ -44,22 +44,24 @@ int CTreeListView::InsertChildItems(int index, std::vector<HTLItem>& children) {
 		child.mask = LVIF_INDENT | LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE | LVIF_STATE;
 		child.stateMask = LVIS_STATEIMAGEMASK;
 		int n2 = InsertItem(&child);
+		ATLASSERT(n2 >= 0);
+		m_HiddenItems.erase(*it);
 		int c = 1;
 		for (auto const& si : child.SubItems)
 			CListViewCtrl::SetItemText(n2, c++, si.c_str());
-		if (child.Collapsed)
-			DoCollapseItem(MapIndexToID(n));
+		//if (child.state & INDEXTOSTATEIMAGEMASK(2))
+		//	DoCollapseItem(MapIndexToID(n));
+		if(m_Collapsed.contains(id))
+			DoExpandItem(MapIndexToID(n));
 		m_HiddenItems.erase(id);
 	}
 	return 1;
 }
 
 int CTreeListView::InsertChildItems(int index) {
-	auto data = MapIndexToID(index);
-	LVITEM item{};
-	item.mask = LVIF_INDENT;
+	auto id = MapIndexToID(index);
 	SuspendSetItemText();
-	InsertChildItems(index, m_Collapsed[data]);
+	InsertChildItems(index, m_Collapsed[id]);
 	SuspendSetItemText(false);
 	return 1;
 }
@@ -72,21 +74,17 @@ LRESULT CTreeListView::OnClick(int, LPNMHDR hdr, BOOL&) {
 	UINT flags;
 	int n = HitTest(lv->ptAction, &flags);
 	if (n == lv->iItem && flags == LVHT_ONITEMSTATEICON) {
-		auto data = MapIndexToID(n);
-		auto it = m_Collapsed.find(data);
+		auto id = MapIndexToID(n);
+		auto it = m_Collapsed.find(id);
 		if (it == m_Collapsed.end()) {
-			CollapseItem(data);
+			CollapseItem(id);
 		}
 		else {
 			// expand
-			LVITEM item;
-			item.mask = LVIF_INDENT;
-			item.iItem = n;
-			item.iSubItem = 0;
-			GetItem(&item);
 			SetItemState(n, INDEXTOSTATEIMAGEMASK(1), LVIS_STATEIMAGEMASK);
 			InsertChildItems(n);
-			m_Collapsed.erase(MapIndexToID(n));
+			m_Collapsed.erase(id);
+			EnsureVisible(n, FALSE);
 		}
 	}
 	return 0;
@@ -140,10 +138,11 @@ void CTreeListView::DoCollapseItem(HTLItem hItem) {
 			DoExpandItem(MapIndexToID(i));
 			item.Collapsed = true;
 		}
-		HTLItem id;
-		children.push_back(id = SaveItem(i));
-		DeleteItem(i);
+		children.push_back(SaveItem(MapIndexToID(i)));
+		i++;
 	}
+	for (auto child : children)
+		DeleteItem(MapIDToIndex(child));
 	m_Collapsed.try_emplace(hItem, std::move(children));
 }
 
@@ -183,18 +182,17 @@ void CTreeListView::SuspendSetItemText(bool suspend) {
 	m_SuspendSetItem = suspend;
 }
 
-HTLItem CTreeListView::SaveItem(int index) {
-	auto id = MapIndexToID(index);
+HTLItem CTreeListView::SaveItem(HTLItem id) {
 	ListViewItem item{};
 	item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_INDENT | LVIF_PARAM | LVIF_STATE;
 	item.stateMask = LVIS_STATEIMAGEMASK;
-	item.iItem = index;
+	item.iItem = MapIDToIndex(id);
 	item.Id = id;
 	GetItem(&item);
 	auto columns = GetHeader().GetItemCount();
 	for (int c = 1; c < columns; c++) {
 		CString text;
-		GetItemText(index, c, text);
+		GetItemText(item.iItem, c, text);
 		item.SubItems.push_back((PCWSTR)text);
 	}
 	m_HiddenItems.insert({ id, std::move(item) });
@@ -231,15 +229,17 @@ LRESULT CTreeListView::DoDeleteItem(UINT uMsg, WPARAM wParam, LPARAM lParam, BOO
 	return TRUE;
 }
 
-bool CTreeListView::SetIcon(HICON hIcon, bool expanded) {
-	return GetImageList(LVSIL_STATE).ReplaceIcon(expanded ? 0 : 1, hIcon) >= 0;
+bool CTreeListView::SetIcons(HICON hIconExpanded, HICON hIconCollapsed) {
+	GetImageList(LVSIL_STATE).ReplaceIcon(0, hIconExpanded);
+	GetImageList(LVSIL_STATE).ReplaceIcon(1, hIconCollapsed);
+	return true;
 }
 
 LRESULT CTreeListView::DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 	CImageList images;
 	images.Create(16, 16, ILC_COLOR32, 2, 0);
-	images.AddIcon(AtlLoadIconImage(IDI_EXCLAMATION));
-	images.AddIcon(AtlLoadIconImage(IDI_HAND));
+	images.AddIcon(AtlLoadSysIcon(IDI_EXCLAMATION));
+	images.AddIcon(AtlLoadSysIcon(IDI_HAND));
 	SetImageList(images, LVSIL_STATE);
 
 	return DefWindowProc();
