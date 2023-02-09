@@ -117,12 +117,15 @@
     <ClInclude Include="CustomToolBar.h">
       <Filter>Controls</Filter>
     </ClInclude>
+<<<<<<< HEAD:WTLHelper.vcxproj.filters
+=======
     <ClInclude Include="IBufferManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="HexControl.h">
       <Filter>Controls</Filter>
     </ClInclude>
+>>>>>>> 56ae0baca77a02f9b2dec9d7870abd8c81a3edf1:WTLHelper/WTLHelper.vcxproj.filters
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WTLHelper.cpp">
@@ -191,5 +194,8 @@
     <ClCompile Include="HexControl.cpp">
       <Filter>Controls</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="$(MSBuildThisFileDirectory)..\..\natvis\wil.natvis" />
   </ItemGroup>
 </Project>
