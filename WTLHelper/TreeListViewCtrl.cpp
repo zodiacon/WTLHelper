@@ -2,6 +2,7 @@
 #include "TreeListViewCtrl.h"
 #include "ThemeHelper.h"
 #include "Theme.h"
+#include "WTLHelperRes.h"
 
 HTLItem CTreeListView::AddItem(PCWSTR text, int image) {
 	return MapIndexToID(InsertItem(GetItemCount(), text, image));
@@ -230,18 +231,22 @@ LRESULT CTreeListView::DoDeleteItem(UINT uMsg, WPARAM wParam, LPARAM lParam, BOO
 	return TRUE;
 }
 
-bool CTreeListView::SetIcons(HICON hIconExpanded, HICON hIconCollapsed) const {
-	GetImageList(LVSIL_STATE).ReplaceIcon(0, hIconExpanded);
-	GetImageList(LVSIL_STATE).ReplaceIcon(1, hIconCollapsed);
+bool CTreeListView::SetIcons(HICON hIconExpanded, HICON hIconCollapsed, bool dark) const {
+	GetImageList(LVSIL_STATE).ReplaceIcon(dark ? 2 : 0, hIconExpanded);
+	GetImageList(LVSIL_STATE).ReplaceIcon(dark ? 3 : 1, hIconCollapsed);
 	return true;
 }
 
 LRESULT CTreeListView::DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
-	CImageList images;
-	images.Create(16, 16, ILC_COLOR32, 2, 0);
-	images.AddIcon(AtlLoadSysIcon(IDI_EXCLAMATION));
-	images.AddIcon(AtlLoadSysIcon(IDI_HAND));
-	SetImageList(images, LVSIL_STATE);
+	m_Light.Create(16, 16, ILC_COLOR32, 2, 0);
+	m_Dark.Create(16, 16, ILC_COLOR32, 2, 0);
+	UINT icons[] = { IDI_EXPANDED, IDI_COLLAPSED, IDI_EXPANDED2, IDI_COLLAPSED2 };
+	m_Light.AddIcon(AtlLoadIconImage(IDI_EXPANDED, 0, 16, 16));
+	m_Light.AddIcon(AtlLoadIconImage(IDI_COLLAPSED, 0, 16, 16));
+	m_Dark.AddIcon(AtlLoadIconImage(IDI_EXPANDED2, 0, 16, 16));
+	m_Dark.AddIcon(AtlLoadIconImage(IDI_COLLAPSED2, 0, 16, 16));
+
+	SetImageList(ThemeHelper::IsDefault() ? m_Light : m_Dark, LVSIL_STATE);
 
 	return DefWindowProc();
 }
@@ -280,6 +285,7 @@ LRESULT CTreeListView::OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BO
 	auto theme = reinterpret_cast<Theme*>(lParam);
 	SetBkColor(theme->BackColor);
 	SetTextColor(theme->TextColor);
+	SetImageList(theme->IsDefault() ? m_Light : m_Dark, LVSIL_STATE);
 
 	return 0;
 }

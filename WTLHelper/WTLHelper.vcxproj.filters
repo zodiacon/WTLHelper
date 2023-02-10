@@ -140,6 +140,9 @@
     <ClInclude Include="StandardColors.h">
       <Filter>Helpers</Filter>
     </ClInclude>
+    <ClInclude Include="WTLHelperRes.h">
+      <Filter>Resources</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">
@@ -151,5 +154,27 @@
     <Filter Include="CompoundFiles">
       <UniqueIdentifier>{710a3743-66ec-4746-b502-aacc34dfc091}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Resources">
+      <UniqueIdentifier>{231c6c75-96a7-4165-a773-29ca474d7abf}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="res\Collapsed.ico">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="res\Collapsed2.ico">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="res\Expanded.ico">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="res\Expanded2.ico">
+      <Filter>Resources</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="WTLHelper.rc">
+      <Filter>Resources</Filter>
+    </ResourceCompile>
   </ItemGroup>
 </Project>

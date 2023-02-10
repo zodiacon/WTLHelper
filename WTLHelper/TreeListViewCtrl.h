@@ -8,14 +8,14 @@ using HTLItem = UINT;
 
 class CTreeListView : public CWindowImpl<CTreeListView, CListViewCtrl> {
 public:
-	DECLARE_WND_SUPERCLASS(NULL, CListViewCtrl::GetWndClassName())
+	DECLARE_WND_SUPERCLASS(nullptr, CListViewCtrl::GetWndClassName())
 
 	HTLItem AddChildItem(HTLItem index, PCWSTR text, int image);
 	HTLItem AddItem(PCWSTR text, int image);
 	bool IsExpanded(HTLItem hItem) const;
 	bool CollapseItem(HTLItem hItem);
 	bool ExpandItem(HTLItem hItem);
-	bool SetIcons(HICON hIconExpanded, HICON hIconCollapsed) const;
+	bool SetIcons(HICON hIconExpanded, HICON hIconCollapsed, bool dark) const;
 	bool SetItemText(HTLItem hItem, int subItem, PCWSTR text);
 
 protected:
@@ -69,6 +69,7 @@ protected:
 
 	std::unordered_map<HTLItem, std::vector<HTLItem>> m_Collapsed;
 	std::unordered_map<HTLItem, ListViewItem> m_HiddenItems;
+	CImageList m_Light, m_Dark;
 	bool m_SuspendSetItem{ false };
 	bool m_Deleting{ false };
 };
