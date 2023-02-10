@@ -264,7 +264,7 @@ LRESULT CTreeListView::OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM
 	ScreenToClient(&pt);
 	UINT flags;
 	int n = HitTest(pt, &flags);
-	if (flags == LVHT_ONITEMSTATEICON) {
+	if (flags == LVHT_ONITEMSTATEICON && GetItemState(n, LVIS_STATEIMAGEMASK) > 0) {
 		auto id = MapIndexToID(n);
 		auto it = m_Collapsed.find(id);
 		if (it == m_Collapsed.end()) {
