@@ -34,11 +34,11 @@ protected:
 
 	struct ListViewItem : LVITEMW {
 		WCHAR Text[64];
-		UINT Id;
+		UINT Id = -1;
 		std::vector<std::wstring> SubItems;
 		bool Collapsed{ false };
 
-		ListViewItem() {
+		ListViewItem() : LVITEM{} {
 			pszText = Text;
 			cchTextMax = _countof(Text);
 		}

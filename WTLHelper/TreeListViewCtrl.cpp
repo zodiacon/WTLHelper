@@ -45,7 +45,6 @@ int CTreeListView::InsertChildItems(int index, std::vector<HTLItem>& children) {
 		child.stateMask = LVIS_STATEIMAGEMASK;
 		int n2 = InsertItem(&child);
 		ATLASSERT(n2 >= 0);
-		m_HiddenItems.erase(*it);
 		int c = 1;
 		for (auto const& si : child.SubItems)
 			CListViewCtrl::SetItemText(n2, c++, si.c_str());
@@ -53,7 +52,7 @@ int CTreeListView::InsertChildItems(int index, std::vector<HTLItem>& children) {
 		//	DoCollapseItem(MapIndexToID(n));
 		if(m_Collapsed.contains(id))
 			DoExpandItem(MapIndexToID(n));
-		m_HiddenItems.erase(id);
+		m_HiddenItems.erase(*it);
 	}
 	return 1;
 }
@@ -183,12 +182,12 @@ void CTreeListView::SuspendSetItemText(bool suspend) {
 }
 
 HTLItem CTreeListView::SaveItem(HTLItem id) {
-	ListViewItem item{};
+	ListViewItem item;
 	item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_INDENT | LVIF_PARAM | LVIF_STATE;
 	item.stateMask = LVIS_STATEIMAGEMASK;
 	item.iItem = MapIDToIndex(id);
 	item.Id = id;
-	GetItem(&item);
+	ATLVERIFY(GetItem(&item));
 	auto columns = GetHeader().GetItemCount();
 	for (int c = 1; c < columns; c++) {
 		CString text;
