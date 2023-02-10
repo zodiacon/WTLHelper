@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "TreeListViewCtrl.h"
+#include "ThemeHelper.h"
+#include "Theme.h"
 
 HTLItem CTreeListView::AddItem(PCWSTR text, int image) {
 	return MapIndexToID(InsertItem(GetItemCount(), text, image));
@@ -274,3 +276,10 @@ LRESULT CTreeListView::OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM
 	return 0;
 }
 
+LRESULT CTreeListView::OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/) {
+	auto theme = reinterpret_cast<Theme*>(lParam);
+	SetBkColor(theme->BackColor);
+	SetTextColor(theme->TextColor);
+
+	return 0;
+}

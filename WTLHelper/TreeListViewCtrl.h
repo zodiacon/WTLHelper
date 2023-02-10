@@ -26,6 +26,7 @@ protected:
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLMouseButtonUp)
 		MESSAGE_HANDLER(LVM_DELETEITEM, DoDeleteItem)
 		MESSAGE_HANDLER(LVM_DELETEALLITEMS, DoDeleteAllItems)
+		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
 		MESSAGE_HANDLER(WM_CREATE, DoCreate)
 		if (!m_SuspendSetItem) {
 			MESSAGE_HANDLER(LVM_SETITEMTEXT, OnSetItemText)
@@ -64,6 +65,7 @@ protected:
 	LRESULT DoDeleteAllItems(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
+	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 
 	std::unordered_map<HTLItem, std::vector<HTLItem>> m_Collapsed;
 	std::unordered_map<HTLItem, ListViewItem> m_HiddenItems;
