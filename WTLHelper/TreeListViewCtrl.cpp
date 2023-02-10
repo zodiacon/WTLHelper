@@ -228,7 +228,7 @@ LRESULT CTreeListView::DoDeleteItem(UINT uMsg, WPARAM wParam, LPARAM lParam, BOO
 	return TRUE;
 }
 
-bool CTreeListView::SetIcons(HICON hIconExpanded, HICON hIconCollapsed) {
+bool CTreeListView::SetIcons(HICON hIconExpanded, HICON hIconCollapsed) const {
 	GetImageList(LVSIL_STATE).ReplaceIcon(0, hIconExpanded);
 	GetImageList(LVSIL_STATE).ReplaceIcon(1, hIconCollapsed);
 	return true;
@@ -242,5 +242,35 @@ LRESULT CTreeListView::DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lPara
 	SetImageList(images, LVSIL_STATE);
 
 	return DefWindowProc();
+}
+
+LRESULT CTreeListView::DoDeleteAllItems(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled) {
+	m_Collapsed.clear();
+	m_HiddenItems.clear();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CTreeListView::OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
+	CPoint pt;
+	::GetCursorPos(&pt);
+	ScreenToClient(&pt);
+	UINT flags;
+	int n = HitTest(pt, &flags);
+	if (flags == LVHT_ONITEMSTATEICON) {
+		auto id = MapIndexToID(n);
+		auto it = m_Collapsed.find(id);
+		if (it == m_Collapsed.end()) {
+			CollapseItem(id);
+		}
+		else {
+			// expand
+			SetItemState(n, INDEXTOSTATEIMAGEMASK(1), LVIS_STATEIMAGEMASK);
+			InsertChildItems(n);
+			m_Collapsed.erase(id);
+			EnsureVisible(n, FALSE);
+		}
+	}
+	return 0;
 }
 

@@ -15,7 +15,7 @@ public:
 	bool IsExpanded(HTLItem hItem) const;
 	bool CollapseItem(HTLItem hItem);
 	bool ExpandItem(HTLItem hItem);
-	bool SetIcons(HICON hIconExpanded, HICON hIconCollapsed);
+	bool SetIcons(HICON hIconExpanded, HICON hIconCollapsed) const;
 	bool SetItemText(HTLItem hItem, int subItem, PCWSTR text);
 
 protected:
@@ -23,12 +23,13 @@ protected:
 	void DoExpandItem(HTLItem hItem);
 
 	BEGIN_MSG_MAP(CTreeListView)
-		REFLECTED_NOTIFY_CODE_HANDLER(NM_CLICK, OnClick)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLMouseButtonUp)
 		MESSAGE_HANDLER(LVM_DELETEITEM, DoDeleteItem)
+		MESSAGE_HANDLER(LVM_DELETEALLITEMS, DoDeleteAllItems)
 		MESSAGE_HANDLER(WM_CREATE, DoCreate)
 		if (!m_SuspendSetItem) {
 			MESSAGE_HANDLER(LVM_SETITEMTEXT, OnSetItemText)
-				MESSAGE_HANDLER(LVM_SETITEM, OnSetItem)
+			MESSAGE_HANDLER(LVM_SETITEM, OnSetItem)
 		}
 	END_MSG_MAP()
 
@@ -60,7 +61,9 @@ protected:
 	LRESULT OnSetItemText(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT OnSetItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT DoDeleteItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
+	LRESULT DoDeleteAllItems(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
+	LRESULT OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 
 	std::unordered_map<HTLItem, std::vector<HTLItem>> m_Collapsed;
 	std::unordered_map<HTLItem, ListViewItem> m_HiddenItems;
