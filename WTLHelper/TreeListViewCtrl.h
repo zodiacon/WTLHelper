@@ -8,7 +8,7 @@ using HTLItem = UINT;
 
 class CTreeListView : public CWindowImpl<CTreeListView, CListViewCtrl> {
 public:
-	DECLARE_WND_SUPERCLASS(nullptr, CListViewCtrl::GetWndClassName())
+	DECLARE_WND_SUPERCLASS(L"WYL_TreeListView", CListViewCtrl::GetWndClassName())
 
 	HTLItem AddChildItem(HTLItem index, PCWSTR text, int image);
 	HTLItem AddItem(PCWSTR text, int image);
