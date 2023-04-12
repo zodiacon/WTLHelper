@@ -1,0 +1,180 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="ColumnManager.cpp" />
+    <ClCompile Include="IListView.cpp" />
+    <ClCompile Include="OwnerDrawnMenu.cpp" />
+    <ClCompile Include="pch.cpp" />
+    <ClCompile Include="Settings.cpp" />
+    <ClCompile Include="Theme.cpp" />
+    <ClCompile Include="WTLHelper.cpp" />
+    <ClCompile Include="ClipboardHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="ColorHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="CustomTabView.cpp">
+      <Filter>Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="IconHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="HexControl.cpp">
+      <Filter>Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="ListViewhelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="ThemeHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="ToolbarHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="SortHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="IniFile.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="TreeListViewCtrl.cpp">
+      <Filter>Controls</Filter>
+    </ClCompile>
+    <ClCompile Include="VersionResourceHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="StringHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
+    <ClCompile Include="CompoundFileReaderWriter.cpp">
+      <Filter>CompoundFiles</Filter>
+    </ClCompile>
+    <ClCompile Include="CompoundFile.cpp">
+      <Filter>CompoundFiles</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ColumnManager.h" />
+    <ClInclude Include="IBufferManager.h" />
+    <ClInclude Include="IListView.h" />
+    <ClInclude Include="OwnerDrawnMenu.h" />
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="Settings.h" />
+    <ClInclude Include="SortedFilteredVector.h" />
+    <ClInclude Include="ClipboardHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="ColorHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomButton.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomDialog.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomEdit.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomHeader.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomListView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomRebar.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomStatusBar.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomTabControl.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomTabView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomToolBar.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomTreeView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="IconHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="HexControl.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="ListViewhelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="ToolbarHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="IniFile.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="TreeListViewCtrl.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="VirtualListView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="TreeViewHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="DialogHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="CompoundFile.h">
+      <Filter>CompoundFiles</Filter>
+    </ClInclude>
+    <ClInclude Include="CompoundFileReaderWriter.h">
+      <Filter>CompoundFiles</Filter>
+    </ClInclude>
+    <ClInclude Include="QuickFindEdit.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="StandardColors.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="WTLHelperRes.h">
+      <Filter>Resources</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Helpers">
+      <UniqueIdentifier>{80afb784-1648-4f6e-a265-79846f6ed7b2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Controls">
+      <UniqueIdentifier>{e0c05608-3785-46b8-8e10-f7e92ffa9fc2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CompoundFiles">
+      <UniqueIdentifier>{710a3743-66ec-4746-b502-aacc34dfc091}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Resources">
+      <UniqueIdentifier>{231c6c75-96a7-4165-a773-29ca474d7abf}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="res\Collapsed.ico">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="res\Collapsed2.ico">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="res\Expanded.ico">
+      <Filter>Resources</Filter>
+    </Image>
+    <Image Include="res\Expanded2.ico">
+      <Filter>Resources</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="WTLHelper.rc">
+      <Filter>Resources</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+</Project>
