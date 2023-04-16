@@ -8,7 +8,7 @@
 namespace StructuredStorage {
 	class CompoundFileWriter {
 	public:
-		CompoundFileWriter(StructuredFile& file);
+		explicit CompoundFileWriter(StructuredFile& file);
 		CompoundFileWriter(StructuredDirectory& dir, const std::wstring& name);
 
 		template<typename T>
@@ -135,12 +135,12 @@ namespace StructuredStorage {
 	};
 
 	template<typename T>
-	bool CreateFileAndWrite(StructuredDirectory& dir, const std::wstring& name, const T& value) {
+	bool CreateFileAndWrite(StructuredDirectory& dir, const std::wstring& name, T&& value) {
 		auto file = dir.CreateStructuredFile(name);
 		if (!file)
 			return false;
 		CompoundFileWriter writer(file);
-		writer.Write(value);
+		writer.Write(std::forward<T&&>(value));
 		return true;
 	}
 

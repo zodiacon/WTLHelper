@@ -36,12 +36,14 @@ public:
 
 	void push_back(const T& value) {
 		m_items.push_back(value);
-		m_indices.push_back(m_indices.size());
+		if (m_Filter && m_Filter(value, m_items.size() - 1))
+			m_indices.push_back(m_indices.size());
 	}
 
 	void push_back(T&& value) {
+		if (m_Filter && m_Filter(value, m_items.size() - 1))
+			m_indices.push_back(m_indices.size());
 		m_items.push_back(std::move(value));
-		m_indices.push_back(m_indices.size());
 	}
 
 	void shrinkm_tom_fit() {
@@ -139,7 +141,8 @@ public:
 		return m_items.size();
 	}
 
-	void Filter(std::function<bool(const T&, int)> predicate, bool append = false) {
+	void Filter(std::function<bool(const T&, size_t)> predicate, bool append = false) {
+		m_Filter = predicate;
 		if (!append) {
 			m_indices.clear();
 		}
@@ -166,6 +169,18 @@ public:
 		}
 	}
 
+	bool erase(size_t index) {
+		if (index >= m_items.size())
+			return false;
+
+		m_items.erase(m_items.begin() + m_indices[index]);
+		m_indices.erase(m_indices.begin() + index);
+		for (; index < m_indices.size(); index++)
+			m_indices[index]--;
+
+		return true;
+	}
+
 	const std::vector<T>& GetRealAll() const {
 		return m_items;
 	}
@@ -185,5 +200,6 @@ public:
 private:
 	std::vector<T> m_items;
 	std::vector<size_t> m_indices;
+	std::function<bool(const T&, size_t)> m_Filter;
 };
 

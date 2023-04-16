@@ -166,7 +166,7 @@ bool CTreeListView::DoSetItemText(HTLItem hItem, int subitem, PCWSTR text) {
 	if (subitem == 0)
 		wcscpy_s(lvi.Text, text);
 	else {
-		if (lvi.SubItems.size() < GetHeader().GetItemCount() - 1)
+		if ((int)lvi.SubItems.size() < GetHeader().GetItemCount() - 1)
 			lvi.SubItems.resize(GetHeader().GetItemCount() - 1);
 		lvi.SubItems[subitem - 1] = text;
 	}
