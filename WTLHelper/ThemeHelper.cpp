@@ -78,6 +78,10 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		auto win = new CCustomComboBox;
 		ATLVERIFY(win->SubclassWindow(cs->hwnd));
 	}
+	else if (name.CompareNoCase(L"ComboLBox") == 0) {
+		auto win = new CCustomComboLBox;
+		ATLVERIFY(win->SubclassWindow(cs->hwnd));
+	}
 	else if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
 		auto win = new CCustomEdit;
 		ATLVERIFY(win->SubclassWindow(cs->hwnd));
