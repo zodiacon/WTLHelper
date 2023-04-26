@@ -36,19 +36,19 @@ public:
 
 	void push_back(const T& value) {
 		m_items.push_back(value);
-		if (m_Filter && m_Filter(value, m_items.size() - 1))
+		if (m_Filter == nullptr || m_Filter(value, m_items.size() - 1))
 			m_indices.push_back(m_indices.size());
 	}
 
 	void push_back(T&& value) {
-		if (m_Filter && m_Filter(value, m_items.size() - 1))
+		if (m_Filter == nullptr || m_Filter(value, m_items.size() - 1))
 			m_indices.push_back(m_indices.size());
 		m_items.push_back(std::move(value));
 	}
 
-	void shrinkm_tom_fit() {
-		m_items.shrinkm_tom_fit();
-		m_indices.shrinkm_tom_fit();
+	void shrink_to_fit() {
+		m_items.shrink_to_fit();
+		m_indices.shrink_to_fit();
 	}
 
 	void Remove(size_t index) {
