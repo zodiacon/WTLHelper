@@ -24,7 +24,7 @@ void CHexControl::DoPaint(CDCHandle dc) {
 
 void CHexControl::UpdateLayout() {
 	auto size = m_bm->GetSize();
-	SetScrollSize(100, m_Lines = (1 + size / m_BytesPerLine) * m_CharHeight, TRUE, true);
+	SetScrollSize(100, m_Lines = uint32_t((1 + size / m_BytesPerLine) * m_CharHeight), TRUE, true);
 }
 
 HWND CHexControl::GetHwnd() const {
