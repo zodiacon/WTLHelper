@@ -17,8 +17,6 @@ struct ThemeHelper abstract final {
 	static int Suspend();
 	static bool IsSuspended();
 	static int Resume();
-	static bool SuspendDCOperation(DCOperation op, HDC hdc);
-	static bool ResumeDCOperation(DCOperation op, HDC hdc);
 
 	static const Theme* GetCurrentTheme();
 	static bool IsDefault();

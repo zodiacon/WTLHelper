@@ -27,20 +27,6 @@ static decltype(::GetSystemMetrics)* OrgGetSystemMetrics = ::GetSystemMetrics;
 static decltype(::SetTextColor)* OrgSetTextColor = ::SetTextColor;
 static decltype(::ReleaseDC)* OrgReleaseDC = ::ReleaseDC;
 
-thread_local std::unordered_map<HDC, DCOperation> SuspendedDCOperations;
-
-COLORREF WINAPI HookedSetTextColor(HDC hdc, COLORREF color) {
-	if (auto it = SuspendedDCOperations.find(hdc); it != SuspendedDCOperations.end() && (it->second & DCOperation::SetTextColor) == DCOperation::SetTextColor) {
-		return ::GetTextColor(hdc);
-	}
-	return OrgSetTextColor(hdc, color);
-}
-
-int WINAPI HookedReleaseDC(HWND hWnd, HDC hDC) {
-	SuspendedDCOperations.erase(hDC);
-	return OrgReleaseDC(hWnd, hDC);
-}
-
 int WINAPI HookedGetSystemMetrics(_In_ int index) {
 	return OrgGetSystemMetrics(index);
 }
@@ -172,8 +158,6 @@ bool ThemeHelper::Init(HANDLE hThread) {
 	DetourAttach((PVOID*)&OrgGetSysColor, HookedGetSysColor);
 	DetourAttach((PVOID*)&OrgGetSysColorBrush, HookedGetSysColorBrush);
 	DetourAttach((PVOID*)&OrgGetSystemMetrics, HookedGetSystemMetrics);
-	//DetourAttach((PVOID*)&OrgSetTextColor, HookedSetTextColor);
-	//DetourAttach((PVOID*)&OrgReleaseDC, HookedReleaseDC);
 	auto error = DetourTransactionCommit();
 	ATLASSERT(error == NOERROR);
 	if (CurrentTheme == nullptr)
@@ -191,16 +175,6 @@ bool ThemeHelper::IsSuspended() {
 
 int ThemeHelper::Resume() {
 	return --SuspendCount;
-}
-
-bool ThemeHelper::SuspendDCOperation(DCOperation op, HDC hdc) {
-	auto it = SuspendedDCOperations.find(hdc);
-	if (it == SuspendedDCOperations.end())
-		SuspendedDCOperations.insert({ hdc, op });
-	else
-		it->second |= op;
-
-	return true;
 }
 
 const Theme* ThemeHelper::GetCurrentTheme() {
