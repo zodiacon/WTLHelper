@@ -53,6 +53,9 @@
     <ClCompile Include="CompoundFile.cpp">
       <Filter>CompoundFiles</Filter>
     </ClCompile>
+    <ClCompile Include="Selection.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ColumnManager.h" />
@@ -145,6 +148,9 @@
     </ClInclude>
     <ClInclude Include="CustomComboBox.h">
       <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="Selection.h">
+      <Filter>Helpers</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
