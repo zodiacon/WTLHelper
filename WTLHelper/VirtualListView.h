@@ -242,7 +242,7 @@ protected:
 		auto list = fi->hdr.hwndFrom;
 
 		int selected = fi->iStart;
-		int start = selected + 1;
+		int start = selected;
 		int count = ListView_GetItemCount(list);
 		WCHAR name[128]{};
 		if (len >= _countof(name))
