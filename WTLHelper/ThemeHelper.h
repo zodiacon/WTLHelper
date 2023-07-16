@@ -17,14 +17,12 @@ struct ThemeHelper abstract final {
 	static int Suspend();
 	static bool IsSuspended();
 	static int Resume();
-	static bool SuspendDCOperation(DCOperation op, HDC hdc);
-	static bool ResumeDCOperation(DCOperation op, HDC hdc);
 
 	static const Theme* GetCurrentTheme();
 	static bool IsDefault();
 	static void SetCurrentTheme(const Theme& theme, HWND hWnd = nullptr);
 	static void SetDefaultTheme(HWND hWnd);
 	static void UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark);
-	static void SendMessageToDescendants(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+	//static void SendMessageToDescendants(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 };
 

@@ -4,9 +4,7 @@ class CCustomToolBarParent :
 	public CWindowImpl<CCustomToolBarParent>,
 	public CCustomDraw<CCustomToolBarParent> {
 
-	BEGIN_MSG_MAP(CCustomToolBarParent)
-		CHAIN_MSG_MAP(CCustomDraw<CCustomToolBarParent>)
-	END_MSG_MAP()
+	DECLARE_EMPTY_MSG_MAP()
 
 	DWORD OnPrePaint(int, LPNMCUSTOMDRAW cd) {
 		if (cd->hdr.hwndFrom != m_ToolBar) {

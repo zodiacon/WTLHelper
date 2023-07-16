@@ -162,7 +162,7 @@ int ColumnManager::GetRealColumn(int index) const {
 }
 
 bool ColumnManager::DeleteColumn(int col) {
-	if (col >= m_Columns.size() || col < 0)
+	if (col >= (int)m_Columns.size() || col < 0)
 		return false;
 
 	m_Columns.erase(m_Columns.begin() + col);
@@ -170,7 +170,7 @@ bool ColumnManager::DeleteColumn(int col) {
 	HDITEM hdi;
 	hdi.mask = HDI_LPARAM;
 	auto header = m_ListView.GetHeader();
-	for (auto i = col; i < m_Columns.size(); i++) {
+	for (auto i = col; i < (int)m_Columns.size(); i++) {
 		header.GetItem(i, &hdi);
 		hdi.lParam--;
 		header.SetItem(i, &hdi);

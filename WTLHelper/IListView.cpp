@@ -32,8 +32,10 @@ bool IListView::IsItemVisible(int index) const {
 }
 
 CString IListView::GetItemText(int row, int column) const {
-    WCHAR text[256];
-    return S_OK == GetItemText(row, column, text, _countof(text)) ? text : L"";
+    CString text;
+    GetItemText(row, column, text.GetBufferSetLength(256), 256);
+    text.FreeExtra();
+    return text;
 }
 
 ULONG IListView::GetItemState(int row, ULONG mask) const {

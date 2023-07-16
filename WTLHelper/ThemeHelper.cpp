@@ -1,6 +1,6 @@
 #include "pch.h"
 #include <unordered_map>
-#include <detours.h>
+#include <detours/detours.h>
 #include "ThemeHelper.h"
 #include "Theme.h"
 #include "CustomEdit.h"
@@ -26,20 +26,6 @@ static decltype(::GetSysColorBrush)* OrgGetSysColorBrush = ::GetSysColorBrush;
 static decltype(::GetSystemMetrics)* OrgGetSystemMetrics = ::GetSystemMetrics;
 static decltype(::SetTextColor)* OrgSetTextColor = ::SetTextColor;
 static decltype(::ReleaseDC)* OrgReleaseDC = ::ReleaseDC;
-
-thread_local std::unordered_map<HDC, DCOperation> SuspendedDCOperations;
-
-COLORREF WINAPI HookedSetTextColor(HDC hdc, COLORREF color) {
-	if (auto it = SuspendedDCOperations.find(hdc); it != SuspendedDCOperations.end() && (it->second & DCOperation::SetTextColor) == DCOperation::SetTextColor) {
-		return ::GetTextColor(hdc);
-	}
-	return OrgSetTextColor(hdc, color);
-}
-
-int WINAPI HookedReleaseDC(HWND hWnd, HDC hDC) {
-	SuspendedDCOperations.erase(hDC);
-	return OrgReleaseDC(hWnd, hDC);
-}
 
 int WINAPI HookedGetSystemMetrics(_In_ int index) {
 	return OrgGetSystemMetrics(index);
@@ -76,6 +62,10 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	if (name.CompareNoCase(WC_COMBOBOX) == 0) {
 		auto win = new CCustomComboBox;
+		ATLVERIFY(win->SubclassWindow(cs->hwnd));
+	}
+	else if (name.CompareNoCase(L"ComboLBox") == 0) {
+		auto win = new CCustomComboLBox;
 		ATLVERIFY(win->SubclassWindow(cs->hwnd));
 	}
 	else if (name.CompareNoCase(L"EDIT") == 0 || name.CompareNoCase(L"ATL:EDIT") == 0) {
@@ -168,8 +158,6 @@ bool ThemeHelper::Init(HANDLE hThread) {
 	DetourAttach((PVOID*)&OrgGetSysColor, HookedGetSysColor);
 	DetourAttach((PVOID*)&OrgGetSysColorBrush, HookedGetSysColorBrush);
 	DetourAttach((PVOID*)&OrgGetSystemMetrics, HookedGetSystemMetrics);
-	//DetourAttach((PVOID*)&OrgSetTextColor, HookedSetTextColor);
-	//DetourAttach((PVOID*)&OrgReleaseDC, HookedReleaseDC);
 	auto error = DetourTransactionCommit();
 	ATLASSERT(error == NOERROR);
 	if (CurrentTheme == nullptr)
@@ -189,16 +177,6 @@ int ThemeHelper::Resume() {
 	return --SuspendCount;
 }
 
-bool ThemeHelper::SuspendDCOperation(DCOperation op, HDC hdc) {
-	auto it = SuspendedDCOperations.find(hdc);
-	if (it == SuspendedDCOperations.end())
-		SuspendedDCOperations.insert({ hdc, op });
-	else
-		it->second |= op;
-
-	return true;
-}
-
 const Theme* ThemeHelper::GetCurrentTheme() {
 	return CurrentTheme;
 }
@@ -210,7 +188,7 @@ bool ThemeHelper::IsDefault() {
 void ThemeHelper::SetCurrentTheme(const Theme& theme, HWND hWnd) {
 	CurrentTheme = &theme;
 	if (hWnd) {
-		SendMessageToDescendants(hWnd, ::RegisterWindowMessage(L"WTLHelperUpdateTheme"), 0, reinterpret_cast<LPARAM>(&theme));
+		CWindow(hWnd).SendMessageToDescendants(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), 0, reinterpret_cast<LPARAM>(&theme));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_ALLCHILDREN | RDW_INTERNALPAINT | RDW_INVALIDATE | RDW_UPDATENOW);
 	}
 }
@@ -232,11 +210,3 @@ void ThemeHelper::UpdateMenuColors(COwnerDrawnMenuBase& menu, bool dark) {
 	menu.SetSeparatorColor(mtheme.SeparatorColor);
 }
 
-void ThemeHelper::SendMessageToDescendants(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
-	for (auto hWndChild = ::GetTopWindow(hWnd); hWndChild; hWndChild = ::GetNextWindow(hWndChild, GW_HWNDNEXT)) {
-		::SendMessage(hWndChild, message, wParam, lParam);
-		if (::GetTopWindow(hWndChild)) {
-			SendMessageToDescendants(hWndChild, message, wParam, lParam);
-		}
-	}
-}

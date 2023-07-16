@@ -115,6 +115,24 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <LinkIncremental>false</LinkIncremental>
   </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <VcpkgUseStatic>true</VcpkgUseStatic>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -179,7 +197,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -236,6 +254,7 @@
     <ClInclude Include="CompoundFile.h" />
     <ClInclude Include="CompoundFileReaderWriter.h" />
     <ClInclude Include="CustomButton.h" />
+    <ClInclude Include="CustomComboBox.h" />
     <ClInclude Include="CustomDialog.h" />
     <ClInclude Include="CustomEdit.h" />
     <ClInclude Include="CustomHeader.h" />
@@ -247,6 +266,8 @@
     <ClInclude Include="CustomToolBar.h" />
     <ClInclude Include="CustomTreeView.h" />
     <ClInclude Include="DialogHelper.h" />
+    <ClInclude Include="HexControl.h" />
+    <ClInclude Include="IBufferManager.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />
     <ClInclude Include="IniFile.h" />
@@ -254,13 +275,14 @@
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="QuickFindEdit.h" />
+    <ClInclude Include="Selection.h" />
+    <ClInclude Include="WTLHelperRes.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SortedFilteredVector.h" />
     <ClInclude Include="StandardColors.h" />
     <ClInclude Include="ToolbarHelper.h" />
     <ClInclude Include="TreeListViewCtrl.h" />
     <ClInclude Include="TreeViewHelper.h" />
-    <ClInclude Include="UIFramework.h" />
     <ClInclude Include="VirtualListView.h" />
   </ItemGroup>
   <ItemGroup>
@@ -270,6 +292,7 @@
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
     <ClCompile Include="CustomTabView.cpp" />
+    <ClCompile Include="HexControl.cpp" />
     <ClCompile Include="IconHelper.cpp" />
     <ClCompile Include="IListView.cpp" />
     <ClCompile Include="IniFile.cpp" />
@@ -283,6 +306,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="Selection.cpp" />
     <ClCompile Include="Settings.cpp" />
     <ClCompile Include="SortHelper.cpp" />
     <ClCompile Include="StringHelper.cpp" />
@@ -294,19 +318,19 @@
     <ClCompile Include="WTLHelper.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
+    <ResourceCompile Include="WTLHelper.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="res\Collapsed.ico" />
+    <Image Include="res\Collapsed2.ico" />
+    <Image Include="res\Expanded.ico" />
+    <Image Include="res\Expanded2.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project=".\packages\wtl.10.0.10320\build\native\wtl.targets" Condition="Exists('.\packages\wtl.10.0.10320\build\native\wtl.targets')" />
-    <Import Project=".\packages\Microsoft.Windows.ImplementationLibrary.1.0.211019.2\build\native\Microsoft.Windows.ImplementationLibrary.targets" Condition="Exists('.\packages\Microsoft.Windows.ImplementationLibrary.1.0.211019.2\build\native\Microsoft.Windows.ImplementationLibrary.targets')" />
-    <Import Project=".\packages\Detours.4.0.1\build\native\Detours.targets" Condition="Exists('.\packages\Detours.4.0.1\build\native\Detours.targets')" />
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
     </PropertyGroup>
-    <Error Condition="!Exists('.\packages\wtl.10.0.10320\build\native\wtl.targets')" Text="$([System.String]::Format('$(ErrorText)', '.\packages\wtl.10.0.10320\build\native\wtl.targets'))" />
-    <Error Condition="!Exists('.\packages\Microsoft.Windows.ImplementationLibrary.1.0.211019.2\build\native\Microsoft.Windows.ImplementationLibrary.targets')" Text="$([System.String]::Format('$(ErrorText)', '.\packages\Microsoft.Windows.ImplementationLibrary.1.0.211019.2\build\native\Microsoft.Windows.ImplementationLibrary.targets'))" />
-    <Error Condition="!Exists('.\packages\Detours.4.0.1\build\native\Detours.targets')" Text="$([System.String]::Format('$(ErrorText)', '.\packages\Detours.4.0.1\build\native\Detours.targets'))" />
   </Target>
 </Project>
