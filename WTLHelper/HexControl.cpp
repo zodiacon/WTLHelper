@@ -140,6 +140,7 @@ bool CHexControl::HasSelection() const {
 }
 
 LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
 	UpdateCaret();
 	ShowCaret();
 
@@ -148,6 +149,7 @@ LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CHexControl::OnKillFocus(UINT, WPARAM, LPARAM, BOOL&) {
 	HideCaret();
+	DestroyCaret();
 
 	return 0;
 }
@@ -361,7 +363,6 @@ void CHexControl::RedrawCaretLine() {
 
 LRESULT CHexControl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	InitFontMetrics();
-	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
 	m_Notify.hwndFrom = m_hWnd;
 	return 0;
 }
