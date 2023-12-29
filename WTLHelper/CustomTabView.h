@@ -37,3 +37,13 @@ public:
 				return TRUE;	\
 		}		\
 	}
+
+#define COMMAND_TABVIEW_HANDLER2(tabs)	\
+	if(uMsg == WM_COMMAND) {	\
+		int page = tabs.GetActivePage();	\
+		if(page >= 0) {		\
+			auto hWnd = tabs.GetPageHWND(page); \
+				if(::SendMessage(hWnd, uMsg, wParam, lParam)) \
+				return TRUE;	\
+		}		\
+	}

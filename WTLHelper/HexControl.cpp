@@ -469,7 +469,7 @@ void CHexControl::RecalcLayout() {
 	GetClientRect(&rc);
 
 	auto lines = int(GetSize() / m_BytesPerLine) + 1;
-	m_Lines = min(rc.Height() / m_CharHeight, int(GetSize() / m_BytesPerLine)) - 1;
+	m_Lines = min(rc.Height() / m_CharHeight, int(GetSize() / m_BytesPerLine));
 
 	if (GetSize() % m_BytesPerLine == 0) {
 		lines++;
@@ -797,6 +797,7 @@ bool CHexControl::IsInsertMode() const {
 
 void CHexControl::SetSize(int64_t size) {
 	m_Data.resize(size);
+	Refresh();
 }
 
 bool CHexControl::SetDataSize(int32_t size) {
