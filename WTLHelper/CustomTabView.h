@@ -31,10 +31,11 @@ public:
 		int page = tabs.GetActivePage();	\
 		if(page >= 0) {		\
 			auto map = (CMessageMap*)tabs.GetPageData(page);	\
-			ATLASSERT(map);		\
-			LRESULT result;		\
-			if(map->ProcessWindowMessage(m_hWnd, uMsg, wParam, lParam, result, msgMapId))	\
-				return TRUE;	\
+			if(map) { \
+				LRESULT result;		\
+				if (map->ProcessWindowMessage(m_hWnd, uMsg, wParam, lParam, result, msgMapId))	\
+					return TRUE;	\
+			}	\
 		}		\
 	}
 

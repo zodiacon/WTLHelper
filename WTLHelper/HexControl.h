@@ -63,8 +63,8 @@ public:
 	HexControlColors& GetColors();
 	std::wstring GetText(int64_t offset, int64_t size) const;
 	void Refresh();
-	bool SetData(int64_t offset, std::span<uint8_t> data, bool update = true);
-	bool InsertData(int64_t offset, std::span<uint8_t> data, bool update = true);
+	bool SetData(int64_t offset, std::span<const uint8_t> data, bool update = true);
+	bool InsertData(int64_t offset, std::span<const uint8_t> data, bool update = true);
 	bool LoadFile(PCWSTR path);
 
 	BEGIN_MSG_MAP(CHexControl)
@@ -146,5 +146,6 @@ private:
 	bool m_InsertMode : 1 { true };
 	bool m_ReadOnly : 1 { false };
 	bool m_Dirty : 1 { false };
+	bool m_AllowGrow : 1 { false };
 };
 
