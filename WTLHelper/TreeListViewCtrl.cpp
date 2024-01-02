@@ -1,5 +1,8 @@
 #include "pch.h"
 #include "TreeListViewCtrl.h"
+#include "ThemeHelper.h"
+#include "Theme.h"
+#include "WTLHelperRes.h"
 
 HTLItem CTreeListView::AddItem(PCWSTR text, int image) {
 	return MapIndexToID(InsertItem(GetItemCount(), text, image));
@@ -24,7 +27,7 @@ HTLItem CTreeListView::AddChildItem(HTLItem hItem, PCWSTR text, int image) {
 		//
 		// collapsed parent, add to data only
 		//
-		it->second.push_back(SaveItem(n));
+		it->second.push_back(SaveItem(id));
 		SetItemState(MapIDToIndex(hItem), INDEXTOSTATEIMAGEMASK(2), LVIS_STATEIMAGEMASK);
 	}
 	else {
@@ -44,22 +47,23 @@ int CTreeListView::InsertChildItems(int index, std::vector<HTLItem>& children) {
 		child.mask = LVIF_INDENT | LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE | LVIF_STATE;
 		child.stateMask = LVIS_STATEIMAGEMASK;
 		int n2 = InsertItem(&child);
+		ATLASSERT(n2 >= 0);
 		int c = 1;
 		for (auto const& si : child.SubItems)
 			CListViewCtrl::SetItemText(n2, c++, si.c_str());
-		if (child.Collapsed)
-			DoCollapseItem(MapIndexToID(n));
-		m_HiddenItems.erase(id);
+		//if (child.state & INDEXTOSTATEIMAGEMASK(2))
+		//	DoCollapseItem(MapIndexToID(n));
+		if(m_Collapsed.contains(id))
+			DoExpandItem(MapIndexToID(n));
+		m_HiddenItems.erase(*it);
 	}
 	return 1;
 }
 
 int CTreeListView::InsertChildItems(int index) {
-	auto data = MapIndexToID(index);
-	LVITEM item{};
-	item.mask = LVIF_INDENT;
+	auto id = MapIndexToID(index);
 	SuspendSetItemText();
-	InsertChildItems(index, m_Collapsed[data]);
+	InsertChildItems(index, m_Collapsed[id]);
 	SuspendSetItemText(false);
 	return 1;
 }
@@ -72,21 +76,17 @@ LRESULT CTreeListView::OnClick(int, LPNMHDR hdr, BOOL&) {
 	UINT flags;
 	int n = HitTest(lv->ptAction, &flags);
 	if (n == lv->iItem && flags == LVHT_ONITEMSTATEICON) {
-		auto data = MapIndexToID(n);
-		auto it = m_Collapsed.find(data);
+		auto id = MapIndexToID(n);
+		auto it = m_Collapsed.find(id);
 		if (it == m_Collapsed.end()) {
-			CollapseItem(data);
+			CollapseItem(id);
 		}
 		else {
 			// expand
-			LVITEM item;
-			item.mask = LVIF_INDENT;
-			item.iItem = n;
-			item.iSubItem = 0;
-			GetItem(&item);
 			SetItemState(n, INDEXTOSTATEIMAGEMASK(1), LVIS_STATEIMAGEMASK);
 			InsertChildItems(n);
-			m_Collapsed.erase(MapIndexToID(n));
+			m_Collapsed.erase(id);
+			EnsureVisible(n, FALSE);
 		}
 	}
 	return 0;
@@ -140,10 +140,11 @@ void CTreeListView::DoCollapseItem(HTLItem hItem) {
 			DoExpandItem(MapIndexToID(i));
 			item.Collapsed = true;
 		}
-		HTLItem id;
-		children.push_back(id = SaveItem(i));
-		DeleteItem(i);
+		children.push_back(SaveItem(MapIndexToID(i)));
+		i++;
 	}
+	for (auto child : children)
+		DeleteItem(MapIDToIndex(child));
 	m_Collapsed.try_emplace(hItem, std::move(children));
 }
 
@@ -165,7 +166,7 @@ bool CTreeListView::DoSetItemText(HTLItem hItem, int subitem, PCWSTR text) {
 	if (subitem == 0)
 		wcscpy_s(lvi.Text, text);
 	else {
-		if (lvi.SubItems.size() < GetHeader().GetItemCount() - 1)
+		if ((int)lvi.SubItems.size() < GetHeader().GetItemCount() - 1)
 			lvi.SubItems.resize(GetHeader().GetItemCount() - 1);
 		lvi.SubItems[subitem - 1] = text;
 	}
@@ -183,18 +184,17 @@ void CTreeListView::SuspendSetItemText(bool suspend) {
 	m_SuspendSetItem = suspend;
 }
 
-HTLItem CTreeListView::SaveItem(int index) {
-	auto id = MapIndexToID(index);
-	ListViewItem item{};
+HTLItem CTreeListView::SaveItem(HTLItem id) {
+	ListViewItem item;
 	item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_INDENT | LVIF_PARAM | LVIF_STATE;
 	item.stateMask = LVIS_STATEIMAGEMASK;
-	item.iItem = index;
+	item.iItem = MapIDToIndex(id);
 	item.Id = id;
-	GetItem(&item);
+	ATLVERIFY(GetItem(&item));
 	auto columns = GetHeader().GetItemCount();
 	for (int c = 1; c < columns; c++) {
 		CString text;
-		GetItemText(index, c, text);
+		GetItemText(item.iItem, c, text);
 		item.SubItems.push_back((PCWSTR)text);
 	}
 	m_HiddenItems.insert({ id, std::move(item) });
@@ -231,17 +231,61 @@ LRESULT CTreeListView::DoDeleteItem(UINT uMsg, WPARAM wParam, LPARAM lParam, BOO
 	return TRUE;
 }
 
-bool CTreeListView::SetIcon(HICON hIcon, bool expanded) {
-	return GetImageList(LVSIL_STATE).ReplaceIcon(expanded ? 0 : 1, hIcon) >= 0;
+bool CTreeListView::SetIcons(HICON hIconExpanded, HICON hIconCollapsed, bool dark) const {
+	GetImageList(LVSIL_STATE).ReplaceIcon(dark ? 2 : 0, hIconExpanded);
+	GetImageList(LVSIL_STATE).ReplaceIcon(dark ? 3 : 1, hIconCollapsed);
+	return true;
 }
 
 LRESULT CTreeListView::DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
-	CImageList images;
-	images.Create(16, 16, ILC_COLOR32, 2, 0);
-	images.AddIcon(AtlLoadIconImage(IDI_EXCLAMATION));
-	images.AddIcon(AtlLoadIconImage(IDI_HAND));
-	SetImageList(images, LVSIL_STATE);
+	m_Light.Create(16, 16, ILC_COLOR32, 2, 0);
+	m_Dark.Create(16, 16, ILC_COLOR32, 2, 0);
+	UINT icons[] = { IDI_EXPANDED, IDI_COLLAPSED, IDI_EXPANDED2, IDI_COLLAPSED2 };
+	m_Light.AddIcon(AtlLoadIconImage(IDI_EXPANDED, 0, 16, 16));
+	m_Light.AddIcon(AtlLoadIconImage(IDI_COLLAPSED, 0, 16, 16));
+	m_Dark.AddIcon(AtlLoadIconImage(IDI_EXPANDED2, 0, 16, 16));
+	m_Dark.AddIcon(AtlLoadIconImage(IDI_COLLAPSED2, 0, 16, 16));
+
+	SetImageList(ThemeHelper::IsDefault() ? m_Light : m_Dark, LVSIL_STATE);
 
 	return DefWindowProc();
 }
 
+LRESULT CTreeListView::DoDeleteAllItems(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled) {
+	m_Collapsed.clear();
+	m_HiddenItems.clear();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CTreeListView::OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
+	CPoint pt;
+	::GetCursorPos(&pt);
+	ScreenToClient(&pt);
+	UINT flags;
+	int n = HitTest(pt, &flags);
+	if (flags == LVHT_ONITEMSTATEICON && GetItemState(n, LVIS_STATEIMAGEMASK) > 0) {
+		auto id = MapIndexToID(n);
+		auto it = m_Collapsed.find(id);
+		if (it == m_Collapsed.end()) {
+			CollapseItem(id);
+		}
+		else {
+			// expand
+			SetItemState(n, INDEXTOSTATEIMAGEMASK(1), LVIS_STATEIMAGEMASK);
+			InsertChildItems(n);
+			m_Collapsed.erase(id);
+			EnsureVisible(n, FALSE);
+		}
+	}
+	return 0;
+}
+
+LRESULT CTreeListView::OnUpdateTheme(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& /*bHandled*/) {
+	auto theme = reinterpret_cast<Theme*>(lParam);
+	SetBkColor(theme->BackColor);
+	SetTextColor(theme->TextColor);
+	SetImageList(theme->IsDefault() ? m_Light : m_Dark, LVSIL_STATE);
+
+	return 0;
+}

@@ -8,14 +8,14 @@ using HTLItem = UINT;
 
 class CTreeListView : public CWindowImpl<CTreeListView, CListViewCtrl> {
 public:
-	DECLARE_WND_SUPERCLASS(NULL, CListViewCtrl::GetWndClassName())
+	DECLARE_WND_SUPERCLASS(L"WYL_TreeListView", CListViewCtrl::GetWndClassName())
 
-		HTLItem AddChildItem(HTLItem index, PCWSTR text, int image);
+	HTLItem AddChildItem(HTLItem index, PCWSTR text, int image);
 	HTLItem AddItem(PCWSTR text, int image);
 	bool IsExpanded(HTLItem hItem) const;
 	bool CollapseItem(HTLItem hItem);
 	bool ExpandItem(HTLItem hItem);
-	bool SetIcon(HICON hIcon, bool expanded);
+	bool SetIcons(HICON hIconExpanded, HICON hIconCollapsed, bool dark) const;
 	bool SetItemText(HTLItem hItem, int subItem, PCWSTR text);
 
 protected:
@@ -23,22 +23,24 @@ protected:
 	void DoExpandItem(HTLItem hItem);
 
 	BEGIN_MSG_MAP(CTreeListView)
-		REFLECTED_NOTIFY_CODE_HANDLER(NM_CLICK, OnClick)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLMouseButtonUp)
 		MESSAGE_HANDLER(LVM_DELETEITEM, DoDeleteItem)
+		MESSAGE_HANDLER(LVM_DELETEALLITEMS, DoDeleteAllItems)
+		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
 		MESSAGE_HANDLER(WM_CREATE, DoCreate)
 		if (!m_SuspendSetItem) {
 			MESSAGE_HANDLER(LVM_SETITEMTEXT, OnSetItemText)
-				MESSAGE_HANDLER(LVM_SETITEM, OnSetItem)
+			MESSAGE_HANDLER(LVM_SETITEM, OnSetItem)
 		}
 	END_MSG_MAP()
 
 	struct ListViewItem : LVITEMW {
 		WCHAR Text[64];
-		UINT Id;
+		UINT Id = -1;
 		std::vector<std::wstring> SubItems;
 		bool Collapsed{ false };
 
-		ListViewItem() {
+		ListViewItem() : LVITEM{} {
 			pszText = Text;
 			cchTextMax = _countof(Text);
 		}
@@ -48,7 +50,7 @@ protected:
 
 	void SuspendSetItemText(bool suspend = true);
 	bool DoSetItemText(HTLItem n, int subitem, PCWSTR text);
-	HTLItem SaveItem(int index);
+	HTLItem SaveItem(HTLItem index);
 
 	// Handler prototypes (uncomment arguments if needed):
 	//	LRESULT MessageHandler(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
@@ -60,10 +62,14 @@ protected:
 	LRESULT OnSetItemText(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT OnSetItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT DoDeleteItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
+	LRESULT DoDeleteAllItems(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT DoCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
+	LRESULT OnLMouseButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
+	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 
 	std::unordered_map<HTLItem, std::vector<HTLItem>> m_Collapsed;
 	std::unordered_map<HTLItem, ListViewItem> m_HiddenItems;
+	CImageList m_Light, m_Dark;
 	bool m_SuspendSetItem{ false };
 	bool m_Deleting{ false };
 };

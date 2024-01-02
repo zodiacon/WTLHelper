@@ -125,12 +125,20 @@ bool Settings::SaveToFile(PCWSTR path) const {
 bool Settings::Load(PCWSTR path) {
 	WCHAR fullpath[MAX_PATH];
 	::GetModuleFileName(nullptr, fullpath, _countof(fullpath));
-	auto ch = fullpath[3];
-	fullpath[3] = 0;
-	if (::GetDriveType(fullpath) == DRIVE_FIXED)
+	auto dot = wcsrchr(fullpath, L'.');
+	ATLASSERT(dot);
+	if (!dot)
+		return false;
+
+	*dot = 0;
+	wcscat_s(fullpath, L".ini");
+
+	if (::GetFileAttributes(fullpath) == INVALID_FILE_ATTRIBUTES) {
+		//
+		// ini file does not exist, use Registry
+		//
 		return LoadFromKey(path);
-	fullpath[3] = ch;
-	wcscpy_s(fullpath + wcslen(fullpath) - 3, _countof(fullpath), L"ini");
+	}
 	return LoadFromFile(fullpath);
 }
 

@@ -32,7 +32,7 @@ struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {
 		int operator++(int) {
 			auto index = _index;
 			_index = _view._lv.GetNextItem(_index, LVNI_SELECTED);
-			if (_index = -1)
+			if (_index == -1)
 				_end = true;
 			return index;
 		}
