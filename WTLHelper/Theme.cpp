@@ -11,10 +11,12 @@ bool Theme::IsDefault() const {
 }
 
 HBRUSH Theme::GetSysBrush(int index) const {
-	if (_SysBrush[index] == nullptr) {
+	if (_SysBrush[index] == nullptr || ::GetObjectType(_SysBrush[index]) != OBJ_BRUSH) {
 		auto color = GetSysColor(index);
-		if (color != CLR_INVALID)
+		if (color != CLR_INVALID) {
+			_SysBrush[index].Detach();
 			_SysBrush[index].CreateSolidBrush(color);
+		}
 	}
 	return _SysBrush[index].m_hBrush;
 }
