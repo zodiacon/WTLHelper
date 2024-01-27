@@ -48,12 +48,11 @@ void COwnerDrawnMenuBase::AddCommand(UINT id, UINT iconId) {
 
 bool COwnerDrawnMenuBase::AddMenu(UINT id) {
 	CMenu menu;
-	return menu.LoadMenu(id) && AddMenu(menu);
+	return menu.LoadMenu(id) && AddMenu(menu.m_hMenu);
 }
 
-bool COwnerDrawnMenuBase::AddMenu(HMENU hMenu) {
-	ATLASSERT(::IsMenu(hMenu));
-	CMenuHandle menu(hMenu);
+bool COwnerDrawnMenuBase::AddMenu(CMenuHandle menu) {
+	ATLASSERT(::IsMenu(menu.m_hMenu));
 	UpdateMenuBase(menu, true);
 	auto count = menu.GetMenuItemCount();
 	MENUITEMINFO mii = { sizeof(mii) };

@@ -4,10 +4,10 @@
 
 class CCustomTabView : public CTabViewImpl<CCustomTabView> {
 public:
-	DECLARE_WND_CLASS(L"WTL_TabView")
+	DECLARE_WND_CLASS_EX(L"WTL_TabView", CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW, COLOR_APPWORKSPACE)
 
 	BEGIN_MSG_MAP(CCustomTabView)
-		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		//MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
 		CHAIN_MSG_MAP(CTabViewImpl<CCustomTabView>)
 	ALT_MSG_MAP(1)
@@ -31,9 +31,11 @@ public:
 		int page = tabs.GetActivePage();	\
 		if(page >= 0) {		\
 			auto map = (CMessageMap*)tabs.GetPageData(page);	\
-			ATLASSERT(map);		\
-			LRESULT result;		\
-			if(map->ProcessWindowMessage(m_hWnd, uMsg, wParam, lParam, result, msgMapId))	\
-				return TRUE;	\
+			if(map) { \
+				LRESULT result;		\
+				if (map->ProcessWindowMessage(m_hWnd, uMsg, wParam, lParam, result, msgMapId))	\
+					return TRUE;	\
+			}	\
 		}		\
 	}
+

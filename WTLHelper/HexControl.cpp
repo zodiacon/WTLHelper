@@ -140,6 +140,7 @@ bool CHexControl::HasSelection() const {
 }
 
 LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
 	UpdateCaret();
 	ShowCaret();
 
@@ -148,6 +149,7 @@ LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CHexControl::OnKillFocus(UINT, WPARAM, LPARAM, BOOL&) {
 	HideCaret();
+	DestroyCaret();
 
 	return 0;
 }
@@ -172,13 +174,23 @@ LRESULT CHexControl::OnGetDialogCode(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CHexControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	bool ctrl = ::GetKeyState(VK_CONTROL) & 0x80;
+	if (ctrl) {
+		switch (wParam) {
+			case 'V': case 'v':
+				if (CanPaste())
+					Paste();
+				return 0;
+		}
+		return 0;
+	}
+
 	if (GetSize() == 0)
 		return 0;
 
 	auto current = m_CaretOffset;
 	bool abortEdit = false;
 	bool shift = ::GetKeyState(VK_SHIFT) & 0x80;
-	bool ctrl = ::GetKeyState(VK_CONTROL) & 0x80;
 
 	bool redraw = false;
 
@@ -361,7 +373,6 @@ void CHexControl::RedrawCaretLine() {
 
 LRESULT CHexControl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	InitFontMetrics();
-	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
 	m_Notify.hwndFrom = m_hWnd;
 	return 0;
 }
@@ -468,7 +479,7 @@ void CHexControl::RecalcLayout() {
 	GetClientRect(&rc);
 
 	auto lines = int(GetSize() / m_BytesPerLine) + 1;
-	m_Lines = min(rc.Height() / m_CharHeight, int(GetSize() / m_BytesPerLine)) - 1;
+	m_Lines = min(rc.Height() / m_CharHeight, int(GetSize() / m_BytesPerLine));
 
 	if (GetSize() % m_BytesPerLine == 0) {
 		lines++;
@@ -860,6 +871,31 @@ bool CHexControl::Copy(int64_t offset, int64_t size) const {
 }
 
 bool CHexControl::Paste(int64_t offset) {
+	if (::IsClipboardFormatAvailable(CF_TEXT)) {
+		if (OpenClipboard()) {
+			auto hGlobal = ::GetClipboardData(CF_TEXT);
+			if (hGlobal) {
+				auto text = (char*)::GlobalLock(hGlobal);
+				std::vector<uint8_t> data;
+				while (*text) {
+					char* next;
+					int value = strtol(text, &next, 16);
+					if (text == next) {
+						text++;
+						continue;
+					}
+					text = next;
+					data.push_back(value);
+				}
+				offset = offset < 0 ? 0 : offset;
+				if (m_InsertMode)
+					InsertData(offset, data);
+				else
+					SetData(offset, data);
+			}
+			::CloseClipboard();
+		}
+	}
 	return false;
 }
 
@@ -868,7 +904,7 @@ bool CHexControl::CanCopy() const {
 }
 
 bool CHexControl::CanPaste() const {
-	return false;
+	return !IsReadOnly() && ::IsClipboardFormatAvailable(CF_TEXT);
 }
 
 bool CHexControl::Cut() {
@@ -933,14 +969,15 @@ void CHexControl::Refresh() {
 	RedrawWindow();
 }
 
-bool CHexControl::SetData(int64_t offset, std::span<uint8_t> data, bool update) {
-	if (offset + data.size() > m_Data.size()) {
-		if (m_pBuffer)
-			return false;
-		m_Data.resize(offset + data.size());
+bool CHexControl::SetData(int64_t offset, std::span<const uint8_t> data, bool update) {
+	auto size = data.size();
+	if (offset + size > m_Data.size()) {
+		if (m_AllowGrow)
+			m_Data.resize(offset + size);
+		else
+			size = m_Data.size() - offset;
 	}
-	auto p = m_pBuffer ? m_pBuffer : m_Data.data();
-	memcpy(p + offset, data.data(), data.size());
+	memcpy(m_Data.data() + offset, data.data(), size);
 	if (update)
 		Refresh();
 	return true;

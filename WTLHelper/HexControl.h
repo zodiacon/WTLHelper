@@ -149,5 +149,6 @@ private:
 	bool m_InsertMode : 1 { true };
 	bool m_ReadOnly : 1 { false };
 	bool m_Dirty : 1 { false };
+	bool m_AllowGrow : 1 { false };
 };
 
