@@ -64,7 +64,7 @@ public:
 	HexControlColors& GetColors();
 	std::wstring GetText(int64_t offset, int64_t size) const;
 	void Refresh();
-	bool SetData(int64_t offset, std::span<uint8_t> data, bool update = true);
+	bool SetData(int64_t offset, std::span<const uint8_t> data, bool update = true);
 	bool InitData(uint8_t* p, int64_t size, bool owner = false);
 	bool InsertData(int64_t offset, std::span<uint8_t> data, bool update = true);
 	bool LoadFile(PCWSTR path);
