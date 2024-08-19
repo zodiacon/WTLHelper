@@ -4,12 +4,15 @@
 
 #pragma once
 
-class CMainFrame : 
-	public CFrameWindowImpl<CMainFrame>, 
-	public CUpdateUI<CMainFrame>,
-	public CMessageFilter, public CIdleHandler
-{
+#include <WTLx.h>
+
+class CMainFrame :
+	public CFrameWindowImpl<CMainFrame, CWindowX>,
+	public CAutoUpdateUI<CMainFrame>,
+	public CMessageFilter,
+	public CIdleHandler {
 public:
+	using BaseFrame = CFrameWindowImpl<CMainFrame, CWindowX>;
 	DECLARE_FRAME_WND_CLASS(NULL, IDR_MAINFRAME)
 
 	CView m_view;
@@ -26,8 +29,8 @@ public:
 		COMMAND_ID_HANDLER(ID_APP_EXIT, OnFileExit)
 		COMMAND_ID_HANDLER(ID_FILE_NEW, OnFileNew)
 		COMMAND_ID_HANDLER(ID_APP_ABOUT, OnAppAbout)
-		CHAIN_MSG_MAP(CUpdateUI<CMainFrame>)
-		CHAIN_MSG_MAP(CFrameWindowImpl<CMainFrame>)
+		CHAIN_MSG_MAP(CAutoUpdateUI<CMainFrame>)
+		CHAIN_MSG_MAP(BaseFrame)
 	END_MSG_MAP()
 
 // Handler prototypes (uncomment arguments if needed):

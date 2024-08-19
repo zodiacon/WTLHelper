@@ -39,6 +39,6 @@ public:
 	LRESULT OnSize(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/);
 
-	CHexControl m_hex;
+	CHexControl m_Hex;
 	SimpleBuffer m_buffer;
 };

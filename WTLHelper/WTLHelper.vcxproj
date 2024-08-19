@@ -407,6 +407,7 @@
     <ClInclude Include="TreeListViewCtrl.h" />
     <ClInclude Include="TreeViewHelper.h" />
     <ClInclude Include="VirtualListView.h" />
+    <ClInclude Include="WTLx.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ClipboardHelper.cpp" />

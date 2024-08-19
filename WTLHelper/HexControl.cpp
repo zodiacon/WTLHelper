@@ -526,22 +526,6 @@ void CHexControl::InitFontMetrics() {
 	m_CharWidth = tm.tmAveCharWidth;
 }
 
-HWND CHexControl::GetHwnd() const {
-	return m_hWnd;
-}
-
-void CHexControl::SetBufferManager(IBufferManager* mgr) {
-	m_bm = mgr;
-	if (m_bm) {
-		UpdateLayout();
-	}
-	else {
-		CClientDC dc(m_hWnd);
-		DrawNumber(dc.m_hDC, m_CaretOffset, m_CurrentInput, m_EditDigits);
-	}
-	return 0;
-}
-
 CString CHexControl::FormatNumber(ULONGLONG number, int size) const {
 	if (size == 0)
 		size = m_DataSize;
