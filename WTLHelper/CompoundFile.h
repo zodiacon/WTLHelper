@@ -34,6 +34,7 @@ namespace StructuredStorage {
 		HRESULT Seek(uint32_t offset, SeekMode mode = SeekMode::Set, uint32_t* newOffset = nullptr);
 
 		uint32_t GetSize() const;
+		std::wstring GetName() const;
 
 		void Close();
 
@@ -42,7 +43,7 @@ namespace StructuredStorage {
 		}
 
 	private:
-		StructuredFile(IStream* pStm) : m_spStream(pStm) {}
+		explicit StructuredFile(IStream* pStm) : m_spStream(pStm) {}
 
 		CComPtr<IStream> m_spStream;
 	};
@@ -71,6 +72,8 @@ namespace StructuredStorage {
 		CompoundFileMode GetMode() const {
 			return m_FileMode;
 		}
+
+		std::wstring GetName() const;
 
 	protected:
 		IStorage* GetStorage() const {

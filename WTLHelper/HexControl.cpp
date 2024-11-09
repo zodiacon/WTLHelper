@@ -560,16 +560,16 @@ LRESULT CHexControl::OnSize(UINT, WPARAM wp, LPARAM, BOOL&) {
 }
 
 int64_t CHexControl::GetSize() const {
-	return m_Data.size();
+	return m_pBuffer ? m_Size : m_Data.size();
 }
 
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t*& p) {
-	p = m_Data.data() + offset;
+	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
 	return min(size, (int64_t)m_Data.size() - offset);
 }
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t const*& p) const {
-	p = m_Data.data() + offset;
+	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
 	return min(size, (int64_t)m_Data.size() - offset);
 }
@@ -584,18 +584,28 @@ bool CHexControl::IsReadOnly() const {
 	return m_ReadOnly;
 }
 
-void CHexControl::SetInsertMode(bool insert) {
+bool CHexControl::SetInsertMode(bool insert) {
+	if (insert && m_pBuffer)
+		return false;
+
 	m_InsertMode = insert;
 	Refresh();
+	return true;
 }
 
 bool CHexControl::IsInsertMode() const {
 	return m_InsertMode;
 }
 
+bool CHexControl::IsDataOwner() const {
+	return m_pBuffer != nullptr;
+}
+
 void CHexControl::SetSize(int64_t size) {
-	m_Data.resize(size);
-	Refresh();
+	if (m_pBuffer)
+		m_Size = size;
+	else
+		m_Data.resize(size);
 }
 
 bool CHexControl::SetDataSize(int32_t size) {
@@ -695,6 +705,8 @@ bool CHexControl::Delete() {
 
 void CHexControl::ClearAll() {
 	m_Data.clear();
+	m_pBuffer = nullptr;
+	m_Size = 0;
 	Refresh();
 }
 
@@ -759,7 +771,24 @@ bool CHexControl::SetData(int64_t offset, std::span<const uint8_t> data, bool up
 	return true;
 }
 
-bool CHexControl::InsertData(int64_t offset, std::span<const uint8_t> data, bool update) {
+bool CHexControl::InitData(uint8_t* p, int64_t size, bool owner) {
+	if (owner) {
+		m_pBuffer = nullptr;
+		m_Data.clear();
+		SetData(0, std::span{ p, (size_t)size });
+	}
+	else {
+		m_pBuffer = p;
+		m_Size = size;
+		m_Data.clear();
+	}
+	return true;
+}
+
+bool CHexControl::InsertData(int64_t offset, std::span<uint8_t> data, bool update) {
+	if (m_pBuffer)	// not data owner
+		return false;
+
 	m_Data.resize(m_Data.size() + data.size());
 	memmove(m_Data.data() + offset + data.size(), m_Data.data() + offset, m_Data.size() - offset + data.size());
 	memcpy(m_Data.data() + offset, data.data(), data.size());

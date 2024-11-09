@@ -93,3 +93,20 @@ uint32_t StructuredFile::GetSize() const {
 void StructuredFile::Close() {
 	m_spStream = nullptr;
 }
+
+std::wstring StructuredFile::GetName() const {
+	STATSTG stat = { 0 };
+	m_spStream->Stat(&stat, STATFLAG_DEFAULT);
+	std::wstring result(stat.pwcsName);
+	::CoTaskMemFree(stat.pwcsName);
+	return result;
+}
+
+std::wstring StructuredDirectory::GetName() const {
+	STATSTG stat = { 0 };
+	m_spStorage->Stat(&stat, STATFLAG_DEFAULT);
+	std::wstring result(stat.pwcsName);
+	::CoTaskMemFree(stat.pwcsName);
+	return result;
+}
+
