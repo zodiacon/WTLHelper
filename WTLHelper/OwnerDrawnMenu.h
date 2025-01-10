@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <atltypes.h>
 
 struct COwnerDrawnMenuBase {
 	void SetTextColor(COLORREF color);
