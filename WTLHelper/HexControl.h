@@ -3,6 +3,8 @@
 #include "Selection.h"
 #include <span>
 #include <unordered_set>
+#include <atltheme.h>
+#include <atltypes.h>
 
 struct HexControlColors {
 	COLORREF Text{ ::GetSysColor(COLOR_WINDOWTEXT) };
