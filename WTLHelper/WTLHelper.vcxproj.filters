@@ -56,6 +56,7 @@
     <ClCompile Include="Selection.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
+    <ClCompile Include="DarkModeHelper.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ColumnManager.h" />
@@ -155,6 +156,8 @@
     <ClInclude Include="WTLx.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="DarkModeHelper.h" />
+    <ClInclude Include="IATHook.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">
