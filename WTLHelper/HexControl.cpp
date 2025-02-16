@@ -566,12 +566,13 @@ int64_t CHexControl::GetSize() const {
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t*& p) {
 	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return min(size, (int64_t)m_Data.size() - offset);
+	return min(size, m_Size - offset);
 }
+
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t const*& p) const {
 	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return min(size, (int64_t)m_Data.size() - offset);
+	return min(size, (int64_t)m_Size - offset);
 }
 
 
@@ -782,6 +783,7 @@ bool CHexControl::InitData(uint8_t* p, int64_t size, bool owner) {
 		m_Size = size;
 		m_Data.clear();
 	}
+	Refresh();
 	return true;
 }
 
