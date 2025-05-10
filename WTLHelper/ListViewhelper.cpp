@@ -162,7 +162,8 @@ IListView* ListViewHelper::GetIListView(HWND hListView) {
 
 CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator, PCWSTR cr) {
 	CString text;
-	for (int i = 0; i < lv.GetItemCount(); i++) {
+	int count = lv.GetItemCount();
+	for (int i = 0; i < count; i++) {
 		text += GetRowAsString(lv, i, separator) += cr;
 	}
 	if (!text.IsEmpty())

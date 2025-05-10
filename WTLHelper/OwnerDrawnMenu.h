@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <atltypes.h>
 
 struct COwnerDrawnMenuBase {
 	void SetTextColor(COLORREF color);
@@ -10,7 +11,7 @@ struct COwnerDrawnMenuBase {
 	void SetSeparatorColor(COLORREF color);
 	void AddCommand(UINT id, HICON hIcon);
 	void AddCommand(UINT id, UINT iconId);
-	bool AddMenu(HMENU hMenu);
+	bool AddMenu(CMenuHandle hMenu);
 	bool AddMenu(UINT id);
 	void AddSubMenu(CMenuHandle menu);
 	void SetCheckIcon(HICON hicon, HICON hRadioIcon = nullptr);

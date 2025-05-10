@@ -1,5 +1,25 @@
 #pragma once
 
+class CCustomToolBar : public CWindowImpl<CCustomToolBar, CToolBarCtrl> {
+public:
+	void OnFinalMessage(HWND) override {
+	}
+
+	BEGIN_MSG_MAP(CCustomRebar)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+//		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
+	END_MSG_MAP()
+
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wp, LPARAM lParam, BOOL& bHandled) {
+		CDCHandle dc((HDC)wp);
+		CRect rc;
+		GetClientRect(&rc);
+		dc.FillRect(&rc, ::GetSysColorBrush(COLOR_WINDOW));
+		return 1;
+	}
+
+};
+
 class CCustomToolBarParent :
 	public CWindowImpl<CCustomToolBarParent>,
 	public CCustomDraw<CCustomToolBarParent> {
@@ -35,7 +55,6 @@ class CCustomToolBarParent :
 	void Init(HWND tb) {
 		SubclassWindow(::GetParent(tb));
 		m_ToolBar.Attach(tb);
-		::SetWindowTheme(tb, L" ", nullptr);
 	}
 
 	CToolBarCtrl m_ToolBar;

@@ -4,11 +4,12 @@
 
 #pragma once
 
-class CMainFrame : 
-	public CFrameWindowImpl<CMainFrame>, 
+#include <WTLx.h>
+
+class CMainFrame :
+	public CFrameWindowImpl<CMainFrame, CWindowX>,
 	public CAutoUpdateUI<CMainFrame>,
-	public CMessageFilter, public CIdleHandler
-{
+	public CMessageFilter, public CIdleHandler {
 public:
 	DECLARE_FRAME_WND_CLASS(NULL, IDR_MAINFRAME)
 
