@@ -11,6 +11,7 @@ DEFINE_ENUM_FLAG_OPERATORS(DCOperation);
 struct COwnerDrawnMenuBase;
 
 struct ThemeHelper abstract final {
+	static bool SetNativeDarkMode(bool dark);
 	static bool LoadFromFile(PCWSTR path, Theme& theme);
 	static bool SaveToFile(Theme const& theme, PCWSTR path);
 	static bool Init(HANDLE hThread = ::GetCurrentThread());

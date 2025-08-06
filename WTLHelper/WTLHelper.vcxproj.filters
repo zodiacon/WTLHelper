@@ -38,9 +38,6 @@
     <ClCompile Include="IniFile.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
-    <ClCompile Include="TreeListViewCtrl.cpp">
-      <Filter>Controls</Filter>
-    </ClCompile>
     <ClCompile Include="VersionResourceHelper.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
@@ -119,9 +116,6 @@
     <ClInclude Include="IniFile.h">
       <Filter>Helpers</Filter>
     </ClInclude>
-    <ClInclude Include="TreeListViewCtrl.h">
-      <Filter>Controls</Filter>
-    </ClInclude>
     <ClInclude Include="VirtualListView.h">
       <Filter>Controls</Filter>
     </ClInclude>
@@ -151,6 +145,12 @@
     </ClInclude>
     <ClInclude Include="Selection.h">
       <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="CustomSplitterWindow.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="TreeListView.h">
+      <Filter>Controls</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

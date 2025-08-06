@@ -96,7 +96,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 		auto win = new CCustomToolBarParent;
 		win->Init(cs->hwnd);
 	}
-	else if (name.CompareNoCase(WC_HEADER) == 0) {
+	else if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
 		::SetWindowTheme(cs->hwnd, nullptr, nullptr);
 		auto win = new CCustomHeaderParent;
 		win->SubclassWindow(lpcs->hwndParent);
@@ -144,6 +144,26 @@ LRESULT CALLBACK CallWndProc(int action, WPARAM wp, LPARAM lp) {
 	}
 
 	return ::CallNextHookEx(nullptr, action, wp, lp);
+}
+
+bool ThemeHelper::SetNativeDarkMode(bool dark) {
+	static bool (WINAPI * ShouldAppsUseDarkMode)();
+	static bool (WINAPI * AllowDarkModeForWindow)(HWND hwnd, bool allow);
+	static DWORD(WINAPI * SetPreferredAppMode)(DWORD);
+	if(!SetPreferredAppMode) {
+		auto hDll = ::LoadLibrary(L"uxtheme.dll");
+		if (!hDll)
+			return false;
+
+		ShouldAppsUseDarkMode = reinterpret_cast<decltype(ShouldAppsUseDarkMode)>(::GetProcAddress(hDll, MAKEINTRESOURCEA(132)));
+		AllowDarkModeForWindow = reinterpret_cast<decltype(AllowDarkModeForWindow)>(::GetProcAddress(hDll, MAKEINTRESOURCEA(133)));
+		SetPreferredAppMode = reinterpret_cast<decltype(SetPreferredAppMode)>(::GetProcAddress(hDll, MAKEINTRESOURCEA(135)));
+	}
+	if (!SetPreferredAppMode)
+		return false;
+
+	SetPreferredAppMode(dark ? 2 : 1);
+	return true;
 }
 
 bool ThemeHelper::Init(HANDLE hThread) {
