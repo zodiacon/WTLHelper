@@ -153,6 +153,9 @@
     <ClInclude Include="TreeListView.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="DarkModeHelper.h" />
+    <ClInclude Include="IATHook.h" />
+    <ClInclude Include="WTLx.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">
