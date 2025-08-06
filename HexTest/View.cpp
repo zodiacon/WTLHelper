@@ -7,23 +7,20 @@
 
 #include "View.h"
 
-BOOL CView::PreTranslateMessage(MSG* pMsg)
-{
+BOOL CView::PreTranslateMessage(MSG* pMsg) {
 	pMsg;
 	return FALSE;
 }
 
 LRESULT CView::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
-	m_hex.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
-	auto hex = (IHexControl*)&m_hex;
-	hex->SetBufferManager(&m_buffer);
+	m_Hex.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
 
 	return 0;
 }
 
 LRESULT CView::OnSize(UINT, WPARAM, LPARAM lp, BOOL&) {
-	if (m_hex)
-		m_hex.MoveWindow(0, 0, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+	if (m_Hex)
+		m_Hex.MoveWindow(0, 0, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
 	return LRESULT();
 }
 

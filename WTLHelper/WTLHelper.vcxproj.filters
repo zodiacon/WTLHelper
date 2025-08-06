@@ -53,6 +53,7 @@
     <ClCompile Include="Selection.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
+    <ClCompile Include="DarkModeHelper.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ColumnManager.h" />

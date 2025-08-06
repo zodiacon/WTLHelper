@@ -526,218 +526,6 @@ void CHexControl::InitFontMetrics() {
 	m_CharWidth = tm.tmAveCharWidth;
 }
 
-CPoint CHexControl::GetPointFromOffset(int64_t offset) const {
-	if (offset < m_StartOffset || offset > GetSize())
-		return CPoint(-1, -1);
-
-	int line = int((offset - m_StartOffset) / m_BytesPerLine);
-	int b = (offset - m_StartOffset) % m_BytesPerLine / m_DataSize;
-
-	CPoint pt;
-	pt.y = line * m_CharHeight;
-	pt.x = (b * (m_DataSize * 2 + 1) + m_AddressDigits + 1) * m_CharWidth;
-	ATLTRACE(L"GetPointFromOffset %llX: (%d,%d)\n", offset, pt.x, pt.y);
-
-	return pt;
-}
-
-int64_t CHexControl::GetOffsetFromPoint(const POINT& pt) const {
-	uint32_t line = pt.y / m_CharHeight;
-	uint32_t b = pt.x / m_CharWidth - (m_AddressDigits + 1);
-
-	b /= m_DataSize * 2 + 1;
-	if (b < 0 || b >= m_BytesPerLine)
-		return -1;
-
-	return m_StartOffset + line * m_BytesPerLine + b * m_DataSize;
-}
-
-void CHexControl::DrawNumber(CDCHandle dc, int64_t offset, uint64_t value, uint32_t digitsChanged) {
-	auto pos = GetPointFromOffset(offset);
-	CString temp = FormatNumber(value);
-	HideCaret();
-	bool selected = false;
-	dc.SetTextColor(selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : m_Colors.Text);
-	dc.SetBkColor(selected ? ::GetSysColor(COLOR_HIGHLIGHT) : ::GetSysColor(COLOR_WINDOW));
-	if (digitsChanged < m_DataSize * 2)
-		dc.TextOutW(pos.x, pos.y, temp, m_DataSize * 2);
-	dc.SetTextColor(RGB(255, 0, 0));
-	dc.TextOutW(pos.x + m_CharWidth * (m_DataSize * 2 - digitsChanged), pos.y, temp.Right(digitsChanged), digitsChanged);
-	ShowCaret();
-}
-
-void CHexControl::DrawAscii(CDCHandle dc, int64_t offset, int chars) {
-	auto pos = GetPointFromOffset(offset);
-	pos.x = m_CharWidth * ((10 + m_BytesPerLine * (m_DataSize * 2 + 1) / m_DataSize) + offset % m_BytesPerLine);
-	uint8_t const* data;
-	GetData(offset, chars, data);
-	WCHAR str[9]{};
-	for (int i = 0; i < chars; i++)
-		str[i] = data[i] < 32 || data[i] > 127 ? L'.' : (wchar_t)data[i];
-
-	dc.TextOut(pos.x, pos.y, str);
-}
-
-void CHexControl::UpdateCaret() {
-	auto pt = GetPointFromOffset(m_CaretOffset);
-	HideCaret();
-	if (pt.y >= 0) {
-		SetCaretPos(pt.x, pt.y);
-	}
-	else {
-		SetCaretPos(-1000, -1000);
-	}
-	ShowCaret();
-}
-
-void CHexControl::RedrawWindow(RECT* rc) {
-	::RedrawWindow(m_hWnd, rc, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_INTERNALPAINT);
-}
-
-void CHexControl::ClearSelection() {
-	m_Selection.Clear();
-	SendSelectionChanged();
-}
-
-void CHexControl::CommitValue(int64_t offset, uint64_t value) {
-	m_Modified.insert(offset);
-	SetData(offset, { (uint8_t*)&value, m_DataSize }, false);
-	CClientDC dc(m_hWnd);
-	DrawNumber(dc.m_hDC, offset, value, m_DataSize * 2);
-	DrawAscii(dc.m_hDC, offset, m_DataSize);
-}
-
-LRESULT CHexControl::OnMouseMove(UINT, WPARAM wp, LPARAM lParam, BOOL&) {
-	if (GetCapture() != m_hWnd)
-		return 0;
-
-	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-
-	auto offset = GetOffsetFromPoint(pt);
-	if (offset > GetSize())
-		offset = GetSize();
-
-	auto maxoffset = max(offset, m_CaretOffset);
-	auto minoffset = min(offset, m_CaretOffset);
-	if (wp & MK_CONTROL) {
-		int width = maxoffset % m_BytesPerLine - minoffset % m_BytesPerLine, height = int(maxoffset - minoffset) / m_BytesPerLine;
-		if (offset < m_CaretOffset && width < 0) {
-			height++;
-			width++;
-		}
-		if (width < 0) {
-			minoffset += width;
-			width = -width;
-		}
-		m_Selection.SetBox(minoffset, m_BytesPerLine, width, height);
-	}
-	else
-		m_Selection.SetSimple(minoffset, abs(offset - m_CaretOffset));
-	SendSelectionChanged();
-	RedrawWindow();
-
-	return 0;
-}
-
-LRESULT CHexControl::OnLeftButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
-	ReleaseCapture();
-	return 0;
-}
-
-LRESULT CHexControl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
-	int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-	if (delta == 0)
-		return 0;
-	int scroll = WHEEL_DELTA / 2;
-
-	auto keys = GET_KEYSTATE_WPARAM(wParam);
-	if (keys == 0) {
-		if (delta > 0) {
-			m_StartOffset -= m_BytesPerLine * abs(delta) / scroll;
-			if (m_StartOffset < 0)
-				m_StartOffset = 0;
-		}
-		else {
-			m_StartOffset += m_BytesPerLine * abs(delta) / scroll;
-			if (m_StartOffset > GetSize() - (m_Lines - 1) * m_BytesPerLine)
-				m_StartOffset = GetSize() - (m_Lines - 1) * m_BytesPerLine - GetSize() % m_BytesPerLine;
-		}
-		RedrawWindow();
-	}
-	else if (keys == MK_CONTROL) {
-		auto oldSize = m_FontPointSize;
-		// change font size
-		m_FontPointSize = static_cast<int>(m_FontPointSize * (delta > 0 ? 1.1 : (1 / 1.1)));
-		if (m_FontPointSize < 70)
-			m_FontPointSize = 70;
-		else if (m_FontPointSize > 300)
-			m_FontPointSize = 300;
-
-		if (m_FontPointSize != oldSize) {
-			InitFontMetrics();
-			RecalcLayout();
-		}
-	}
-
-	return 0;
-}
-LRESULT CHexControl::OnChar(UINT, WPARAM wParam, LPARAM, BOOL&) {
-	if (IsReadOnly())
-		return 0;
-
-	bool digit = wParam >= '0' && wParam <= '9';
-	bool hexdigit = wParam >= 'A' && wParam <= 'F' || wParam >= 'a' && wParam <= 'f';
-
-	if (!digit && !hexdigit) {
-		::MessageBeep((UINT)-1);
-		return 0;
-	}
-
-	uint8_t value;
-	if (digit)
-		value = static_cast<uint8_t>(wParam) - '0';
-	else {
-		if (wParam > 0x60)
-			wParam -= 0x20;
-		value = static_cast<uint8_t>(wParam) - 'A' + 10;
-	}
-
-	if (m_EditDigits == 0) {
-		m_CurrentInput = 0;
-		// save old value
-		BYTE* buffer;
-		GetData(m_CaretOffset, m_DataSize, buffer);
-		m_OldValue = 0;
-		memcpy(&m_OldValue, buffer, m_DataSize);
-		if (m_InsertMode) {
-			uint64_t v = 0;
-			InsertData(m_CaretOffset, std::span { (uint8_t*)&v, m_DataSize });
-		}
-	}
-
-	m_CurrentInput = (m_CurrentInput << 4) | value;
-	m_EditDigits++;
-
-	auto pos = GetPointFromOffset(m_CaretOffset);
-	if (m_EditDigits == m_DataSize * 2) {
-		CommitValue(m_CaretOffset, m_CurrentInput);
-
-		// end of number
-		m_CaretOffset += m_DataSize;
-		if (m_CaretOffset >= GetSize() && m_CaretOffset % m_BytesPerLine == 0) {
-			//DrawOffset(m_CaretOffset);
-		}
-		m_EditDigits = 0;
-		pos = GetPointFromOffset(m_CaretOffset);
-		SetCaretPos(pos.x, pos.y);
-	}
-	else {
-		CClientDC dc(m_hWnd);
-		DrawNumber(dc.m_hDC, m_CaretOffset, m_CurrentInput, m_EditDigits);
-	}
-	return 0;
-}
-
 CString CHexControl::FormatNumber(ULONGLONG number, int size) const {
 	if (size == 0)
 		size = m_DataSize;
@@ -772,18 +560,19 @@ LRESULT CHexControl::OnSize(UINT, WPARAM wp, LPARAM, BOOL&) {
 }
 
 int64_t CHexControl::GetSize() const {
-	return m_Data.size();
+	return m_pBuffer ? m_Size : m_Data.size();
 }
 
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t*& p) {
-	p = m_Data.data() + offset;
+	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return min(size, (int64_t)m_Data.size() - offset);
+	return min(size, m_Size - offset);
 }
-int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t const*& p) const {
-	p = m_Data.data() + offset;
 
-	return min(size, (int64_t)m_Data.size() - offset);
+int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t const*& p) const {
+	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
+
+	return min(size, (int64_t)m_Size - offset);
 }
 
 
@@ -796,18 +585,28 @@ bool CHexControl::IsReadOnly() const {
 	return m_ReadOnly;
 }
 
-void CHexControl::SetInsertMode(bool insert) {
+bool CHexControl::SetInsertMode(bool insert) {
+	if (insert && m_pBuffer)
+		return false;
+
 	m_InsertMode = insert;
 	Refresh();
+	return true;
 }
 
 bool CHexControl::IsInsertMode() const {
 	return m_InsertMode;
 }
 
+bool CHexControl::IsDataOwner() const {
+	return m_pBuffer != nullptr;
+}
+
 void CHexControl::SetSize(int64_t size) {
-	m_Data.resize(size);
-	Refresh();
+	if (m_pBuffer)
+		m_Size = size;
+	else
+		m_Data.resize(size);
 }
 
 bool CHexControl::SetDataSize(int32_t size) {
@@ -907,6 +706,8 @@ bool CHexControl::Delete() {
 
 void CHexControl::ClearAll() {
 	m_Data.clear();
+	m_pBuffer = nullptr;
+	m_Size = 0;
 	Refresh();
 }
 
@@ -971,7 +772,25 @@ bool CHexControl::SetData(int64_t offset, std::span<const uint8_t> data, bool up
 	return true;
 }
 
-bool CHexControl::InsertData(int64_t offset, std::span<const uint8_t> data, bool update) {
+bool CHexControl::InitData(uint8_t* p, int64_t size, bool owner) {
+	if (owner) {
+		m_pBuffer = nullptr;
+		m_Data.clear();
+		SetData(0, std::span{ p, (size_t)size });
+	}
+	else {
+		m_pBuffer = p;
+		m_Size = size;
+		m_Data.clear();
+	}
+	Refresh();
+	return true;
+}
+
+bool CHexControl::InsertData(int64_t offset, std::span<uint8_t> data, bool update) {
+	if (m_pBuffer)	// not data owner
+		return false;
+
 	m_Data.resize(m_Data.size() + data.size());
 	memmove(m_Data.data() + offset + data.size(), m_Data.data() + offset, m_Data.size() - offset + data.size());
 	memcpy(m_Data.data() + offset, data.data(), data.size());

@@ -3,6 +3,8 @@
 #include "Selection.h"
 #include <span>
 #include <unordered_set>
+#include <atltheme.h>
+#include <atltypes.h>
 
 struct HexControlColors {
 	COLORREF Text{ ::GetSysColor(COLOR_WINDOWTEXT) };
@@ -36,8 +38,9 @@ public:
 	int64_t GetData(int64_t offset, int64_t size, uint8_t const*& p) const;
 	void SetReadOnly(bool readonly);
 	bool IsReadOnly() const;
-	void SetInsertMode(bool insert);
+	bool SetInsertMode(bool insert);
 	bool IsInsertMode() const;
+	bool IsDataOwner() const;
 
 	void SetSize(int64_t size);
 	bool SetDataSize(int32_t size);
@@ -64,7 +67,8 @@ public:
 	std::wstring GetText(int64_t offset, int64_t size) const;
 	void Refresh();
 	bool SetData(int64_t offset, std::span<const uint8_t> data, bool update = true);
-	bool InsertData(int64_t offset, std::span<const uint8_t> data, bool update = true);
+	bool InitData(uint8_t* p, int64_t size, bool owner = false);
+	bool InsertData(int64_t offset, std::span<uint8_t> data, bool update = true);
 	bool LoadFile(PCWSTR path);
 
 	BEGIN_MSG_MAP(CHexControl)
@@ -128,6 +132,7 @@ private:
 	CFont m_Font;
 	std::vector<uint8_t> m_Data;
 	uint8_t* m_pBuffer{ nullptr };
+	int64_t m_Size{ 0 };
 	std::wstring m_FileName;
 	int m_FontPointSize{ 110 };
 	int m_Lines{ 1 };

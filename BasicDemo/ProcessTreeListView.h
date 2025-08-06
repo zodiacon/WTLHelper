@@ -47,7 +47,7 @@ private:
 
 	std::unordered_map<HTREEITEM, ProcessInfo> m_Processes;
 
-	CTreeListViewCtrl m_TreeList;
+	CTreeListView m_TreeList;
 	int m_SortColumn{ -1 };
 	int m_HighlightDiff{ 2000 };
 	bool m_SortAscending{ true };

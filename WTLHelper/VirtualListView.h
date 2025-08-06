@@ -2,6 +2,8 @@
 
 #include "ColumnManager.h"
 #include "ListViewhelper.h"
+#include <memory>
+#include <strsafe.h>
 
 enum class ListViewRowCheck {
 	None,

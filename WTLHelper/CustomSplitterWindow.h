@@ -2,6 +2,7 @@
 
 #include "ThemeHelper.h"
 #include "Theme.h"
+#include <atlsplit.h>
 
 template <bool t_bVertical>
 class CCustomSplitterWindowT : public CSplitterWindowImpl<CCustomSplitterWindowT<t_bVertical>> {
