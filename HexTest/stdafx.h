@@ -18,8 +18,9 @@
 extern CAppModule _Module;
 
 #include <atlwin.h>
-
+#include <atltheme.h>
 #include <atlframe.h>
+#include <atltypes.h>
 #include <atlctrls.h>
 #include <atldlgs.h>
 #include <vector>

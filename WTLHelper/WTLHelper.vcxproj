@@ -204,7 +204,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -223,7 +223,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -282,7 +282,7 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>
@@ -388,13 +388,16 @@
     <ClInclude Include="CustomHeader.h" />
     <ClInclude Include="CustomListView.h" />
     <ClInclude Include="CustomRebar.h" />
+    <ClInclude Include="CustomSplitterWindow.h" />
     <ClInclude Include="CustomStatusBar.h" />
     <ClInclude Include="CustomTabControl.h" />
     <ClInclude Include="CustomTabView.h" />
     <ClInclude Include="CustomToolBar.h" />
     <ClInclude Include="CustomTreeView.h" />
+    <ClInclude Include="DarkModeHelper.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="HexControl.h" />
+    <ClInclude Include="IATHook.h" />
     <ClInclude Include="IBufferManager.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />
@@ -404,14 +407,15 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="QuickFindEdit.h" />
     <ClInclude Include="Selection.h" />
+    <ClInclude Include="TreeListView.h" />
     <ClInclude Include="WTLHelperRes.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SortedFilteredVector.h" />
     <ClInclude Include="StandardColors.h" />
     <ClInclude Include="ToolbarHelper.h" />
-    <ClInclude Include="TreeListViewCtrl.h" />
     <ClInclude Include="TreeViewHelper.h" />
     <ClInclude Include="VirtualListView.h" />
+    <ClInclude Include="WTLx.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ClipboardHelper.cpp" />
@@ -420,6 +424,7 @@
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
     <ClCompile Include="CustomTabView.cpp" />
+    <ClCompile Include="DarkModeHelper.cpp" />
     <ClCompile Include="HexControl.cpp" />
     <ClCompile Include="IconHelper.cpp" />
     <ClCompile Include="IListView.cpp" />
@@ -444,7 +449,6 @@
     <ClCompile Include="Theme.cpp" />
     <ClCompile Include="ThemeHelper.cpp" />
     <ClCompile Include="ToolbarHelper.cpp" />
-    <ClCompile Include="TreeListViewCtrl.cpp" />
     <ClCompile Include="VersionResourceHelper.cpp" />
     <ClCompile Include="WTLHelper.cpp" />
   </ItemGroup>

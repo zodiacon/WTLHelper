@@ -65,7 +65,7 @@ public:
 				rect.left--;
 				rect.right++;
 			}
-			dc.FrameRect(&rect, ::GetSysColorBrush(COLOR_WINDOWTEXT));
+			dc.FrameRect(&rect, ::GetSysColorBrush(COLOR_GRAYTEXT));
 		}
 	}
 
