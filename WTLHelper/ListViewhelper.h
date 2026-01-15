@@ -3,7 +3,7 @@
 struct IListView;
 struct ColumnsState;
 
-struct ListViewHelper abstract final {
+struct ListViewHelper final {
 	static bool SaveAll(PCWSTR path, CListViewCtrl& lv, PCWSTR separator = L",", bool includeHeaders = true);
 	static bool SaveAllToKey(CRegKey& key, CListViewCtrl& lv, bool includeHeaders = true);
 	static CString GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR separator = L"\t");
