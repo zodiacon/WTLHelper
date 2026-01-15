@@ -274,12 +274,12 @@ protected:
 		p->PostSort(si->hWnd);
 	}
 
-	void IsSorting(bool sorting) {
+	void SetIsSorting(bool sorting) {
 		m_IsSorting = sorting;
 	}
 
-	LRESULT OnColumnClick(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {
-		IsSorting(true);
+	LRESULT OnColumnClick(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) noexcept {
+		SetIsSorting(true);
 		auto lv = (NMLISTVIEW*)hdr;
 		auto col = GetRealColumn(hdr->hwndFrom, lv->iSubItem);
 
@@ -329,7 +329,7 @@ protected:
 		//}
 
 		Sort(si);
-		IsSorting(false);
+		SetIsSorting(false);
 		list.RedrawItems(list.GetTopIndex(), list.GetTopIndex() + list.GetCountPerPage());
 
 		return 0;
@@ -345,11 +345,11 @@ protected:
 			list.RedrawItems(list.GetTopIndex(), list.GetTopIndex() + list.GetCountPerPage());
 	}
 
-	bool IsSorting() const {
+	bool IsSorting() const noexcept {
 		return m_IsSorting;
 	}
 
-	bool IsSortable(HWND, int) const {
+	bool IsSortable(HWND, int) const noexcept {
 		return true;
 	}
 
