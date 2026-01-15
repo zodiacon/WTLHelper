@@ -11,7 +11,7 @@
 const int WINDOW_MENU_POSITION = 5;
 
 BOOL CMainFrame::PreTranslateMessage(MSG* pMsg) {
-	if (CFrameWindowImpl<CMainFrame>::PreTranslateMessage(pMsg))
+	if (BaseFrame::PreTranslateMessage(pMsg))
 		return TRUE;
 
 	return m_view.PreTranslateMessage(pMsg);

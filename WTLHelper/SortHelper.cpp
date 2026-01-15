@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "SortHelper.h"
 
-bool SortHelper::Sort(const CString& s1, const CString& s2, bool ascending) {
+bool SortHelper::Sort(const CString& s1, const CString& s2, bool ascending) noexcept {
 	if (s1.IsEmpty() && s2.IsEmpty())
 		return false;
 	if (s1.IsEmpty())
@@ -12,7 +12,7 @@ bool SortHelper::Sort(const CString& s1, const CString& s2, bool ascending) {
 	return ascending ? s2.CompareNoCase(s1) > 0 : s2.CompareNoCase(s1) < 0;
 }
 
-bool SortHelper::Sort(const std::string& s1, const std::string& s2, bool ascending) {
+bool SortHelper::Sort(const std::string& s1, const std::string& s2, bool ascending) noexcept {
 	if (s1.empty() && s2.empty())
 		return false;
 	if (s1.empty())
@@ -24,7 +24,7 @@ bool SortHelper::Sort(const std::string& s1, const std::string& s2, bool ascendi
 	return ascending ? compare > 0 : compare < 0;
 }
 
-bool SortHelper::Sort(const std::wstring& s1, const std::wstring& s2, bool ascending) {
+bool SortHelper::Sort(const std::wstring& s1, const std::wstring& s2, bool ascending) noexcept {
 	if (s1.empty() && s2.empty())
 		return false;
 	if (s1.empty())
@@ -36,7 +36,7 @@ bool SortHelper::Sort(const std::wstring& s1, const std::wstring& s2, bool ascen
 	return ascending ? compare > 0 : compare < 0;
 }
 
-bool SortHelper::Sort(PCWSTR s1, PCWSTR s2, bool ascending) {
+bool SortHelper::Sort(PCWSTR s1, PCWSTR s2, bool ascending) noexcept {
 	if ((s1 == nullptr || *s1 == 0) && (s2 == nullptr || *s2 == 0))
 		return false;
 	if (s1 == nullptr || *s1 == 0)
@@ -48,7 +48,7 @@ bool SortHelper::Sort(PCWSTR s1, PCWSTR s2, bool ascending) {
 	return ascending ? compare > 0 : compare < 0;
 }
 
-bool SortHelper::Sort(PWSTR s1, PWSTR s2, bool ascending) {
+bool SortHelper::Sort(PWSTR s1, PWSTR s2, bool ascending) noexcept {
 	if ((s1 == nullptr || *s1 == 0) && (s2 == nullptr || *s2 == 0))
 		return false;
 	if (s1 == nullptr || *s1 == 0)
@@ -60,6 +60,6 @@ bool SortHelper::Sort(PWSTR s1, PWSTR s2, bool ascending) {
 	return ascending ? compare > 0 : compare < 0;
 }
 
-bool SortHelper::Sort(bool a, bool b, bool asc) {
+bool SortHelper::Sort(bool a, bool b, bool asc) noexcept {
 	return asc ? b > a : a > b;
 }

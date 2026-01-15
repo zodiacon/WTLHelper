@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "TreeListViewCtrl.h"
+#include "TreeListView.h"
 
 class CProcessTreeListView : 
 	public CFrameWindowImpl<CProcessTreeListView, CWindow, CControlWinTraits> {
@@ -18,7 +18,7 @@ public:
 protected:
 	BEGIN_MSG_MAP(CProcessTreeListView)
 		NOTIFY_CODE_HANDLER(TVN_ITEMEXPANDED, OnItemChanged)
-		NOTIFY_CODE_HANDLER(TLN_GETDISPINFO, OnTreeListGetDispInfo)
+		NOTIFY_CODE_HANDLER(LVN_GETDISPINFO, OnTreeListGetDispInfo)
 		NOTIFY_CODE_HANDLER(TVN_GETDISPINFO, OnTreeGetDispInfo)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		CHAIN_MSG_MAP(BaseFrame)
@@ -47,7 +47,7 @@ private:
 
 	std::unordered_map<HTREEITEM, ProcessInfo> m_Processes;
 
-	CTreeListView m_TreeList;
+	CTreeListViewCtrl m_TreeList;
 	int m_SortColumn{ -1 };
 	int m_HighlightDiff{ 2000 };
 	bool m_SortAscending{ true };

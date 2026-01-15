@@ -11,6 +11,7 @@ class CMainFrame :
 	public CAutoUpdateUI<CMainFrame>,
 	public CMessageFilter, public CIdleHandler {
 public:
+	using BaseFrame = CFrameWindowImpl<CMainFrame, CWindowX>;
 	DECLARE_FRAME_WND_CLASS(NULL, IDR_MAINFRAME)
 
 	virtual BOOL PreTranslateMessage(MSG* pMsg);
@@ -28,7 +29,7 @@ protected:
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		CHAIN_MSG_MAP(CAutoUpdateUI<CMainFrame>)
-		CHAIN_MSG_MAP(CFrameWindowImpl<CMainFrame>)
+		CHAIN_MSG_MAP(BaseFrame)
 		REFLECT_NOTIFICATIONS_EX()
 	END_MSG_MAP()
 

@@ -53,7 +53,7 @@ struct CVirtualListView {
 		int RealSortColumn = -1;
 	};
 
-	bool ClearSort(UINT_PTR id = 0) {
+	bool ClearSort(UINT_PTR id = 0) noexcept {
 		auto si = FindById(id);
 		if (si == nullptr)
 			return false;
@@ -68,7 +68,7 @@ struct CVirtualListView {
 		return true;
 	}
 
-	bool ClearSort(HWND hWnd) {
+	bool ClearSort(HWND hWnd) noexcept {
 		auto si = FindByHwnd(hWnd);
 		if (si == nullptr)
 			return false;
@@ -143,19 +143,19 @@ struct CVirtualListView {
 		return 0;
 	}
 
-	bool OnRightClickHeader(HWND, int index, POINT const& pt) const {
+	bool OnRightClickHeader(HWND, int index, POINT const& pt) const noexcept {
 		return false;
 	}
 
-	bool OnRightClickList(HWND, int row, int col, POINT const& pt) const {
+	bool OnRightClickList(HWND, int row, int col, POINT const& pt) const noexcept {
 		return false;
 	}
 
-	bool OnDoubleClickList(HWND, int row, int col, POINT const& pt) const {
+	bool OnDoubleClickList(HWND, int row, int col, POINT const& pt) const noexcept {
 		return false;
 	}
 
-	void OnListViewClick(HWND, int row, int col, POINT const& pt) const {
+	void OnListViewClick(HWND, int row, int col, POINT const& pt) const noexcept {
 	}
 
 protected:
@@ -230,11 +230,11 @@ protected:
 		return 0;
 	}
 
-	PCWSTR GetExistingColumnText(HWND hWnd, int row, int column) const {
+	PCWSTR GetExistingColumnText(HWND hWnd, int row, int column) const noexcept {
 		return nullptr;
 	}
 
-	void OnStateChanged(HWND, int from, int to, UINT oldState, UINT newState) const {
+	void OnStateChanged(HWND, int from, int to, UINT oldState, UINT newState) const noexcept {
 	}
 
 	LRESULT OnFindItem(int /*idCtrl*/, LPNMHDR hdr, BOOL& /*bHandled*/) {

@@ -43,7 +43,7 @@ void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 			break;
 
 		lines++;
-		int jcount = min(m_BytesPerLine, count);
+		int jcount = std::min(m_BytesPerLine, count);
 		auto step = m_DataSize;
 		int x2 = 0;
 		for (int j = 0; j < jcount; j += step) {
@@ -311,11 +311,11 @@ LRESULT CHexControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL&) {
 
 	if (shift && m_CaretOffset != current) {
 		if (ctrl) {
-			m_Selection.SetBox(min(m_CaretOffset, m_Selection.GetAnchor()), m_BytesPerLine,
+			m_Selection.SetBox(std::min(m_CaretOffset, m_Selection.GetAnchor()), m_BytesPerLine,
 				(m_CaretOffset - m_Selection.GetAnchor()) % m_BytesPerLine, (int)(m_CaretOffset - m_Selection.GetAnchor()) / m_BytesPerLine);
 		}
 		else {
-			m_Selection.SetSimple(min(m_CaretOffset, m_Selection.GetAnchor()), abs(m_CaretOffset - m_Selection.GetAnchor()));
+			m_Selection.SetSimple(std::min(m_CaretOffset, m_Selection.GetAnchor()), abs(m_CaretOffset - m_Selection.GetAnchor()));
 		}
 		redraw = true;
 		SendSelectionChanged();
@@ -479,7 +479,7 @@ void CHexControl::RecalcLayout() {
 	GetClientRect(&rc);
 
 	auto lines = int(GetSize() / m_BytesPerLine) + 1;
-	m_Lines = min(rc.Height() / m_CharHeight, int(GetSize() / m_BytesPerLine));
+	m_Lines = std::min(rc.Height() / m_CharHeight, int(GetSize() / m_BytesPerLine));
 
 	if (GetSize() % m_BytesPerLine == 0) {
 		lines++;
@@ -497,7 +497,7 @@ void CHexControl::RecalcLayout() {
 	m_AddressDigits = GetSize() >= 1LL << 32 ? 16 : 8;
 	m_Chars = m_AddressDigits + 1 + m_BytesPerLine / m_DataSize * (1 + 2 * m_DataSize) + 1 + m_BytesPerLine;
 
-	si.nMax = static_cast<int>(m_Chars) - 1;
+	si.nMax = m_Chars - 1;
 	si.nPage = rc.right / m_CharWidth;
 	SetScrollInfo(SB_HORZ, &si);
 
@@ -566,13 +566,13 @@ int64_t CHexControl::GetSize() const {
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t*& p) {
 	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return min(size, m_Size - offset);
+	return std::min(size, m_Size - offset);
 }
 
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t const*& p) const {
 	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return min(size, (int64_t)m_Size - offset);
+	return std::min(size, (int64_t)m_Size - offset);
 }
 
 
