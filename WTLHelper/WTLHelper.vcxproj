@@ -418,6 +418,7 @@
     <ClInclude Include="IListView.h" />
     <ClInclude Include="IniFile.h" />
     <ClInclude Include="ListViewhelper.h" />
+    <ClInclude Include="NativeCustomTabView.h" />
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="QuickFindEdit.h" />
