@@ -16,8 +16,6 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 			auto hwnd = msg->hwnd;
 			auto lpcs = (LPCREATESTRUCT)msg->lParam;
 			if (lpcs->style & WS_CHILD) {
-				DarkMode::setWindowExStyle(hwnd, true, WS_EX_COMPOSITED);
-				DarkMode::setWindowEraseBgSubclass(hwnd);
 				DarkMode::setDarkWndNotifySafe(hwnd);
 			}
 			else {
@@ -52,4 +50,39 @@ DarkMode::DarkModeType WTLHelper::DarkModeType() noexcept {
 
 bool WTLHelper::IsDarkMode() noexcept {
 	return g_DarkModeType == DarkMode::DarkModeType::dark;
+}
+
+bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
+	if (g_DarkModeType == type)
+		return false;
+
+	DarkMode::setDarkModeConfigEx(static_cast<UINT>(g_DarkModeType = type));
+	DarkMode::setDefaultColors(true);
+	DarkMode::setDarkTitleBarEx(hWnd, true);
+	DarkMode::setChildCtrlsTheme(hWnd);
+	::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
+
+	return true;
+}
+
+bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count) {
+	ATLASSERT(::IsMenu(menu));
+
+	CDC mdc;
+	CClientDC dc(::GetDesktopWindow());
+	mdc.CreateCompatibleDC(dc);
+	CRect rc(0, 0, 16, 16);
+	for (int i = 0; i < count; i++) {
+		auto& cmd = items[i];
+		auto hIcon = cmd.hIcon ? cmd.hIcon : AtlLoadIconImage(cmd.icon, 0, 16, 16);
+		ATLASSERT(hIcon);
+		CBitmap bmp;
+		bmp.CreateCompatibleBitmap(dc, 16, 16);
+		mdc.SelectBitmap(bmp);
+		mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
+		mdc.DrawIconEx(0, 0, hIcon, 16, 16);
+		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
+		bmp.Detach();
+	}
+	return true;
 }

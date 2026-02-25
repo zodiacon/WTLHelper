@@ -19,6 +19,7 @@ struct COwnerDrawnMenuBase {
 	void SetCheckIcon(HICON hicon, HICON hRadioIcon = nullptr);
 	void SetCheckIcon(UINT iconId, UINT radioId = 0);
 	void UpdateMenuBase(CMenuHandle menu, bool subMenus = false);
+	void UpdateColors();
 
 protected:
 	int m_Width{ 0 };
