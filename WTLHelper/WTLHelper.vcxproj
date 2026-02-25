@@ -69,7 +69,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <SpectreMitigation>Spectre</SpectreMitigation>
   </PropertyGroup>
@@ -395,6 +395,21 @@
     <ClInclude Include="CustomToolBar.h" />
     <ClInclude Include="CustomTreeView.h" />
     <ClInclude Include="DarkModeHelper.h" />
+    <ClInclude Include="DarkMode\DarkModeSubclass.h" />
+    <ClInclude Include="DarkMode\DmlibColor.h" />
+    <ClInclude Include="DarkMode\DmlibDpi.h" />
+    <ClInclude Include="DarkMode\DmlibGlyph.h" />
+    <ClInclude Include="DarkMode\DmlibHook.h" />
+    <ClInclude Include="DarkMode\DmlibIni.h" />
+    <ClInclude Include="DarkMode\DmlibPaintHelper.h" />
+    <ClInclude Include="DarkMode\DmlibSubclass.h" />
+    <ClInclude Include="DarkMode\DmlibSubclassControl.h" />
+    <ClInclude Include="DarkMode\DmlibSubclassWindow.h" />
+    <ClInclude Include="DarkMode\DmlibWinApi.h" />
+    <ClInclude Include="DarkMode\IatHook.h" />
+    <ClInclude Include="DarkMode\ModuleHelper.h" />
+    <ClInclude Include="DarkMode\UAHMenuBar.h" />
+    <ClInclude Include="DarkMode\Version.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="HexControl.h" />
     <ClInclude Include="IATHook.h" />
@@ -408,6 +423,7 @@
     <ClInclude Include="QuickFindEdit.h" />
     <ClInclude Include="Selection.h" />
     <ClInclude Include="TreeListView.h" />
+    <ClInclude Include="WTLHelper.h" />
     <ClInclude Include="WTLHelperRes.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SortedFilteredVector.h" />
@@ -425,6 +441,16 @@
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
     <ClCompile Include="CustomTabView.cpp" />
     <ClCompile Include="DarkModeHelper.cpp" />
+    <ClCompile Include="DarkMode\DarkModeSubclass.cpp" />
+    <ClCompile Include="DarkMode\DmlibColor.cpp" />
+    <ClCompile Include="DarkMode\DmlibDpi.cpp" />
+    <ClCompile Include="DarkMode\DmlibHook.cpp" />
+    <ClCompile Include="DarkMode\DmlibIni.cpp" />
+    <ClCompile Include="DarkMode\DmlibPaintHelper.cpp" />
+    <ClCompile Include="DarkMode\DmlibSubclass.cpp" />
+    <ClCompile Include="DarkMode\DmlibSubclassControl.cpp" />
+    <ClCompile Include="DarkMode\DmlibSubclassWindow.cpp" />
+    <ClCompile Include="DarkMode\DmlibWinApi.cpp" />
     <ClCompile Include="HexControl.cpp" />
     <ClCompile Include="IconHelper.cpp" />
     <ClCompile Include="IListView.cpp" />
