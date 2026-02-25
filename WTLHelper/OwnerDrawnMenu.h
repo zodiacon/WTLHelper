@@ -2,6 +2,8 @@
 
 #include <unordered_map>
 #include <atltypes.h>
+#include "WTLHelper.h"
+#include "DarkMode/DarkModeSubclass.h"
 
 struct COwnerDrawnMenuBase {
 	void SetTextColor(COLORREF color);
@@ -26,7 +28,8 @@ protected:
 	};
 	std::unordered_map<UINT, ItemData> m_Items;
 	CImageList m_Images;
-	COLORREF m_TextColor{ RGB(0, 0, 0) }, m_BackColor{ ::GetSysColor(COLOR_WINDOW) };
+	COLORREF m_TextColor{ WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColor(COLOR_WINDOWTEXT) : DarkMode::getTextColor() };
+	COLORREF m_BackColor{ WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColor(COLOR_WINDOW) : DarkMode::getBackgroundColor() };
 	COLORREF m_SelectionBackColor{ ::GetSysColor(COLOR_HIGHLIGHT) }, m_SelectionTextColor{ ::GetSysColor(COLOR_HIGHLIGHTTEXT) };
 	COLORREF m_SeparatorColor{ RGB(64, 64, 64) };
 	int m_LastHeight{ 16 };

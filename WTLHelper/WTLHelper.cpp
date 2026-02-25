@@ -33,12 +33,23 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 	return ::CallNextHookEx(nullptr, code, wp, lp);
 }
 
-bool WTLHelper::InitDarkMode() {
+DarkMode::DarkModeType g_DarkModeType;
+
+bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
+	g_DarkModeType = type;
 	DarkMode::initDarkMode();
-	DarkMode::setDarkModeConfigEx(static_cast<UINT>(DarkMode::DarkModeType::dark));
+	DarkMode::setDarkModeConfigEx(static_cast<UINT>(type));
 	DarkMode::setDefaultColors(true);
 	DarkMode::setColorizeTitleBarConfig(false);
 
 	::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	return true;
+}
+
+DarkMode::DarkModeType WTLHelper::DarkModeType() noexcept {
+	return g_DarkModeType;
+}
+
+bool WTLHelper::IsDarkMode() noexcept {
+	return g_DarkModeType == DarkMode::DarkModeType::dark;
 }
