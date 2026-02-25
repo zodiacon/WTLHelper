@@ -16,14 +16,15 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 			auto hwnd = msg->hwnd;
 			auto lpcs = (LPCREATESTRUCT)msg->lParam;
 			if (lpcs->style & WS_CHILD) {
-				DarkMode::setWindowExStyle(msg->hwnd, true, WS_EX_COMPOSITED);
-				DarkMode::setWindowEraseBgSubclass(msg->hwnd);
+				DarkMode::setWindowExStyle(hwnd, true, WS_EX_COMPOSITED);
+				DarkMode::setWindowEraseBgSubclass(hwnd);
+				DarkMode::setDarkWndNotifySafe(hwnd);
 			}
 			else {
 				// top-level window
-				DarkMode::setDarkWndNotifySafe(msg->hwnd);
-				DarkMode::setWindowEraseBgSubclass(msg->hwnd);
-				DarkMode::setWindowMenuBarSubclass(msg->hwnd);
+				DarkMode::setDarkWndNotifySafe(hwnd);
+				DarkMode::setWindowEraseBgSubclass(hwnd);
+				DarkMode::setWindowMenuBarSubclass(hwnd);
 				//DarkMode::setWindowExStyle(msg->hwnd, true, WS_EX_COMPOSITED);
 				::SetWindowLongPtr(hwnd, GWL_EXSTYLE, GetWindowLongPtr(hwnd, GWL_EXSTYLE) | WS_EX_COMPOSITED);
 			}

@@ -53,7 +53,36 @@
     <ClCompile Include="Selection.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
-    <ClCompile Include="DarkModeHelper.cpp" />
+    <ClCompile Include="DarkMode\DarkModeSubclass.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibColor.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibDpi.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibHook.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibIni.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibPaintHelper.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibSubclass.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibSubclassControl.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibSubclassWindow.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
+    <ClCompile Include="DarkMode\DmlibWinApi.cpp">
+      <Filter>DarkMode</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ColumnManager.h" />
@@ -153,9 +182,54 @@
     <ClInclude Include="TreeListView.h">
       <Filter>Controls</Filter>
     </ClInclude>
-    <ClInclude Include="DarkModeHelper.h" />
-    <ClInclude Include="IATHook.h" />
     <ClInclude Include="WTLx.h" />
+    <ClInclude Include="DarkMode\ModuleHelper.h" />
+    <ClInclude Include="WTLHelper.h" />
+    <ClInclude Include="DarkMode\DarkModeSubclass.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibColor.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibDpi.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibGlyph.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibHook.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibIni.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibPaintHelper.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibSubclass.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibSubclassControl.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibSubclassWindow.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\DmlibWinApi.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="NativeCustomTabView.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\UAHMenuBar.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\Version.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
+    <ClInclude Include="DarkMode\IatHook.h">
+      <Filter>DarkMode</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">
@@ -169,6 +243,9 @@
     </Filter>
     <Filter Include="Resources">
       <UniqueIdentifier>{231c6c75-96a7-4165-a773-29ca474d7abf}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="DarkMode">
+      <UniqueIdentifier>{56aeb4d9-6a77-44e4-aabd-92b22837e51c}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>

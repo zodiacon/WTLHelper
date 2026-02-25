@@ -394,7 +394,6 @@
     <ClInclude Include="CustomTabView.h" />
     <ClInclude Include="CustomToolBar.h" />
     <ClInclude Include="CustomTreeView.h" />
-    <ClInclude Include="DarkModeHelper.h" />
     <ClInclude Include="DarkMode\DarkModeSubclass.h" />
     <ClInclude Include="DarkMode\DmlibColor.h" />
     <ClInclude Include="DarkMode\DmlibDpi.h" />
@@ -412,7 +411,6 @@
     <ClInclude Include="DarkMode\Version.h" />
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="HexControl.h" />
-    <ClInclude Include="IATHook.h" />
     <ClInclude Include="IBufferManager.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />
@@ -441,7 +439,6 @@
     <ClCompile Include="CompoundFile.cpp" />
     <ClCompile Include="CompoundFileReaderWriter.cpp" />
     <ClCompile Include="CustomTabView.cpp" />
-    <ClCompile Include="DarkModeHelper.cpp" />
     <ClCompile Include="DarkMode\DarkModeSubclass.cpp" />
     <ClCompile Include="DarkMode\DmlibColor.cpp" />
     <ClCompile Include="DarkMode\DmlibDpi.cpp" />
