@@ -1,7 +1,7 @@
 #pragma once
 
 template<typename T, typename TFrame, typename TBase = CWindow>
-class CFrameView abstract :
+class CFrameView :
 	public CFrameWindowImpl<T, TBase, CControlWinTraits> {
 public:
 	using BaseFrame = CFrameWindowImpl<T, TBase, CControlWinTraits>;
