@@ -17,5 +17,7 @@ struct WTLHelper final {
 	static bool SwitchToMode(DarkMode::DarkModeType type, HWND hWnd);
 	static bool InitMenu(CMenuHandle menu, MenuItemData const* items, int count);
 	static bool IsSystemInDarkMode();
+	static int SuspendHook();
+	static int ResumeHook();
 };
 

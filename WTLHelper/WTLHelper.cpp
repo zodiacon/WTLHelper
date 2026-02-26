@@ -6,8 +6,12 @@
 #include "DarkMode/DarkModeSubclass.h"
 #include "CustomHeader2.h"
 
+static DarkMode::DarkModeType g_DarkModeType;
+static HHOOK g_hHook;
+static int g_SuspendCount;
+
 static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
-	if (code == HC_ACTION) {
+	if (g_SuspendCount <= 0 && code == HC_ACTION) {
 		auto msg = (CWPRETSTRUCT*)lp;
 		if (msg->message == WM_INITDIALOG) {
 			DarkMode::setDarkWndNotifySafe(msg->hwnd);
@@ -41,8 +45,6 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 	return ::CallNextHookEx(nullptr, code, wp, lp);
 }
 
-DarkMode::DarkModeType g_DarkModeType;
-
 bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	g_DarkModeType = type;
 	DarkMode::initDarkMode();
@@ -50,7 +52,7 @@ bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	DarkMode::setDefaultColors(true);
 	DarkMode::setColorizeTitleBarConfig(false);
 
-	::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
+	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	return true;
 }
 
@@ -108,4 +110,12 @@ bool WTLHelper::IsSystemInDarkMode() {
 
 	DWORD value;
 	return key.QueryDWORDValue(L"AppsUseLightTheme", value) == ERROR_SUCCESS && value == 0;
+}
+
+int WTLHelper::SuspendHook() {
+	return ++g_SuspendCount;
+}
+
+int WTLHelper::ResumeHook() {
+	return --g_SuspendCount;
 }
