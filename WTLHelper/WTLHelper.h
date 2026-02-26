@@ -10,6 +10,7 @@ struct MenuItemData {
 };
 
 struct WTLHelper final {
+	static bool InitDarkMode();
 	static bool InitDarkMode(DarkMode::DarkModeType type);
 	static DarkMode::DarkModeType DarkModeType() noexcept;
 	static bool IsDarkMode() noexcept;

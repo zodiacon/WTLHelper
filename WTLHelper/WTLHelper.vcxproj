@@ -422,6 +422,7 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="QuickFindEdit.h" />
     <ClInclude Include="Selection.h" />
+    <ClInclude Include="TabViewHelper.h" />
     <ClInclude Include="TreeListView.h" />
     <ClInclude Include="WTLHelper.h" />
     <ClInclude Include="WTLHelperRes.h" />

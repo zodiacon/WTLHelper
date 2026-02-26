@@ -54,6 +54,10 @@ bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	return true;
 }
 
+bool WTLHelper::InitDarkMode() {
+	return InitDarkMode(IsSystemInDarkMode() ? DarkMode::DarkModeType::dark : DarkMode::DarkModeType::classic);
+}
+
 DarkMode::DarkModeType WTLHelper::DarkModeType() noexcept {
 	return g_DarkModeType;
 }
