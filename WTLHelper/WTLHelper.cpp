@@ -96,3 +96,12 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count)
 	}
 	return true;
 }
+
+bool WTLHelper::IsSystemInDarkMode() {
+	CRegKey key;
+	if (ERROR_SUCCESS != key.Open(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)", KEY_QUERY_VALUE))
+		return false;
+
+	DWORD value;
+	return key.QueryDWORDValue(L"AppsUseLightTheme", value) == ERROR_SUCCESS && value == 0;
+}
