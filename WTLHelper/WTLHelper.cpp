@@ -69,6 +69,9 @@ bool WTLHelper::IsDarkMode() noexcept {
 }
 
 bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
+	if (type == DarkMode::DarkModeType::system)
+		type = IsSystemInDarkMode() ? DarkMode::DarkModeType::dark : DarkMode::DarkModeType::light;
+
 	if (g_DarkModeType == type)
 		return false;
 

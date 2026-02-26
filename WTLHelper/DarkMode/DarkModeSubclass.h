@@ -165,6 +165,7 @@ namespace DarkMode
 	{
 		light = 0,  ///< Light mode appearance.
 		dark = 1,   ///< Dark mode appearance.
+		system = 2,
 		classic = 3 ///< Classic (non-themed or system) appearance.
 	};
 
