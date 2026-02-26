@@ -230,6 +230,9 @@
     <ClInclude Include="DarkMode\IatHook.h">
       <Filter>DarkMode</Filter>
     </ClInclude>
+    <ClInclude Include="CustomHeader2.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">

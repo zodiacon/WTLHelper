@@ -386,6 +386,7 @@
     <ClInclude Include="CustomDialog.h" />
     <ClInclude Include="CustomEdit.h" />
     <ClInclude Include="CustomHeader.h" />
+    <ClInclude Include="CustomHeader2.h" />
     <ClInclude Include="CustomListView.h" />
     <ClInclude Include="CustomRebar.h" />
     <ClInclude Include="CustomSplitterWindow.h" />

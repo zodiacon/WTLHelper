@@ -4,6 +4,7 @@
 #include "pch.h"
 #include "WTLHelper.h"
 #include "DarkMode/DarkModeSubclass.h"
+#include "CustomHeader2.h"
 
 static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 	if (code == HC_ACTION) {
@@ -17,6 +18,15 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 			auto lpcs = (LPCREATESTRUCT)msg->lParam;
 			if (lpcs->style & WS_CHILD) {
 				DarkMode::setDarkWndNotifySafe(hwnd);
+
+				CString name;
+				if (::GetClassName(hwnd, name.GetBufferSetLength(32), 32)) {
+					if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
+						::SetWindowTheme(hwnd, nullptr, nullptr);
+						auto win = new CCustomHeader2;
+						win->SubclassWindow(hwnd);
+					}
+				}
 			}
 			else {
 				// top-level window
