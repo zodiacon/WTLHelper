@@ -12,7 +12,7 @@ public:
 	END_MSG_MAP()
 
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (!WTLHelper::IsDarkMode()) {
+		if (WTLHelper::IsClassicMode()) {
 			bHandled = FALSE;
 			return 0;
 		}
@@ -62,20 +62,21 @@ public:
 				dc.MoveTo(rc.right, rc.top);
 				dc.LineTo(rc.right, rc.bottom);
 			}
+			bHandled = TRUE;
 		}
 
 		return 0;
 	}
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (!WTLHelper::IsDarkMode()) {
+		if (WTLHelper::IsClassicMode()) {
 			bHandled = FALSE;
 			return 0;
 		}
-		DefWindowProc();
-		CClientDC dc(*this);
+		CDCHandle dc((HDC)wParam);
 		CRect rc;
 		GetClientRect(&rc);
+		dc.FillRect(&rc, DarkMode::getCtrlBackgroundBrush());
 		RECT rcItem;
 		if (GetItemCount()) {
 			std::vector<int> order(GetItemCount());
@@ -83,10 +84,10 @@ public:
 			GetItemRect(order.back(), &rcItem);
 			rc.left = rcItem.right;
 			if (rc.right > rc.left)
-				dc.FillSolidRect(&rc, DarkMode::getCtrlBackgroundColor());
+				dc.FillRect(&rc, DarkMode::getCtrlBackgroundBrush());
 		}
+		bHandled = TRUE;
 		return 1;
 	}
 
-	int m_Width{ 0 };
 };

@@ -15,6 +15,7 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 		auto msg = (CWPRETSTRUCT*)lp;
 		if (msg->message == WM_INITDIALOG) {
 			DarkMode::setDarkWndNotifySafe(msg->hwnd);
+			::SetWindowLongPtr(msg->hwnd, GWL_STYLE, ::GetWindowLongPtr(msg->hwnd, GWL_STYLE) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
 		}
 
 		else if (msg->message == WM_CREATE) {
@@ -22,11 +23,10 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 			auto lpcs = (LPCREATESTRUCT)msg->lParam;
 			if (lpcs->style & WS_CHILD) {
 				DarkMode::setDarkWndNotifySafe(hwnd);
-
 				CString name;
 				if (::GetClassName(hwnd, name.GetBufferSetLength(32), 32)) {
 					if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
-						::SetWindowTheme(hwnd, nullptr, nullptr);
+						//::SetWindowTheme(hwnd, nullptr, nullptr);
 						auto win = new CCustomHeader2;
 						win->SubclassWindow(hwnd);
 					}
@@ -68,6 +68,10 @@ bool WTLHelper::IsDarkMode() noexcept {
 	return g_DarkModeType == DarkMode::DarkModeType::dark;
 }
 
+bool WTLHelper::IsClassicMode() noexcept {
+	return g_DarkModeType == DarkMode::DarkModeType::classic;
+}
+
 bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
 	if (type == DarkMode::DarkModeType::system)
 		type = IsSystemInDarkMode() ? DarkMode::DarkModeType::dark : DarkMode::DarkModeType::light;
@@ -106,6 +110,23 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count)
 	return true;
 }
 
+bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const& cmd) {
+	auto hIcon = cmd.hIcon ? cmd.hIcon : AtlLoadIconImage(cmd.icon, 0, 16, 16);
+	ATLASSERT(hIcon);
+	CBitmap bmp;
+	CDC mdc;
+	CClientDC dc(::GetDesktopWindow());
+	mdc.CreateCompatibleDC(dc);
+	CRect rc(0, 0, 16, 16);
+	bmp.CreateCompatibleBitmap(dc, 16, 16);
+	mdc.SelectBitmap(bmp);
+	mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
+	mdc.DrawIconEx(0, 0, hIcon, 16, 16);
+	menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
+	bmp.Detach();
+	return true;
+}
+
 bool WTLHelper::IsSystemInDarkMode() {
 	CRegKey key;
 	if (ERROR_SUCCESS != key.Open(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)", KEY_QUERY_VALUE))
@@ -115,10 +136,10 @@ bool WTLHelper::IsSystemInDarkMode() {
 	return key.QueryDWORDValue(L"AppsUseLightTheme", value) == ERROR_SUCCESS && value == 0;
 }
 
-int WTLHelper::SuspendHook() {
+int WTLHelper::SuspendHook() noexcept {
 	return ++g_SuspendCount;
 }
 
-int WTLHelper::ResumeHook() {
+int WTLHelper::ResumeHook() noexcept {
 	return --g_SuspendCount;
 }
