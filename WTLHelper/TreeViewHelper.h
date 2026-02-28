@@ -74,7 +74,7 @@ struct CTreeViewHelper {
 	}
 
 	template<typename TData>
-	HTREEITEM FindItemByData(CTreeViewCtrl const& tree, HTREEITEM hParent, TData const& data) const {
+	static HTREEITEM FindItemByData(CTreeViewCtrl const& tree, HTREEITEM hParent, TData const& data) {
 		int start = 0;
 		HTREEITEM hItem = nullptr;
 		while (hParent) {
