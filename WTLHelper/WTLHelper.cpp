@@ -24,7 +24,6 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 				CString name;
 				if (::GetClassName(hwnd, name.GetBufferSetLength(32), 32)) {
 					if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
-						::SetWindowTheme(hwnd, L" ", L"");
 						auto win = new CCustomHeader2;
 						win->SubclassWindow(hwnd);
 					}
