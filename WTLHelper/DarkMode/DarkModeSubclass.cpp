@@ -1612,7 +1612,7 @@ static void setListViewCtrlSubclassAndTheme(HWND hWnd, DarkModeParams p) noexcep
 	{
 		if (!dmlib_subclass::isThemePrefered())
 		{
-			DarkMode::setHeaderCtrlSubclass(hHeader);
+			//DarkMode::setHeaderCtrlSubclass(hHeader);
 		}
 
 		const auto lvExStyle = ListView_GetExtendedListViewStyle(hWnd);

@@ -940,7 +940,7 @@ static LRESULT onNotifyCustomDraw(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
 		if (className == WC_LISTVIEW)
 		{
-			return darkListViewNotifyCustomDraw(hWnd, uMsg, wParam, lParam);
+			//return darkListViewNotifyCustomDraw(hWnd, uMsg, wParam, lParam);
 		}
 
 		if (className == WC_TREEVIEW)

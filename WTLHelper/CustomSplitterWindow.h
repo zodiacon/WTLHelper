@@ -56,7 +56,7 @@ public:
 			}
 
 			//dc.DrawEdge(&rect, EDGE_ETCHED, t_bVertical ? (BF_LEFT | BF_RIGHT) : (BF_TOP | BF_BOTTOM));
-			dc.FillRect(&rect, ::GetSysColorBrush(COLOR_WINDOW));
+			dc.FillRect(&rect, ::GetSysColorBrush(COLOR_APPWORKSPACE));
 			if constexpr (t_bVertical) {
 				rect.top--;
 				rect.bottom++;

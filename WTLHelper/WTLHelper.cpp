@@ -3,6 +3,7 @@
 
 #include "pch.h"
 #include "WTLHelper.h"
+
 #include "DarkMode/DarkModeSubclass.h"
 #include "CustomHeader2.h"
 
@@ -11,22 +12,19 @@ static HHOOK g_hHook;
 static int g_SuspendCount;
 
 static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
-	if (g_SuspendCount <= 0 && code == HC_ACTION) {
+	if (g_SuspendCount <= 0 && code >= HC_ACTION) {
 		auto msg = (CWPRETSTRUCT*)lp;
 		if (msg->message == WM_INITDIALOG) {
 			DarkMode::setDarkWndNotifySafe(msg->hwnd);
-			::SetWindowLongPtr(msg->hwnd, GWL_STYLE, ::GetWindowLongPtr(msg->hwnd, GWL_STYLE) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
 		}
-
 		else if (msg->message == WM_CREATE) {
 			auto hwnd = msg->hwnd;
 			auto lpcs = (LPCREATESTRUCT)msg->lParam;
 			if (lpcs->style & WS_CHILD) {
-				DarkMode::setDarkWndNotifySafe(hwnd);
 				CString name;
 				if (::GetClassName(hwnd, name.GetBufferSetLength(32), 32)) {
 					if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
-						//::SetWindowTheme(hwnd, nullptr, nullptr);
+						::SetWindowTheme(hwnd, L" ", L"");
 						auto win = new CCustomHeader2;
 						win->SubclassWindow(hwnd);
 					}
@@ -37,8 +35,6 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 				DarkMode::setDarkWndNotifySafe(hwnd);
 				DarkMode::setWindowEraseBgSubclass(hwnd);
 				DarkMode::setWindowMenuBarSubclass(hwnd);
-				//DarkMode::setWindowExStyle(msg->hwnd, true, WS_EX_COMPOSITED);
-				::SetWindowLongPtr(hwnd, GWL_EXSTYLE, GetWindowLongPtr(hwnd, GWL_EXSTYLE) | WS_EX_COMPOSITED);
 			}
 		}
 	}
@@ -46,13 +42,13 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 }
 
 bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
+	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	g_DarkModeType = type;
 	DarkMode::initDarkMode();
 	DarkMode::setDarkModeConfigEx(static_cast<UINT>(type));
 	DarkMode::setDefaultColors(true);
 	DarkMode::setColorizeTitleBarConfig(false);
 
-	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	return true;
 }
 
