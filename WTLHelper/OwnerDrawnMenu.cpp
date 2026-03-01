@@ -30,11 +30,6 @@ void COwnerDrawnMenuBase::UpdateMenuBase(CMenuHandle menu, bool subMenus) {
 	ATLVERIFY(menu.SetMenuInfo(&mi));
 }
 
-void COwnerDrawnMenuBase::UpdateColors() {
-	m_TextColor = WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColor(COLOR_WINDOWTEXT) : DarkMode::getTextColor();
-	m_BackColor = WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColor(COLOR_WINDOW) : DarkMode::getBackgroundColor();
-}
-
 void COwnerDrawnMenuBase::AddCommand(UINT id, HICON hIcon) {
 	ItemData data;
 	data.Image = m_Images.AddIcon(hIcon);
