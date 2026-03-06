@@ -234,6 +234,9 @@
       <Filter>Controls</Filter>
     </ClInclude>
     <ClInclude Include="TabViewHelper.h" />
+    <ClInclude Include="CustomDateTimePicker.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">

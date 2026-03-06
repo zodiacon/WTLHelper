@@ -4,8 +4,11 @@
 #include "pch.h"
 #include "WTLHelper.h"
 
+#include <detours/detours.h>
+
 #include "DarkMode/DarkModeSubclass.h"
 #include "CustomHeader2.h"
+#include "CustomDateTimePicker.h"
 
 static DarkMode::DarkModeType g_DarkModeType;
 static HHOOK g_hHook;
@@ -27,6 +30,24 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 						auto win = new CCustomHeader2;
 						win->SubclassWindow(hwnd);
 					}
+					else if (name == DATETIMEPICK_CLASS) {
+						::SetWindowTheme(hwnd, L" ", L" ");
+						CDateTimePickerCtrl dtp(hwnd);
+						dtp.SetMonthCalColor(MCSC_BACKGROUND, DarkMode::getBackgroundColor());
+						dtp.SetMonthCalColor(MCSC_MONTHBK, DarkMode::getBackgroundColor());
+						dtp.SetMonthCalColor(MCSC_TITLEBK, DarkMode::getBackgroundColor());
+						dtp.SetMonthCalColor(MCSC_TEXT, DarkMode::getTextColor());
+						dtp.SetMonthCalColor(MCSC_TITLETEXT, DarkMode::getTextColor());
+					}
+					else if (name == MONTHCAL_CLASS) {
+						::SetWindowTheme(hwnd, L" ", L" ");
+						CMonthCalendarCtrl ctl(hwnd);
+						ctl.SetColor(MCSC_BACKGROUND, DarkMode::getBackgroundColor());
+						ctl.SetColor(MCSC_MONTHBK, DarkMode::getBackgroundColor());
+						ctl.SetColor(MCSC_TITLEBK, DarkMode::getBackgroundColor());
+						ctl.SetColor(MCSC_TEXT, DarkMode::getTextColor());
+						ctl.SetColor(MCSC_TITLETEXT, DarkMode::getTextColor());
+					}
 				}
 			}
 			else {
@@ -40,6 +61,52 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 	return ::CallNextHookEx(nullptr, code, wp, lp);
 }
 
+static decltype(::GetSysColor)* OrgGetSysColor = ::GetSysColor;
+static decltype(::GetSysColorBrush)* OrgGetSysColorBrush = ::GetSysColorBrush;
+static bool g_ThemeChanged;
+
+HBRUSH WINAPI HookedGetSysColorBrush2(int index) {
+	switch (index) {
+		case COLOR_WINDOW:
+			return DarkMode::getBackgroundBrush();
+		case COLOR_3DFACE:
+			return DarkMode::getCtrlBackgroundBrush();
+		case COLOR_WINDOWTEXT:
+			static auto textBrush = ::CreateSolidBrush(DarkMode::getTextColor());
+			if (g_ThemeChanged) {
+				g_ThemeChanged = false;
+				::DeleteObject(textBrush);
+				textBrush = ::CreateSolidBrush(DarkMode::getTextColor());
+			}
+			return textBrush;
+	}
+	return OrgGetSysColorBrush(index);
+}
+
+COLORREF WINAPI HookedGetSysColor2(int index) {
+	switch (index) {
+		case COLOR_WINDOW:
+			return DarkMode::getBackgroundColor();
+		case COLOR_3DFACE:
+			return DarkMode::getCtrlBackgroundColor();
+		case COLOR_WINDOWTEXT:
+			return DarkMode::getTextColor();
+	}
+	return OrgGetSysColor(index);
+}
+
+bool InitHooks() {
+	if (NOERROR != DetourTransactionBegin())
+		return false;
+
+	DetourUpdateThread(::GetCurrentThread());
+	DetourAttach((PVOID*)&OrgGetSysColor, HookedGetSysColor2);
+	DetourAttach((PVOID*)&OrgGetSysColorBrush, HookedGetSysColorBrush2);
+	auto error = DetourTransactionCommit();
+	ATLASSERT(error == NOERROR);
+	return error == NOERROR;
+}
+
 bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	g_DarkModeType = type;
@@ -48,7 +115,7 @@ bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	DarkMode::setDefaultColors(true);
 	DarkMode::setColorizeTitleBarConfig(false);
 
-	return true;
+	return InitHooks();
 }
 
 bool WTLHelper::InitDarkMode() {
@@ -78,6 +145,8 @@ bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
 	DarkMode::setDefaultColors(true);
 	DarkMode::setDarkTitleBarEx(hWnd, true);
 	DarkMode::setChildCtrlsTheme(hWnd);
+	g_ThemeChanged = true;
+
 	::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
 
 	return true;
