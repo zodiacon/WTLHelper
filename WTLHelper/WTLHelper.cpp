@@ -163,6 +163,7 @@ bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
 		DarkMode::setChildCtrlsTheme(hWnd);
 		g_ThemeChanged = true;
 
+		CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(type));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
 	}
 	return true;

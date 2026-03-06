@@ -10,6 +10,7 @@ struct MenuItemData {
 };
 
 struct WTLHelper final {
+	inline static UINT ThemeChangedMessage = ::RegisterWindowMessage(L"ThemeChanged");
 	static bool InitDarkMode();
 	static bool InitDarkMode(DarkMode::DarkModeType type);
 	static DarkMode::DarkModeType DarkModeType() noexcept;
