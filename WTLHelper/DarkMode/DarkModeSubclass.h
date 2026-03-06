@@ -163,6 +163,7 @@ namespace DarkMode
 	 */
 	enum class DarkModeType : unsigned char
 	{
+		unknown = 0xff,
 		light = 0,  ///< Light mode appearance.
 		dark = 1,   ///< Dark mode appearance.
 		system = 2,

@@ -8,9 +8,8 @@
 
 #include "DarkMode/DarkModeSubclass.h"
 #include "CustomHeader2.h"
-#include "CustomDateTimePicker.h"
 
-static DarkMode::DarkModeType g_DarkModeType;
+static DarkMode::DarkModeType g_DarkModeType { DarkMode::DarkModeType::unknown };
 static HHOOK g_hHook;
 static int g_SuspendCount;
 
@@ -49,25 +48,31 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 						ctl.SetColor(MCSC_TITLETEXT, DarkMode::getTextColor());
 					}
 				}
+				DarkMode::setDarkWndNotifySafe(hwnd);
+
 			}
 			else {
 				// top-level window
-				DarkMode::setDarkWndNotifySafe(hwnd);
 				DarkMode::setWindowEraseBgSubclass(hwnd);
 				DarkMode::setWindowMenuBarSubclass(hwnd);
+				DarkMode::setDarkWndNotifySafe(hwnd);
 			}
 		}
 	}
 	return ::CallNextHookEx(nullptr, code, wp, lp);
 }
 
-static decltype(::GetSysColor)* OrgGetSysColor = ::GetSysColor;
-static decltype(::GetSysColorBrush)* OrgGetSysColorBrush = ::GetSysColorBrush;
-static bool g_ThemeChanged;
+static decltype(::GetSysColor)* OrgGetSysColor;
+static decltype(::GetSysColorBrush)* OrgGetSysColorBrush;
+static bool g_ThemeChanged = true;
 
 HBRUSH WINAPI HookedGetSysColorBrush2(int index) {
+	if (g_DarkModeType != DarkMode::DarkModeType::dark)
+		return OrgGetSysColorBrush(index);
+
 	switch (index) {
 		case COLOR_WINDOW:
+		case COLOR_BACKGROUND:
 			return DarkMode::getBackgroundBrush();
 		case COLOR_3DFACE:
 			return DarkMode::getCtrlBackgroundBrush();
@@ -84,8 +89,12 @@ HBRUSH WINAPI HookedGetSysColorBrush2(int index) {
 }
 
 COLORREF WINAPI HookedGetSysColor2(int index) {
+	if (g_DarkModeType != DarkMode::DarkModeType::dark)
+		return OrgGetSysColor(index);
+
 	switch (index) {
 		case COLOR_WINDOW:
+		case COLOR_BACKGROUND:
 			return DarkMode::getBackgroundColor();
 		case COLOR_3DFACE:
 			return DarkMode::getCtrlBackgroundColor();
@@ -96,6 +105,11 @@ COLORREF WINAPI HookedGetSysColor2(int index) {
 }
 
 bool InitHooks() {
+	OrgGetSysColor = (decltype(OrgGetSysColor))::GetProcAddress(::GetModuleHandle(L"user32"), "GetSysColor");
+	ATLASSERT(OrgGetSysColor);
+	OrgGetSysColorBrush = (decltype(OrgGetSysColorBrush))::GetProcAddress(::GetModuleHandle(L"user32"), "GetSysColorBrush");
+	ATLASSERT(OrgGetSysColorBrush);
+
 	if (NOERROR != DetourTransactionBegin())
 		return false;
 
@@ -110,12 +124,13 @@ bool InitHooks() {
 bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	g_DarkModeType = type;
+
 	DarkMode::initDarkMode();
 	DarkMode::setDarkModeConfigEx(static_cast<UINT>(type));
 	DarkMode::setDefaultColors(true);
 	DarkMode::setColorizeTitleBarConfig(false);
 
-	return InitHooks();
+	return true;// InitHooks();
 }
 
 bool WTLHelper::InitDarkMode() {
@@ -143,13 +158,18 @@ bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
 
 	DarkMode::setDarkModeConfigEx(static_cast<UINT>(g_DarkModeType = type));
 	DarkMode::setDefaultColors(true);
-	DarkMode::setDarkTitleBarEx(hWnd, true);
-	DarkMode::setChildCtrlsTheme(hWnd);
-	g_ThemeChanged = true;
+	if (hWnd) {
+		DarkMode::setDarkTitleBarEx(hWnd, true);
+		DarkMode::setChildCtrlsTheme(hWnd);
+		g_ThemeChanged = true;
 
-	::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
-
+		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
+	}
 	return true;
+}
+
+bool WTLHelper::SwitchToMode(HWND hWnd) {
+	return SwitchToMode(DarkMode::DarkModeType::system, hWnd);
 }
 
 bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count) {
