@@ -11,7 +11,7 @@
 #include "CustomDateTimePicker.h"
 #include "CustomMonthCalendar.h"
 
-static DarkMode::DarkModeType g_DarkModeType { DarkMode::DarkModeType::unknown };
+static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
 static HHOOK g_hHook;
 static int g_SuspendCount;
 
@@ -64,7 +64,7 @@ static decltype(::GetSysColorBrush)* OrgGetSysColorBrush;
 static bool g_ThemeChanged = true;
 
 HBRUSH WINAPI HookedGetSysColorBrush2(int index) {
-	if (g_DarkModeType != DarkMode::DarkModeType::dark)
+	if (g_DarkModeType != DarkModeKind::Dark)
 		return OrgGetSysColorBrush(index);
 
 	switch (index) {
@@ -86,7 +86,7 @@ HBRUSH WINAPI HookedGetSysColorBrush2(int index) {
 }
 
 COLORREF WINAPI HookedGetSysColor2(int index) {
-	if (g_DarkModeType != DarkMode::DarkModeType::dark)
+	if (g_DarkModeType != DarkModeKind::Dark)
 		return OrgGetSysColor(index);
 
 	switch (index) {
@@ -118,7 +118,7 @@ bool InitHooks() {
 	return error == NOERROR;
 }
 
-bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
+bool WTLHelper::InitDarkMode(DarkModeKind type) {
 	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
 	g_DarkModeType = type;
 
@@ -131,24 +131,24 @@ bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 }
 
 bool WTLHelper::InitDarkMode() {
-	return InitDarkMode(IsSystemInDarkMode() ? DarkMode::DarkModeType::dark : DarkMode::DarkModeType::classic);
+	return InitDarkMode(IsSystemInDarkMode() ? DarkModeKind::Dark : DarkModeKind::Classic);
 }
 
-DarkMode::DarkModeType WTLHelper::DarkModeType() noexcept {
+DarkModeKind WTLHelper::DarkModeType() noexcept {
 	return g_DarkModeType;
 }
 
 bool WTLHelper::IsDarkMode() noexcept {
-	return g_DarkModeType == DarkMode::DarkModeType::dark;
+	return g_DarkModeType == DarkModeKind::Dark;
 }
 
 bool WTLHelper::IsClassicMode() noexcept {
-	return g_DarkModeType == DarkMode::DarkModeType::classic;
+	return g_DarkModeType == DarkModeKind::Classic;
 }
 
-bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
-	if (type == DarkMode::DarkModeType::system)
-		type = IsSystemInDarkMode() ? DarkMode::DarkModeType::dark : DarkMode::DarkModeType::light;
+bool WTLHelper::SwitchToMode(DarkModeKind type, HWND hWnd) {
+	if (type == DarkModeKind::System)
+		type = IsSystemInDarkMode() ? DarkModeKind::Dark : DarkModeKind::Light;
 
 	if (g_DarkModeType == type)
 		return false;
@@ -167,7 +167,7 @@ bool WTLHelper::SwitchToMode(DarkMode::DarkModeType type, HWND hWnd) {
 }
 
 bool WTLHelper::SwitchToMode(HWND hWnd) {
-	return SwitchToMode(DarkMode::DarkModeType::system, hWnd);
+	return SwitchToMode(DarkModeKind::System, hWnd);
 }
 
 bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count) {
@@ -184,7 +184,7 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count)
 		CBitmap bmp;
 		bmp.CreateCompatibleBitmap(dc, 16, 16);
 		mdc.SelectBitmap(bmp);
-		mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
+		mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
 		mdc.DrawIconEx(0, 0, hIcon, 16, 16);
 		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
 		bmp.Detach();
@@ -202,7 +202,7 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const& cmd) {
 	CRect rc(0, 0, 16, 16);
 	bmp.CreateCompatibleBitmap(dc, 16, 16);
 	mdc.SelectBitmap(bmp);
-	mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkMode::DarkModeType::classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
+	mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
 	mdc.DrawIconEx(0, 0, hIcon, 16, 16);
 	menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
 	bmp.Detach();
