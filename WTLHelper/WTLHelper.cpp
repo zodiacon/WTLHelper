@@ -8,6 +8,8 @@
 
 #include "DarkMode/DarkModeSubclass.h"
 #include "CustomHeader2.h"
+#include "CustomDateTimePicker.h"
+#include "CustomMonthCalendar.h"
 
 static DarkMode::DarkModeType g_DarkModeType { DarkMode::DarkModeType::unknown };
 static HHOOK g_hHook;
@@ -22,31 +24,26 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 		else if (msg->message == WM_CREATE) {
 			auto hwnd = msg->hwnd;
 			auto lpcs = (LPCREATESTRUCT)msg->lParam;
+			CString name;
+			::GetClassName(hwnd, name.GetBufferSetLength(32), 32);
+
+			if (name.CompareNoCase(DATETIMEPICK_CLASS) == 0) {
+				auto win = new CCustomDateTimePicker;
+				win->SubclassWindow(hwnd);
+				win->Init();
+				return ::CallNextHookEx(nullptr, code, wp, lp);
+			}
+			if (name.CompareNoCase(MONTHCAL_CLASS) == 0) {
+				auto win = new CCustomMonthCalendar;
+				win->SubclassWindow(hwnd);
+				win->Init();
+				return ::CallNextHookEx(nullptr, code, wp, lp);
+			}
+
 			if (lpcs->style & WS_CHILD) {
-				CString name;
-				if (::GetClassName(hwnd, name.GetBufferSetLength(32), 32)) {
-					if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
-						auto win = new CCustomHeader2;
-						win->SubclassWindow(hwnd);
-					}
-					else if (name == DATETIMEPICK_CLASS) {
-						::SetWindowTheme(hwnd, L" ", L" ");
-						CDateTimePickerCtrl dtp(hwnd);
-						dtp.SetMonthCalColor(MCSC_BACKGROUND, DarkMode::getBackgroundColor());
-						dtp.SetMonthCalColor(MCSC_MONTHBK, DarkMode::getBackgroundColor());
-						dtp.SetMonthCalColor(MCSC_TITLEBK, DarkMode::getBackgroundColor());
-						dtp.SetMonthCalColor(MCSC_TEXT, DarkMode::getTextColor());
-						dtp.SetMonthCalColor(MCSC_TITLETEXT, DarkMode::getTextColor());
-					}
-					else if (name == MONTHCAL_CLASS) {
-						::SetWindowTheme(hwnd, L" ", L" ");
-						CMonthCalendarCtrl ctl(hwnd);
-						ctl.SetColor(MCSC_BACKGROUND, DarkMode::getBackgroundColor());
-						ctl.SetColor(MCSC_MONTHBK, DarkMode::getBackgroundColor());
-						ctl.SetColor(MCSC_TITLEBK, DarkMode::getBackgroundColor());
-						ctl.SetColor(MCSC_TEXT, DarkMode::getTextColor());
-						ctl.SetColor(MCSC_TITLETEXT, DarkMode::getTextColor());
-					}
+				if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
+					auto win = new CCustomHeader2;
+					win->SubclassWindow(hwnd);
 				}
 				DarkMode::setDarkWndNotifySafe(hwnd);
 
@@ -130,7 +127,7 @@ bool WTLHelper::InitDarkMode(DarkMode::DarkModeType type) {
 	DarkMode::setDefaultColors(true);
 	DarkMode::setColorizeTitleBarConfig(false);
 
-	return true;// InitHooks();
+	return InitHooks();
 }
 
 bool WTLHelper::InitDarkMode() {

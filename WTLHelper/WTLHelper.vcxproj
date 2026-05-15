@@ -389,6 +389,7 @@
     <ClInclude Include="CustomHeader.h" />
     <ClInclude Include="CustomHeader2.h" />
     <ClInclude Include="CustomListView.h" />
+    <ClInclude Include="CustomMonthCalendar.h" />
     <ClInclude Include="CustomRebar.h" />
     <ClInclude Include="CustomSplitterWindow.h" />
     <ClInclude Include="CustomStatusBar.h" />

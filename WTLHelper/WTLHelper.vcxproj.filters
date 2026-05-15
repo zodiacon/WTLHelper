@@ -237,6 +237,9 @@
     <ClInclude Include="CustomDateTimePicker.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="CustomMonthCalendar.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">
