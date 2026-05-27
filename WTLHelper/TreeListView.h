@@ -288,11 +288,6 @@ public:
 		auto p = static_cast<T*>(this);
 		ATLASSERT(::IsWindow(p->m_hWnd));
 
-		// This is a Platform SDK define which we need
-#ifndef TVS_NOHSCROLL
-		const UINT TVS_NOHSCROLL = 0x8000;
-#endif
-
 		// Create the tree control
 		// Thanks to Nicola Tufarelli for suggesting using the GetDlgCtrlID() to
 		// preserve the original control ID...
@@ -300,12 +295,12 @@ public:
 		UINT nID = p->GetDlgCtrlID();
 		m_ctrlTree.Create(this, 1, p->m_hWnd, &p->rcDefault, nullptr, dwStyle, 0, nID);
 		ATLASSERT(m_ctrlTree.IsWindow());
+		m_ctrlTree.SetBkColor(::GetSysColor(COLOR_WINDOW));
 		m_ctrlTree.ModifyStyle(0, TVS_NOHSCROLL | TVS_FULLROWSELECT);  // we need these
 
 		// Create the header control
 		m_ctrlHeader.Create(this, 2, p->m_hWnd, &p->rcDefault, nullptr, m_dwHeaderStyle);
 		ATLASSERT(m_ctrlHeader.IsWindow());
-		::SetWindowTheme(m_ctrlHeader, nullptr, nullptr);
 
 		p->SendMessage(WM_SETTINGCHANGE);
 
@@ -390,6 +385,7 @@ public:
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_HSCROLL, OnHScroll)
+		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		NOTIFY_CODE_HANDLER(TVN_DELETEITEMA, OnTreeItemDelete)
 		NOTIFY_CODE_HANDLER(TVN_DELETEITEMW, OnTreeItemDelete)
@@ -414,6 +410,11 @@ public:
 		MESSAGE_HANDLER(HDM_DELETEITEM, OnHeaderItemDelete)
 	END_MSG_MAP()
 
+	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
+		m_ctrlTree.SetBkColor(::GetSysColor(COLOR_WINDOW));
+		return 0;
+	}
+
 	LRESULT OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		// Do not allow the TreeView control to initialize here! 
 		// We are creating new child controls ourselves in the _Init() method.
@@ -421,7 +422,8 @@ public:
 		return 0;
 	}
 	LRESULT OnSettingChange(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
-		if (!m_fontHeader.IsNull()) m_fontHeader.DeleteObject();
+		if (!m_fontHeader.IsNull()) 
+			m_fontHeader.DeleteObject();
 		NONCLIENTMETRICS ncm = { 0 };
 		ncm.cbSize = sizeof(ncm);
 		::SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
@@ -747,7 +749,8 @@ public:
 		return CDRF_NOTIFYITEMDRAW;   // We need per-item notifications
 	}
 	DWORD OnItemPrePaint(int /*idCtrl*/, LPNMCUSTOMDRAW lpNMCustomDraw) {
-		if (lpNMCustomDraw->hdr.hwndFrom != m_ctrlTree) return CDRF_DODEFAULT;
+		if (lpNMCustomDraw->hdr.hwndFrom != m_ctrlTree) 
+			return CDRF_DODEFAULT;
 
 		// Reset the focus because it will be drawn by us
 		m_iItemState = lpNMCustomDraw->uItemState;
@@ -853,7 +856,6 @@ public:
 			dc.FillSolidRect(&rcHigh, lptvcd->clrTextBk);
 		}
 
-		// Always write text with background
 		dc.SetBkMode(OPAQUE);
 
 		// Draw all columns of the item
@@ -885,8 +887,8 @@ public:
 			if (pItem->mask & TLVIF_TEXT) {
 				rc.left += 2;
 
-				COLORREF clrText = lptvcd->clrText;
-				COLORREF clrBack = lptvcd->clrTextBk;
+				COLORREF clrText = lptvcd->clrText == CLR_INVALID ? ::GetSysColor(COLOR_WINDOWTEXT) : lptvcd->clrText;
+				COLORREF clrBack = lptvcd->clrTextBk == CLR_INVALID ? ::GetSysColor(COLOR_WINDOW) : lptvcd->clrTextBk;
 
 				if (pItem->mask & TLVIF_COLOR) {
 					if (bSelected) {
@@ -898,14 +900,14 @@ public:
 							dc.SetTextColor(pItem->clrText);
 						}
 						if (pItem->clrBack != CLR_NONE) {
-							dc.SetBkColor(pItem->clrBack);
+							dc.SetBkColor(clrBack);
 							if (i != 0) {
 								// For first item we already set background color
 								dc.FillSolidRect(&rc, pItem->clrBack);
 							}
 						}
 						else {
-							COLORREF clrBack = m_ctrlTree.GetBkColor();
+							COLORREF clrBack = CLR_NONE;// m_ctrlTree.GetBkColor();
 							if (clrBack == CLR_NONE) clrBack = ::GetSysColor(COLOR_WINDOW);
 							if (((*pVal)[0]->mask & TLVIF_COLOR) && ((*pVal)[0]->clrBack != CLR_NONE))clrBack = (*pVal)[0]->clrBack;
 							dc.SetBkColor(clrBack);
@@ -913,8 +915,9 @@ public:
 					}
 				}
 				else {
-					COLORREF clrBack = m_ctrlTree.GetBkColor();
-					if (clrBack == CLR_NONE) clrBack = ::GetSysColor(COLOR_WINDOW);
+					COLORREF clrBack = CLR_NONE;// m_ctrlTree.GetBkColor();
+					if (clrBack == CLR_NONE) 
+						clrBack = ::GetSysColor(COLOR_WINDOW);
 					dc.SetBkColor(bSelected ? m_clrSelection : clrBack);
 					dc.SetTextColor(clrText);
 				}

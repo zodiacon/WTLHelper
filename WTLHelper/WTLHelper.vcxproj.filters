@@ -248,9 +248,6 @@
     <Filter Include="CompoundFiles">
       <UniqueIdentifier>{710a3743-66ec-4746-b502-aacc34dfc091}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Resources">
-      <UniqueIdentifier>{231c6c75-96a7-4165-a773-29ca474d7abf}</UniqueIdentifier>
-    </Filter>
     <Filter Include="DarkMode">
       <UniqueIdentifier>{56aeb4d9-6a77-44e4-aabd-92b22837e51c}</UniqueIdentifier>
     </Filter>
