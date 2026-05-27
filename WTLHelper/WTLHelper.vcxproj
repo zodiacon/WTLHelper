@@ -427,7 +427,6 @@
     <ClInclude Include="TabViewHelper.h" />
     <ClInclude Include="TreeListView.h" />
     <ClInclude Include="WTLHelper.h" />
-    <ClInclude Include="WTLHelperRes.h" />
     <ClInclude Include="Settings.h" />
     <ClInclude Include="SortedFilteredVector.h" />
     <ClInclude Include="StandardColors.h" />
@@ -479,15 +478,6 @@
     <ClCompile Include="ToolbarHelper.cpp" />
     <ClCompile Include="VersionResourceHelper.cpp" />
     <ClCompile Include="WTLHelper.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ResourceCompile Include="WTLHelper.rc" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="res\Collapsed.ico" />
-    <Image Include="res\Collapsed2.ico" />
-    <Image Include="res\Expanded.ico" />
-    <Image Include="res\Expanded2.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

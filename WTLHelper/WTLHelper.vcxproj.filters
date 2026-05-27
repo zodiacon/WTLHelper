@@ -167,9 +167,6 @@
     <ClInclude Include="StandardColors.h">
       <Filter>Helpers</Filter>
     </ClInclude>
-    <ClInclude Include="WTLHelperRes.h">
-      <Filter>Resources</Filter>
-    </ClInclude>
     <ClInclude Include="CustomComboBox.h">
       <Filter>Controls</Filter>
     </ClInclude>
@@ -257,24 +254,5 @@
     <Filter Include="DarkMode">
       <UniqueIdentifier>{56aeb4d9-6a77-44e4-aabd-92b22837e51c}</UniqueIdentifier>
     </Filter>
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="res\Collapsed.ico">
-      <Filter>Resources</Filter>
-    </Image>
-    <Image Include="res\Collapsed2.ico">
-      <Filter>Resources</Filter>
-    </Image>
-    <Image Include="res\Expanded.ico">
-      <Filter>Resources</Filter>
-    </Image>
-    <Image Include="res\Expanded2.ico">
-      <Filter>Resources</Filter>
-    </Image>
-  </ItemGroup>
-  <ItemGroup>
-    <ResourceCompile Include="WTLHelper.rc">
-      <Filter>Resources</Filter>
-    </ResourceCompile>
   </ItemGroup>
 </Project>
