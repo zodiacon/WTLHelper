@@ -119,6 +119,7 @@ private:
 	void DrawAscii(CDCHandle dc, int64_t offset, int chars);
 	CString FormatNumber(ULONGLONG number, int size = 0) const;
 
+	int GetAsciiStartChar() const;
 	void UpdateCaret();
 	void RedrawWindow(RECT* = nullptr);
 	void ClearSelection();
@@ -140,7 +141,7 @@ private:
 	int m_CharWidth, m_CharHeight;
 	std::vector<std::wstring> m_Text;
 	int64_t m_StartOffset{ 0 }, m_BiasOffset{ 0 };
-	uint32_t m_DataSize{ 1 }, m_BytesPerLine{ 32 };
+	int m_DataSize{ 1 }, m_BytesPerLine{ 32 };
 	int64_t m_CaretOffset{ 0 };
 	int m_AddressDigits{ 8 };
 	int m_EditDigits{ 0 }, m_LastDigits{ 0 };
@@ -152,5 +153,8 @@ private:
 	bool m_ReadOnly : 1 { false };
 	bool m_Dirty : 1 { false };
 	bool m_AllowGrow : 1 { false };
+	mutable bool m_InAsciiArea : 1 { false };
+	bool m_DragInAscii : 1 { false };
+	int64_t m_DragAnchor{ -1 };
 };
 

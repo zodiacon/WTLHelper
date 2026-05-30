@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "HexControl.h"
+#include <algorithm>
 
 void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 	dc.FillSolidRect(&rect, m_Colors.Background);
@@ -43,7 +44,7 @@ void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 			break;
 
 		lines++;
-		int jcount = std::min(m_BytesPerLine, count);
+		int jcount = std::min<int>(m_BytesPerLine, count);
 		auto step = m_DataSize;
 		int x2 = 0;
 		for (int j = 0; j < jcount; j += step) {
@@ -80,20 +81,20 @@ void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 	if (GetSize() % m_BytesPerLine == 0)
 		lines++;
 
-	POLYTEXT poly[128]{};
+	std::vector<POLYTEXT> poly(lines);
 	for (int y = 0; y < lines; y++) {
 		std::wstring text;
 		::StringCchPrintf(str, _countof(str), addrFormat.c_str(), m_BiasOffset + m_StartOffset + y * m_BytesPerLine);
 		text = str;
 
 		auto& p = poly[y];
-		p.lpstr = text.c_str();
 		p.x = x + xstart;
 		p.y = y * m_CharHeight;
 		p.n = (UINT)text.size();
 		m_Text.push_back(std::move(text));
+		p.lpstr = m_Text.back().c_str();
 	}
-	::PolyTextOut(dc, poly, (int)m_Text.size());
+	::PolyTextOut(dc, poly.data(), (int)m_Text.size());
 
 
 	//
@@ -162,6 +163,8 @@ LRESULT CHexControl::OnLeftButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto offset = GetOffsetFromPoint(CPoint(x, y));
 	if (offset >= 0) {
 		m_CaretOffset = offset;
+		m_DragInAscii = m_InAsciiArea;
+		m_DragAnchor = offset;
 		SetCapture();
 		UpdateCaret();
 	}
@@ -258,7 +261,7 @@ LRESULT CHexControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		case VK_RIGHT:
 			m_CaretOffset += m_DataSize;
 			if (m_CaretOffset >= GetSize())
-				m_CaretOffset = GetSize() + m_DataSize - 1;
+				m_CaretOffset = GetSize() - m_DataSize;
 			if (m_CaretOffset >= m_StartOffset + m_Lines * m_BytesPerLine) {
 				m_StartOffset += m_BytesPerLine;
 				redraw = true;
@@ -507,7 +510,7 @@ void CHexControl::RecalcLayout() {
 	m_StartOffset = si.nPos * m_BytesPerLine;
 	if (m_StartOffset + m_Lines * m_BytesPerLine >= GetSize()) {
 		m_StartOffset = GetSize() - m_Lines * m_BytesPerLine;
-		m_StartOffset += m_StartOffset % m_BytesPerLine;
+		m_StartOffset -= m_StartOffset % m_BytesPerLine;
 		ATLASSERT(m_StartOffset % m_BytesPerLine == 0);
 		if (m_StartOffset < 0)
 			m_StartOffset = 0;
@@ -566,13 +569,13 @@ int64_t CHexControl::GetSize() const {
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t*& p) {
 	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return std::min(size, m_Size - offset);
+	return std::min(size, GetSize() - offset);
 }
 
 int64_t CHexControl::GetData(int64_t offset, int64_t size, uint8_t const*& p) const {
 	p = (m_pBuffer ? m_pBuffer : m_Data.data()) + offset;
 
-	return std::min(size, (int64_t)m_Size - offset);
+	return std::min(size, GetSize() - offset);
 }
 
 
@@ -610,7 +613,7 @@ void CHexControl::SetSize(int64_t size) {
 }
 
 bool CHexControl::SetDataSize(int32_t size) {
-	if (size == 0 || (m_DataSize & (m_DataSize - 1)) != 0 || size > 8)
+	if (size == 0 || (size & (size - 1)) != 0 || size > 8)
 		return false;
 
 	m_DataSize = size;
@@ -676,6 +679,7 @@ bool CHexControl::Paste(int64_t offset) {
 					text = next;
 					data.push_back(value);
 				}
+				::GlobalUnlock(hGlobal);
 				offset = offset < 0 ? 0 : offset;
 				if (m_InsertMode)
 					InsertData(offset, data);
@@ -792,7 +796,7 @@ bool CHexControl::InsertData(int64_t offset, std::span<uint8_t> data, bool updat
 		return false;
 
 	m_Data.resize(m_Data.size() + data.size());
-	memmove(m_Data.data() + offset + data.size(), m_Data.data() + offset, m_Data.size() - offset + data.size());
+	memmove(m_Data.data() + offset + data.size(), m_Data.data() + offset, m_Data.size() - offset - data.size());
 	memcpy(m_Data.data() + offset, data.data(), data.size());
 	if (update)
 		Refresh();
@@ -800,7 +804,7 @@ bool CHexControl::InsertData(int64_t offset, std::span<uint8_t> data, bool updat
 }
 
 void CHexControl::CancelEdit() {
-	SetData(m_CaretOffset, std::span { (uint8_t*)&m_OldValue, m_DataSize }, false);
+	SetData(m_CaretOffset, std::span { (uint8_t*)&m_OldValue, (uint32_t)m_DataSize }, false);
 	if (m_InsertMode) {
 		memmove(m_Data.data() + m_CaretOffset, m_Data.data() + m_CaretOffset + m_DataSize, m_Data.size() - m_CaretOffset);
 		m_Data.resize(m_Data.size() - m_DataSize);
@@ -822,7 +826,7 @@ bool CHexControl::CopyText(PCWSTR text) const {
 			auto p = ::GlobalLock(hData);
 			if (p) {
 				::memcpy(p, text, size);
-				::GlobalUnlock(p);
+				::GlobalUnlock(hData);
 				::SetClipboardData(CF_UNICODETEXT, hData);
 			}
 		}
@@ -831,4 +835,273 @@ bool CHexControl::CopyText(PCWSTR text) const {
 			return true;
 	}
 	return false;
+}
+
+int CHexControl::GetAsciiStartChar() const {
+	return m_AddressDigits + 2 + m_BytesPerLine / m_DataSize * (m_DataSize * 2 + 1);
+}
+
+int64_t CHexControl::GetOffsetFromPoint(const POINT& pt) const {
+	SCROLLINFO si;
+	si.cbSize = sizeof(si);
+	si.fMask = SIF_POS;
+	::GetScrollInfo(m_hWnd, SB_HORZ, &si);
+
+	int adjustedX = pt.x + si.nPos * m_CharWidth;
+	int line = pt.y / m_CharHeight;
+	int64_t lineOffset = m_StartOffset + (int64_t)line * m_BytesPerLine;
+
+	int hexStartChar = m_AddressDigits + 1;
+	int asciiStartChar = GetAsciiStartChar();
+	int charCol = adjustedX / m_CharWidth;
+
+	if (charCol >= asciiStartChar && charCol < asciiStartChar + m_BytesPerLine) {
+		int byteInLine = charCol - asciiStartChar;
+		m_InAsciiArea = true;
+		int64_t offset = lineOffset + byteInLine;
+		return (offset >= 0 && offset < GetSize()) ? offset : -1;
+	}
+	else if (charCol >= hexStartChar && charCol < asciiStartChar) {
+		int byteGroup = (charCol - hexStartChar) / (m_DataSize * 2 + 1);
+		if (byteGroup >= m_BytesPerLine / (int)m_DataSize)
+			return -1;
+		m_InAsciiArea = false;
+		int64_t offset = lineOffset + byteGroup * m_DataSize;
+		return (offset >= 0 && offset < GetSize()) ? offset : -1;
+	}
+
+	return -1;
+}
+
+CPoint CHexControl::GetPointFromOffset(int64_t offset) const {
+	if (offset < m_StartOffset)
+		return CPoint(-1000, -1000);
+
+	SCROLLINFO si;
+	si.cbSize = sizeof(si);
+	si.fMask = SIF_POS;
+	::GetScrollInfo(m_hWnd, SB_HORZ, &si);
+	int xscroll = -si.nPos * m_CharWidth;
+
+	int line = int((offset - m_StartOffset) / m_BytesPerLine);
+	int byteInLine = int((offset - m_StartOffset) % m_BytesPerLine);
+
+	CPoint pt;
+	pt.y = line * m_CharHeight;
+
+	if (m_InAsciiArea) {
+		pt.x = xscroll + (GetAsciiStartChar() + byteInLine) * m_CharWidth;
+	}
+	else {
+		pt.x = xscroll + (m_AddressDigits + 1 + byteInLine / m_DataSize * (m_DataSize * 2 + 1)) * m_CharWidth;
+	}
+
+	return pt;
+}
+
+void CHexControl::UpdateCaret() {
+	auto pt = GetPointFromOffset(m_CaretOffset);
+	HideCaret();
+	if (m_CaretOffset >= m_StartOffset && m_CaretOffset < m_StartOffset + (int64_t)m_Lines * m_BytesPerLine)
+		SetCaretPos(pt.x, pt.y);
+	else
+		SetCaretPos(-1000, -1000);
+	ShowCaret();
+}
+
+void CHexControl::ClearSelection() {
+	m_Selection.Clear();
+	SendSelectionChanged();
+}
+
+void CHexControl::CommitValue(int64_t offset, uint64_t value) {
+	SetData(offset, std::span{ reinterpret_cast<const uint8_t*>(&value), static_cast<size_t>(m_DataSize) }, false);
+	m_Modified.insert(offset);
+	m_Dirty = true;
+	ResetInput();
+	RedrawCaretLine();
+}
+
+void CHexControl::DrawNumber(CDCHandle dc, int64_t offset, uint64_t value, uint32_t editDigits) {
+	auto pos = GetPointFromOffset(offset);
+	if (pos.x < 0)
+		return;
+	CString temp = FormatNumber(value);
+	HideCaret();
+	bool selected = m_Selection.IsSelected(offset);
+	dc.SetBkColor(selected ? m_Colors.SelectionBackground : m_Colors.Background);
+	dc.SetTextColor(selected ? m_Colors.SelectionText : m_Colors.Text);
+	if (editDigits < (uint32_t)m_DataSize * 2)
+		dc.TextOutW(pos.x, pos.y, temp, m_DataSize * 2);
+	dc.SetTextColor(m_Colors.Modified);
+	dc.TextOutW(pos.x + m_CharWidth * (m_DataSize * 2 - (int)editDigits), pos.y, temp.Right(editDigits), editDigits);
+	ShowCaret();
+}
+
+void CHexControl::DrawAscii(CDCHandle dc, int64_t offset, int chars) {
+	uint8_t* data;
+	auto count = (int)GetData(offset, chars, data);
+	if (count <= 0)
+		return;
+
+	SCROLLINFO si;
+	si.cbSize = sizeof(si);
+	si.fMask = SIF_POS;
+	::GetScrollInfo(m_hWnd, SB_HORZ, &si);
+	int xscroll = -si.nPos * m_CharWidth;
+
+	int line = int((offset - m_StartOffset) / m_BytesPerLine);
+	int byteInLine = int((offset - m_StartOffset) % m_BytesPerLine);
+	int asciiStartChar = GetAsciiStartChar();
+
+	WCHAR text[2]{};
+	for (int j = 0; j < count; j++) {
+		text[0] = data[j] < 32 || data[j] > 127 ? L'.' : (wchar_t)data[j];
+		bool selected = m_Selection.IsSelected(offset + j);
+		dc.SetTextColor(selected ? m_Colors.SelectionText : m_Colors.Ascii);
+		dc.SetBkColor(selected ? m_Colors.SelectionBackground : m_Colors.Background);
+		dc.TextOut(xscroll + (asciiStartChar + byteInLine + j) * m_CharWidth, line * m_CharHeight, text, 1);
+	}
+}
+
+LRESULT CHexControl::OnChar(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	if (IsReadOnly() || m_InAsciiArea)
+		return 0;
+
+	bool digit = wParam >= '0' && wParam <= '9';
+	bool hexdigit = (wParam >= 'A' && wParam <= 'F') || (wParam >= 'a' && wParam <= 'f');
+	if (!digit && !hexdigit) {
+		::MessageBeep((UINT)-1);
+		return 0;
+	}
+
+	uint8_t nibble;
+	if (digit)
+		nibble = static_cast<uint8_t>(wParam) - '0';
+	else {
+		if (wParam > 0x60) wParam -= 0x20;
+		nibble = static_cast<uint8_t>(wParam) - 'A' + 10;
+	}
+
+	if (m_EditDigits == 0) {
+		uint8_t* p;
+		GetData(m_CaretOffset, m_DataSize, p);
+		m_OldValue = 0;
+		memcpy(&m_OldValue, p, m_DataSize);
+		if (m_InsertMode && !m_pBuffer) {
+			m_Data.resize(m_Data.size() + m_DataSize);
+			memmove(m_Data.data() + m_CaretOffset + m_DataSize, m_Data.data() + m_CaretOffset,
+				m_Data.size() - m_CaretOffset - m_DataSize);
+		}
+	}
+
+	m_CurrentInput = (m_CurrentInput << 4) | nibble;
+	m_EditDigits++;
+
+	if (m_EditDigits == (uint32_t)m_DataSize * 2) {
+		CommitValue(m_CaretOffset, m_CurrentInput);
+		m_CaretOffset += m_DataSize;
+		if (m_CaretOffset >= GetSize())
+			m_CaretOffset = GetSize() - m_DataSize;
+		Refresh();
+	}
+	else {
+		CClientDC dc(m_hWnd);
+		dc.SelectFont(m_Font);
+		dc.SetBkMode(OPAQUE);
+		DrawNumber(dc.m_hDC, m_CaretOffset, m_CurrentInput, m_EditDigits);
+	}
+	return 0;
+}
+
+LRESULT CHexControl::OnMouseMove(UINT, WPARAM wp, LPARAM lParam, BOOL&) {
+	if (GetCapture() != m_hWnd || m_DragAnchor < 0)
+		return 0;
+
+	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+
+	int64_t offset;
+	if (m_DragInAscii) {
+		if (m_Lines <= 0)
+			return 0;
+		SCROLLINFO si;
+		si.cbSize = sizeof(si);
+		si.fMask = SIF_POS;
+		::GetScrollInfo(m_hWnd, SB_HORZ, &si);
+		int line = std::clamp<int>(pt.y / m_CharHeight, 0, m_Lines - 1);
+		int col  = std::clamp<int>(pt.x / m_CharWidth + si.nPos - GetAsciiStartChar(), 0, m_BytesPerLine - 1);
+		offset   = std::min(m_StartOffset + (int64_t)line * m_BytesPerLine + col, GetSize() - 1);
+		m_InAsciiArea = true;
+	}
+	else {
+		offset = GetOffsetFromPoint(pt);
+		if (offset < 0)
+			return 0;
+		m_InAsciiArea = false;
+	}
+
+	auto maxoffset = std::max(offset, m_DragAnchor);
+	auto minoffset = std::min(offset, m_DragAnchor);
+
+	if (wp & MK_CONTROL) {
+		int width = int(maxoffset % m_BytesPerLine - minoffset % m_BytesPerLine);
+		int height = int((maxoffset - minoffset) / m_BytesPerLine);
+		if (offset < m_DragAnchor && width < 0) {
+			height++;
+			width++;
+		}
+		if (width < 0) {
+			minoffset += width;
+			width = -width;
+		}
+		m_Selection.SetBox(minoffset, m_BytesPerLine, width, height);
+	}
+	else {
+		m_Selection.SetSimple(minoffset, std::abs(offset - m_DragAnchor));
+	}
+	SendSelectionChanged();
+	RedrawWindow();
+	return 0;
+}
+
+LRESULT CHexControl::OnLeftButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+	ReleaseCapture();
+	m_DragInAscii = false;
+	m_DragAnchor = -1;
+	return 0;
+}
+
+LRESULT CHexControl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	if (delta == 0)
+		return 0;
+
+	auto keys = GET_KEYSTATE_WPARAM(wParam);
+	if (keys == MK_CONTROL) {
+		auto oldSize = m_FontPointSize;
+		m_FontPointSize = static_cast<int>(m_FontPointSize * (delta > 0 ? 1.1 : (1.0 / 1.1)));
+		if (m_FontPointSize < 70) m_FontPointSize = 70;
+		else if (m_FontPointSize > 300) m_FontPointSize = 300;
+		if (m_FontPointSize != oldSize) {
+			InitFontMetrics();
+			RecalcLayout();
+			RedrawWindow();
+		}
+	}
+	else {
+		int scroll = WHEEL_DELTA / 3;
+		if (delta > 0) {
+			m_StartOffset -= m_BytesPerLine * abs(delta) / scroll;
+			if (m_StartOffset < 0)
+				m_StartOffset = 0;
+		}
+		else {
+			m_StartOffset += m_BytesPerLine * abs(delta) / scroll;
+			auto limit = GetSize() - (int64_t)m_Lines * m_BytesPerLine;
+			if (m_StartOffset > limit)
+				m_StartOffset = std::max(limit, (int64_t)0);
+		}
+		RedrawWindow();
+	}
+	return 0;
 }

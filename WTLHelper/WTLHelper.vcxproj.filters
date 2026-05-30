@@ -237,6 +237,66 @@
     <ClInclude Include="CustomMonthCalendar.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="..\WTL\atlapp.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlcrack.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlctrls.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlctrlw.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlctrlx.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlddx.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atldlgs.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atldwm.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlfind.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlframe.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlgdi.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlmisc.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlprint.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlres.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlribbon.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlscrl.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlsplit.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atltheme.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atluser.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\WTL\atlwinx.h">
+      <Filter>WTL</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Helpers">
@@ -250,6 +310,9 @@
     </Filter>
     <Filter Include="DarkMode">
       <UniqueIdentifier>{56aeb4d9-6a77-44e4-aabd-92b22837e51c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="WTL">
+      <UniqueIdentifier>{06acfe70-9638-421e-8fd0-0c9c4fedde6d}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>
