@@ -1,8 +1,5 @@
 #pragma once
 
-#include "ThemeHelper.h"
-#include "Theme.h"
-
 const UINT EN_DELAYCHANGE = EN_CHANGE + 1;
 
 class CQuickFindEdit : public CWindowImpl<CQuickFindEdit, CEdit> {
@@ -14,7 +11,6 @@ public:
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_CHAR, OnChar)
-		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnDialogColor)
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnDialogColor)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
@@ -55,14 +51,6 @@ public:
 		if (wParam == 1)
 			SetFocus();
 		return 0;
-	}
-
-	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& /*bHandled*/) {
-		CDCHandle dc((HDC)wParam);
-		CRect rc;
-		GetClientRect(&rc);
-		dc.FillSolidRect(&rc, ThemeHelper::GetCurrentTheme()->BackColor);
-		return 1;
 	}
 
 	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
