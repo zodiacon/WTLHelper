@@ -1509,7 +1509,7 @@ static void ncPaintCustomBorder(HWND hWnd, const dmlib_subclass::BorderMetricsDa
 		rcClient.bottom += borderMetricsData.m_yScroll;
 	}
 
-	HPEN hPen = ::CreatePen(PS_SOLID, 1, (::IsWindowEnabled(hWnd) == TRUE) ? DarkMode::getBackgroundColor() : DarkMode::getDlgBackgroundColor());
+	HPEN hPen = ::CreatePen(PS_SOLID, 1, ::IsWindowEnabled(hWnd) ? DarkMode::getBackgroundColor() : DarkMode::getDlgBackgroundColor());
 	RECT rcInner{ rcClient };
 	::InflateRect(&rcInner, -1, -1);
 	dmlib_paint::paintFrameRect(hdc, rcInner, hPen);

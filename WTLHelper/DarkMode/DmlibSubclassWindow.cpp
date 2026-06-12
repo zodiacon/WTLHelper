@@ -105,7 +105,11 @@ static LRESULT onCtlColorStaticHelper(LPARAM lParam, WPARAM wParam)
 
 	if (className == WC_EDIT)
 	{
-		return isChildEnabled ? DarkMode::onCtlColor(hdc) : DarkMode::onCtlColorDlg(hdc);
+		// A read-only edit sends WM_CTLCOLORSTATIC (not WM_CTLCOLOREDIT). Paint it with the
+		// control background like an editable edit so the field stays visible, instead of the
+		// window/dialog background which makes it blend into the dialog. Disabled edits keep
+		// the dialog background.
+		return isChildEnabled ? DarkMode::onCtlColorCtrl(hdc) : DarkMode::onCtlColorDlg(hdc);
 	}
 
 	if (className == WC_LINK)
