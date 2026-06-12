@@ -191,6 +191,7 @@ bool CHexControl::HasSelection() const {
 }
 
 LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
 	UpdateCaret();
 	ShowCaret();
 
@@ -199,6 +200,7 @@ LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CHexControl::OnKillFocus(UINT, WPARAM, LPARAM, BOOL&) {
 	HideCaret();
+	DestroyCaret();
 
 	return 0;
 }
@@ -206,6 +208,12 @@ LRESULT CHexControl::OnKillFocus(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CHexControl::OnLeftButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	SetFocus();
 	SetCapture();
+
+	// finalize any in-progress edit at the current caret before moving it,
+	// mirroring keyboard navigation (otherwise the typed-but-uncommitted value
+	// gets painted at the new caret location)
+	if (m_EditDigits > 0)
+		CommitValue(m_CaretOffset, m_CurrentInput);	// also calls ResetInput()
 
 	bool shift = (wParam & MK_SHIFT) != 0;
 	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };

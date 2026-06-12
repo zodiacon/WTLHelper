@@ -20,9 +20,6 @@
     <ClCompile Include="IconHelper.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
-    <ClCompile Include="HexControl.cpp">
-      <Filter>Controls</Filter>
-    </ClCompile>
     <ClCompile Include="ListViewhelper.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
@@ -49,9 +46,6 @@
     </ClCompile>
     <ClCompile Include="CompoundFile.cpp">
       <Filter>CompoundFiles</Filter>
-    </ClCompile>
-    <ClCompile Include="Selection.cpp">
-      <Filter>Helpers</Filter>
     </ClCompile>
     <ClCompile Include="DarkMode\DarkModeSubclass.cpp">
       <Filter>DarkMode</Filter>
@@ -86,7 +80,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ColumnManager.h" />
-    <ClInclude Include="IBufferManager.h" />
     <ClInclude Include="IListView.h" />
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
@@ -134,9 +127,6 @@
     <ClInclude Include="IconHelper.h">
       <Filter>Helpers</Filter>
     </ClInclude>
-    <ClInclude Include="HexControl.h">
-      <Filter>Controls</Filter>
-    </ClInclude>
     <ClInclude Include="ListViewhelper.h">
       <Filter>Helpers</Filter>
     </ClInclude>
@@ -169,9 +159,6 @@
     </ClInclude>
     <ClInclude Include="CustomComboBox.h">
       <Filter>Controls</Filter>
-    </ClInclude>
-    <ClInclude Include="Selection.h">
-      <Filter>Helpers</Filter>
     </ClInclude>
     <ClInclude Include="CustomSplitterWindow.h">
       <Filter>Controls</Filter>

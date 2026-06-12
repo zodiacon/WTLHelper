@@ -2,7 +2,8 @@
 #include "MemoryBuffer.h"
 
 MemoryBuffer::MemoryBuffer(uint32_t initialSize) : m_buffer(initialSize) {
-
+    m_ptr = m_buffer.data();
+    m_size = (int64_t)m_buffer.size();
 }
 
 MemoryBuffer::MemoryBuffer(const uint8_t* data, uint32_t size, bool copy) {
@@ -33,23 +34,33 @@ uint32_t MemoryBuffer::GetData(int64_t offset, uint8_t* buffer, uint32_t count) 
 
 bool MemoryBuffer::Insert(int64_t offset, const uint8_t* data, uint32_t count) {
     m_buffer.insert(m_buffer.begin() + offset, data, data + count);
+    m_ptr = m_buffer.data();
+    m_size = (int64_t)m_buffer.size();
     return true;
 }
 
 bool MemoryBuffer::Delete(int64_t offset, size_t count) {
     m_buffer.erase(m_buffer.begin() + offset, m_buffer.begin() + offset + count);
+    m_ptr = m_buffer.data();
+    m_size = (int64_t)m_buffer.size();
     return true;
 }
 
 bool MemoryBuffer::SetData(int64_t offset, const uint8_t* data, uint32_t count) {
-    m_buffer.resize(offset + count);
+    if (offset + count > (int64_t)m_buffer.size())
+        m_buffer.resize(offset + count);
     ::memcpy(m_buffer.data() + offset, data, count);
+    m_ptr = m_buffer.data();
+    m_size = (int64_t)m_buffer.size();
     return true;
 }
 
 bool MemoryBuffer::SetData(int64_t offset, uint8_t value, uint32_t count) {
-    m_buffer.resize(offset + count);
+    if (offset + count > (int64_t)m_buffer.size())
+        m_buffer.resize(offset + count);
     ::memset(m_buffer.data() + offset, value, count);
+    m_ptr = m_buffer.data();
+    m_size = (int64_t)m_buffer.size();
     return true;
 }
 
