@@ -1,6 +1,7 @@
 #pragma once
 
 #define NOMINMAX
+#define _DARKMODELIB_USE_SCROLLBAR_FIX 1	// compile in dmlib_hook::fixDarkScrollBar (dark scroll bars)
 #include <Windows.h>
 #include <atlbase.h>
 #include <atlapp.h>

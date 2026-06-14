@@ -968,7 +968,9 @@ void DarkMode::setSysColor(int nIndex, COLORREF color)
  */
 void DarkMode::enableDarkScrollBarForWindowAndChildren([[maybe_unused]] HWND hWnd)
 {
-#if defined(_DARKMODELIB_USE_SCROLLBAR_FIX) && (_DARKMODELIB_USE_SCROLLBAR_FIX > 0)
+	// the per-window implementation only exists at level > 1; at level 1 the scroll bar fix is
+	// global (see fixDarkScrollBar), so this is a no-op there.
+#if defined(_DARKMODELIB_USE_SCROLLBAR_FIX) && (_DARKMODELIB_USE_SCROLLBAR_FIX > 1)
 	dmlib_hook::enableDarkScrollBarForWindowAndChildren(hWnd);
 #endif
 }
