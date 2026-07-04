@@ -225,3 +225,13 @@ int WTLHelper::SuspendHook() noexcept {
 int WTLHelper::ResumeHook() noexcept {
 	return --g_SuspendCount;
 }
+
+bool WTLHelper::InvokeFontDialog(CFontDialog& dlg) {
+	auto mode = WTLHelper::DarkModeType();
+	WTLHelper::SwitchToMode(DarkModeKind::Light, nullptr);
+	WTLHelper::SuspendHook();
+	auto ok = dlg.DoModal() == IDOK;
+	WTLHelper::ResumeHook();
+	WTLHelper::SwitchToMode(mode, nullptr);
+	return ok;
+}
