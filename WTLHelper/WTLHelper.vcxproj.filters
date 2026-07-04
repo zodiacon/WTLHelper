@@ -77,6 +77,9 @@
     <ClCompile Include="DarkMode\DmlibWinApi.cpp">
       <Filter>DarkMode</Filter>
     </ClCompile>
+    <ClCompile Include="SecurityHelper.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ColumnManager.h" />
@@ -283,6 +286,9 @@
     </ClInclude>
     <ClInclude Include="..\WTL\atlwinx.h">
       <Filter>WTL</Filter>
+    </ClInclude>
+    <ClInclude Include="SecurityHelper.h">
+      <Filter>Helpers</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

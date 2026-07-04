@@ -450,6 +450,7 @@
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="QuickFindEdit.h" />
+    <ClInclude Include="SecurityHelper.h" />
     <ClInclude Include="TabViewHelper.h" />
     <ClInclude Include="TreeListView.h" />
     <ClInclude Include="WTLHelper.h" />
@@ -494,6 +495,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseSigned|ARM64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="SecurityHelper.cpp" />
     <ClCompile Include="Settings.cpp" />
     <ClCompile Include="SortHelper.cpp" />
     <ClCompile Include="StringHelper.cpp" />
