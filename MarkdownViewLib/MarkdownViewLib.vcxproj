@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <!--
+    vcpkg per-project (manifest) integration — deliberately NOT relying on
+    machine-wide `vcpkg integrate install`, so opening this project doesn't
+    depend on (or mutate) any global VS/MSBuild state. Picks up VCPKG_ROOT or
+    VCPKG_INSTALLATION_ROOT from the environment; either is fine. Set before
+    any Microsoft.Cpp.* import so it wins over VS's own bundled-vcpkg default
+    (VS2022's toolset otherwise silently prefers its internal copy, which
+    isn't a git checkout and can't resolve a manifest baseline). This project
+    lives in its own subfolder (MarkdownViewLib\), one level below vcpkg.json
+    (repo root), so VcpkgManifestRoot is pointed explicitly at the parent
+    directory rather than relying on manifest discovery next to the project.
+    This resolves both WTL and MD4C headers via AdditionalIncludeDirectories
+    injected by vcpkg's own targets file below — no WTL or MD4C source files
+    are vendored here.
+  -->
+  <PropertyGroup Label="Vcpkg">
+    <VcpkgRoot Condition="'$(VCPKG_ROOT)' != ''">$(VCPKG_ROOT)</VcpkgRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' and '$(VCPKG_INSTALLATION_ROOT)' != ''">$(VCPKG_INSTALLATION_ROOT)</VcpkgRoot>
+    <VcpkgManifestRoot>$(MSBuildThisFileDirectory)..\</VcpkgManifestRoot>
+  </PropertyGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{8E4A1C2E-5A9C-4B7A-9F3C-1E2D3F4A5B6C}</ProjectGuid>
+    <RootNamespace>MarkdownViewLib</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <!-- Both projects share one output dir at the repo root (see CLAUDE.md / CI) even though each now builds from its own subfolder; IntDir is left at its per-project default. -->
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <IncludePath>..\WTLHelper\WTL;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>..\WTLHelper\WTL;$(VC_IncludePath);$(WindowsSDK_IncludePath);</IncludePath>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <PreprocessorDefinitions>NOMINMAX;UNICODE;_UNICODE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\WTLHelper\WTL;..\..\WTLHelper\WTL;$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <SDLCheck>true</SDLCheck>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <!--
+    Control-related sources only: CMarkdownView (the reusable WTL control)
+    and the module free functions it depends on (markdown parsing, D2D
+    rendering/layout, input, editor, overlays, search, file watching,
+    syntax highlighting). Excludes:
+      - main_d2d.cpp: the reference host (WinMain/CMainFrame) — not part of
+        the reusable control.
+      - settings.cpp: registry/%APPDATA% persistence — a host concern by
+        design (see CLAUDE.md); settings.h is still included below because
+        MarkdownView.h's public API uses the Settings struct.
+  -->
+  <ItemGroup>
+    <ClCompile Include="src\MarkdownView.cpp" />
+    <ClCompile Include="src\markdown.cpp" />
+    <ClCompile Include="src\themes.cpp" />
+    <ClCompile Include="src\d2d_init.cpp" />
+    <ClCompile Include="src\syntax.cpp" />
+    <ClCompile Include="src\utils.cpp" />
+    <ClCompile Include="src\search.cpp" />
+    <ClCompile Include="src\render.cpp" />
+    <ClCompile Include="src\file_utils.cpp" />
+    <ClCompile Include="src\overlays.cpp" />
+    <ClCompile Include="src\input.cpp" />
+    <ClCompile Include="src\editor.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\app.h" />
+    <ClInclude Include="include\MarkdownView.h" />
+    <ClInclude Include="include\types.h" />
+    <ClInclude Include="include\markdown.h" />
+    <ClInclude Include="include\settings.h" />
+    <ClInclude Include="include\d2d_init.h" />
+    <ClInclude Include="include\syntax.h" />
+    <ClInclude Include="include\utils.h" />
+    <ClInclude Include="include\search.h" />
+    <ClInclude Include="include\render.h" />
+    <ClInclude Include="include\file_utils.h" />
+    <ClInclude Include="include\overlays.h" />
+    <ClInclude Include="include\input.h" />
+    <ClInclude Include="include\editor.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets" Condition="'$(VcpkgRoot)' != '' and Exists('$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets')" />
+  </ImportGroup>
+</Project>

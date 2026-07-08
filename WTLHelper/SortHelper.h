@@ -3,7 +3,7 @@
 #include <string>
 #include <atlstr.h>
 
-struct SortHelper final abstract {
+struct SortHelper final {
 	static bool Sort(const ATL::CString& s1, const ATL::CString& s2, bool ascending) noexcept;
 	static bool Sort(const std::string& s1, const std::string& s2, bool ascending) noexcept;
 	static bool Sort(const std::wstring& s1, const std::wstring& s2, bool ascending) noexcept;
