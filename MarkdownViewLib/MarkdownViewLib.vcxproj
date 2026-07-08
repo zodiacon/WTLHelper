@@ -10,27 +10,6 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
-  <!--
-    vcpkg per-project (manifest) integration — deliberately NOT relying on
-    machine-wide `vcpkg integrate install`, so opening this project doesn't
-    depend on (or mutate) any global VS/MSBuild state. Picks up VCPKG_ROOT or
-    VCPKG_INSTALLATION_ROOT from the environment; either is fine. Set before
-    any Microsoft.Cpp.* import so it wins over VS's own bundled-vcpkg default
-    (VS2022's toolset otherwise silently prefers its internal copy, which
-    isn't a git checkout and can't resolve a manifest baseline). This project
-    lives in its own subfolder (MarkdownViewLib\), one level below vcpkg.json
-    (repo root), so VcpkgManifestRoot is pointed explicitly at the parent
-    directory rather than relying on manifest discovery next to the project.
-    This resolves both WTL and MD4C headers via AdditionalIncludeDirectories
-    injected by vcpkg's own targets file below — no WTL or MD4C source files
-    are vendored here.
-  -->
-  <PropertyGroup Label="Vcpkg">
-    <VcpkgRoot Condition="'$(VCPKG_ROOT)' != ''">$(VCPKG_ROOT)</VcpkgRoot>
-    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' and '$(VCPKG_INSTALLATION_ROOT)' != ''">$(VCPKG_INSTALLATION_ROOT)</VcpkgRoot>
-    <VcpkgManifestRoot>$(MSBuildThisFileDirectory)..\</VcpkgManifestRoot>
-    <VcpkgEnableManifest>false</VcpkgEnableManifest>
-  </PropertyGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -65,9 +44,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <!-- Both projects share one output dir at the repo root (see CLAUDE.md / CI) even though each now builds from its own subfolder; IntDir is left at its per-project default. -->
-  <PropertyGroup>
-    <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
-  </PropertyGroup>
+  <PropertyGroup />
   <!--
     Stock VS Static Library template settings (WarningLevel3, Optimization,
     SDLCheck, WIN32/_DEBUG/NDEBUG/_LIB, ConformanceMode, RuntimeLibrary left
@@ -142,6 +119,5 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets" Condition="'$(VcpkgRoot)' != '' and Exists('$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets')" />
   </ImportGroup>
 </Project>
