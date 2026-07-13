@@ -1,7 +1,9 @@
 #pragma once
 
+#include "DarkMode/DarkModeSubclass.h"
+
 enum class DarkModeKind {
-	Light, Dark, System, Classic, 
+	Light, Dark, System, Classic,
 	Unknown = 0xff
 };
 
@@ -24,5 +26,7 @@ struct WTLHelper final {
 	static bool IsSystemInDarkMode();
 	static int SuspendHook() noexcept;
 	static int ResumeHook() noexcept;
+	static bool SetDarkTone(DarkMode::ColorTone tone, HWND hWnd = nullptr);
+	static DarkMode::ColorTone GetDarkTone() noexcept;
 };
 

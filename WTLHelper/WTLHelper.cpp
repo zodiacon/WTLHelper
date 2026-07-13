@@ -225,3 +225,18 @@ int WTLHelper::SuspendHook() noexcept {
 int WTLHelper::ResumeHook() noexcept {
 	return --g_SuspendCount;
 }
+
+bool WTLHelper::SetDarkTone(DarkMode::ColorTone tone, HWND hWnd) {
+	DarkMode::setColorTone(static_cast<int>(tone));
+
+	if (hWnd) {
+		g_ThemeChanged = true;
+		CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(g_DarkModeType));
+		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
+	}
+	return true;
+}
+
+DarkMode::ColorTone WTLHelper::GetDarkTone() noexcept {
+	return static_cast<DarkMode::ColorTone>(DarkMode::getColorTone());
+}
