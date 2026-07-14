@@ -170,6 +170,18 @@ bool WTLHelper::SwitchToMode(HWND hWnd) {
 	return SwitchToMode(DarkModeKind::System, hWnd);
 }
 
+void WTLHelper::SetColorTone(ColorTone tone, HWND hWnd) {
+	DarkMode::setColorTone(static_cast<int>(tone));
+	if (hWnd) {
+		g_ThemeChanged = true;
+		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
+	}
+}
+
+ColorTone WTLHelper::GetColorTone() noexcept {
+	return static_cast<ColorTone>(DarkMode::getColorTone());
+}
+
 bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count) {
 	ATLASSERT(::IsMenu(menu));
 

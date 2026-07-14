@@ -1,13 +1,15 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 18
-VisualStudioVersion = 18.7.11925.98 stable
+VisualStudioVersion = 18.7.11925.98
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "WTLHelper", "WTLHelper\WTLHelper.vcxproj", "{AE53419F-A769-4548-8E15-E311904DF7DF}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "HexControl", "HexControl\HexControl.vcxproj", "{EF5C2F6B-5FCD-446C-BE8D-1485407CD65A}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MarkdownViewLib", "MarkdownViewLib\MarkdownViewLib.vcxproj", "{8E4A1C2E-5A9C-4B7A-9F3C-1E2D3F4A5B6C}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TreeListView", "TreeListView\TreeListView.vcxproj", "{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -55,6 +57,18 @@ Global
 		{8E4A1C2E-5A9C-4B7A-9F3C-1E2D3F4A5B6C}.Release|x64.Build.0 = Release|x64
 		{8E4A1C2E-5A9C-4B7A-9F3C-1E2D3F4A5B6C}.Release|x86.ActiveCfg = Release|x64
 		{8E4A1C2E-5A9C-4B7A-9F3C-1E2D3F4A5B6C}.Release|x86.Build.0 = Release|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Debug|ARM64.ActiveCfg = Debug|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Debug|ARM64.Build.0 = Debug|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Debug|x64.ActiveCfg = Debug|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Debug|x64.Build.0 = Debug|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Debug|x86.ActiveCfg = Debug|Win32
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Debug|x86.Build.0 = Debug|Win32
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Release|ARM64.ActiveCfg = Release|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Release|ARM64.Build.0 = Release|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Release|x64.ActiveCfg = Release|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Release|x64.Build.0 = Release|x64
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Release|x86.ActiveCfg = Release|Win32
+		{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

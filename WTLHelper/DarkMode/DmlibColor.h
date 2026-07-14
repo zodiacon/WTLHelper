@@ -30,7 +30,7 @@ namespace dmlib_color
 	/// Black tone (default)
 	inline constexpr DarkMode::Colors kDarkColors{
 		dmlib_color::HEXRGB(0x202020),   // background
-		dmlib_color::HEXRGB(0x383838),   // ctrlBackground
+		dmlib_color::HEXRGB(0x303030),   // ctrlBackground
 		dmlib_color::HEXRGB(0x454545),   // hotBackground
 		dmlib_color::HEXRGB(0x202020),   // dlgBackground
 		dmlib_color::HEXRGB(0xB00000),   // errorBackground
