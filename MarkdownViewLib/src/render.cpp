@@ -1,15 +1,20 @@
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <string_view>
+#include <filesystem>
+#include <urlmon.h>
+#include <utility>
+
 #include "render.h"
 #include "utils.h"
 #include "syntax.h"
 #include "search.h"
+#include "mermaid.h"
 
-#include <algorithm>
-#include <cmath>
-#include <functional>
-#include <string_view>
-#include <filesystem>
-#include <utility>
-#include <urlmon.h>
+
 #pragma comment(lib, "urlmon.lib")
 
 namespace {
@@ -17,8 +22,9 @@ constexpr float kHugeWidth = 100000.0f;
 constexpr float kLineBucketTolerance = 5.0f;
 
 struct LayoutInfo {
-    CComPtr<IDWriteTextLayout> layout;
+    IDWriteTextLayout* layout = nullptr;
     float width = 0.0f;
+    float height = 0.0f;
 };
 
 static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextFormat* format,
@@ -34,15 +40,17 @@ static LayoutInfo createLayout(App& app, std::wstring_view text, IDWriteTextForm
         }
         // Apply font fallback for emoji support
         if (app.fontFallback) {
-            CComPtr<IDWriteTextLayout2> layout2;
+            IDWriteTextLayout2* layout2 = nullptr;
             if (SUCCEEDED(info.layout->QueryInterface(__uuidof(IDWriteTextLayout2),
                     reinterpret_cast<void**>(&layout2)))) {
                 layout2->SetFontFallback(app.fontFallback);
+                layout2->Release();
             }
         }
         DWRITE_TEXT_METRICS metrics{};
         info.layout->GetMetrics(&metrics);
         info.width = metrics.widthIncludingTrailingWhitespace;
+        info.height = metrics.height;
     }
     return info;
 }
@@ -76,7 +84,7 @@ static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
     if (!info.layout) return;
 
     App::LayoutTextRun run;
-    run.layout = std::move(info.layout);
+    run.layout = info.layout;
     run.pos = pos;
     run.bounds = bounds;
     run.color = color;
@@ -91,7 +99,8 @@ static void addTextRun(App& app, LayoutInfo&& info, const D2D1_POINT_2F& pos,
 }
 
 struct LayoutSnapshot {
-    size_t textRuns, rects, lines, links, textRects, lineBuckets, docTextLen;
+    size_t textRuns, rects, lines, shapes, connectors;
+    size_t links, textRects, lineBuckets, docTextLen;
 };
 
 static LayoutSnapshot takeSnapshot(App& app) {
@@ -99,6 +108,8 @@ static LayoutSnapshot takeSnapshot(App& app) {
         app.layoutTextRuns.size(),
         app.layoutRects.size(),
         app.layoutLines.size(),
+        app.layoutShapes.size(),
+        app.layoutConnectors.size(),
         app.linkRects.size(),
         app.textRects.size(),
         app.lineBuckets.size(),
@@ -107,9 +118,16 @@ static LayoutSnapshot takeSnapshot(App& app) {
 }
 
 static void rollbackTo(App& app, const LayoutSnapshot& s) {
+    for (size_t i = s.textRuns; i < app.layoutTextRuns.size(); i++) {
+        if (app.layoutTextRuns[i].layout) {
+            app.layoutTextRuns[i].layout.Release();
+        }
+    }
     app.layoutTextRuns.resize(s.textRuns);
     app.layoutRects.resize(s.rects);
     app.layoutLines.resize(s.lines);
+    app.layoutShapes.resize(s.shapes);
+    app.layoutConnectors.resize(s.connectors);
     app.linkRects.resize(s.links);
     app.textRects.resize(s.textRects);
     app.lineBuckets.resize(s.lineBuckets);
@@ -133,6 +151,17 @@ static void shiftLayoutItems(App& app, const LayoutSnapshot& from, float dx) {
         auto& r = app.layoutLines[i];
         r.p1.x += dx;
         r.p2.x += dx;
+    }
+    for (size_t i = from.shapes; i < app.layoutShapes.size(); i++) {
+        auto& shape = app.layoutShapes[i];
+        shape.rect.left += dx;
+        shape.rect.right += dx;
+    }
+    for (size_t i = from.connectors; i < app.layoutConnectors.size(); i++) {
+        auto& connector = app.layoutConnectors[i];
+        connector.bounds.left += dx;
+        connector.bounds.right += dx;
+        for (auto& point : connector.points) point.x += dx;
     }
     for (size_t i = from.links; i < app.linkRects.size(); i++) {
         auto& r = app.linkRects[i];
@@ -162,6 +191,137 @@ static float getSpaceWidth(App& app, IDWriteTextFormat* format) {
 static void layoutElement(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 static void layoutImage(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth);
 
+// --- UAX#14 line-break analysis ---
+//
+// DirectWrite's text analyzer implements the Unicode line breaking
+// algorithm, including CJK rules (a break opportunity between almost every
+// pair of ideographs, but never before closing punctuation like 。，」or
+// after opening brackets). Chinese prose has no spaces, so anything less
+// treats an entire sentence as one unbreakable word.
+
+namespace {
+
+class LineBreakAnalysis final : public IDWriteTextAnalysisSource,
+                                public IDWriteTextAnalysisSink {
+public:
+    LineBreakAnalysis(const wchar_t* text, UINT32 length)
+        : text_(text), length_(length), breakpoints_(length) {}
+
+    std::vector<DWRITE_LINE_BREAKPOINT> breakpoints_;
+
+    // Stack-allocated and used synchronously: refcounting is inert
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override {
+        if (riid == __uuidof(IDWriteTextAnalysisSource)) {
+            *object = static_cast<IDWriteTextAnalysisSource*>(this);
+            return S_OK;
+        }
+        if (riid == __uuidof(IDWriteTextAnalysisSink)) {
+            *object = static_cast<IDWriteTextAnalysisSink*>(this);
+            return S_OK;
+        }
+        if (riid == __uuidof(IUnknown)) {
+            *object = static_cast<IUnknown*>(static_cast<IDWriteTextAnalysisSource*>(this));
+            return S_OK;
+        }
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    // IDWriteTextAnalysisSource
+    HRESULT STDMETHODCALLTYPE GetTextAtPosition(UINT32 position, const WCHAR** text,
+                                                UINT32* textLength) override {
+        if (position >= length_) { *text = nullptr; *textLength = 0; return S_OK; }
+        *text = text_ + position;
+        *textLength = length_ - position;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetTextBeforePosition(UINT32 position, const WCHAR** text,
+                                                    UINT32* textLength) override {
+        if (position == 0 || position > length_) { *text = nullptr; *textLength = 0; return S_OK; }
+        *text = text_;
+        *textLength = position;
+        return S_OK;
+    }
+    DWRITE_READING_DIRECTION STDMETHODCALLTYPE GetParagraphReadingDirection() override {
+        return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT;
+    }
+    HRESULT STDMETHODCALLTYPE GetLocaleName(UINT32 position, UINT32* textLength,
+                                            const WCHAR** localeName) override {
+        *localeName = L"en-us";
+        *textLength = length_ - position;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetNumberSubstitution(UINT32 position, UINT32* textLength,
+                                                    IDWriteNumberSubstitution** substitution) override {
+        *substitution = nullptr;
+        *textLength = length_ - position;
+        return S_OK;
+    }
+
+    // IDWriteTextAnalysisSink
+    HRESULT STDMETHODCALLTYPE SetLineBreakpoints(UINT32 position, UINT32 length,
+                                                 const DWRITE_LINE_BREAKPOINT* lineBreakpoints) override {
+        for (UINT32 i = 0; i < length && position + i < breakpoints_.size(); i++) {
+            breakpoints_[position + i] = lineBreakpoints[i];
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetScriptAnalysis(UINT32, UINT32, const DWRITE_SCRIPT_ANALYSIS*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetBidiLevel(UINT32, UINT32, UINT8, UINT8) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetNumberSubstitution(UINT32, UINT32, IDWriteNumberSubstitution*) override { return S_OK; }
+
+private:
+    const wchar_t* text_;
+    UINT32 length_;
+};
+
+// canBreak[i] == true when a line may break before text[i]; canBreak[len]
+// is always true. Falls back to space-only breaking if analysis fails.
+void analyzeBreakOpportunities(App& app, const std::wstring& text, std::vector<bool>& canBreak) {
+    canBreak.assign(text.size() + 1, false);
+    if (text.empty()) return;
+    canBreak[text.size()] = true;
+
+    // Fast path: plain ASCII prose with ordinary token lengths breaks at
+    // spaces exactly like the full algorithm — skip the analyzer round trip
+    bool simple = true;
+    size_t tokenLen = 0;
+    for (wchar_t c : text) {
+        if (c >= 0x80) { simple = false; break; }
+        if (c == L' ') tokenLen = 0;
+        else if (++tokenLen > 60) { simple = false; break; }  // long URLs etc. want real breaks
+    }
+    if (simple) {
+        for (size_t i = 1; i < text.size(); i++) {
+            if (text[i - 1] == L' ') canBreak[i] = true;
+        }
+        return;
+    }
+
+    bool analyzed = false;
+    if (app.textAnalyzer) {
+        LineBreakAnalysis analysis(text.c_str(), (UINT32)text.size());
+        if (SUCCEEDED(app.textAnalyzer->AnalyzeLineBreakpoints(
+                &analysis, 0, (UINT32)text.size(), &analysis))) {
+            for (size_t i = 1; i < text.size(); i++) {
+                UINT8 after = analysis.breakpoints_[i - 1].breakConditionAfter;
+                canBreak[i] = (after == DWRITE_BREAK_CONDITION_CAN_BREAK ||
+                               after == DWRITE_BREAK_CONDITION_MUST_BREAK);
+            }
+            analyzed = true;
+        }
+    }
+    if (!analyzed) {
+        for (size_t i = 1; i < text.size(); i++) {
+            if (text[i - 1] == L' ') canBreak[i] = true;
+        }
+    }
+}
+
+} // namespace
+
 static void layoutInlineContent(App& app, const std::vector<ElementPtr>& elements,
                                 float startX, float& y, float maxWidth,
                                 IDWriteTextFormat* baseFormat, D2D1_COLOR_F baseColor,
@@ -189,6 +349,10 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         D2D1_COLOR_F color = baseColor;
         std::string linkUrl = baseLinkUrl;
         bool isLink = !baseLinkUrl.empty();
+        bool hasBg = false;
+        bool hasStrike = false;
+        D2D1_COLOR_F bgColor{};
+        float drawYOffset = 0.0f;
 
         std::wstring text;
 
@@ -208,6 +372,48 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 
             case ElementType::Emphasis:
                 format = app.italicFormat;
+                for (const auto& child : elem->children) {
+                    if (child->type == ElementType::Text) {
+                        text += toWide(child->text);
+                    }
+                }
+                break;
+
+            case ElementType::Strikethrough:
+                hasStrike = true;
+                for (const auto& child : elem->children) {
+                    if (child->type == ElementType::Text) {
+                        text += toWide(child->text);
+                    }
+                }
+                break;
+
+            case ElementType::Highlight:
+                // ==text== renders on a marker-pen background
+                hasBg = true;
+                bgColor = app.theme.isDark
+                    ? D2D1::ColorF(0.98f, 0.80f, 0.25f, 0.28f)
+                    : D2D1::ColorF(1.00f, 0.88f, 0.20f, 0.45f);
+                for (const auto& child : elem->children) {
+                    if (child->type == ElementType::Text) {
+                        text += toWide(child->text);
+                    }
+                }
+                break;
+
+            case ElementType::Superscript:
+                // Small text; NEAR alignment already sits it at the top of the line
+                format = app.supSubFormat ? app.supSubFormat.p : baseFormat;
+                for (const auto& child : elem->children) {
+                    if (child->type == ElementType::Text) {
+                        text += toWide(child->text);
+                    }
+                }
+                break;
+
+            case ElementType::Subscript:
+                format = app.supSubFormat ? app.supSubFormat.p : baseFormat;
+                drawYOffset = lineHeight * 0.38f;
                 for (const auto& child : elem->children) {
                     if (child->type == ElementType::Text) {
                         text += toWide(child->text);
@@ -372,11 +578,13 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         float linkLineStartX = x;
         float linkLineY = y;
 
-        // Measure the whole element once: cluster metrics give every word
-        // width without creating one IDWriteTextLayout per word. Word splits
-        // happen at spaces, which are always cluster boundaries.
+        // Measure the whole element once: cluster metrics give every break
+        // unit's width without creating one IDWriteTextLayout per unit.
         std::vector<float> cumW(text.length() + 1, -1.0f);
+        std::vector<bool> isBoundary(text.length() + 1, false);
         cumW[0] = 0.0f;
+        isBoundary[0] = true;
+        isBoundary[text.length()] = true;
         {
             LayoutInfo measureInfo = createLayout(app, text, format, lineHeight, app.bodyTypography);
             if (measureInfo.layout) {
@@ -391,12 +599,16 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                         for (UINT32 ci = 0; ci < clusterCount && cpos < text.length(); ci++) {
                             w += clusters[ci].width;
                             cpos += clusters[ci].length;
-                            if (cpos <= text.length()) cumW[cpos] = w;
+                            if (cpos <= text.length()) {
+                                cumW[cpos] = w;
+                                isBoundary[cpos] = true;
+                            }
                         }
                     }
                 }
+                measureInfo.layout->Release();
             }
-            // Fill boundaries that fall inside clusters (safety; word splits
+            // Fill positions that fall inside clusters (break opportunities
             // never land there)
             float last = 0.0f;
             for (auto& v : cumW) { if (v < 0.0f) v = last; else last = v; }
@@ -419,7 +631,18 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             std::wstring_view segText(text.data() + segStart, segEnd - segStart);
             LayoutInfo info = createLayout(app, segText, format, lineHeight, app.bodyTypography);
             float segWidth = widthOf(segStart, segEnd);
-            D2D1_POINT_2F segPos = D2D1::Point2F(segX, y);
+            if (hasBg) {
+                app.layoutRects.push_back({
+                    D2D1::RectF(segX - 2, y + 1, segX + segWidth + 2, y + lineHeight - 1),
+                    bgColor});
+            }
+            if (hasStrike) {
+                float strikeY = y + lineHeight * 0.55f;
+                app.layoutLines.push_back({D2D1::Point2F(segX, strikeY),
+                                           D2D1::Point2F(segX + segWidth, strikeY),
+                                           color, 1.0f});
+            }
+            D2D1_POINT_2F segPos = D2D1::Point2F(segX, y + drawYOffset);
             D2D1_RECT_F segBounds = D2D1::RectF(segX, y, segX + segWidth, y + lineHeight);
             addTextRun(app, std::move(info), segPos, segBounds, color,
                        textDocStart + segStart, segEnd - segStart, false);
@@ -432,48 +655,85 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             segWords.clear();
         };
 
+        // Break opportunities from the Unicode line breaking algorithm:
+        // spaces for Latin text, between-ideograph positions (with proper
+        // punctuation rules) for CJK, after / and - inside URLs, etc.
+        std::vector<bool> canBreak;
+        analyzeBreakOpportunities(app, text, canBreak);
+
         size_t pos = 0;
         size_t lastWordEnd = 0;
+
+        auto emitWord = [&](size_t wordStart, size_t wordEnd) {
+            float wordWidth = widthOf(wordStart, wordEnd);
+            float wordX = segOpen ? segX + widthOf(segStart, wordStart) : x;
+
+            if (wordX + wordWidth > maxX && wordX > startX) {
+                // Unit wraps: flush the current line's segment first
+                flushSegment(lastWordEnd);
+                if (isLink && lastWordEndX > linkLineStartX) {
+                    addLinkSegment(linkLineStartX, lastWordEndX, linkLineY, linkUrl, color);
+                }
+                x = startX;
+                y += lineHeight;
+                linkLineStartX = x;
+                linkLineY = y;
+                wordX = x;
+            }
+
+            if (!segOpen) {
+                segOpen = true;
+                segStart = wordStart;
+                segX = wordX;
+            }
+            segWords.push_back({wordStart, wordEnd - wordStart});
+            lastWordEnd = wordEnd;
+            lastWordEndX = segX + widthOf(segStart, wordEnd);
+            x = lastWordEndX;
+        };
+
         while (pos < text.length()) {
-            size_t spacePos = text.find(L' ', pos);
-            if (spacePos == std::wstring::npos) spacePos = text.length();
+            // The next unit runs to the following break opportunity
+            size_t bp = pos + 1;
+            while (bp < text.length() && !canBreak[bp]) bp++;
 
-            size_t wordLen = spacePos - pos;
-            if (wordLen > 0) {
-                float wordWidth = widthOf(pos, spacePos);
-                float wordX = segOpen ? segX + widthOf(segStart, pos) : x;
+            // Trailing spaces belong to the unit but don't participate in
+            // the wrap decision and never render at a line start
+            size_t vis = bp;
+            while (vis > pos && text[vis - 1] == L' ') vis--;
 
-                if (wordX + wordWidth > maxX && wordX > startX) {
-                    // Word wraps: flush the current line's segment first
-                    flushSegment(lastWordEnd);
-                    if (isLink && lastWordEndX > linkLineStartX) {
-                        addLinkSegment(linkLineStartX, lastWordEndX, linkLineY, linkUrl, color);
+            if (vis > pos) {
+                if (widthOf(pos, vis) > maxWidth) {
+                    // Emergency break: a single unbreakable unit wider than a
+                    // whole line splits at cluster boundaries so nothing is
+                    // ever clipped or overlaps a neighbor
+                    size_t pieceStart = pos;
+                    while (widthOf(pieceStart, vis) > maxWidth) {
+                        size_t lo = pieceStart + 1, hi = vis - 1;
+                        while (lo < hi) {
+                            size_t mid = (lo + hi + 1) / 2;
+                            if (widthOf(pieceStart, mid) <= maxWidth) lo = mid;
+                            else hi = mid - 1;
+                        }
+                        size_t pieceEnd = lo;
+                        while (pieceEnd > pieceStart + 1 && !isBoundary[pieceEnd]) pieceEnd--;
+                        if (pieceEnd <= pieceStart) pieceEnd = pieceStart + 1;
+                        emitWord(pieceStart, pieceEnd);
+                        pieceStart = pieceEnd;
+                        if (pieceStart >= vis) break;
                     }
-                    x = startX;
-                    y += lineHeight;
-                    linkLineStartX = x;
-                    linkLineY = y;
-                    wordX = x;
+                    if (pieceStart < vis) emitWord(pieceStart, vis);
+                } else {
+                    emitWord(pos, vis);
                 }
-
-                if (!segOpen) {
-                    segOpen = true;
-                    segStart = pos;
-                    segX = wordX;
-                }
-                segWords.push_back({pos, wordLen});
-                lastWordEnd = spacePos;
-                lastWordEndX = segX + widthOf(segStart, spacePos);
-                x = lastWordEndX;
             }
 
-            if (spacePos < text.length()) {
-                // Advance past the space (shaped width inside an open segment)
-                x = segOpen ? segX + widthOf(segStart, spacePos + 1) : x + spaceWidth;
-                pos = spacePos + 1;
-            } else {
-                pos = spacePos;
+            if (bp > vis) {
+                // Advance x across the trailing spaces (shaped width when a
+                // segment is open)
+                x = segOpen ? segX + widthOf(segStart, bp) : x + widthOf(vis, bp);
             }
+            pos = bp;
         }
         flushSegment(lastWordEnd);
 
@@ -514,7 +774,12 @@ static void layoutHeading(App& app, const ElementPtr& elem, float& y, float inde
             else for (const auto& c : e->children) extract(c);
         };
         for (const auto& child : elem->children) extract(child);
-        app.headings.push_back({headingText, elem->level, y});
+
+        std::string baseId = slugifyHeading(headingText);
+        int& n = app.headingSlugCounts[baseId];
+        std::string id = (n == 0) ? baseId : (baseId + "-" + std::to_string(n));
+        n++;
+        app.headings.push_back({headingText, elem->level, y, id});
     }
 
     layoutInlineContent(app, elem->children, indent, y, maxWidth, format, app.theme.heading);
@@ -534,11 +799,536 @@ static void layoutHeading(App& app, const ElementPtr& elem, float& y, float inde
     y += 12 * scale;
 }
 
+static LayoutInfo createWrappedLayout(App& app, std::wstring_view text,
+                                      IDWriteTextFormat* format,
+                                      float width, float height) {
+    LayoutInfo info;
+    if (!format || text.empty() || width <= 0.0f || height <= 0.0f) return info;
+
+    app.dwriteFactory->CreateTextLayout(
+        text.data(), static_cast<UINT32>(text.length()),
+        format, width, height, &info.layout);
+    if (!info.layout) return info;
+
+    info.layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    info.layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    info.layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    if (app.fontFallback) {
+        IDWriteTextLayout2* layout2 = nullptr;
+        if (SUCCEEDED(info.layout->QueryInterface(
+                __uuidof(IDWriteTextLayout2),
+                reinterpret_cast<void**>(&layout2)))) {
+            layout2->SetFontFallback(app.fontFallback);
+            layout2->Release();
+        }
+    }
+
+    DWRITE_TEXT_METRICS metrics{};
+    info.layout->GetMetrics(&metrics);
+    info.width = metrics.widthIncludingTrailingWhitespace;
+    info.height = metrics.height;
+    return info;
+}
+
+static D2D1_COLOR_F mermaidColor(const mermaid::Color& color) {
+    return D2D1::ColorF(
+        ((color.rgb >> 16) & 0xFF) / 255.0f,
+        ((color.rgb >> 8) & 0xFF) / 255.0f,
+        (color.rgb & 0xFF) / 255.0f,
+        color.alpha);
+}
+
+struct ResolvedMermaidStyle {
+    D2D1_COLOR_F fill{};
+    D2D1_COLOR_F stroke{};
+    D2D1_COLOR_F text{};
+    float strokeWidth = 1.0f;
+};
+
+static ResolvedMermaidStyle resolveMermaidStyle(
+        const App& app, const mermaid::Diagram& diagram,
+        const mermaid::Node& node, float scale) {
+    ResolvedMermaidStyle resolved;
+    resolved.fill = app.theme.codeBackground;
+    resolved.stroke = app.theme.accent;
+    resolved.text = app.theme.text;
+    resolved.strokeWidth = 1.5f * scale;
+
+    auto apply = [&](const mermaid::Style& style) {
+        if (style.hasFill) resolved.fill = mermaidColor(style.fill);
+        if (style.hasStroke) resolved.stroke = mermaidColor(style.stroke);
+        if (style.hasText) resolved.text = mermaidColor(style.text);
+        if (style.hasStrokeWidth) {
+            resolved.strokeWidth = style.strokeWidth * scale;
+        }
+    };
+
+    auto defaultStyle = diagram.classStyles.find("default");
+    if (defaultStyle != diagram.classStyles.end()) apply(defaultStyle->second);
+    if (!node.className.empty()) {
+        auto classStyle = diagram.classStyles.find(node.className);
+        if (classStyle != diagram.classStyles.end()) apply(classStyle->second);
+    }
+    apply(node.style);
+    return resolved;
+}
+
+static App::LayoutShapeType mermaidShapeType(mermaid::NodeShape shape) {
+    switch (shape) {
+        case mermaid::NodeShape::RoundedRectangle:
+            return App::LayoutShapeType::RoundedRectangle;
+        case mermaid::NodeShape::Diamond:
+            return App::LayoutShapeType::Diamond;
+        case mermaid::NodeShape::Stadium:
+            return App::LayoutShapeType::Stadium;
+        case mermaid::NodeShape::Circle:
+            return App::LayoutShapeType::Ellipse;
+        case mermaid::NodeShape::Hexagon:
+            return App::LayoutShapeType::Hexagon;
+        case mermaid::NodeShape::Rectangle:
+        default:
+            return App::LayoutShapeType::Rectangle;
+    }
+}
+
+static bool layoutMermaidDiagram(App& app, const std::string& source,
+                                 size_t sourceOffset, float& y,
+                                 float indent, float maxWidth,
+                                 D2D1_RECT_F* renderedBounds = nullptr) {
+    auto parsed = mermaid::parse(source);
+    if (!parsed.success || parsed.diagram.nodes.empty()) return false;
+
+    const auto& diagram = parsed.diagram;
+    float scale = app.contentScale * app.zoomFactor;
+    float maxLabelWidth = 280.0f * scale;
+    float measureHeight = 10000.0f * scale;
+    float paddingX = 18.0f * scale;
+    float paddingY = 12.0f * scale;
+    float minimumWidth = 120.0f * scale;
+    float minimumHeight = 52.0f * scale;
+
+    std::vector<std::wstring> labels;
+    std::vector<mermaid::Size> nodeSizes;
+    std::vector<ResolvedMermaidStyle> styles;
+    labels.reserve(diagram.nodes.size());
+    nodeSizes.reserve(diagram.nodes.size());
+    styles.reserve(diagram.nodes.size());
+
+    for (const auto& node : diagram.nodes) {
+        std::wstring label = toWide(node.label.empty() ? node.id : node.label);
+        LayoutInfo measured = createWrappedLayout(
+            app, label, app.textFormat, maxLabelWidth, measureHeight);
+        float width = std::max(minimumWidth, measured.width + paddingX * 2.0f);
+        float height = std::max(minimumHeight, measured.height + paddingY * 2.0f);
+        if (measured.layout) measured.layout->Release();
+
+        if (node.shape == mermaid::NodeShape::Diamond) {
+            width = std::max(width * 1.28f, 150.0f * scale);
+            height = std::max(height * 1.45f, 82.0f * scale);
+        } else if (node.shape == mermaid::NodeShape::Hexagon) {
+            width += 40.0f * scale;
+        } else if (node.shape == mermaid::NodeShape::Circle) {
+            float diameter = std::max(width, height);
+            width = diameter;
+            height = diameter;
+        }
+
+        labels.push_back(std::move(label));
+        nodeSizes.push_back({width, height});
+        styles.push_back(resolveMermaidStyle(app, diagram, node, scale));
+    }
+
+    struct MeasuredMermaidEdgeLabel {
+        std::wstring text;
+        float width = 0.0f;
+        float height = 0.0f;
+    };
+    bool vertical = diagram.direction == mermaid::Direction::TopToBottom ||
+                    diagram.direction == mermaid::Direction::BottomToTop;
+    float labelPaddingX = 6.0f * scale;
+    float labelPaddingY = 4.0f * scale;
+    float rankGap = 78.0f * scale;
+    std::vector<MeasuredMermaidEdgeLabel> edgeLabels(diagram.edges.size());
+    for (size_t i = 0; i < diagram.edges.size(); i++) {
+        if (diagram.edges[i].label.empty()) continue;
+
+        auto& edgeLabel = edgeLabels[i];
+        edgeLabel.text = toWide(diagram.edges[i].label);
+        edgeLabel.width = std::min(
+            180.0f * scale,
+            std::max(60.0f * scale,
+                     measureText(app, edgeLabel.text, app.textFormat) +
+                         labelPaddingX * 2.0f));
+        LayoutInfo measured = createWrappedLayout(
+            app, edgeLabel.text, app.textFormat,
+            edgeLabel.width - labelPaddingX * 2.0f, measureHeight);
+        edgeLabel.height = std::max(
+            28.0f * scale, measured.height + labelPaddingY * 2.0f);
+        if (measured.layout) measured.layout->Release();
+
+        float labelExtent = vertical ? edgeLabel.height : edgeLabel.width;
+        rankGap = std::max(rankGap, labelExtent + 20.0f * scale);
+    }
+
+    mermaid::Layout graphLayout = mermaid::layout(
+        diagram, nodeSizes, 32.0f * scale, rankGap);
+    if (graphLayout.nodes.size() != diagram.nodes.size()) return false;
+
+    float baseX = indent;
+    if (graphLayout.width < maxWidth) {
+        baseX += (maxWidth - graphLayout.width) * 0.5f;
+    }
+    float baseY = y + 10.0f * scale;
+    float diagramLeft = baseX;
+    float diagramTop = baseY;
+    float diagramRight = baseX + graphLayout.width;
+    float diagramBottom = baseY + graphLayout.height;
+
+    std::vector<D2D1_RECT_F> nodeRects;
+    nodeRects.reserve(graphLayout.nodes.size());
+    for (const auto& rect : graphLayout.nodes) {
+        nodeRects.push_back(D2D1::RectF(
+            baseX + rect.left,
+            baseY + rect.top,
+            baseX + rect.right,
+            baseY + rect.bottom));
+    }
+
+    struct MermaidTextItem {
+        std::wstring text;
+        D2D1_RECT_F rect{};
+        D2D1_COLOR_F color{};
+    };
+    std::vector<MermaidTextItem> textItems;
+    textItems.reserve(diagram.nodes.size() + diagram.edges.size());
+
+    D2D1_COLOR_F connectorColor = app.theme.text;
+    connectorColor.a = app.theme.isDark ? 0.7f : 0.6f;
+
+    app.layoutConnectors.reserve(
+        app.layoutConnectors.size() + diagram.edges.size());
+    size_t exteriorLane = 0;
+    std::vector<D2D1_RECT_F> placedLabelRects;
+    placedLabelRects.reserve(diagram.edges.size());
+    for (size_t edgeIndex = 0; edgeIndex < diagram.edges.size(); edgeIndex++) {
+        const auto& edge = diagram.edges[edgeIndex];
+        if (edge.from >= nodeRects.size() || edge.to >= nodeRects.size()) continue;
+
+        const auto& from = nodeRects[edge.from];
+        const auto& to = nodeRects[edge.to];
+        App::LayoutConnector connector;
+        connector.color = connectorColor;
+        connector.stroke = 1.4f * scale * edge.strokeScale;
+        connector.arrowSize = 8.0f * scale;
+        connector.directed = edge.directed;
+        connector.dashed = edge.dashed;
+
+        float fromCenterX = (from.left + from.right) * 0.5f;
+        float fromCenterY = (from.top + from.bottom) * 0.5f;
+        float toCenterX = (to.left + to.right) * 0.5f;
+        float toCenterY = (to.top + to.bottom) * 0.5f;
+        bool selfLoop = edge.from == edge.to;
+
+        // Edges that skip over intermediate ranks would cut straight through
+        // the nodes between them (and drop their label onto whatever edge
+        // happens to sit at the midpoint) — route those through an exterior
+        // lane like back-edges instead
+        bool skipsRanks = false;
+        if (edge.from < graphLayout.ranks.size() &&
+            edge.to < graphLayout.ranks.size()) {
+            size_t fromRank = graphLayout.ranks[edge.from];
+            size_t toRank = graphLayout.ranks[edge.to];
+            skipsRanks = (fromRank < toRank ? toRank - fromRank
+                                            : fromRank - toRank) > 1;
+        }
+
+        if (vertical) {
+            bool topToBottom =
+                diagram.direction == mermaid::Direction::TopToBottom;
+            bool forward = !selfLoop && !skipsRanks &&
+                (topToBottom ? toCenterY > fromCenterY : toCenterY < fromCenterY);
+            if (selfLoop) {
+                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
+                D2D1_POINT_2F start = D2D1::Point2F(from.right, fromCenterY);
+                D2D1_POINT_2F end = D2D1::Point2F(fromCenterX, from.bottom);
+                float laneX = from.right + lane;
+                float laneY = from.bottom + lane;
+                connector.points = {
+                    start,
+                    D2D1::Point2F(laneX, start.y),
+                    D2D1::Point2F(laneX, laneY),
+                    D2D1::Point2F(end.x, laneY),
+                    end,
+                };
+            } else if (forward) {
+                D2D1_POINT_2F start = D2D1::Point2F(
+                    fromCenterX, topToBottom ? from.bottom : from.top);
+                D2D1_POINT_2F end = D2D1::Point2F(
+                    toCenterX, topToBottom ? to.top : to.bottom);
+                float middleY = (start.y + end.y) * 0.5f;
+                connector.points = {
+                    start,
+                    D2D1::Point2F(start.x, middleY),
+                    D2D1::Point2F(end.x, middleY),
+                    end,
+                };
+            } else {
+                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
+                D2D1_POINT_2F start = D2D1::Point2F(from.right, fromCenterY);
+                D2D1_POINT_2F end = D2D1::Point2F(to.right, toCenterY);
+                float laneX = std::max(from.right, to.right) + lane;
+                connector.points = {
+                    start,
+                    D2D1::Point2F(laneX, start.y),
+                    D2D1::Point2F(laneX, end.y),
+                    end,
+                };
+            }
+        } else {
+            bool leftToRight =
+                diagram.direction == mermaid::Direction::LeftToRight;
+            bool forward = !selfLoop && !skipsRanks &&
+                (leftToRight ? toCenterX > fromCenterX : toCenterX < fromCenterX);
+            if (selfLoop) {
+                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
+                D2D1_POINT_2F start = D2D1::Point2F(fromCenterX, from.bottom);
+                D2D1_POINT_2F end = D2D1::Point2F(from.right, fromCenterY);
+                float laneX = from.right + lane;
+                float laneY = from.bottom + lane;
+                connector.points = {
+                    start,
+                    D2D1::Point2F(start.x, laneY),
+                    D2D1::Point2F(laneX, laneY),
+                    D2D1::Point2F(laneX, end.y),
+                    end,
+                };
+            } else if (forward) {
+                D2D1_POINT_2F start = D2D1::Point2F(
+                    leftToRight ? from.right : from.left, fromCenterY);
+                D2D1_POINT_2F end = D2D1::Point2F(
+                    leftToRight ? to.left : to.right, toCenterY);
+                float middleX = (start.x + end.x) * 0.5f;
+                connector.points = {
+                    start,
+                    D2D1::Point2F(middleX, start.y),
+                    D2D1::Point2F(middleX, end.y),
+                    end,
+                };
+            } else {
+                float lane = (36.0f + exteriorLane++ * 14.0f) * scale;
+                D2D1_POINT_2F start = D2D1::Point2F(fromCenterX, from.bottom);
+                D2D1_POINT_2F end = D2D1::Point2F(toCenterX, to.bottom);
+                float laneY = std::max(from.bottom, to.bottom) + lane;
+                connector.points = {
+                    start,
+                    D2D1::Point2F(start.x, laneY),
+                    D2D1::Point2F(end.x, laneY),
+                    end,
+                };
+            }
+        }
+
+        connector.bounds = D2D1::RectF(
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest());
+        for (const auto& point : connector.points) {
+            connector.bounds.left = std::min(connector.bounds.left, point.x);
+            connector.bounds.top = std::min(connector.bounds.top, point.y);
+            connector.bounds.right = std::max(connector.bounds.right, point.x);
+            connector.bounds.bottom = std::max(connector.bounds.bottom, point.y);
+        }
+        connector.bounds.left -= connector.arrowSize;
+        connector.bounds.top -= connector.arrowSize;
+        connector.bounds.right += connector.arrowSize;
+        connector.bounds.bottom += connector.arrowSize;
+        diagramLeft = std::min(diagramLeft, connector.bounds.left);
+        diagramTop = std::min(diagramTop, connector.bounds.top);
+        diagramRight = std::max(diagramRight, connector.bounds.right);
+        diagramBottom = std::max(diagramBottom, connector.bounds.bottom);
+        app.layoutConnectors.push_back(std::move(connector));
+
+        if (!edge.label.empty()) {
+            const auto& edgeLabel = edgeLabels[edgeIndex];
+            const auto& points = app.layoutConnectors.back().points;
+            size_t middle = points.size() / 2;
+            const auto& middleStart = points[middle - 1];
+            const auto& middleEnd = points[middle];
+            float centerX = (middleStart.x + middleEnd.x) * 0.5f;
+            float centerY = (middleStart.y + middleEnd.y) * 0.5f;
+            auto chipAt = [&](float cx, float cy) {
+                return D2D1::RectF(
+                    cx - edgeLabel.width * 0.5f,
+                    cy - edgeLabel.height * 0.5f,
+                    cx + edgeLabel.width * 0.5f,
+                    cy + edgeLabel.height * 0.5f);
+            };
+            D2D1_RECT_F labelRect = chipAt(centerX, centerY);
+
+            // Parallel exterior lanes sit only a few pixels apart, so their
+            // midpoint chips stack on top of each other — slide an
+            // overlapping chip along its own segment until it finds space
+            bool segVertical = std::abs(middleEnd.x - middleStart.x) <
+                               std::abs(middleEnd.y - middleStart.y);
+            float stepX = segVertical ? 0.0f : edgeLabel.width + 8.0f * scale;
+            float stepY = segVertical ? edgeLabel.height + 8.0f * scale : 0.0f;
+            auto overlapsPlaced = [&](const D2D1_RECT_F& rect) {
+                for (const auto& placed : placedLabelRects) {
+                    if (rect.left < placed.right && rect.right > placed.left &&
+                        rect.top < placed.bottom && rect.bottom > placed.top) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            for (int attempt = 1; attempt <= 8 && overlapsPlaced(labelRect); attempt++) {
+                float direction = (attempt % 2 == 1) ? 1.0f : -1.0f;
+                float magnitude = (float)((attempt + 1) / 2);
+                labelRect = chipAt(centerX + stepX * direction * magnitude,
+                                   centerY + stepY * direction * magnitude);
+            }
+            placedLabelRects.push_back(labelRect);
+            // Draw the label as a visible chip on the edge — an invisible
+            // background-colored pill erases the line under it, which makes
+            // edges look disconnected and labels look like floating text
+            D2D1_COLOR_F chipStroke = connectorColor;
+            chipStroke.a *= 0.6f;
+            app.layoutShapes.push_back({
+                App::LayoutShapeType::RoundedRectangle,
+                labelRect,
+                app.theme.codeBackground,
+                chipStroke,
+                1.2f * scale,
+                4.0f * scale,
+            });
+            diagramLeft = std::min(diagramLeft, labelRect.left);
+            diagramTop = std::min(diagramTop, labelRect.top);
+            diagramRight = std::max(diagramRight, labelRect.right);
+            diagramBottom = std::max(diagramBottom, labelRect.bottom);
+            D2D1_RECT_F textRect = D2D1::RectF(
+                labelRect.left + labelPaddingX,
+                labelRect.top + labelPaddingY,
+                labelRect.right - labelPaddingX,
+                labelRect.bottom - labelPaddingY);
+            textItems.push_back({edgeLabel.text, textRect, app.theme.text});
+        }
+    }
+
+    app.layoutShapes.reserve(app.layoutShapes.size() + diagram.nodes.size());
+    for (size_t i = 0; i < diagram.nodes.size(); i++) {
+        const auto& node = diagram.nodes[i];
+        const auto& rect = nodeRects[i];
+        const auto& style = styles[i];
+
+        app.layoutShapes.push_back({
+            mermaidShapeType(node.shape),
+            rect,
+            style.fill,
+            style.stroke,
+            style.strokeWidth,
+            8.0f * scale,
+        });
+
+        float insetX = paddingX;
+        float insetY = paddingY;
+        if (node.shape == mermaid::NodeShape::Diamond) {
+            insetX = (rect.right - rect.left) * 0.18f;
+            insetY = (rect.bottom - rect.top) * 0.18f;
+        } else if (node.shape == mermaid::NodeShape::Hexagon) {
+            insetX = (rect.right - rect.left) * 0.18f;
+        }
+
+        D2D1_RECT_F textRect = D2D1::RectF(
+            rect.left + insetX,
+            rect.top + insetY,
+            rect.right - insetX,
+            rect.bottom - insetY);
+        textItems.push_back({labels[i], textRect, style.text});
+
+        if (sourceOffset != SIZE_MAX) {
+            size_t anchorOffset = sourceOffset + node.sourceOffset;
+            if (app.scrollAnchors.empty() ||
+                app.scrollAnchors.back().sourceOffset < anchorOffset) {
+                app.scrollAnchors.push_back({anchorOffset, rect.top});
+            }
+        }
+    }
+
+    std::stable_sort(
+        textItems.begin(), textItems.end(),
+        [](const MermaidTextItem& left, const MermaidTextItem& right) {
+            if (std::abs(left.rect.top - right.rect.top) > kLineBucketTolerance) {
+                return left.rect.top < right.rect.top;
+            }
+            return left.rect.left < right.rect.left;
+        });
+    for (const auto& item : textItems) {
+        LayoutInfo textLayout = createWrappedLayout(
+            app, item.text, app.textFormat,
+            item.rect.right - item.rect.left,
+            item.rect.bottom - item.rect.top);
+        size_t docStart = app.docText.size();
+        app.docText += item.text;
+        addTextRun(
+            app, std::move(textLayout),
+            D2D1::Point2F(item.rect.left, item.rect.top),
+            item.rect, item.color, docStart, item.text.size(), true);
+        app.docText += L"\n";
+    }
+    app.docText += L"\n";
+
+    app.contentWidth = std::max(
+        app.contentWidth,
+        diagramRight + 40.0f * scale);
+    if (app.focusMermaidOnNextLayout && !nodeRects.empty()) {
+        std::vector<bool> hasIncoming(diagram.nodes.size(), false);
+        for (const auto& edge : diagram.edges) {
+            if (edge.to < hasIncoming.size()) hasIncoming[edge.to] = true;
+        }
+        size_t rootIndex = 0;
+        for (size_t i = 0; i < hasIncoming.size(); i++) {
+            if (!hasIncoming[i]) {
+                rootIndex = i;
+                break;
+            }
+        }
+
+        float rootCenter = (nodeRects[rootIndex].left + nodeRects[rootIndex].right) * 0.5f;
+        float viewportWidth = documentViewportWidth(app);
+        float maxScroll = std::max(0.0f, app.contentWidth - viewportWidth);
+        float focusedScroll = rootCenter - viewportWidth * 0.5f;
+        app.scrollX = std::max(0.0f, std::min(focusedScroll, maxScroll));
+        app.targetScrollX = app.scrollX;
+        app.focusMermaidOnNextLayout = false;
+    }
+    if (renderedBounds) {
+        *renderedBounds =
+            D2D1::RectF(diagramLeft, diagramTop, diagramRight, diagramBottom);
+    }
+    y = diagramBottom + 24.0f * scale;
+    return true;
+}
+
 static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float indent, float maxWidth) {
     std::string code;
     for (const auto& child : elem->children) {
         if (child->type == ElementType::Text) {
             code += child->text;
+        }
+    }
+
+    std::string languageName = elem->language;
+    std::transform(
+        languageName.begin(), languageName.end(), languageName.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (languageName == "mermaid") {
+        D2D1_RECT_F renderedBounds{};
+        if (layoutMermaidDiagram(
+                app, code, elem->sourceOffset, y, indent, maxWidth,
+                &renderedBounds)) {
+            app.codeBlocks.push_back({renderedBounds, toWide(code)});
+            return;
         }
     }
 
@@ -555,6 +1345,7 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     app.docText += L"\n";
 
     float blockHeight = lineCount * lineHeight + padding * 2;
+    size_t bgRectIndex = app.layoutRects.size();
     app.layoutRects.push_back({D2D1::RectF(indent, y, indent + maxWidth, y + blockHeight),
                                app.theme.codeBackground});
 
@@ -569,6 +1360,7 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
     bool inBlockComment = false;
     size_t codeDocStart = app.docText.size();
     size_t lineStart = 0;
+    float maxLineWidth = 0.0f;
 
     while (lineStart <= wcode.length()) {
         size_t lineEnd = wcode.find(L'\n', lineStart);
@@ -636,9 +1428,19 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
             addTextRect(app, lineBounds, lineDocStart, wline.length());
         }
 
+        maxLineWidth = std::max(maxLineWidth, lineWidth);
         textY += lineHeight;
         if (lineEnd == wcode.length()) break;
         lineStart = lineEnd + 1;
+    }
+
+    // Long code lines used to be clipped at the block edge with no way to
+    // reach them — extend the block background and the document width so
+    // wide code participates in horizontal scrolling like diagrams do
+    float widestExtent = maxLineWidth + padding * 2;
+    if (widestExtent > maxWidth) {
+        app.layoutRects[bgRectIndex].rect.right = indent + widestExtent;
+        app.contentWidth = std::max(app.contentWidth, indent + widestExtent);
     }
 
     app.docText += wcode;
@@ -761,7 +1563,7 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     }
 
     // Load via WIC
-    CComPtr<IWICBitmapDecoder> decoder;
+    IWICBitmapDecoder* decoder = nullptr;
     HRESULT hr = app.wicFactory->CreateDecoderFromFilename(widePath.c_str(), nullptr,
         GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder);
     if (FAILED(hr) || !decoder) {
@@ -769,16 +1571,19 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
         return app.imageCache[src];
     }
 
-    CComPtr<IWICBitmapFrameDecode> frame;
+    IWICBitmapFrameDecode* frame = nullptr;
     hr = decoder->GetFrame(0, &frame);
     if (FAILED(hr) || !frame) {
+        decoder->Release();
         app.imageCache[src] = entry;
         return app.imageCache[src];
     }
 
-    CComPtr<IWICFormatConverter> converter;
+    IWICFormatConverter* converter = nullptr;
     hr = app.wicFactory->CreateFormatConverter(&converter);
     if (FAILED(hr) || !converter) {
+        frame->Release();
+        decoder->Release();
         app.imageCache[src] = entry;
         return app.imageCache[src];
     }
@@ -786,19 +1591,25 @@ static App::ImageEntry& getOrLoadImage(App& app, const std::string& src) {
     hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
         WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
     if (FAILED(hr)) {
+        converter->Release();
+        frame->Release();
+        decoder->Release();
         app.imageCache[src] = entry;
         return app.imageCache[src];
     }
 
-    CComPtr<ID2D1Bitmap> bitmap;
+    ID2D1Bitmap* bitmap = nullptr;
     hr = app.renderTarget->CreateBitmapFromWicBitmap(converter, nullptr, &bitmap);
+    converter->Release();
+    frame->Release();
+    decoder->Release();
 
     if (SUCCEEDED(hr) && bitmap) {
         D2D1_SIZE_F size = bitmap->GetSize();
+        entry.bitmap = bitmap;
         entry.width = (int)size.width;
         entry.height = (int)size.height;
         entry.failed = false;
-        entry.bitmap = std::move(bitmap);
     }
 
     app.imageCache[src] = entry;
@@ -907,13 +1718,14 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
             IDWriteTextFormat* fmt = isHeader ? app.boldFormat : app.textFormat;
             float textWidth = 0;
             if (!text.empty() && fmt) {
-                CComPtr<IDWriteTextLayout> layout;
+                IDWriteTextLayout* layout = nullptr;
                 app.dwriteFactory->CreateTextLayout(text.data(), (UINT32)text.length(),
                     fmt, kHugeWidth, lineHeight, &layout);
                 if (layout) {
                     DWRITE_TEXT_METRICS metrics{};
                     layout->GetMetrics(&metrics);
                     textWidth = metrics.widthIncludingTrailingWhitespace;
+                    layout->Release();
                 }
             }
             float needed = textWidth + cellPadding * 2 + 6.0f * scale;
@@ -921,17 +1733,54 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         }
     }
 
-    // Distribute widths: if total exceeds maxWidth, scale proportionally
+    // Distribute widths like a browser's auto table layout: columns whose
+    // natural width is under their fair share keep it untouched; only the
+    // wide columns shrink, splitting the remaining space proportionally.
+    // Pure proportional scaling starved narrow columns (a 3-character CJK
+    // header ended up one character wide) while a single huge cell hogged
+    // the row (#24).
     float totalWidth = 0;
     for (int c = 0; c < colCount; c++) totalWidth += colWidths[c];
 
     if (totalWidth > maxWidth) {
-        float ratio = maxWidth / totalWidth;
-        for (int c = 0; c < colCount; c++) {
-            colWidths[c] = std::max(minColWidth, colWidths[c] * ratio);
+        // Floor: at least ~2.5 CJK glyphs per line so no column degenerates
+        // into a vertical strip
+        float minCol = std::max(minColWidth, fontSize * 2.5f + cellPadding * 2);
+        std::vector<bool> fixed(colCount, false);
+        float available = maxWidth;
+        int unfixedCount = colCount;
+        bool changed = true;
+        while (changed && unfixedCount > 0) {
+            changed = false;
+            float fair = available / unfixedCount;
+            for (int c = 0; c < colCount; c++) {
+                if (!fixed[c] && colWidths[c] <= fair) {
+                    fixed[c] = true;
+                    available -= colWidths[c];
+                    unfixedCount--;
+                    changed = true;
+                }
+            }
+        }
+        if (unfixedCount > 0) {
+            float naturalSum = 0;
+            for (int c = 0; c < colCount; c++) {
+                if (!fixed[c]) naturalSum += colWidths[c];
+            }
+            for (int c = 0; c < colCount; c++) {
+                if (!fixed[c]) {
+                    float w = (naturalSum > 0.0f)
+                        ? available * (colWidths[c] / naturalSum)
+                        : available / unfixedCount;
+                    colWidths[c] = std::max(minCol, w);
+                }
+            }
         }
         totalWidth = 0;
         for (int c = 0; c < colCount; c++) totalWidth += colWidths[c];
+        // Minimum widths can push past maxWidth; the table then joins
+        // horizontal scrolling instead of squeezing columns unreadably
+        app.contentWidth = std::max(app.contentWidth, indent + totalWidth);
     }
 
     // Pass 1b: Measure row heights via layoutInlineContent with snapshot-rollback
@@ -1071,6 +1920,19 @@ static void layoutElement(App& app, const ElementPtr& elem, float& y, float inde
         case ElementType::CodeBlock:
             layoutCodeBlock(app, elem, y, indent, maxWidth);
             break;
+        case ElementType::MermaidDiagram:
+            if (!layoutMermaidDiagram(
+                    app, elem->text, elem->sourceOffset, y, indent, maxWidth)) {
+                app.focusMermaidOnNextLayout = false;
+                auto fallback = std::make_shared<Element>(ElementType::CodeBlock);
+                auto text = std::make_shared<Element>(ElementType::Text);
+                text->text = elem->text;
+                text->parent = fallback.get();
+                fallback->children.push_back(std::move(text));
+                fallback->sourceOffset = elem->sourceOffset;
+                layoutCodeBlock(app, fallback, y, indent, maxWidth);
+            }
+            break;
         case ElementType::BlockQuote:
             layoutBlockquote(app, elem, y, indent, maxWidth);
             break;
@@ -1168,6 +2030,8 @@ bool layoutBegin(App& app) {
     app.layoutTextRuns.reserve(elemCount * 2);
     app.layoutRects.reserve(elemCount);
     app.layoutLines.reserve(elemCount);
+    app.layoutShapes.reserve(elemCount);
+    app.layoutConnectors.reserve(elemCount);
     app.linkRects.reserve(elemCount / 4);
     app.textRects.reserve(elemCount * 2);
     app.lineBuckets.reserve(elemCount);
@@ -1175,11 +2039,7 @@ bool layoutBegin(App& app) {
 
     float scale = app.contentScale * app.zoomFactor;
 
-    // In edit mode, use preview pane width instead of full window
-    float layoutWidth = (float)app.width;
-    if (app.editMode) {
-        layoutWidth = app.width * (1.0f - app.editorSplitRatio) - 6;
-    }
+    float layoutWidth = documentViewportWidth(app);
 
     app.layoutIndent = 40.0f * scale;
     app.layoutMaxWidth = layoutWidth - app.layoutIndent * 2;

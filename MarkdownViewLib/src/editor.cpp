@@ -1,14 +1,20 @@
+#include <Windows.h>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <chrono>
+#include <imm.h>
+#include <utility>
+
 #include "editor.h"
+#include "document.h"
 #include "utils.h"
 #include "file_utils.h"
 #include "render.h"
 #include "d2d_init.h"
 #include "search.h"
 
-#include <fstream>
-#include <sstream>
-#include <algorithm>
-#include <chrono>
+#define TIMER_EDITOR_REPARSE 2
 
 // --- UTF conversion ---
 
@@ -28,7 +34,90 @@ static std::wstring fromUtf8(const std::string& str) {
     return out;
 }
 
+// --- DirectWrite line helpers ---
+//
+// The editor font is monospace for ASCII, but CJK and other full-width
+// glyphs render wider than editorCharWidth, so caret, click, and selection
+// math must go through DirectWrite hit testing instead of multiplying a
+// column index by a fixed character width.
+
+// Width available for line text in the editor pane (after gutter + padding)
+static float editorTextMaxWidth(const App& app) {
+    float gutterWidth = dpi(app, 48.0f);
+    float padding = dpi(app, 8.0f);
+    return std::max(10.0f, editorPaneWidth(app) - gutterWidth - padding * 2.0f);
+}
+
+static IDWriteTextLayout* createEditorLineLayout(const App& app, size_t lineStart, size_t lineLen) {
+    if (!app.dwriteFactory || !app.editorTextFormat || lineLen == 0) return nullptr;
+    float maxWidth = app.editorWordWrap ? editorTextMaxWidth(app) : 1e7f;
+    IDWriteTextLayout* layout = nullptr;
+    app.dwriteFactory->CreateTextLayout(
+        app.editorText.data() + lineStart, (UINT32)lineLen,
+        app.editorTextFormat, maxWidth, 1e7f, &layout);
+    // The shared editor format is NO_WRAP; the wrap toggle overrides per layout
+    if (layout && app.editorWordWrap) {
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    }
+    return layout;
+}
+
+// Caret x,y within a (possibly wrapped) line layout for the caret placed
+// before column `col`
+static void editorCaretXY(IDWriteTextLayout* layout, size_t col, float& x, float& y) {
+    x = 0.0f;
+    y = 0.0f;
+    if (!layout) return;
+    FLOAT hx = 0, hy = 0;
+    DWRITE_HIT_TEST_METRICS m{};
+    HRESULT hr = (col == 0)
+        ? layout->HitTestTextPosition(0, FALSE, &hx, &hy, &m)
+        : layout->HitTestTextPosition((UINT32)(col - 1), TRUE, &hx, &hy, &m);
+    if (SUCCEEDED(hr)) {
+        x = hx;
+        y = hy;
+    }
+}
+
+// X offset of the caret placed before column `col`, relative to the text origin.
+static float editorColToX(const App& app, IDWriteTextLayout* layout, size_t col) {
+    if (col == 0) return 0.0f;
+    if (layout) {
+        FLOAT x = 0, y = 0;
+        DWRITE_HIT_TEST_METRICS m{};
+        if (SUCCEEDED(layout->HitTestTextPosition((UINT32)(col - 1), TRUE, &x, &y, &m)))
+            return x;
+    }
+    float charWidth = app.editorCharWidth > 0 ? app.editorCharWidth
+        : (app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 0.6f : 10.0f);
+    return col * charWidth;
+}
+
+// --- Surrogate-pair helpers ---
+
+static bool isHighSurrogate(wchar_t c) { return c >= 0xD800 && c <= 0xDBFF; }
+static bool isLowSurrogate(wchar_t c)  { return c >= 0xDC00 && c <= 0xDFFF; }
+
+// Start of the character (code point) preceding pos
+static size_t editorPrevCharStart(const App& app, size_t pos) {
+    if (pos == 0) return 0;
+    size_t p = pos - 1;
+    if (p > 0 && isLowSurrogate(app.editorText[p]) && isHighSurrogate(app.editorText[p - 1])) p--;
+    return p;
+}
+
+// End of the character (code point) starting at pos
+static size_t editorNextCharEnd(const App& app, size_t pos) {
+    size_t len = app.editorText.size();
+    if (pos >= len) return len;
+    size_t p = pos + 1;
+    if (p < len && isHighSurrogate(app.editorText[pos]) && isLowSurrogate(app.editorText[p])) p++;
+    return p;
+}
+
 // --- Line starts ---
+
+static void rebuildEditorRowMetrics(App& app);
 
 void rebuildLineStarts(App& app) {
     app.editorLineStarts.clear();
@@ -38,6 +127,7 @@ void rebuildLineStarts(App& app) {
             app.editorLineStarts.push_back(i + 1);
         }
     }
+    rebuildEditorRowMetrics(app);
 }
 
 static size_t getLineFromPos(const App& app, size_t pos) {
@@ -64,6 +154,141 @@ static size_t getLineEnd(const App& app, size_t line) {
 
 static size_t getLineLength(const App& app, size_t line) {
     return getLineEnd(app, line) - app.editorLineStarts[line];
+}
+
+// --- Soft-wrap row metrics ---
+//
+// In wrap mode each logical line occupies one or more visual rows.
+// editorRowStarts holds the cumulative row count before each line so
+// scroll, click, and caret math can map between rows and lines.
+
+static void rebuildEditorRowMetrics(App& app) {
+    app.editorRowStarts.clear();
+    app.editorTotalRows = 0;
+    app.editorRowMetricsWidth = -1.0f;
+    if (!app.editorWordWrap || !app.editMode) return;
+
+    float maxTextWidth = editorTextMaxWidth(app);
+    app.editorRowMetricsWidth = maxTextWidth;
+    float charWidth = app.editorCharWidth > 0 ? app.editorCharWidth
+        : (app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 0.6f : 10.0f);
+
+    size_t lineCount = app.editorLineStarts.size();
+    app.editorRowStarts.reserve(lineCount + 1);
+    app.editorRowStarts.push_back(0);
+    for (size_t i = 0; i < lineCount; i++) {
+        size_t lineLen = getLineLength(app, i);
+        size_t rows = 1;
+        // A line can't wrap unless it could exceed the pane width even at
+        // full-width glyph advances (2x the ASCII cell) — skip the layout
+        // for the common short line
+        if (lineLen > 0 && (float)lineLen * charWidth * 2.0f > maxTextWidth) {
+            IDWriteTextLayout* layout =
+                createEditorLineLayout(app, app.editorLineStarts[i], lineLen);
+            if (layout) {
+                DWRITE_TEXT_METRICS tm{};
+                if (SUCCEEDED(layout->GetMetrics(&tm)) && tm.lineCount > 0) {
+                    rows = tm.lineCount;
+                }
+                layout->Release();
+            }
+        }
+        app.editorRowStarts.push_back(app.editorRowStarts.back() + rows);
+    }
+    app.editorTotalRows = app.editorRowStarts.back();
+}
+
+// Rebuild row metrics if the wrap width changed (resize, zoom, splitter,
+// preview toggle) or the line count is out of sync
+static void ensureEditorRowMetrics(App& app) {
+    if (!app.editorWordWrap) return;
+    if (app.editorRowStarts.size() != app.editorLineStarts.size() + 1 ||
+        std::abs(editorTextMaxWidth(app) - app.editorRowMetricsWidth) > 0.5f) {
+        rebuildEditorRowMetrics(app);
+    }
+}
+
+// Logical line containing a global visual row
+static size_t editorLineFromRow(const App& app, size_t row) {
+    if (app.editorRowStarts.size() < 2) return 0;
+    size_t lo = 0, hi = app.editorRowStarts.size() - 1;
+    while (lo + 1 < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (app.editorRowStarts[mid] <= row) lo = mid;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// Top visible logical line for the current editor scroll position
+size_t editorTopVisibleLine(App& app) {
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    size_t row = (size_t)std::max(0.0f, app.editorScrollY / lineHeight);
+    if (app.editorWordWrap) {
+        ensureEditorRowMetrics(app);
+        return editorLineFromRow(app, row);
+    }
+    return row;
+}
+
+// Up/Down in wrap mode moves by VISUAL row, staying near the same x —
+// within a wrapped line first, then into the adjacent logical line
+static void editorMoveCursorVertical(App& app, bool down) {
+    ensureEditorRowMetrics(app);
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    size_t line = getLineFromPos(app, app.editorCursorPos);
+    size_t col = app.editorCursorPos - app.editorLineStarts[line];
+
+    IDWriteTextLayout* layout = createEditorLineLayout(
+        app, app.editorLineStarts[line], getLineLength(app, line));
+    float cx = 0, cy = 0;
+    editorCaretXY(layout, col, cx, cy);
+    if (app.editorDesiredCol < 0) {
+        app.editorDesiredX = cx;
+        app.editorDesiredCol = 0;  // wrap mode uses the flag only; x is authoritative
+    }
+
+    auto hitCol = [&](IDWriteTextLayout* lay, float x, float y, size_t lineLen) {
+        if (!lay) return (size_t)0;
+        BOOL trailing = FALSE, inside = FALSE;
+        DWRITE_HIT_TEST_METRICS m{};
+        lay->HitTestPoint(x, y, &trailing, &inside, &m);
+        size_t c = (size_t)m.textPosition + (trailing ? (size_t)m.length : 0);
+        return std::min(c, lineLen);
+    };
+
+    bool moved = false;
+    if (layout) {
+        DWRITE_TEXT_METRICS tm{};
+        float layoutHeight = SUCCEEDED(layout->GetMetrics(&tm)) ? tm.height : lineHeight;
+        float targetY = cy + (down ? lineHeight : -lineHeight) + lineHeight * 0.5f;
+        if (targetY >= 0.0f && targetY < layoutHeight) {
+            app.editorCursorPos = app.editorLineStarts[line] +
+                hitCol(layout, app.editorDesiredX, targetY, getLineLength(app, line));
+            moved = true;
+        }
+        layout->Release();
+    }
+
+    if (!moved) {
+        bool hasAdjacent = down ? (line + 1 < app.editorLineStarts.size()) : (line > 0);
+        if (!hasAdjacent) return;
+        size_t adjacent = down ? line + 1 : line - 1;
+        size_t adjacentLen = getLineLength(app, adjacent);
+        IDWriteTextLayout* adjacentLayout = createEditorLineLayout(
+            app, app.editorLineStarts[adjacent], adjacentLen);
+        float targetY = lineHeight * 0.5f;
+        if (!down && adjacentLayout) {
+            // entering from below: land on the LAST visual row
+            DWRITE_TEXT_METRICS tm{};
+            if (SUCCEEDED(adjacentLayout->GetMetrics(&tm))) {
+                targetY = tm.height - lineHeight * 0.5f;
+            }
+        }
+        app.editorCursorPos = app.editorLineStarts[adjacent] +
+            hitCol(adjacentLayout, app.editorDesiredX, targetY, adjacentLen);
+        if (adjacentLayout) adjacentLayout->Release();
+    }
 }
 
 // --- Undo/Redo ---
@@ -179,6 +404,15 @@ static bool isEditorWordChar(wchar_t c) {
            (c >= L'0' && c <= L'9') || c == L'_';
 }
 
+// Character class for double-click selection: 0 = whitespace/ASCII
+// punctuation, 1 = ASCII word chars, 2 = CJK and any other non-ASCII text.
+// Double-click selects a contiguous run of the same class.
+static int editorCharClass(wchar_t c) {
+    if (isEditorWordChar(c)) return 1;
+    if ((unsigned)c > 127 && !iswspace(c)) return 2;
+    return 0;
+}
+
 static size_t editorWordLeft(const App& app, size_t pos) {
     if (pos == 0) return 0;
     pos--;
@@ -240,7 +474,19 @@ static void editorEnsureCursorVisible(App& app) {
     size_t line = getLineFromPos(app, app.editorCursorPos);
     float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
     float padding = dpi(app, 8.0f);
-    float cursorY = padding + line * lineHeight;
+    float cursorY;
+    if (app.editorWordWrap) {
+        ensureEditorRowMetrics(app);
+        IDWriteTextLayout* layout = createEditorLineLayout(
+            app, app.editorLineStarts[line], getLineLength(app, line));
+        float cx = 0, cy = 0;
+        editorCaretXY(layout, app.editorCursorPos - app.editorLineStarts[line], cx, cy);
+        if (layout) layout->Release();
+        size_t rowStart = (line < app.editorRowStarts.size()) ? app.editorRowStarts[line] : line;
+        cursorY = padding + rowStart * lineHeight + cy;
+    } else {
+        cursorY = padding + line * lineHeight;
+    }
 
     if (cursorY < app.editorScrollY + lineHeight) {
         app.editorScrollY = std::max(0.0f, cursorY - lineHeight);
@@ -311,23 +557,25 @@ void scrollEditorToMatch(App& app) {
 static void scheduleReparse(App& app) {
     if (!app.editorDirty) {
         app.editorDirty = true;
-        if (app.host) app.host->OnDirtyStateChanged(true);
         // Update window title with dirty marker
         std::wstring wpath = toWide(app.currentFile);
         size_t lastSep = wpath.find_last_of(L"\\/");
         std::wstring fname = (lastSep != std::wstring::npos) ? wpath.substr(lastSep + 1) : wpath;
         std::wstring title = L"Tinta - * " + fname;
         SetWindowTextW(app.hwnd, title.c_str());
-        if (app.host) app.host->OnTitleChanged(title.c_str());
     }
+    // No preview pane — nothing to keep in sync until it's shown again
+    if (!app.editorShowPreview) return;
     // Debounce: coalesce rapid typing into one reparse per pause. WM_TIMER
-    // calls editorReparse, which kills the timer.
-    SetTimer(app.hwnd, TIMER_EDITOR_REPARSE, 150, nullptr);
+    // calls editorReparse, which kills the timer. 300ms so brief pauses
+    // mid-typing (common with IME input) don't trigger a full preview
+    // relayout on every committed character.
+    SetTimer(app.hwnd, TIMER_EDITOR_REPARSE, 300, nullptr);
 }
 
 void editorReparse(App& app) {
     KillTimer(app.hwnd, TIMER_EDITOR_REPARSE);
-    if (!app.editMode) return;
+    if (!app.editMode || !app.editorShowPreview) return;
     std::string utf8 = toUtf8(app.editorText);
 
     // Build line-to-byte-offset mapping for scroll sync
@@ -339,7 +587,7 @@ void editorReparse(App& app) {
         }
     }
 
-    auto result = app.parser.parse(utf8);
+    auto result = parseDocument(app.parser, utf8, app.currentFile);
     if (result.success) {
         app.root = result.root;
         app.parseTimeUs = result.parseTimeUs;
@@ -391,7 +639,6 @@ void enterEditMode(App& app) {
     app.editorScrollY = 0;
     app.editorHasSelection = false;
     app.editorDirty = false;
-    if (app.host) app.host->OnDirtyStateChanged(false);
     app.undoStack.clear();
     app.redoStack.clear();
     app.editorSearchMatches.clear();
@@ -412,6 +659,7 @@ void enterEditMode(App& app) {
     updateBlinkTimer(app);
 
     // Force layout at new width
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
@@ -456,7 +704,7 @@ void exitEditMode(App& app) {
     if (file) {
         std::stringstream buf;
         buf << file.rdbuf();
-        auto result = app.parser.parse(buf.str());
+        auto result = parseDocument(app.parser, buf.str(), app.currentFile);
         if (result.success) {
             app.root = result.root;
             app.parseTimeUs = result.parseTimeUs;
@@ -466,6 +714,7 @@ void exitEditMode(App& app) {
     // Update window title (remove dirty marker)
     updateWindowTitle(app);
 
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
@@ -512,7 +761,6 @@ void saveEditorFile(App& app, HWND hwnd) {
         out.write(utf8.data(), utf8.size());
         out.close();
         app.editorDirty = false;
-        if (app.host) app.host->OnDirtyStateChanged(false);
         updateFileWriteTime(app);
 
         // Reparse and update preview immediately
@@ -620,7 +868,6 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
         } else if (wParam == 'N') {
             app.confirmExitPending = false;
             app.editorDirty = false;  // Discard changes
-            if (app.host) app.host->OnDirtyStateChanged(false);
             exitEditMode(app);
         } else if (wParam == VK_ESCAPE) {
             app.confirmExitPending = false;
@@ -713,6 +960,41 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 }
                 return;
             }
+            case 'P': {
+                app.editorShowPreview = !app.editorShowPreview;
+                if (app.editorShowPreview) {
+                    // Re-parse so the preview catches up with edits made
+                    // while it was hidden
+                    editorReparse(app);
+                }
+                app.editorRowMetricsWidth = -1.0f;  // pane width changed
+                app.editorNotificationMsg = app.editorShowPreview
+                    ? L"Preview shown (Ctrl+P to hide)"
+                    : L"Preview hidden (Ctrl+P to show)";
+                app.showEditModeNotification = true;
+                app.editModeNotificationAlpha = 1.0f;
+                app.editModeNotificationStart = std::chrono::steady_clock::now();
+                startNotificationTimer(app);
+                app.layoutDirty = app.editorShowPreview;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return;
+            }
+            case 'W': {
+                app.editorWordWrap = !app.editorWordWrap;
+                app.editorDesiredCol = -1;
+                app.editorDesiredX = -1.0f;
+                rebuildEditorRowMetrics(app);
+                editorEnsureCursorVisible(app);
+                app.editorNotificationMsg = app.editorWordWrap
+                    ? L"Word wrap on (Ctrl+W to turn off)"
+                    : L"Word wrap off (Ctrl+W to turn on)";
+                app.showEditModeNotification = true;
+                app.editModeNotificationAlpha = 1.0f;
+                app.editModeNotificationStart = std::chrono::steady_clock::now();
+                startNotificationTimer(app);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return;
+            }
             case VK_HOME:
                 editorStartOrExtendSelection(app, shift);
                 app.editorCursorPos = 0;
@@ -761,7 +1043,7 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 app.editorCursorPos = editorSelMin(app);
                 app.editorHasSelection = false;
             } else if (app.editorCursorPos > 0) {
-                app.editorCursorPos--;
+                app.editorCursorPos = editorPrevCharStart(app, app.editorCursorPos);
             }
             app.editorDesiredCol = -1;
             if (shift) editorUpdateSelEnd(app);
@@ -775,7 +1057,7 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 app.editorCursorPos = editorSelMax(app);
                 app.editorHasSelection = false;
             } else if (app.editorCursorPos < app.editorText.size()) {
-                app.editorCursorPos++;
+                app.editorCursorPos = editorNextCharEnd(app, app.editorCursorPos);
             }
             app.editorDesiredCol = -1;
             if (shift) editorUpdateSelEnd(app);
@@ -783,26 +1065,19 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
 
-        case VK_UP: {
+        case VK_UP:
+        case VK_DOWN: {
+            bool down = (wParam == VK_DOWN);
             editorStartOrExtendSelection(app, shift);
             size_t line = getLineFromPos(app, app.editorCursorPos);
-            if (line > 0) {
+            if (app.editorWordWrap) {
+                editorMoveCursorVertical(app, down);
+            } else if (!down && line > 0) {
                 size_t col = (app.editorDesiredCol >= 0) ? (size_t)app.editorDesiredCol : getColFromPos(app, app.editorCursorPos);
                 if (app.editorDesiredCol < 0) app.editorDesiredCol = (int)col;
                 size_t prevLineLen = getLineLength(app, line - 1);
                 app.editorCursorPos = app.editorLineStarts[line - 1] + std::min(col, prevLineLen);
-            }
-            if (shift) editorUpdateSelEnd(app);
-            else app.editorHasSelection = false;
-            editorEnsureCursorVisible(app);
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return;
-        }
-
-        case VK_DOWN: {
-            editorStartOrExtendSelection(app, shift);
-            size_t line = getLineFromPos(app, app.editorCursorPos);
-            if (line + 1 < app.editorLineStarts.size()) {
+            } else if (down && line + 1 < app.editorLineStarts.size()) {
                 size_t col = (app.editorDesiredCol >= 0) ? (size_t)app.editorDesiredCol : getColFromPos(app, app.editorCursorPos);
                 if (app.editorDesiredCol < 0) app.editorDesiredCol = (int)col;
                 size_t nextLineLen = getLineLength(app, line + 1);
@@ -877,10 +1152,11 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             if (app.editorHasSelection) {
                 editorDeleteSelection(app);
             } else if (app.editorCursorPos < app.editorText.size()) {
-                std::wstring deleted(1, app.editorText[app.editorCursorPos]);
+                size_t delEnd = editorNextCharEnd(app, app.editorCursorPos);
+                std::wstring deleted = app.editorText.substr(app.editorCursorPos, delEnd - app.editorCursorPos);
                 pushUndo(app, App::EditAction::Delete, app.editorCursorPos, deleted,
                          app.editorCursorPos, app.editorCursorPos);
-                app.editorText.erase(app.editorCursorPos, 1);
+                app.editorText.erase(app.editorCursorPos, delEnd - app.editorCursorPos);
                 rebuildLineStarts(app);
             }
             app.editorDesiredCol = -1;
@@ -924,9 +1200,10 @@ void handleEditorCharInput(App& app, HWND hwnd, WPARAM wParam) {
             editorDeleteSelection(app);
         } else if (app.editorCursorPos > 0) {
             size_t before = app.editorCursorPos;
-            std::wstring deleted(1, app.editorText[app.editorCursorPos - 1]);
-            app.editorText.erase(app.editorCursorPos - 1, 1);
-            app.editorCursorPos--;
+            size_t delStart = editorPrevCharStart(app, app.editorCursorPos);
+            std::wstring deleted = app.editorText.substr(delStart, before - delStart);
+            app.editorText.erase(delStart, before - delStart);
+            app.editorCursorPos = delStart;
             pushUndo(app, App::EditAction::Delete, app.editorCursorPos, deleted, before, app.editorCursorPos);
             rebuildLineStarts(app);
         }
@@ -973,17 +1250,68 @@ void handleEditorCharInput(App& app, HWND hwnd, WPARAM wParam) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
+// --- IME support ---
+
+// Place the IME composition window at the caret so candidate lists for
+// CJK input appear where the user is typing instead of the window corner.
+void editorPositionImeWindow(App& app, HWND hwnd) {
+    if (!app.editMode || app.editorLineStarts.empty()) return;
+    HIMC himc = ImmGetContext(hwnd);
+    if (!himc) return;
+
+    size_t line = getLineFromPos(app, app.editorCursorPos);
+    size_t lineStart = app.editorLineStarts[line];
+    size_t lineLen = getLineLength(app, line);
+    size_t col = std::min(app.editorCursorPos - lineStart, lineLen);
+
+    IDWriteTextLayout* layout = createEditorLineLayout(app, lineStart, lineLen);
+    float xOff = 0, yOff = 0;
+    editorCaretXY(layout, col, xOff, yOff);
+    if (layout) layout->Release();
+
+    float lineHeight = app.editorTextFormat ? app.editorTextFormat->GetFontSize() * 1.5f : 20.0f;
+    float padding = dpi(app, 8.0f);
+    float gutterWidth = dpi(app, 48.0f);
+
+    float lineTop;
+    if (app.editorWordWrap) {
+        ensureEditorRowMetrics(app);
+        size_t rowStart = (line < app.editorRowStarts.size()) ? app.editorRowStarts[line] : line;
+        lineTop = padding + rowStart * lineHeight;
+    } else {
+        lineTop = padding + line * lineHeight;
+    }
+
+    COMPOSITIONFORM cf{};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos.x = (LONG)(gutterWidth + padding + xOff);
+    cf.ptCurrentPos.y = (LONG)(lineTop + yOff - app.editorScrollY + lineHeight);
+    ImmSetCompositionWindow(himc, &cf);
+    ImmReleaseContext(hwnd, himc);
+}
+
 // --- Mouse handling ---
 
-static size_t editorPosFromClick(const App& app, int x, int y) {
+static size_t editorPosFromClick(App& app, int x, int y) {
     if (!app.editorTextFormat || app.editorLineStarts.empty()) return 0;
 
     float lineHeight = app.editorTextFormat->GetFontSize() * 1.5f;
     float padding = dpi(app, 8.0f);
-    float charWidth = app.editorCharWidth > 0 ? app.editorCharWidth : app.editorTextFormat->GetFontSize() * 0.6f;
 
     float adjustedY = y + app.editorScrollY - padding;
-    size_t line = (size_t)std::max(0, (int)(adjustedY / lineHeight));
+    size_t line;
+    float localY = lineHeight * 0.5f;
+    if (app.editorWordWrap) {
+        ensureEditorRowMetrics(app);
+        size_t row = (size_t)std::max(0, (int)(adjustedY / lineHeight));
+        line = editorLineFromRow(app, row);
+        if (line < app.editorRowStarts.size()) {
+            localY = adjustedY - app.editorRowStarts[line] * lineHeight;
+            localY = std::max(0.0f, localY);
+        }
+    } else {
+        line = (size_t)std::max(0, (int)(adjustedY / lineHeight));
+    }
     if (line >= app.editorLineStarts.size()) line = app.editorLineStarts.size() - 1;
 
     size_t lineStart = app.editorLineStarts[line];
@@ -991,23 +1319,42 @@ static size_t editorPosFromClick(const App& app, int x, int y) {
 
     float gutterWidth = dpi(app, 48.0f);
     float adjustedX = (float)x - gutterWidth - padding;
-    size_t col = (size_t)std::max(0, (int)(adjustedX / charWidth + 0.5f));
+    if (lineLen == 0) return lineStart;
+    if (adjustedX <= 0.0f && !app.editorWordWrap) return lineStart;
+    adjustedX = std::max(0.0f, adjustedX);
+
+    size_t col;
+    IDWriteTextLayout* layout = createEditorLineLayout(app, lineStart, lineLen);
+    if (layout) {
+        BOOL trailing = FALSE, inside = FALSE;
+        DWRITE_HIT_TEST_METRICS m{};
+        layout->HitTestPoint(adjustedX, localY, &trailing, &inside, &m);
+        layout->Release();
+        // trailing hit means the click was past the glyph's midpoint: the
+        // caret goes after the full character (m.length covers surrogate pairs)
+        col = (size_t)m.textPosition + (trailing ? (size_t)m.length : 0);
+    } else {
+        float charWidth = app.editorCharWidth > 0 ? app.editorCharWidth : app.editorTextFormat->GetFontSize() * 0.6f;
+        col = (size_t)std::max(0, (int)(adjustedX / charWidth + 0.5f));
+    }
     col = std::min(col, lineLen);
 
     return lineStart + col;
 }
 
 void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
-    float editorWidth = app.width * app.editorSplitRatio - 3;
+    float editorWidth = editorPaneWidth(app);
 
-    // Check for separator
-    float sepX = app.width * app.editorSplitRatio;
-    if (std::abs((float)x - sepX) < dpi(app, 6.0f)) {
-        app.draggingSeparator = true;
-        app.separatorDragStartX = (float)x;
-        app.separatorDragStartRatio = app.editorSplitRatio;
-        SetCapture(hwnd);
-        return;
+    // Check for separator (only exists while the preview is visible)
+    if (app.editorShowPreview) {
+        float sepX = app.width * app.editorSplitRatio;
+        if (std::abs((float)x - sepX) < dpi(app, 6.0f)) {
+            app.draggingSeparator = true;
+            app.separatorDragStartX = (float)x;
+            app.separatorDragStartRatio = app.editorSplitRatio;
+            SetCapture(hwnd);
+            return;
+        }
     }
 
     // Only handle clicks in the editor pane (left side)
@@ -1032,11 +1379,21 @@ void handleEditorMouseDown(App& app, HWND hwnd, int x, int y) {
     app.lastClickY = y;
 
     if (app.clickCount == 2) {
-        // Double-click: select word
+        // Double-click: select run of same character class (handles CJK,
+        // which has no spaces between words)
         size_t wordStart = clickPos;
         size_t wordEnd = clickPos;
-        while (wordStart > 0 && isEditorWordChar(app.editorText[wordStart - 1])) wordStart--;
-        while (wordEnd < app.editorText.size() && isEditorWordChar(app.editorText[wordEnd])) wordEnd++;
+        int cls = 0;
+        if (clickPos < app.editorText.size()) cls = editorCharClass(app.editorText[clickPos]);
+        if (cls == 0 && clickPos > 0) {
+            // Clicked just past the end of a word: select the run before
+            cls = editorCharClass(app.editorText[clickPos - 1]);
+            if (cls != 0) { wordStart = clickPos - 1; wordEnd = clickPos; }
+        }
+        if (cls != 0) {
+            while (wordStart > 0 && editorCharClass(app.editorText[wordStart - 1]) == cls) wordStart--;
+            while (wordEnd < app.editorText.size() && editorCharClass(app.editorText[wordEnd]) == cls) wordEnd++;
+        }
         app.editorSelStart = wordStart;
         app.editorSelEnd = wordEnd;
         app.editorCursorPos = wordEnd;
@@ -1090,7 +1447,7 @@ void handleEditorMouseUp(App& app, HWND hwnd, int x, int y) {
 }
 
 void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
-    float editorWidth = app.width * app.editorSplitRatio - 3;
+    float editorWidth = editorPaneWidth(app);
 
     if (app.draggingSeparator) {
         float dx = (float)x - app.separatorDragStartX;
@@ -1116,7 +1473,7 @@ void handleEditorMouseMove(App& app, HWND hwnd, int x, int y) {
     static HCURSOR cursorIBeam = LoadCursor(nullptr, IDC_IBEAM);
     static HCURSOR cursorArrow = LoadCursor(nullptr, IDC_ARROW);
 
-    if (std::abs((float)x - sepX) < dpi(app, 6.0f)) {
+    if (app.editorShowPreview && std::abs((float)x - sepX) < dpi(app, 6.0f)) {
         SetCursor(cursorSizeWE);
     } else if (x < editorWidth) {
         SetCursor(cursorIBeam);
@@ -1134,8 +1491,176 @@ void handleEditorMouseWheel(App& app, HWND hwnd, float delta) {
 
 // --- Rendering ---
 
+// Fill highlight rectangles for a text range within a wrapped line layout.
+// HitTestTextRange returns one rect per visual row the range touches.
+static void editorFillRangeRects(App& app, IDWriteTextLayout* layout,
+                                 float originX, float originY,
+                                 size_t rangeStart, size_t rangeLen,
+                                 const D2D1_COLOR_F& color) {
+    if (!layout || rangeLen == 0) return;
+    UINT32 count = 0;
+    layout->HitTestTextRange((UINT32)rangeStart, (UINT32)rangeLen, 0, 0,
+                             nullptr, 0, &count);
+    if (count == 0) return;
+    std::vector<DWRITE_HIT_TEST_METRICS> metrics(count);
+    if (FAILED(layout->HitTestTextRange((UINT32)rangeStart, (UINT32)rangeLen,
+                                        0, 0, metrics.data(), count, &count))) {
+        return;
+    }
+    app.brush->SetColor(color);
+    for (UINT32 i = 0; i < count; i++) {
+        app.renderTarget->FillRectangle(
+            D2D1::RectF(originX + metrics[i].left, originY + metrics[i].top,
+                        originX + metrics[i].left + metrics[i].width,
+                        originY + metrics[i].top + metrics[i].height),
+            app.brush);
+    }
+}
+
+// Soft-wrap rendering: each logical line spans editorRowStarts-many visual
+// rows; highlights and the caret come from DirectWrite hit testing on the
+// wrapped per-line layouts
+static void renderEditorWrapped(App& app, float editorWidth) {
+    ensureEditorRowMetrics(app);
+    if (app.editorRowStarts.size() != app.editorLineStarts.size() + 1) return;
+
+    float lineHeight = app.editorTextFormat->GetFontSize() * 1.5f;
+    float padding = dpi(app, 8.0f);
+    float gutterWidth = dpi(app, 48.0f);
+    float textX = gutterWidth + padding;
+
+    app.brush->SetColor(app.theme.background);
+    app.renderTarget->FillRectangle(
+        D2D1::RectF(0, 0, editorWidth, (float)app.height), app.brush);
+
+    app.renderTarget->PushAxisAlignedClip(
+        D2D1::RectF(0, 0, editorWidth, (float)app.height),
+        D2D1_ANTIALIAS_MODE_ALIASED);
+
+    size_t selMin = 0, selMax = 0;
+    if (app.editorHasSelection) {
+        selMin = editorSelMin(app);
+        selMax = editorSelMax(app);
+    }
+    bool hasSearchMatches = app.showSearch && !app.searchQuery.empty() &&
+                            !app.editorSearchMatches.empty();
+    size_t searchScanIdx = 0;
+
+    size_t curLine = getLineFromPos(app, app.editorCursorPos);
+    float charWidth = app.editorCharWidth > 0 ? app.editorCharWidth
+        : app.editorTextFormat->GetFontSize() * 0.6f;
+
+    size_t firstRow = (size_t)std::max(0.0f, (app.editorScrollY - padding) / lineHeight);
+    size_t firstLine = editorLineFromRow(app, firstRow);
+
+    for (size_t i = firstLine; i < app.editorLineStarts.size(); i++) {
+        float lineY = padding + app.editorRowStarts[i] * lineHeight - app.editorScrollY;
+        if (lineY > app.height) break;
+
+        size_t lineStart = app.editorLineStarts[i];
+        size_t lineLen = getLineLength(app, i);
+        IDWriteTextLayout* lineLayout = createEditorLineLayout(app, lineStart, lineLen);
+
+        // Line number on the first visual row of the line
+        wchar_t lineNum[16];
+        swprintf(lineNum, 16, L"%d", (int)i + 1);
+        D2D1_COLOR_F gutterColor = app.theme.text;
+        gutterColor.a = 0.3f;
+        app.brush->SetColor(gutterColor);
+        app.renderTarget->DrawText(lineNum, (UINT32)wcslen(lineNum), app.editorTextFormat,
+            D2D1::RectF(dpi(app, 4.0f), lineY, gutterWidth - dpi(app, 4.0f), lineY + lineHeight),
+            app.brush);
+
+        // Selection highlight
+        if (app.editorHasSelection && selMax > lineStart && selMin < lineStart + lineLen + 1) {
+            size_t hlStart = (selMin > lineStart) ? selMin - lineStart : 0;
+            size_t hlEnd = std::min(selMax - lineStart, lineLen);
+            D2D1_COLOR_F selColor = D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f);
+            editorFillRangeRects(app, lineLayout, textX, lineY, hlStart, hlEnd - hlStart, selColor);
+            if (selMax > lineStart + lineLen && selMin <= lineStart + lineLen) {
+                // Newline included: mark one cell past the end of the last row
+                float ex = 0, ey = 0;
+                editorCaretXY(lineLayout, lineLen, ex, ey);
+                app.brush->SetColor(selColor);
+                app.renderTarget->FillRectangle(
+                    D2D1::RectF(textX + ex, lineY + ey,
+                                textX + ex + charWidth, lineY + ey + lineHeight),
+                    app.brush);
+            }
+        }
+
+        // Search match highlights
+        if (hasSearchMatches) {
+            size_t lineEnd = lineStart + lineLen;
+            while (searchScanIdx < app.editorSearchMatches.size() &&
+                   app.editorSearchMatches[searchScanIdx].startPos +
+                       app.editorSearchMatches[searchScanIdx].length <= lineStart) {
+                searchScanIdx++;
+            }
+            for (size_t si = searchScanIdx; si < app.editorSearchMatches.size(); si++) {
+                const auto& m = app.editorSearchMatches[si];
+                if (m.startPos >= lineEnd) break;
+                size_t overlapStart = std::max(lineStart, m.startPos);
+                size_t overlapEnd = std::min(lineEnd, m.startPos + m.length);
+                if (overlapStart >= overlapEnd) continue;
+                bool isCurrent = ((int)si == app.editorSearchCurrentIndex);
+                D2D1_COLOR_F hlColor = isCurrent
+                    ? D2D1::ColorF(1.0f, 0.6f, 0.0f, 0.5f)
+                    : D2D1::ColorF(1.0f, 0.9f, 0.0f, 0.3f);
+                editorFillRangeRects(app, lineLayout, textX, lineY,
+                                     overlapStart - lineStart,
+                                     overlapEnd - overlapStart, hlColor);
+            }
+        }
+
+        // Line text
+        if (lineLayout) {
+            app.brush->SetColor(app.theme.text);
+            app.renderTarget->DrawTextLayout(
+                D2D1::Point2F(textX, lineY), lineLayout, app.brush);
+        }
+
+        // Caret
+        if (app.cursorBlinkOn && i == curLine) {
+            float cx = 0, cy = 0;
+            editorCaretXY(lineLayout, app.editorCursorPos - lineStart, cx, cy);
+            app.brush->SetColor(app.theme.text);
+            app.renderTarget->FillRectangle(
+                D2D1::RectF(textX + cx, lineY + cy,
+                            textX + cx + dpi(app, 2.0f), lineY + cy + lineHeight),
+                app.brush);
+        }
+
+        if (lineLayout) lineLayout->Release();
+    }
+
+    app.editorContentHeight = padding * 2 + app.editorTotalRows * lineHeight;
+
+    // Editor scrollbar (same as unwrapped)
+    if (app.editorContentHeight > app.height) {
+        float maxScroll = app.editorContentHeight - app.height;
+        float sbHeight = (float)app.height / app.editorContentHeight * app.height;
+        sbHeight = std::max(sbHeight, dpi(app, 30.0f));
+        float sbY = (maxScroll > 0) ? (app.editorScrollY / maxScroll * (app.height - sbHeight)) : 0;
+
+        float sbColorValue = app.theme.isDark ? 1.0f : 0.0f;
+        app.brush->SetColor(D2D1::ColorF(sbColorValue, sbColorValue, sbColorValue, 0.3f));
+        app.renderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(editorWidth - dpi(app, 10.0f), sbY,
+                                           editorWidth - dpi(app, 4.0f), sbY + sbHeight), 3, 3),
+            app.brush);
+    }
+
+    app.renderTarget->PopAxisAlignedClip();
+}
+
 void renderEditor(App& app, float editorWidth) {
     if (!app.editorTextFormat || app.editorLineStarts.empty()) return;
+
+    if (app.editorWordWrap) {
+        renderEditorWrapped(app, editorWidth);
+        return;
+    }
 
     float lineHeight = app.editorTextFormat->GetFontSize() * 1.5f;
     float padding = dpi(app, 8.0f);
@@ -1184,6 +1709,11 @@ void renderEditor(App& app, float editorWidth) {
         size_t lineStart = app.editorLineStarts[i];
         size_t lineLen = getLineLength(app, i);
 
+        // One DirectWrite layout per visible line: reused for highlight
+        // metrics and drawing so overlays always match the actual glyphs
+        // (CJK and other full-width characters are wider than charWidth)
+        IDWriteTextLayout* lineLayout = createEditorLineLayout(app, lineStart, lineLen);
+
         // Line number
         wchar_t lineNum[16];
         swprintf(lineNum, 16, L"%d", i + 1);
@@ -1197,8 +1727,14 @@ void renderEditor(App& app, float editorWidth) {
         if (app.editorHasSelection && selMax > lineStart && selMin < lineStart + lineLen + 1) {
             size_t hlStart = (selMin > lineStart) ? selMin - lineStart : 0;
             size_t hlEnd = std::min(selMax - lineStart, lineLen + 1);
-            float hlX1 = gutterWidth + padding + hlStart * charWidth;
-            float hlX2 = gutterWidth + padding + hlEnd * charWidth;
+            float hlX1 = gutterWidth + padding + editorColToX(app, lineLayout, hlStart);
+            float hlX2;
+            if (hlEnd > lineLen) {
+                // Selection includes the newline: extend one char past line end
+                hlX2 = gutterWidth + padding + editorColToX(app, lineLayout, lineLen) + charWidth;
+            } else {
+                hlX2 = gutterWidth + padding + editorColToX(app, lineLayout, hlEnd);
+            }
             app.brush->SetColor(D2D1::ColorF(0.2f, 0.4f, 0.9f, 0.35f));
             app.renderTarget->FillRectangle(
                 D2D1::RectF(hlX1, lineY, hlX2, lineY + lineHeight), app.brush);
@@ -1218,8 +1754,8 @@ void renderEditor(App& app, float editorWidth) {
                 size_t overlapStart = std::max(lineStart, m.startPos);
                 size_t overlapEnd = std::min(lineEnd, mEnd);
                 if (overlapStart < overlapEnd) {
-                    float hlX1 = gutterWidth + padding + (overlapStart - lineStart) * charWidth;
-                    float hlX2 = gutterWidth + padding + (overlapEnd - lineStart) * charWidth;
+                    float hlX1 = gutterWidth + padding + editorColToX(app, lineLayout, overlapStart - lineStart);
+                    float hlX2 = gutterWidth + padding + editorColToX(app, lineLayout, overlapEnd - lineStart);
 
                     bool isCurrent = ((int)si == app.editorSearchCurrentIndex);
                     if (isCurrent) {
@@ -1240,20 +1776,24 @@ void renderEditor(App& app, float editorWidth) {
         }
 
         // Line text
-        if (lineLen > 0) {
-            std::wstring_view lineView(app.editorText.data() + lineStart, lineLen);
+        if (lineLayout) {
             app.brush->SetColor(app.theme.text);
-            app.renderTarget->DrawText(lineView.data(), (UINT32)lineView.size(), app.editorTextFormat,
-                D2D1::RectF(gutterWidth + padding, lineY,
-                            editorWidth - padding, lineY + lineHeight), app.brush);
+            app.renderTarget->DrawTextLayout(
+                D2D1::Point2F(gutterWidth + padding, lineY), lineLayout, app.brush);
         }
+
+        if (lineLayout) lineLayout->Release();
     }
 
     // Cursor (blink state driven by TIMER_CURSOR_BLINK)
     if (app.cursorBlinkOn) {
         size_t curLine = getLineFromPos(app, app.editorCursorPos);
         size_t curCol = getColFromPos(app, app.editorCursorPos);
-        float curX = gutterWidth + padding + curCol * charWidth;
+        size_t curLineStart = app.editorLineStarts[curLine];
+        size_t curLineLen = getLineLength(app, curLine);
+        IDWriteTextLayout* curLayout = createEditorLineLayout(app, curLineStart, curLineLen);
+        float curX = gutterWidth + padding + editorColToX(app, curLayout, std::min(curCol, curLineLen));
+        if (curLayout) curLayout->Release();
         float curY = padding + curLine * lineHeight - app.editorScrollY;
 
         app.brush->SetColor(app.theme.text);

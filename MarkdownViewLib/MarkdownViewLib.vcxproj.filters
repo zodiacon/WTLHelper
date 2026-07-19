@@ -10,7 +10,6 @@
       <Extensions>h;hpp</Extensions>
     </Filter>
   </ItemGroup>
-
   <ItemGroup>
     <ClCompile Include="src\MarkdownView.cpp">
       <Filter>Source Files</Filter>
@@ -48,8 +47,13 @@
     <ClCompile Include="src\editor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\document.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mermaid.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
-
   <ItemGroup>
     <ClInclude Include="include\app.h">
       <Filter>Header Files</Filter>
@@ -91,6 +95,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\editor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\document.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

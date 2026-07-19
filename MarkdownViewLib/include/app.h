@@ -1,10 +1,6 @@
-#ifndef TINTA_APP_H
-#define TINTA_APP_H
+#pragma once
 
 #define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -121,6 +117,8 @@ struct Settings {
     int windowHeight = 768;
     bool windowMaximized = false;
     bool hasAskedFileAssociation = false;
+    bool editorShowPreview = true;
+    bool editorWordWrap = false;
 };
 
 // Application state
@@ -169,6 +167,7 @@ struct App {
     CComPtr<IDWriteTextFormat> boldFormat;
     CComPtr<IDWriteTextFormat> italicFormat;
     CComPtr<IDWriteTextFormat> headingFormats[6];
+    CComPtr<IDWriteTextAnalyzer> textAnalyzer;  // UAX#14 line-break analysis
 
     // Overlay text formats (cached)
     CComPtr<IDWriteTextFormat> searchTextFormat;
@@ -197,6 +196,7 @@ struct App {
     MarkdownParser parser;
     ElementPtr root;
     std::string currentFile;
+    bool focusMermaidOnNextLayout = false;
     size_t parseTimeUs = 0;
     float contentHeight = 0;
     float contentWidth = 0;
@@ -250,8 +250,10 @@ struct App {
         std::wstring text;
         int level;       // 1-6
         float y;         // document Y coordinate
+        std::string id;  // GitHub-style slug for anchor links
     };
     std::vector<HeadingInfo> headings;
+    std::unordered_map<std::string, int> headingSlugCounts;
     int hoveredTocIndex = -1;
     float tocScroll = 0.0f;
 
@@ -361,9 +363,36 @@ struct App {
         D2D1_COLOR_F color{};
         float stroke = 1.0f;
     };
+    enum class LayoutShapeType {
+        Rectangle,
+        RoundedRectangle,
+        Diamond,
+        Stadium,
+        Ellipse,
+        Hexagon,
+    };
+    struct LayoutShape {
+        LayoutShapeType type = LayoutShapeType::Rectangle;
+        D2D1_RECT_F rect{};
+        D2D1_COLOR_F fill{};
+        D2D1_COLOR_F stroke{};
+        float strokeWidth = 1.0f;
+        float radius = 0.0f;
+    };
+    struct LayoutConnector {
+        std::vector<D2D1_POINT_2F> points;
+        D2D1_RECT_F bounds{};
+        D2D1_COLOR_F color{};
+        float stroke = 1.0f;
+        float arrowSize = 8.0f;
+        bool directed = true;
+        bool dashed = false;
+    };
     std::vector<LayoutTextRun> layoutTextRuns;
     std::vector<LayoutRect> layoutRects;
     std::vector<LayoutLine> layoutLines;
+    std::vector<LayoutShape> layoutShapes;
+    std::vector<LayoutConnector> layoutConnectors;
     bool layoutDirty = true;
 
     // Incremental layout: the first paint lays out ~2 viewports, the rest
@@ -443,9 +472,21 @@ struct App {
     bool editorDirty = false;
     std::vector<size_t> editorLineStarts;
 
+    // Editor view options (persisted)
+    bool editorShowPreview = true;
+    bool editorWordWrap = false;
+
+    // Soft-wrap metrics: cumulative visual rows before each logical line
+    // (editorRowStarts.size() == lines + 1). Only maintained while
+    // editorWordWrap is on; rebuilt when text or wrap width changes.
+    std::vector<size_t> editorRowStarts;
+    size_t editorTotalRows = 0;
+    float editorRowMetricsWidth = -1.0f;  // wrap width the metrics were built for
+
     // Editor cursor & selection
     size_t editorCursorPos = 0;
     int editorDesiredCol = -1;
+    float editorDesiredX = -1.0f;  // desired caret x for Up/Down in wrap mode
     bool editorSelecting = false;
     size_t editorSelStart = 0;
     size_t editorSelEnd = 0;
@@ -476,6 +517,7 @@ struct App {
 
     // Editor text format (monospace)
     CComPtr<IDWriteTextFormat> editorTextFormat;
+    CComPtr < IDWriteTextFormat> supSubFormat;   // small size for ^sup^/~sub~
     float editorCharWidth = 0.0f; // Measured monospace char width
 
     // Metrics
@@ -496,6 +538,7 @@ struct App {
         docText.clear();
         docTextLower.clear();
         headings.clear();
+        headingSlugCounts.clear();
 
         copiedNotificationLayout.Release();
     }
@@ -557,4 +600,24 @@ inline void startNotificationTimer(App& app) {
     if (app.hwnd) SetTimer(app.hwnd, TIMER_NOTIFICATION, 33, nullptr);
 }
 
-#endif // TINTA_APP_H
+// Width of the editor pane in edit mode (full window when preview is hidden)
+inline float editorPaneWidth(const App& app) {
+    return app.editorShowPreview
+        ? app.width * app.editorSplitRatio - 3.0f
+        : static_cast<float>(app.width);
+}
+
+inline float documentViewportX(const App& app) {
+    if (!app.editMode) return 0.0f;
+    // Preview hidden: zero-width viewport at the right edge — document
+    // rendering flows through unchanged and clips to nothing
+    if (!app.editorShowPreview) return static_cast<float>(app.width);
+    return app.width * app.editorSplitRatio + 3.0f;
+}
+
+inline float documentViewportWidth(const App& app) {
+    float width = app.editMode
+        ? static_cast<float>(app.width) - documentViewportX(app)
+        : static_cast<float>(app.width);
+    return width > 0.0f ? width : 0.0f;
+}

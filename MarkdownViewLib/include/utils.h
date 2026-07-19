@@ -1,5 +1,4 @@
-#ifndef TINTA_UTILS_H
-#define TINTA_UTILS_H
+#pragma once
 
 #include "app.h"
 #include <string>
@@ -23,13 +22,17 @@ std::wstring_view textViewForRect(const App& app, const App::TextRect& tr);
 bool isWordBoundary(wchar_t c);
 const App::TextRect* findTextRectAt(const App& app, int x, int y);
 bool findWordBoundsAt(const App& app, const App::TextRect& tr, int x,
-                      float& wordLeft, float& wordRight);
+    float& wordLeft, float& wordRight);
 void findLineRects(const App& app, float y, float& lineLeft, float& lineRight,
-                   float& lineTop, float& lineBottom);
+    float& lineTop, float& lineBottom);
 
 void updateWindowTitle(App& app);
 void openUrl(const std::string& url);
 void copyToClipboard(HWND hwnd, const std::wstring& text);
 void extractText(const ElementPtr& elem, std::wstring& out);
 
-#endif // TINTA_UTILS_H
+std::string slugifyHeading(const std::wstring& text);
+void scrollToHeadingY(App& app, float headingY);
+bool scrollToHeadingId(App& app, const std::string& id);
+void handleLinkClick(App& app);
+

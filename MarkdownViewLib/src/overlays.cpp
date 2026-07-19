@@ -91,15 +91,17 @@ void renderSearchOverlay(App& app) {
 
             // Blinking cursor (blink state driven by TIMER_CURSOR_BLINK).
             // Query width is cached — it only changes when the query or the
-            // text format changes, not per frame. (Per-instance state, lives
-            // on App — see App::releaseOverlayFormats.)
+            // text format changes, not per frame.
             if (app.searchActive && app.cursorBlinkOn) {
-                if (app.searchCursorCachedQuery != app.searchQuery || app.searchCursorCachedFormat != searchTextFormat) {
-                    app.searchCursorCachedQueryWidth = measureText(app, app.searchQuery, searchTextFormat);
-                    app.searchCursorCachedQuery = app.searchQuery;
-                    app.searchCursorCachedFormat = searchTextFormat;
+                static std::wstring cachedQuery;
+                static IDWriteTextFormat* cachedFormat = nullptr;
+                static float cachedQueryWidth = 0.0f;
+                if (cachedQuery != app.searchQuery || cachedFormat != searchTextFormat) {
+                    cachedQueryWidth = measureText(app, app.searchQuery, searchTextFormat);
+                    cachedQuery = app.searchQuery;
+                    cachedFormat = searchTextFormat;
                 }
-                float cursorX = textX + app.searchCursorCachedQueryWidth + 2;
+                float cursorX = textX + cachedQueryWidth + 2;
                 app.brush->SetColor(textColor);
                 app.renderTarget->DrawLine(
                     D2D1::Point2F(cursorX, barY + dpi(app, 12.0f)),
@@ -705,6 +707,8 @@ void renderHelpOverlay(App& app) {
     const HelpEntry editEntries[] = {
         {L":",             L"Enter edit mode"},
         {L"Ctrl+S",       L"Save (in edit mode)"},
+        {L"Ctrl+P",       L"Show / hide preview pane"},
+        {L"Ctrl+W",       L"Toggle word wrap"},
         {L"ESC ESC",      L"Exit edit mode"},
     };
 

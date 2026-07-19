@@ -1,4 +1,15 @@
+#include <Windows.h>
+#include <windowsx.h>
+#include <shellapi.h>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <chrono>
+#include <utility>
+
+#include "app.h"
 #include "input.h"
+#include "document.h"
 #include "editor.h"
 #include "file_utils.h"
 #include "utils.h"
@@ -6,13 +17,6 @@
 #include "d2d_init.h"
 #include "settings.h"
 #include "render.h"
-
-#include <windowsx.h>
-#include <shellapi.h>
-#include <fstream>
-#include <sstream>
-#include <algorithm>
-#include <chrono>
 
 // Cached cursor handles - avoid calling LoadCursor() on every WM_MOUSEMOVE
 static HCURSOR cursorArrow = LoadCursor(nullptr, IDC_ARROW);
@@ -49,7 +53,9 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
 
     // Edit mode: route scroll to editor or preview based on mouse X
     if (app.editMode) {
-        float sepX = app.width * app.editorSplitRatio;
+        float sepX = app.editorShowPreview
+            ? app.width * app.editorSplitRatio
+            : static_cast<float>(app.width);
         if (app.mouseX < sepX) {
             if (ctrl) {
                 applyZoomDelta(app, delta);
@@ -100,6 +106,13 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
     if (ctrl) {
         // Zoom in/out — scale scroll position to keep content anchored
         applyZoomDelta(app, delta);
+    } else if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+        // Shift+wheel: horizontal scroll (wheel up = left), same as tilt wheels
+        app.targetScrollX -= delta * dpi(app, 60.0f);
+        float maxScrollX = std::max(
+            0.0f, app.contentWidth - documentViewportWidth(app));
+        app.targetScrollX = std::max(0.0f, std::min(app.targetScrollX, maxScrollX));
+        app.scrollX = app.targetScrollX;
     } else {
         // Normal scroll
         app.targetScrollY -= delta * dpi(app, 60.0f);
@@ -116,7 +129,8 @@ void handleMouseHWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
     float delta = (float)GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA * dpi(app, 60.0f);
     app.targetScrollX += delta;
 
-    float maxScrollX = std::max(0.0f, app.contentWidth - app.width);
+    float maxScrollX = std::max(
+        0.0f, app.contentWidth - documentViewportWidth(app));
     app.targetScrollX = std::max(0.0f, std::min(app.targetScrollX, maxScrollX));
     app.scrollX = app.targetScrollX;
 
@@ -148,13 +162,15 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
     if (app.editMode) {
         handleEditorMouseMove(app, hwnd, app.mouseX, app.mouseY);
         // If mouse is in the preview pane and not dragging separator, fall through for link hover etc.
-        float sepX = app.width * app.editorSplitRatio;
+        float sepX = app.editorShowPreview
+            ? app.width * app.editorSplitRatio
+            : static_cast<float>(app.width);
         if (app.mouseX < sepX || app.draggingSeparator || app.editorSelecting) return;
         // For preview pane, adjust mouseX to be relative to preview offset
         // but we leave the existing code to work with document coordinates
     }
 
-    float previewOffsetX = app.editMode ? (app.width * app.editorSplitRatio + 3) : 0;
+    float previewOffsetX = documentViewportX(app);
     float docX = (app.mouseX - previewOffsetX) + app.scrollX;
     float docY = app.mouseY + app.scrollY;
 
@@ -215,11 +231,12 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
 
     // Horizontal scrollbar dragging
     if (app.hScrollbarDragging) {
-        float maxScroll = std::max(0.0f, app.contentWidth - app.width);
-        if (maxScroll > 0 && app.contentWidth > app.width) {
-            float sbWidth = (float)app.width / app.contentWidth * app.width;
+        float viewportWidth = documentViewportWidth(app);
+        float maxScroll = std::max(0.0f, app.contentWidth - viewportWidth);
+        if (maxScroll > 0 && app.contentWidth > viewportWidth) {
+            float sbWidth = viewportWidth / app.contentWidth * viewportWidth;
             sbWidth = std::max(sbWidth, 30.0f);
-            float trackWidth = app.width - sbWidth;
+            float trackWidth = viewportWidth - sbWidth;
 
             float deltaX = (float)app.mouseX - app.hScrollbarDragStartX;
             float scrollDelta = (deltaX / trackWidth) * maxScroll;
@@ -244,9 +261,13 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
     // Check horizontal scrollbar hover
     bool wasHHovered = app.hScrollbarHovered;
     app.hScrollbarHovered = false;
-    if (app.contentWidth > app.width) {
+    float viewportX = documentViewportX(app);
+    float viewportWidth = documentViewportWidth(app);
+    if (app.contentWidth > viewportWidth) {
         float sbHeight = dpi(app, 14.0f);  // hit area
-        if (app.mouseY >= app.height - sbHeight) {
+        if (app.mouseY >= app.height - sbHeight &&
+            app.mouseX >= viewportX &&
+            app.mouseX <= viewportX + viewportWidth) {
             app.hScrollbarHovered = true;
         }
     }
@@ -343,7 +364,9 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
     if (app.editMode) {
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
-        float sepX = app.width * app.editorSplitRatio;
+        float sepX = app.editorShowPreview
+            ? app.width * app.editorSplitRatio
+            : static_cast<float>(app.width);
         if (x < sepX + 6) {
             handleEditorMouseDown(app, hwnd, x, y);
             return;
@@ -395,7 +418,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
     app.mouseX = GET_X_LPARAM(lParam);
     app.mouseY = GET_Y_LPARAM(lParam);
     SetCapture(hwnd);
-    float previewOffsetX = app.editMode ? (app.width * app.editorSplitRatio + 3) : 0;
+    float previewOffsetX = documentViewportX(app);
     float docX = (app.mouseX - previewOffsetX) + app.scrollX;
     float docY = app.mouseY + app.scrollY;
 
@@ -424,21 +447,27 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
     // Check if clicking horizontal scrollbar
-    else if (app.hScrollbarHovered && app.contentWidth > app.width) {
+    else if (app.hScrollbarHovered &&
+             app.contentWidth > documentViewportWidth(app)) {
         app.hScrollbarDragging = true;
         app.hScrollbarDragStartX = (float)app.mouseX;
         app.hScrollbarDragStartScroll = app.scrollX;
 
         // Check if clicking in track (not thumb) - jump to position
-        float maxScroll = std::max(0.0f, app.contentWidth - app.width);
-        float sbWidth = (float)app.width / app.contentWidth * app.width;
+        float viewportX = documentViewportX(app);
+        float viewportWidth = documentViewportWidth(app);
+        float localMouseX = app.mouseX - viewportX;
+        float maxScroll = std::max(0.0f, app.contentWidth - viewportWidth);
+        float sbWidth = viewportWidth / app.contentWidth * viewportWidth;
         sbWidth = std::max(sbWidth, 30.0f);
-        float sbX = (maxScroll > 0) ? (app.scrollX / maxScroll * (app.width - sbWidth)) : 0;
+        float sbX = (maxScroll > 0)
+            ? (app.scrollX / maxScroll * (viewportWidth - sbWidth))
+            : 0;
 
         // If clicked outside thumb, jump
-        if (app.mouseX < sbX || app.mouseX > sbX + sbWidth) {
-            float trackWidth = app.width - sbWidth;
-            float clickPos = (float)app.mouseX - sbWidth / 2;
+        if (localMouseX < sbX || localMouseX > sbX + sbWidth) {
+            float trackWidth = viewportWidth - sbWidth;
+            float clickPos = localMouseX - sbWidth / 2;
             clickPos = std::max(0.0f, std::min(clickPos, trackWidth));
             app.scrollX = (clickPos / trackWidth) * maxScroll;
             app.targetScrollX = app.scrollX;
@@ -553,10 +582,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
             // Click inside panel
             if (app.hoveredTocIndex >= 0 && app.hoveredTocIndex < (int)app.headings.size()) {
                 // Scroll document to heading
-                float headingY = app.headings[app.hoveredTocIndex].y - 20.0f;
-                float maxScroll = std::max(0.0f, app.contentHeight - app.height);
-                app.scrollY = std::max(0.0f, std::min(headingY, maxScroll));
-                app.targetScrollY = app.scrollY;
+                scrollToHeadingY(app, app.headings[app.hoveredTocIndex].y);
 
                 // Close TOC
                 app.showToc = false;
@@ -601,7 +627,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
                     }
                     populateFolderItems(app);
                 } else {
-                    // Open .md file
+                    // Open document
                     std::wstring fullPath = app.folderBrowserPath;
                     if (fullPath.back() != L'\\' && fullPath.back() != L'/') {
                         fullPath += L'\\';
@@ -613,7 +639,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
                     if (file) {
                         std::stringstream buffer;
                         buffer << file.rdbuf();
-                        auto result = app.parser.parse(buffer.str());
+                        auto result = parseDocument(app.parser, buffer.str(), fullPath);
                         if (result.success) {
                             app.root = result.root;
                             app.parseTimeUs = result.parseTimeUs;
@@ -622,12 +648,14 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
                             app.currentFile.resize(utf8Len - 1);
                             WideCharToMultiByte(CP_UTF8, 0, fullPath.c_str(), -1, &app.currentFile[0], utf8Len, nullptr, nullptr);
                             app.scrollY = 0;
+                            app.scrollX = 0;
                             app.targetScrollY = 0;
+                            app.targetScrollX = 0;
+                            app.focusMermaidOnNextLayout = isMermaidDocumentPath(fullPath);
                             app.contentHeight = 0;
                             app.docText.clear();
                             app.docTextLower.clear();
                             app.searchMatches.clear();
-                            app.searchMatchYs.clear();
                             app.layoutDirty = true;
                             updateFileWriteTime(app);
                             updateWindowTitle(app);
@@ -707,7 +735,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
     } else if (app.hoveredCodeBlock >= 0 && app.hoveredCodeBlock < (int)app.codeBlocks.size()) {
         // Check if click was on the copy button (top-right corner of code block)
         const auto& cb = app.codeBlocks[app.hoveredCodeBlock];
-        float previewOffsetX = app.editMode ? (app.width * app.editorSplitRatio + 3) : 0;
+        float previewOffsetX = documentViewportX(app);
         float clickDocX = (app.mouseX - previewOffsetX) + app.scrollX;
         float clickDocY = app.mouseY + app.scrollY;
         float btnW = dpi(app, 52.0f);
@@ -733,7 +761,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
             // hasSelection was already set to true in WM_LBUTTONDOWN
         } else {
             // Normal selection: finalize with current mouse position (document coordinates)
-            float previewOffsetX = app.editMode ? (app.width * app.editorSplitRatio + 3) : 0;
+            float previewOffsetX = documentViewportX(app);
             float docX = (app.mouseX - previewOffsetX) + app.scrollX;
             float docY = app.mouseY + app.scrollY;
             app.selEndX = (int)docX;
@@ -747,7 +775,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
                 app.hasSelection = true;
             } else if (!app.hoveredLink.empty()) {
                 // It was just a click on a link
-                openUrl(app.hoveredLink);
+                handleLinkClick(app);
                 app.hasSelection = false;
             } else {
                 app.hasSelection = false;
@@ -756,7 +784,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM wParam, LPARAM lParam) {
         InvalidateRect(hwnd, nullptr, FALSE);
     } else if (!app.hoveredLink.empty()) {
         // Click on link
-        openUrl(app.hoveredLink);
+        handleLinkClick(app);
     }
 
     app.mouseDown = false;
@@ -1049,41 +1077,38 @@ void handleCharInput(App& app, HWND hwnd, WPARAM wParam) {
 void handleDropFiles(App& app, HWND hwnd, WPARAM wParam) {
     HDROP hDrop = (HDROP)wParam;
     wchar_t wpath[MAX_PATH];
-    if (DragQueryFileW(hDrop, 0, wpath, MAX_PATH)) {
+    if (DragQueryFileW(hDrop, 0, wpath, MAX_PATH) &&
+        isSupportedDropPath(wpath)) {
         // Convert wide path to UTF-8 for std::string usage
         int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wpath, -1, nullptr, 0, nullptr, nullptr);
         std::string filepath(utf8Len - 1, '\0');
         WideCharToMultiByte(CP_UTF8, 0, wpath, -1, &filepath[0], utf8Len, nullptr, nullptr);
-        size_t dotPos = filepath.rfind('.');
-        if (dotPos != std::string::npos) {
-            std::string ext = filepath.substr(dotPos);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (ext == ".md" || ext == ".markdown" || ext == ".txt") {
-                // Load file - use wide path for non-ASCII support
-                std::ifstream file(wpath);
-                if (file) {
-                    std::stringstream buffer;
-                    buffer << file.rdbuf();
-                    auto result = app.parser.parse(buffer.str());
-                    if (result.success) {
-                        app.root = result.root;
-                        app.parseTimeUs = result.parseTimeUs;
-                        app.currentFile = filepath;
-                        app.scrollY = 0;
-                        app.targetScrollY = 0;
-                        app.contentHeight = 0;
-                        app.docText.clear();
-                        app.docTextLower.clear();
-                        app.searchMatches.clear();
-                        app.searchMatchYs.clear();
-                        app.layoutDirty = true;
-                        updateFileWriteTime(app);
-                        updateWindowTitle(app);
-                    }
-                }
-                InvalidateRect(hwnd, nullptr, FALSE);
+
+        // Load file - use wide path for non-ASCII support
+        std::ifstream file(wpath);
+        if (file) {
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            auto result = parseDocument(app.parser, buffer.str(), wpath);
+            if (result.success) {
+                app.root = result.root;
+                app.parseTimeUs = result.parseTimeUs;
+                app.currentFile = filepath;
+                app.scrollY = 0;
+                app.scrollX = 0;
+                app.targetScrollY = 0;
+                app.targetScrollX = 0;
+                app.focusMermaidOnNextLayout = isMermaidDocumentPath(wpath);
+                app.contentHeight = 0;
+                app.docText.clear();
+                app.docTextLower.clear();
+                app.searchMatches.clear();
+                app.layoutDirty = true;
+                updateFileWriteTime(app);
+                updateWindowTitle(app);
             }
         }
+        InvalidateRect(hwnd, nullptr, FALSE);
     }
     DragFinish(hDrop);
 }
@@ -1105,7 +1130,7 @@ void handleFileWatchTimer(App& app, HWND hwnd) {
             if (file) {
                 std::stringstream buffer;
                 buffer << file.rdbuf();
-                auto result = app.parser.parse(buffer.str());
+                auto result = parseDocument(app.parser, buffer.str(), app.currentFile);
                 if (result.success) {
                     float savedScroll = app.scrollY;
                     float savedTargetScroll = app.targetScrollY;
