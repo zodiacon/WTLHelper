@@ -228,6 +228,9 @@ void handleLinkClick(App& app) {
         scrollToHeadingId(app, app.hoveredLink.substr(1));
     }
     else {
+        if (!app.host || !app.host->OnLinkClicked(app.hoveredLink.c_str()))
+            openUrl(app.hoveredLink);
+
         openUrl(app.hoveredLink);
     }
 }

@@ -30,6 +30,9 @@ public:
     virtual void OnDirtyStateChanged(bool dirty) {}
     virtual void OnZoomChanged(float zoom) {}
     virtual void OnThemeChanged(int themeIndex) {}
+    virtual bool OnLinkClicked(const char* link) {
+        return false;
+    }
 };
 
 // Timing helpers
