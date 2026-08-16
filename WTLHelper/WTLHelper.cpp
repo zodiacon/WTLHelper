@@ -170,6 +170,18 @@ bool WTLHelper::SwitchToMode(HWND hWnd) {
 	return SwitchToMode(DarkModeKind::System, hWnd);
 }
 
+void WTLHelper::SetColorTone(ColorTone tone, HWND hWnd) {
+	DarkMode::setColorTone(static_cast<int>(tone));
+	if (hWnd) {
+		g_ThemeChanged = true;
+		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
+	}
+}
+
+ColorTone WTLHelper::GetColorTone() noexcept {
+	return static_cast<ColorTone>(DarkMode::getColorTone());
+}
+
 bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count) {
 	ATLASSERT(::IsMenu(menu));
 
@@ -239,4 +251,14 @@ bool WTLHelper::SetDarkTone(DarkMode::ColorTone tone, HWND hWnd) {
 
 DarkMode::ColorTone WTLHelper::GetDarkTone() noexcept {
 	return static_cast<DarkMode::ColorTone>(DarkMode::getColorTone());
+}
+
+bool WTLHelper::InvokeFontDialog(CFontDialog& dlg) {
+	auto mode = WTLHelper::DarkModeType();
+	WTLHelper::SwitchToMode(DarkModeKind::Light, nullptr);
+	WTLHelper::SuspendHook();
+	auto ok = dlg.DoModal() == IDOK;
+	WTLHelper::ResumeHook();
+	WTLHelper::SwitchToMode(mode, nullptr);
+	return ok;
 }

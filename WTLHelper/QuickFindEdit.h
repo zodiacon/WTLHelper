@@ -9,10 +9,8 @@ public:
 		MESSAGE_HANDLER(WM_HOTKEY, OnHotKey)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
-		MESSAGE_HANDLER(WM_SETFOCUS, OnKillFocus)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_CHAR, OnChar)
-		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnDialogColor)
-		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnDialogColor)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 	END_MSG_MAP()
 
@@ -21,6 +19,24 @@ public:
 			::DestroyIcon(m_hIcon);
 	}
 
+	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		DefWindowProc();
+		if (GetWindowTextLength() == 0 && !m_Watermark.IsEmpty() && ::GetFocus() != m_hWnd) {
+			CClientDC dc(m_hWnd);
+			dc.SetBkMode(TRANSPARENT);
+			dc.SetTextColor(m_WatermarkColor);
+			dc.SelectFont(GetFont());
+			CRect rc;
+			GetClientRect(&rc);
+			rc.left += 2;
+			if (m_hIcon) {
+				dc.DrawIconEx(rc.left, rc.Height() / 2 - 8, m_hIcon, 16, 16);
+				rc.left += 20;
+			}
+			dc.DrawText(m_Watermark, -1, &rc, DT_VCENTER | DT_SINGLELINE | DT_LEFT);
+		}
+		return 0;
+	}
 	bool SetHotKey(UINT modifiers, UINT virtKey) {
 		if (m_HotKeyId)
 			::UnregisterHotKey(m_hWnd, 1);
@@ -33,6 +49,7 @@ public:
 
 	void SetWatermark(PCWSTR watermark) {
 		m_Watermark = watermark;
+		Invalidate();
 	}
 
 	void SetTextChangeDelay(UINT ms) {
@@ -41,6 +58,7 @@ public:
 
 	void SetWatermarkIcon(HICON hIcon) {
 		m_hIcon = hIcon;
+		Invalidate();
 	}
 
 	LRESULT OnGetDlgCode(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
@@ -61,36 +79,15 @@ public:
 		return 0;
 	}
 
-	LRESULT OnDialogColor(UINT, WPARAM, LPARAM, BOOL&) {
-		return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
-	}
-
-	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (GetWindowTextLength() == 0 && !m_Watermark.IsEmpty() && ::GetFocus() != m_hWnd) {
-			CPaintDC dc(m_hWnd);
-			dc.SetBkMode(TRANSPARENT);
-			dc.SetTextColor(m_WatermarkColor);
-			dc.SelectFont(GetFont());
-			CRect rc;
-			GetClientRect(&rc);
-			rc.left += 4;
-			if (m_hIcon) {
-				dc.DrawIconEx(rc.left, rc.Height() / 2 - 8, m_hIcon, 16, 16);
-				rc.left += 20;
-			}
-			dc.DrawText(m_Watermark, -1, &rc, DT_VCENTER | DT_SINGLELINE);
-		}
-		else {
-			DefWindowProc();
-		}
+	LRESULT OnSetFocus(UINT msg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+		SetSelAll();
+		bHandled = FALSE;
 		return 0;
 	}
 
 	LRESULT OnKillFocus(UINT msg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
-		if (!m_Watermark.IsEmpty())
-			Invalidate();
-		if (msg == WM_SETFOCUS)
-			SetSelAll();
+		Invalidate();
+	
 		bHandled = FALSE;
 		return 0;
 	}

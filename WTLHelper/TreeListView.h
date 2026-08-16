@@ -197,14 +197,15 @@ public:
 		return TRUE;
 	}
 
-	BOOL SetSubItemText(HTREEITEM hItem, int nSubItem, LPCTSTR pstrString) {
+	BOOL SetSubItemText(HTREEITEM hItem, int nSubItem, LPCTSTR pstrString, DWORD format = TLVIFMT_LEFT) {
 		auto p = static_cast<T*>(this);
 		ATLASSERT(::IsWindow(p->m_hWnd));
 		ATLASSERT(hItem);
 		ATLASSERT(!::IsBadStringPtr(pstrString, (UINT)-1));
 		TLVITEM itm = { 0 };
 		itm.iSubItem = nSubItem;
-		itm.mask = TLVIF_TEXT;
+		itm.mask = TLVIF_TEXT | TLVIF_FORMAT;
+		itm.format = format;
 		itm.pszText = const_cast<LPTSTR>(pstrString);
 		return SetSubItem(hItem, &itm);
 	}
@@ -416,11 +417,22 @@ public:
 	}
 
 	LRESULT OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
-		// Do not allow the TreeView control to initialize here! 
+		// Do not allow the TreeView control to initialize here!
 		// We are creating new child controls ourselves in the _Init() method.
 		_Init();
 		return 0;
 	}
+
+	bool AddColumn(PCWSTR text, int width, DWORD format = HDF_LEFT) {
+		auto header = GetHeaderControl();
+		HDITEM col;
+		col.mask = HDI_FORMAT | HDI_TEXT | HDI_WIDTH;
+		col.fmt = format;
+		col.cxy = width;
+		col.pszText = (PWSTR)text;
+		return header.InsertItem(header.GetItemCount(), &col);
+	}
+
 	LRESULT OnSettingChange(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		if (!m_fontHeader.IsNull()) 
 			m_fontHeader.DeleteObject();
@@ -907,7 +919,7 @@ public:
 							}
 						}
 						else {
-							COLORREF clrBack = CLR_NONE;// m_ctrlTree.GetBkColor();
+							COLORREF clrBack = m_ctrlTree.GetBkColor();
 							if (clrBack == CLR_NONE) clrBack = ::GetSysColor(COLOR_WINDOW);
 							if (((*pVal)[0]->mask & TLVIF_COLOR) && ((*pVal)[0]->clrBack != CLR_NONE))clrBack = (*pVal)[0]->clrBack;
 							dc.SetBkColor(clrBack);
@@ -915,8 +927,8 @@ public:
 					}
 				}
 				else {
-					COLORREF clrBack = CLR_NONE;// m_ctrlTree.GetBkColor();
-					if (clrBack == CLR_NONE) 
+					COLORREF clrBack = m_ctrlTree.GetBkColor();
+					if (clrBack == CLR_NONE)
 						clrBack = ::GetSysColor(COLOR_WINDOW);
 					dc.SetBkColor(bSelected ? m_clrSelection : clrBack);
 					dc.SetTextColor(clrText);
@@ -954,6 +966,12 @@ public:
 class CTreeListViewCtrl : public CTreeListViewImpl<CTreeListViewCtrl> {
 public:
 	DECLARE_WND_CLASS(_T("WTL_TreeListView"));
+};
+
+// Alternate name kept for source compatibility with existing consumers.
+class CTreeListView : public CTreeListViewImpl<CTreeListView> {
+public:
+	DECLARE_WND_CLASS(L"WTL_TreeListView")
 };
 
 
