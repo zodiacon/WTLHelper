@@ -40,5 +40,6 @@ struct WTLHelper final {
 	static int ResumeHook() noexcept;
 	static bool SetDarkTone(DarkMode::ColorTone tone, HWND hWnd = nullptr);
 	static DarkMode::ColorTone GetDarkTone() noexcept;
+	static bool InvokeFontDialog(CFontDialog& dlg);
 };
 
