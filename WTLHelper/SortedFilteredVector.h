@@ -35,15 +35,17 @@ public:
 	}
 
 	void push_back(const T& value) {
+		auto index = m_items.size();
 		m_items.push_back(value);
-		if (m_Filter == nullptr || m_Filter(value, m_items.size() - 1))
-			m_indices.push_back(m_indices.size());
+		if (m_Filter == nullptr || m_Filter(m_items.back(), index))
+			m_indices.push_back(index);
 	}
 
 	void push_back(T&& value) {
-		if (m_Filter == nullptr || m_Filter(value, m_items.size() - 1))
-			m_indices.push_back(m_indices.size());
+		auto index = m_items.size();
 		m_items.push_back(std::move(value));
+		if (m_Filter == nullptr || m_Filter(m_items.back(), index))
+			m_indices.push_back(index);
 	}
 
 	void shrink_to_fit() {
@@ -170,14 +172,10 @@ public:
 	}
 
 	bool erase(size_t index) {
-		if (index >= m_items.size())
+		if (index >= m_indices.size())
 			return false;
 
-		m_items.erase(m_items.begin() + m_indices[index]);
-		m_indices.erase(m_indices.begin() + index);
-		for (; index < m_indices.size(); index++)
-			m_indices[index]--;
-
+		Remove(index);
 		return true;
 	}
 
