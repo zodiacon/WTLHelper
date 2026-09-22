@@ -70,6 +70,24 @@ BOOL CGraphGrid::OnEraseBkgnd(CDCHandle) {
 }
 
 LRESULT CGraphGrid::OnChildNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+    auto* nm = reinterpret_cast<NMHDR*>(lParam);
+
+    // Mirror the hovered slot onto the other tiles. m_SyncingHover stops the
+    // notifications that mirroring itself raises from bouncing back.
+    if (m_SharedCrosshair && !m_SyncingHover && nm && nm->code == GCN_HOVERSAMPLE) {
+        auto* hn = reinterpret_cast<GRAPHHOVERNOTIFY*>(lParam);
+
+        m_SyncingHover = true;
+        for (auto& g : m_Graphs) {
+            if (!g->m_hWnd || g->m_hWnd == nm->hwndFrom) continue;
+            // Crosshair and dot on the siblings, but only one readout box --
+            // the one on the tile actually under the pointer.
+            if (hn->SampleIndex >= 0) g->SetHoverSample(hn->SampleIndex, false, false);
+            else                      g->ClearHoverSample();
+        }
+        m_SyncingHover = false;
+    }
+
     // Pass the tiles' notifications up unchanged; hosts identify them by idFrom.
     HWND parent = GetParent();
     if (!parent) {
@@ -78,6 +96,16 @@ LRESULT CGraphGrid::OnChildNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&
     }
     bHandled = TRUE;
     return ::SendMessage(parent, uMsg, wParam, lParam);
+}
+
+void CGraphGrid::SetSharedCrosshair(bool enable) {
+    m_SharedCrosshair = enable;
+    if (enable) return;
+
+    m_SyncingHover = true;
+    for (auto& g : m_Graphs)
+        if (g->m_hWnd) g->ClearHoverSample();
+    m_SyncingHover = false;
 }
 
 // ---- Creation ----------------------------------------------------------------

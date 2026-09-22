@@ -2,14 +2,19 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <psapi.h>
 #include "GraphControl.h"
 #include "GraphGrid.h"
+#include "CompositionBar.h"
 
 #pragma comment(lib, "GraphControl.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "psapi.lib")
 
 #include <iterator>
+#include <thread>
+#include <algorithm>
 
 using namespace GraphCtrl;
 
@@ -18,6 +23,7 @@ static constexpr int IDC_CPU    = 101;
 static constexpr int IDC_MEM    = 102;
 static constexpr int IDC_STATUS = 103;
 static constexpr int IDC_CORES  = 104;   // base id for the per-core tiles
+static constexpr int IDC_COMP   = 4000;  // composition bar (past the tile ids)
 
 // Commands
 static constexpr int IDC_PAUSE      = 200;
@@ -47,17 +53,23 @@ static constexpr int IDC_SAVEPNG    = 223;
 static constexpr int IDC_STALL      = 224;
 static constexpr int IDC_ANIMATE    = 225;
 static constexpr int IDC_BIGFONT    = 226;
+static constexpr int IDC_WORKER     = 227;
+static constexpr int IDC_COMPVERT   = 228;
 
 static constexpr UINT_PTR TIMER_MEMORY = 1;
 
 static CGraphControl g_cpu;      // pull mode: the control asks for samples
 static CGraphControl g_mem;      // push mode: this app feeds it from its own timer
 static CGraphGrid    g_cores;    // one tile per logical processor
+static CCompositionBar g_comp;   // memory composition strip
 static HWND          g_status = nullptr;
 
 static SeriesId g_cpuUser   = InvalidSeries;
 static SeriesId g_cpuKernel = InvalidSeries;
-static SeriesId g_memInUse  = InvalidSeries;
+static SeriesId  g_memInUse  = InvalidSeries;
+static SegmentId g_segInUse  = InvalidSegment;
+static SegmentId g_segCached = InvalidSegment;
+static SegmentId g_segFree   = InvalidSegment;
 
 static bool   g_paused    = false;
 static UINT   g_interval  = 1000;
@@ -69,6 +81,7 @@ static DWORD  g_coreCount = 1;
 static CGraphControl* g_menuTarget = nullptr;   // graph the context menu came from
 static bool   g_animate  = true;
 static bool   g_bigFont  = false;
+static bool   g_compVert = false;
 static UINT_PTR g_hoverFrom = 0;   // which graph the hover reading belongs to
 
 // The style both graphs are created with, and the one the View menu edits.
@@ -175,6 +188,29 @@ static float SampleMemoryInUse() {
     return static_cast<float>(ms.ullTotalPhys - ms.ullAvailPhys);
 }
 
+// Roughly the Task Manager split: what is committed, what the system cache
+// holds (reclaimable), and what is untouched. SystemCache is an approximation
+// -- the exact standby/modified breakdown is not in a documented API.
+static void SampleComposition(float& inUse, float& cached, float& freeBytes) {
+    inUse = cached = freeBytes = 0.0f;
+
+    MEMORYSTATUSEX ms{ sizeof(ms) };
+    if (!GlobalMemoryStatusEx(&ms)) return;
+
+    const double total = static_cast<double>(ms.ullTotalPhys);
+    const double avail = static_cast<double>(ms.ullAvailPhys);
+
+    double cache = 0;
+    PERFORMANCE_INFORMATION pi{ sizeof(pi) };
+    if (GetPerformanceInfo(&pi, sizeof(pi)))
+        cache = static_cast<double>(pi.SystemCache) * pi.PageSize;
+
+    cache = std::min(cache, avail);            // only the reclaimable part counts here
+    inUse     = static_cast<float>(total - avail);
+    cached    = static_cast<float>(cache);
+    freeBytes = static_cast<float>(avail - cache);
+}
+
 static float TotalPhysicalMemory() {
     MEMORYSTATUSEX ms{ sizeof(ms) };
     return GlobalMemoryStatusEx(&ms) ? static_cast<float>(ms.ullTotalPhys) : 1.0f;
@@ -262,6 +298,7 @@ static void SyncMenu(HWND hwnd) {
     check(IDC_PERCORE,    g_showCores);
     check(IDC_ANIMATE,    g_animate);
     check(IDC_BIGFONT,    g_bigFont);
+    check(IDC_COMPVERT,   g_compVert);
 
     const int hist = (g_history == 60) ? IDC_HIST60 : (g_history == 120) ? IDC_HIST120 : IDC_HIST300;
     CheckMenuRadioItem(menu, IDC_HIST60, IDC_HIST300, hist, MF_BYCOMMAND);
@@ -318,16 +355,28 @@ static void SetHistory(HWND hwnd, size_t samples) {
 }
 
 static void LayoutChildren(int w, int h) {
-    const int sbH = 22;
-    const int graphH = (h - sbH) / 2;
-    const int lowerH = h - sbH - graphH;
+    const int sbH   = 22;
+    const int compH = 74;    // horizontal: a strip along the bottom
+    const int compW = 210;   // vertical: a column down the right
+
+    const int graphW = g_compVert ? w - compW : w;
+    const int rest   = g_compVert ? (h - sbH) : (h - sbH - compH);
+    const int graphH = rest / 2;
+    const int lowerH = rest - graphH;
 
     if (g_cpu.m_hWnd)
-        SetWindowPos(g_cpu.m_hWnd, nullptr, 0, 0, w, graphH, SWP_NOZORDER);
+        SetWindowPos(g_cpu.m_hWnd, nullptr, 0, 0, graphW, graphH, SWP_NOZORDER);
     if (g_mem.m_hWnd)
-        SetWindowPos(g_mem.m_hWnd, nullptr, 0, graphH, w, lowerH, SWP_NOZORDER);
+        SetWindowPos(g_mem.m_hWnd, nullptr, 0, graphH, graphW, lowerH, SWP_NOZORDER);
     if (g_cores.m_hWnd)
-        SetWindowPos(g_cores.m_hWnd, nullptr, 0, graphH, w, lowerH, SWP_NOZORDER);
+        SetWindowPos(g_cores.m_hWnd, nullptr, 0, graphH, graphW, lowerH, SWP_NOZORDER);
+
+    if (g_comp.m_hWnd) {
+        if (g_compVert)
+            SetWindowPos(g_comp.m_hWnd, nullptr, graphW, 0, compW, h - sbH, SWP_NOZORDER);
+        else
+            SetWindowPos(g_comp.m_hWnd, nullptr, 0, graphH + lowerH, w, compH, SWP_NOZORDER);
+    }
     if (g_status)
         SendMessage(g_status, WM_SIZE, 0, 0);
 }
@@ -407,6 +456,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_cores.SetGraphCount(g_coreCount);
         g_cores.SetSampleSource([](std::vector<float>& v) { SamplePerCore(v); });
 
+        // ---- Memory composition strip ----
+        g_comp.Create(hwnd, 0, 0, rc.right, 70, WS_CHILD | WS_VISIBLE, CBS_DEFAULT, IDC_COMP);
+        g_segInUse  = g_comp.AddSegment(L"In use", RGB(139, 92, 196));
+        g_segCached = g_comp.AddSegment(L"Cached", RGB(96, 118, 170));
+        g_segFree   = g_comp.AddSegment(L"Free",   RGB(64, 64, 72));
+        g_comp.SetTitle(L"Memory composition");
+        g_comp.SetValueFormatter(Format::Bytes);
+        g_comp.SetTotal(g_totalPhys);
+
         g_status = CreateWindowEx(0, STATUSCLASSNAME, nullptr,
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
             0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)IDC_STATUS, nullptr, nullptr);
@@ -422,6 +480,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_TIMER:
         if (wParam == TIMER_MEMORY) {
             g_mem.PushSample(g_memInUse, SampleMemoryInUse());
+
+            float inUse = 0, cached = 0, freeBytes = 0;
+            SampleComposition(inUse, cached, freeBytes);
+            const float composition[] = { inUse, cached, freeBytes };
+            g_comp.SetValues(composition, 3);
+
             UpdateStatus();
         }
         return 0;
@@ -534,11 +598,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_cpu.SetTheme(GraphTheme::Dark());
             g_mem.SetTheme(GraphTheme::Dark());
             g_cores.SetTheme(GraphTheme::Dark());
+            g_comp.SetTheme(GraphTheme::Dark());
             break;
         case IDC_LIGHT:
             g_cpu.SetTheme(GraphTheme::Light());
             g_mem.SetTheme(GraphTheme::Light());
             g_cores.SetTheme(GraphTheme::Light());
+            g_comp.SetTheme(GraphTheme::Light());
             break;
         case IDC_STALL: {
             // Block the UI thread outright. The control notices the intervals
@@ -562,14 +628,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_cpu.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
                 g_mem.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
                 g_cores.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
+                g_comp.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
             }
             else {
                 g_cpu.ResetFont();
                 g_mem.ResetFont();
                 g_cores.SetFont(nullptr);
+                g_comp.ResetFont();
             }
             SyncMenu(hwnd);
             break;
+        case IDC_WORKER: {
+            // Ten samples from a background thread, straight into the CPU graph
+            // through PostSample -- no locking, no touching the UI from there.
+            SetWindowText(g_status, L"Posting samples from a worker thread...");
+            std::thread([] {
+                for (int i = 0; i < 10; i++) {
+                    const float spike[] = { 20.0f + i * 6.0f, 5.0f };
+                    g_cpu.PostSamples(spike, 2);
+                    Sleep(100);
+                }
+            }).detach();
+            break;
+        }
+        case IDC_COMPVERT: {
+            g_compVert = !g_compVert;
+            g_comp.SetVertical(g_compVert);
+
+            CRect rc;
+            GetClientRect(hwnd, &rc);
+            LayoutChildren(rc.Width(), rc.Height());
+            SyncMenu(hwnd);
+            break;
+        }
         case IDC_COPY: {
             CGraphControl* target = g_menuTarget ? g_menuTarget : &g_cpu;
             SetWindowText(g_status, target->CopyImageToClipboard()
@@ -690,8 +781,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         { FVIRTKEY | FCONTROL, 'C', IDC_COPY },
         { FVIRTKEY | FCONTROL, 'S', IDC_SAVEPNG },
         { FVIRTKEY,      'K', IDC_STALL },
+        { FVIRTKEY,      'W', IDC_WORKER },
         { FVIRTKEY,      'Y', IDC_ANIMATE },
         { FVIRTKEY,      'Z', IDC_BIGFONT },
+        { FVIRTKEY,      'U', IDC_COMPVERT },
         { FVIRTKEY,      'D', IDC_DARK },
         { FVIRTKEY,      'L', IDC_LIGHT },
     };

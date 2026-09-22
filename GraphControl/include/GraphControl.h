@@ -72,6 +72,9 @@ constexpr wchar_t WC_GRAPHCONTROL[] = L"GraphControl";
 // Default look: Task Manager style, fixed 0..100 range.
 #define GCS_DEFAULT  (GCS_GRID | GCS_FILL | GCS_AXISLABELS)
 
+// Private: carries samples posted from another thread to the UI thread.
+constexpr UINT WM_GRAPHPOSTSAMPLE = WM_APP + 0x100;
+
 // Fills one value per series, in AddSeries order. Installed with
 // SetSampleSource to let the control pull its own data on each timer tick.
 using SampleSourceFn = std::function<void(std::vector<float>& values)>;
@@ -95,6 +98,8 @@ public:
         MSG_WM_KEYDOWN(OnKeyDown)
         MSG_WM_CONTEXTMENU(OnContextMenu)
         MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
+        MESSAGE_HANDLER(WM_PRINTCLIENT, OnPrintClient)
+        MESSAGE_HANDLER(WM_GRAPHPOSTSAMPLE, OnPostedSamples)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
         MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
     END_MSG_MAP()
@@ -114,6 +119,12 @@ public:
     void PushSample(SeriesId id, float value);
     void PushSamples(const float* values, size_t count);
     void PushSamples(const std::vector<float>& values);
+
+    // Safe from any thread: the values are copied and handed to the UI thread,
+    // which does the actual push. Returns false if the post could not be made
+    // (no window yet, or the queue refused it). The control must already exist.
+    bool PostSample(SeriesId id, float value);
+    bool PostSamples(const float* values, size_t count);
 
     void Clear();                       // drops samples, keeps the series
     void SetHistoryLength(size_t samples);
@@ -184,7 +195,10 @@ public:
     // reading can be studied without holding the mouse still. Clicking the
     // plot, or Escape, releases it.
     bool IsHoverPinned() const { return m_HoverPinned; }
-    void SetHoverSample(int sampleIndex, bool pin = true);
+    // showReadout == false marks the sample without the value box: what a
+    // grid wants on the tiles the pointer is not actually over.
+    void SetHoverSample(int sampleIndex, bool pin = true, bool showReadout = true);
+    void ClearHoverSample();
     void ClearHoverPin();
 
     // ---- Image export ----
@@ -224,6 +238,8 @@ private:
     void OnKeyDown(UINT vkey, UINT repeats, UINT flags);
     void OnContextMenu(CWindow wnd, CPoint pt);
     LRESULT OnGetDlgCode(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    LRESULT OnPrintClient(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    LRESULT OnPostedSamples(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     BOOL OnEraseBkgnd(CDCHandle dc);
     LRESULT OnDpiChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 

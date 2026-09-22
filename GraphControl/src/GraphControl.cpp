@@ -8,10 +8,17 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 #pragma comment(lib, "comctl32.lib")
 
 namespace GraphCtrl {
+
+// What a cross-thread PostSample/PostSamples hands to the UI thread.
+struct PostedSamples {
+    SeriesId           Id = InvalidSeries;   // InvalidSeries => all series
+    std::vector<float> Values;
+};
 
 constexpr UINT_PTR k_UpdateTimerId = 1;
 constexpr UINT_PTR k_RangeTimerId  = 2;
@@ -189,6 +196,34 @@ LRESULT CGraphControl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
     return DLGC_WANTARROWS;
 }
 
+LRESULT CGraphControl::OnPrintClient(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+    HDC dc = reinterpret_cast<HDC>(wParam);
+    CRect rc;
+    GetClientRect(&rc);
+    if (!dc || rc.IsRectEmpty()) {
+        bHandled = FALSE;
+        return 0;
+    }
+
+    UpdateValueText();
+    m_Renderer.RenderToDC(dc, rc, m_Data, m_Range, m_Theme,
+                          MakeRenderOptions(), m_Formatter);
+    return 0;
+}
+
+// Takes ownership of the payload posted by PostSample/PostSamples.
+LRESULT CGraphControl::OnPostedSamples(UINT, WPARAM, LPARAM lParam, BOOL&) {
+    std::unique_ptr<PostedSamples> posted(reinterpret_cast<PostedSamples*>(lParam));
+    if (!posted) return 0;
+
+    if (posted->Id == InvalidSeries)
+        PushSamples(posted->Values.data(), posted->Values.size());
+    else if (!posted->Values.empty())
+        PushSample(posted->Id, posted->Values.front());
+
+    return 0;
+}
+
 BOOL CGraphControl::OnEraseBkgnd(CDCHandle) {
     return TRUE;   // prevent flicker; the renderer fills the background
 }
@@ -261,6 +296,37 @@ void CGraphControl::PushSamples(const float* values, size_t count) {
 
 void CGraphControl::PushSamples(const std::vector<float>& values) {
     PushSamples(values.data(), values.size());
+}
+
+bool CGraphControl::PostSample(SeriesId id, float value) {
+    if (!m_hWnd) return false;
+
+    auto posted = std::make_unique<PostedSamples>();
+    posted->Id = id;
+    posted->Values.assign(1, value);
+
+    if (!::PostMessage(m_hWnd, WM_GRAPHPOSTSAMPLE, 0,
+                       reinterpret_cast<LPARAM>(posted.get())))
+        return false;                    // the payload is still ours
+
+    posted.release();                    // the handler frees it
+    return true;
+}
+
+bool CGraphControl::PostSamples(const float* values, size_t count) {
+    if (!m_hWnd) return false;
+
+    auto posted = std::make_unique<PostedSamples>();
+    posted->Id = InvalidSeries;
+    if (values && count)
+        posted->Values.assign(values, values + count);
+
+    if (!::PostMessage(m_hWnd, WM_GRAPHPOSTSAMPLE, 0,
+                       reinterpret_cast<LPARAM>(posted.get())))
+        return false;
+
+    posted.release();
+    return true;
 }
 
 void CGraphControl::Clear() {
@@ -580,7 +646,7 @@ void CGraphControl::OnSamplesPushed() {
     RequestInvalidate();
 }
 
-void CGraphControl::SetHoverSample(int sampleIndex, bool pin) {
+void CGraphControl::SetHoverSample(int sampleIndex, bool pin, bool showReadout) {
     if (sampleIndex < 0) {
         ClearHoverPin();
         ClearHover();
@@ -600,9 +666,14 @@ void CGraphControl::SetHoverSample(int sampleIndex, bool pin) {
         if (HWND parent = GetParent())
             ::SendMessage(parent, WM_NOTIFY, nmh.Hdr.idFrom, reinterpret_cast<LPARAM>(&nmh));
 
-        BuildHoverText(sampleIndex);
+        if (showReadout) BuildHoverText(sampleIndex);
+        else             m_HoverText.clear();
     }
     RequestInvalidate();
+}
+
+void CGraphControl::ClearHoverSample() {
+    ClearHover();
 }
 
 void CGraphControl::ClearHoverPin() {

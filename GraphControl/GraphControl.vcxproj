@@ -94,12 +94,14 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\CompositionBar.h" />
     <ClInclude Include="include\GraphControl.h" />
     <ClInclude Include="include\GraphData.h" />
     <ClInclude Include="include\GraphGrid.h" />
     <ClInclude Include="include\GraphRenderer.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CompositionBar.cpp" />
     <ClCompile Include="src\GraphControl.cpp" />
     <ClCompile Include="src\GraphData.cpp" />
     <ClCompile Include="src\GraphGrid.cpp" />

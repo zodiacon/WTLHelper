@@ -45,6 +45,12 @@ public:
     void SetLayout(int columns, int rows);   // 0, 0 = auto (roughly square)
     void SetSpacing(int pixels);
 
+    // Hovering one tile marks the same time slot on all of them, which is what
+    // makes "did these spike together?" answerable across a per-core view.
+    // On by default; the tiles need GCS_TOOLTIP for it to show.
+    void SetSharedCrosshair(bool enable);
+    bool HasSharedCrosshair() const { return m_SharedCrosshair; }
+
     // ---- Applied to every tile ----
     void SetRange(float minValue, float maxValue);
     void SetAutoScale(bool enable, float headroom = 1.1f);
@@ -118,6 +124,8 @@ private:
     std::vector<float> m_SampleScratch;
     UINT               m_UpdateInterval = 0;
     bool               m_Paused         = false;
+    bool               m_SharedCrosshair = true;
+    bool               m_SyncingHover    = false;   // guards against feedback
 };
 
 } // namespace GraphCtrl

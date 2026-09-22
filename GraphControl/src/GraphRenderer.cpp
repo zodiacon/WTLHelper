@@ -312,6 +312,7 @@ void GraphRenderer::DiscardDeviceResources() {
     m_Brush.Reset();
     m_RenderTarget.Reset();
     m_HwndTarget.Reset();
+    m_DcTarget.Reset();
 }
 
 void GraphRenderer::Resize(UINT width, UINT height) {
@@ -328,19 +329,39 @@ void GraphRenderer::SetDpi(float dpi) {
 
 // ---- Shared geometry ---------------------------------------------------------
 
+// Below this much height the chrome starts giving way to the plot.
+constexpr float k_CompactHeight = 120.0f;
+constexpr float k_FooterHeight  = 90.0f;
+constexpr float k_CompactPad    = 2.0f;
+
+GraphRenderer::ChromeMetrics GraphRenderer::MetricsFor(const RECT& clientRect,
+                                                       const RenderOptions& opt) const {
+    const float scale = 96.0f / m_Dpi;   // pixels -> DIPs
+    const float h = (clientRect.bottom - clientRect.top) * scale;
+
+    ChromeMetrics m;
+    m.TitleHeight = m_TitleHeight;
+    m.LabelHeight = m_LabelHeight;
+    m.Padding     = (h < k_CompactHeight) ? k_CompactPad : k_Padding;
+    m.ShowHeader  = (opt.Title && *opt.Title) || opt.AxisLabels;
+    // The footer only carries the axis minimum and the time span; on a tile
+    // that is a poor trade for a fifth of the plot.
+    m.ShowFooter  = opt.AxisLabels && h >= k_FooterHeight;
+    return m;
+}
+
 D2D1_RECT_F GraphRenderer::PlotRect(const RECT& clientRect, const RenderOptions& opt) const {
     const float scale = 96.0f / m_Dpi;   // pixels -> DIPs
     const float w = (clientRect.right - clientRect.left) * scale;
     const float h = (clientRect.bottom - clientRect.top) * scale;
 
-    const bool hasHeader = (opt.Title && *opt.Title) || opt.AxisLabels;
-    const bool hasFooter = opt.AxisLabels;
+    const ChromeMetrics m = MetricsFor(clientRect, opt);
 
     return D2D1::RectF(
-        k_Padding,
-        k_Padding + (hasHeader ? m_TitleHeight : 0.0f),
-        w - k_Padding,
-        h - k_Padding - (hasFooter ? m_LabelHeight : 0.0f));
+        m.Padding,
+        m.Padding + (m.ShowHeader ? m.TitleHeight : 0.0f),
+        w - m.Padding,
+        h - m.Padding - (m.ShowFooter ? m.LabelHeight : 0.0f));
 }
 
 float GraphRenderer::SampleSpacing(const D2D1_RECT_F& plot, size_t capacity) {
@@ -709,8 +730,14 @@ void GraphRenderer::DrawGeometry(const GraphData& data, const D2D1_RECT_F& plot,
 // ---- Overlays ----------------------------------------------------------------
 
 void GraphRenderer::DrawReferenceLines(const D2D1_RECT_F& plot, const AxisRange& range,
-                                       const RenderOptions& opt) {
+                                       const RenderOptions& opt, const ChromeMetrics& metrics) {
     if (!opt.RefLines || opt.RefLineCount == 0) return;
+
+    // Both the value overlay and these labels are right-aligned near the top,
+    // so a high reference line would otherwise print over the reading.
+    const bool haveValue = opt.ValueOverlay && opt.ValueText && *opt.ValueText &&
+                           (plot.bottom - plot.top >= m_ValueHeight + 8.0f);
+    const D2D1_RECT_F valueRect = ValueOverlayRect(plot, metrics);
 
     const float span = (range.Max - range.Min) != 0.0f ? (range.Max - range.Min) : 1.0f;
 
@@ -727,26 +754,36 @@ void GraphRenderer::DrawReferenceLines(const D2D1_RECT_F& plot, const AxisRange&
                                  rl.Dashed ? m_DashStyle.Get() : nullptr);
 
         if (!rl.Label.empty()) {
-            const D2D1_RECT_F rc = D2D1::RectF(plot.left, y - m_LabelHeight - 1.0f,
-                                               plot.right - 6.0f, y - 1.0f);
+            D2D1_RECT_F rc = D2D1::RectF(plot.left, y - m_LabelHeight - 1.0f,
+                                         plot.right - 6.0f, y - 1.0f);
+
+            // Sitting under the value overlay: put the label below its line.
+            if (haveValue && rc.top < valueRect.bottom && rc.bottom > valueRect.top)
+                rc = D2D1::RectF(plot.left, y + 1.0f, plot.right - 6.0f, y + 1.0f + m_LabelHeight);
+
             DrawLabel(rl.Label.c_str(), rc, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
     }
 }
 
+D2D1_RECT_F GraphRenderer::ValueOverlayRect(const D2D1_RECT_F& plot,
+                                            const ChromeMetrics&) const {
+    return D2D1::RectF(plot.left + k_LegendInset, plot.top + 6.0f,
+                       plot.right - k_LegendInset, plot.top + 6.0f + m_ValueHeight);
+}
+
 void GraphRenderer::DrawValueOverlay(const D2D1_RECT_F& plot, const RenderOptions& opt,
-                                     const GraphTheme& theme) {
+                                     const GraphTheme& theme, const ChromeMetrics& metrics) {
     if (!opt.ValueText || !*opt.ValueText) return;
     if (plot.bottom - plot.top < m_ValueHeight + 8.0f) return;
 
     m_Brush->SetColor(ColorrefToD2D(theme.ValueColor));
-    const D2D1_RECT_F rc = D2D1::RectF(plot.left + k_LegendInset, plot.top + 6.0f,
-                                       plot.right - k_LegendInset, plot.top + 6.0f + m_ValueHeight);
-    DrawLabel(opt.ValueText, rc, m_ValueFormat.Get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawLabel(opt.ValueText, ValueOverlayRect(plot, metrics), m_ValueFormat.Get(),
+              DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
 void GraphRenderer::DrawLegend(const D2D1_RECT_F& plot, const GraphData& data,
-                               const GraphTheme& theme) {
+                               const GraphTheme& theme, const ChromeMetrics&) {
     m_LabelFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
 
     int   rows   = 0;
@@ -891,12 +928,14 @@ void GraphRenderer::DrawLabel(const wchar_t* text, const D2D1_RECT_F& rc,
 
 void GraphRenderer::DrawChrome(const D2D1_RECT_F& plot, const D2D1_RECT_F& client,
                                const AxisRange& range, const GraphTheme& theme,
-                               const RenderOptions& opt, const ValueFormatFn& formatter) {
+                               const RenderOptions& opt, const ValueFormatFn& formatter,
+                               const ChromeMetrics& metrics) {
     m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
 
     // Header band: title on the left, axis maximum on the right.
-    const D2D1_RECT_F header = D2D1::RectF(client.left + k_Padding, plot.top - m_TitleHeight,
-                                           client.right - k_Padding, plot.top);
+    const D2D1_RECT_F header = D2D1::RectF(client.left + metrics.Padding,
+                                           plot.top - metrics.TitleHeight,
+                                           client.right - metrics.Padding, plot.top);
     DrawLabel(opt.Title, header, m_TitleFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
 
     if (!opt.AxisLabels) return;
@@ -906,9 +945,12 @@ void GraphRenderer::DrawChrome(const D2D1_RECT_F& plot, const D2D1_RECT_F& clien
     else           Format::Number(range.Max, buffer, _countof(buffer));
     DrawLabel(buffer, header, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
 
+    if (!metrics.ShowFooter) return;   // compact: the plot keeps that band
+
     // Footer band: time span on the left, axis minimum on the right.
-    const D2D1_RECT_F footer = D2D1::RectF(client.left + k_Padding, plot.bottom,
-                                           client.right - k_Padding, plot.bottom + m_LabelHeight);
+    const D2D1_RECT_F footer = D2D1::RectF(client.left + metrics.Padding, plot.bottom,
+                                           client.right - metrics.Padding,
+                                           plot.bottom + metrics.LabelHeight);
     DrawLabel(opt.TimeSpanText, footer, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
 
     buffer[0] = 0;
@@ -925,8 +967,9 @@ HRESULT GraphRenderer::DrawFrame(const RECT& clientRect, const GraphData& data,
     const D2D1_SIZE_F size = m_RenderTarget->GetSize();   // DIPs
     if (size.width <= 0.0f || size.height <= 0.0f) return S_OK;
 
-    const D2D1_RECT_F client = D2D1::RectF(0.0f, 0.0f, size.width, size.height);
-    const D2D1_RECT_F plot   = PlotRect(clientRect, opt);
+    const D2D1_RECT_F client  = D2D1::RectF(0.0f, 0.0f, size.width, size.height);
+    const D2D1_RECT_F plot    = PlotRect(clientRect, opt);
+    const ChromeMetrics metrics = MetricsFor(clientRect, opt);
 
     m_RenderTarget->BeginDraw();
     m_RenderTarget->Clear(ColorrefToD2D(theme.Background));
@@ -942,7 +985,7 @@ HRESULT GraphRenderer::DrawFrame(const RECT& clientRect, const GraphData& data,
 
         m_RenderTarget->PushAxisAlignedClip(plot, D2D1_ANTIALIAS_MODE_ALIASED);
         DrawGeometry(data, plot, opt);
-        DrawReferenceLines(plot, range, opt);
+        DrawReferenceLines(plot, range, opt, metrics);
         m_RenderTarget->PopAxisAlignedClip();
 
         m_Brush->SetColor(ColorrefToD2D(theme.BorderColor));
@@ -952,12 +995,12 @@ HRESULT GraphRenderer::DrawFrame(const RECT& clientRect, const GraphData& data,
         m_RenderTarget->DrawRectangle(border, m_Brush.Get(), 1.0f);
 
         if (opt.ValueOverlay)
-            DrawValueOverlay(plot, opt, theme);
+            DrawValueOverlay(plot, opt, theme, metrics);
         if (opt.Legend)
-            DrawLegend(plot, data, theme);
+            DrawLegend(plot, data, theme, metrics);
 
         DrawCrosshair(plot, data, range, opt, theme);
-        DrawChrome(plot, client, range, theme, opt, formatter);
+        DrawChrome(plot, client, range, theme, opt, formatter, metrics);
     }
 
     return m_RenderTarget->EndDraw();
@@ -1097,27 +1140,62 @@ HRESULT GraphRenderer::RenderOffscreen(IWICImagingFactory* wic, const RECT& clie
     hr = m_D2dFactory->CreateWicBitmapRenderTarget(bitmap.Get(), props, target.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    // Brushes belong to a target, so the offscreen pass gets its own set. The
-    // geometry cache comes from the factory and is reused as is.
+    hr = DrawFrameOn(target.Get(), clientRect, data, range, theme, opt, formatter);
+    if (FAILED(hr)) return hr;
+
+    *out = bitmap.Detach();
+    return S_OK;
+}
+
+HRESULT GraphRenderer::DrawFrameOn(ID2D1RenderTarget* target, const RECT& clientRect,
+                                   const GraphData& data, const AxisRange& range,
+                                   const GraphTheme& theme, const RenderOptions& opt,
+                                   const ValueFormatFn& formatter) {
+    if (!target) return E_POINTER;
+
+    // The geometry cache comes from the factory, so it carries over untouched;
+    // only the brushes have to be rebuilt against this target.
     auto savedTarget = m_RenderTarget;
     auto savedBrush  = m_Brush;
     auto savedFills  = std::move(m_FillBrushes);
     m_FillBrushes.clear();
 
     m_RenderTarget = target;
-    hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black),
-                                               m_Brush.ReleaseAndGetAddressOf());
+    HRESULT hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black),
+                                                       m_Brush.ReleaseAndGetAddressOf());
     if (SUCCEEDED(hr))
         hr = DrawFrame(clientRect, data, range, theme, opt, formatter);
 
     m_FillBrushes  = std::move(savedFills);
     m_Brush        = savedBrush;
     m_RenderTarget = savedTarget;
+    return hr;
+}
 
-    if (FAILED(hr)) return hr;
+bool GraphRenderer::RenderToDC(HDC dc, const RECT& clientRect, const GraphData& data,
+                               const AxisRange& range, const GraphTheme& theme,
+                               const RenderOptions& opt, const ValueFormatFn& formatter) {
+    if (!dc || !m_D2dFactory) return false;
 
-    *out = bitmap.Detach();
-    return S_OK;
+    if (!m_DcTarget) {
+        auto props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            m_Dpi, m_Dpi);
+        if (FAILED(m_D2dFactory->CreateDCRenderTarget(&props, m_DcTarget.GetAddressOf())))
+            return false;
+    }
+
+    m_DcTarget->SetDpi(m_Dpi, m_Dpi);
+    if (FAILED(m_DcTarget->BindDC(dc, &clientRect))) return false;
+
+    const HRESULT hr = DrawFrameOn(m_DcTarget.Get(), clientRect, data, range, theme,
+                                   opt, formatter);
+    if (hr == D2DERR_RECREATE_TARGET) {
+        m_DcTarget.Reset();
+        return false;
+    }
+    return SUCCEEDED(hr);
 }
 
 bool GraphRenderer::SaveImage(const wchar_t* path, const RECT& clientRect,
@@ -1156,6 +1234,251 @@ bool GraphRenderer::CopyToClipboard(HWND owner, const RECT& clientRect,
         return false;
 
     return PutDibOnClipboard(owner, bitmap.Get());
+}
+
+// ---- Composition bar ---------------------------------------------------------
+//
+// Not a time series: one band split into segments that sum to a total, the way
+// Task Manager shows memory composition. It shares this renderer so it gets the
+// same theme, fonts, DPI handling and device resources.
+
+constexpr float k_CompBarThickness = 44.0f;   // height, or width when vertical
+constexpr float k_CompMinLabelW    = 54.0f;
+constexpr float k_CompLabelGap     = 6.0f;
+constexpr float k_CompBarShare     = 0.35f;   // of the width, when labels sit beside it
+
+D2D1_RECT_F GraphRenderer::CompositionBarRect(const RECT& clientRect,
+                                              const CompositionOptions& opt) const {
+    const float scale = 96.0f / m_Dpi;
+    const float w = (clientRect.right - clientRect.left) * scale;
+    const float h = (clientRect.bottom - clientRect.top) * scale;
+
+    const float pad    = (h < k_CompactHeight) ? k_CompactPad : k_Padding;
+    const float header = (opt.Title && *opt.Title) ? m_TitleHeight : 0.0f;
+
+    const float top    = pad + header;
+    const float bottom = h - pad;
+    if (bottom - top <= 0.0f || w - pad * 2 <= 0.0f) return D2D1::RectF(0, 0, 0, 0);
+
+    if (opt.Vertical) {
+        // The bar runs the full height; labels, if any, sit to its right.
+        const float available = w - pad * 2;
+        float barWidth = std::min(k_CompBarThickness, std::max(6.0f, available));
+        float left     = pad;
+
+        if (opt.ShowLabels)
+            barWidth = std::min(barWidth, std::max(6.0f, available * k_CompBarShare));
+        else
+            left = pad + std::max(0.0f, (available - barWidth) / 2);   // centred
+
+        return D2D1::RectF(left, top, left + barWidth, bottom);
+    }
+
+    // Horizontal: the bar plus its label rows sit as one block, centred.
+    const float labels = opt.ShowLabels ? m_LabelHeight * 2 : 0.0f;
+    float barHeight = std::min(k_CompBarThickness, std::max(6.0f, bottom - top - labels));
+    const float blockTop = top + std::max(0.0f, (bottom - top - barHeight - labels) / 2);
+
+    return D2D1::RectF(pad, blockTop, w - pad, blockTop + barHeight);
+}
+
+int GraphRenderer::HitTestSegment(const RECT& clientRect,
+                                  const std::vector<CompositionSegment>& segments,
+                                  const CompositionOptions& opt, POINT pt) const {
+    if (segments.empty()) return -1;
+
+    const D2D1_RECT_F bar = CompositionBarRect(clientRect, opt);
+    if (bar.right - bar.left <= 0.0f) return -1;
+
+    const float scale = 96.0f / m_Dpi;
+    const float x = pt.x * scale;
+    const float y = pt.y * scale;
+    if (x < bar.left || x > bar.right || y < bar.top || y > bar.bottom) return -1;
+
+    float total = opt.Total;
+    if (total <= 0.0f) {
+        total = 0.0f;
+        for (const auto& s : segments) total += std::max(0.0f, s.Value);
+    }
+    if (total <= 0.0f) return -1;
+
+    const float span = opt.Vertical ? (bar.bottom - bar.top) : (bar.right - bar.left);
+    const float along = opt.Vertical ? y : x;
+    float cursor = opt.Vertical ? bar.top : bar.left;
+
+    for (size_t i = 0; i < segments.size(); i++) {
+        const float extent = (std::max(0.0f, segments[i].Value) / total) * span;
+        if (along >= cursor && along < cursor + extent) return static_cast<int>(i);
+        cursor += extent;
+    }
+    return static_cast<int>(segments.size()) - 1;   // rounding at the far edge
+}
+
+HRESULT GraphRenderer::DrawComposition(const RECT& clientRect,
+                                       const std::vector<CompositionSegment>& segments,
+                                       const GraphTheme& theme,
+                                       const CompositionOptions& opt,
+                                       const ValueFormatFn& formatter) {
+    const D2D1_SIZE_F size = m_RenderTarget->GetSize();
+    if (size.width <= 0.0f || size.height <= 0.0f) return S_OK;
+
+    const float scale  = 96.0f / m_Dpi;
+    const float pad    = ((clientRect.bottom - clientRect.top) * scale < k_CompactHeight)
+                         ? k_CompactPad : k_Padding;
+    const D2D1_RECT_F bar = CompositionBarRect(clientRect, opt);
+
+    m_RenderTarget->BeginDraw();
+    m_RenderTarget->Clear(ColorrefToD2D(theme.Background));
+
+    if (opt.Title && *opt.Title) {
+        m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+        DrawLabel(opt.Title,
+                  D2D1::RectF(pad, pad, size.width - pad, pad + m_TitleHeight),
+                  m_TitleFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
+    }
+
+    if (bar.right - bar.left >= 4.0f && bar.bottom - bar.top >= 4.0f) {
+        float total = opt.Total;
+        if (total <= 0.0f) {
+            total = 0.0f;
+            for (const auto& s : segments) total += std::max(0.0f, s.Value);
+        }
+
+        m_Brush->SetColor(ColorrefToD2D(theme.PlotColor));
+        m_RenderTarget->FillRectangle(bar, m_Brush.Get());
+
+        if (total > 0.0f) {
+            const bool  vertical = opt.Vertical;
+            const float span  = vertical ? (bar.bottom - bar.top) : (bar.right - bar.left);
+            const float limit  = vertical ? bar.bottom : bar.right;
+            float       cursor = vertical ? bar.top : bar.left;
+
+            for (size_t i = 0; i < segments.size(); i++) {
+                const CompositionSegment& seg = segments[i];
+                const float extent = (std::max(0.0f, seg.Value) / total) * span;
+                if (extent <= 0.0f) continue;
+
+                const float end = std::min(cursor + extent, limit);
+                const D2D1_RECT_F rc = vertical
+                    ? D2D1::RectF(bar.left, cursor, bar.right, end)
+                    : D2D1::RectF(cursor, bar.top, end, bar.bottom);
+
+                m_Brush->SetColor(ColorrefToD2D(seg.Color));
+                m_RenderTarget->FillRectangle(rc, m_Brush.Get());
+
+                // The hovered segment lifts slightly rather than changing hue.
+                if (static_cast<int>(i) == opt.HoverIndex) {
+                    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f));
+                    m_RenderTarget->FillRectangle(rc, m_Brush.Get());
+                }
+
+                if (end < limit) {
+                    m_Brush->SetColor(ColorrefToD2D(theme.Background, 0.9f));
+                    if (vertical)
+                        m_RenderTarget->DrawLine(D2D1::Point2F(bar.left, end),
+                                                 D2D1::Point2F(bar.right, end),
+                                                 m_Brush.Get(), 1.0f);
+                    else
+                        m_RenderTarget->DrawLine(D2D1::Point2F(end, bar.top),
+                                                 D2D1::Point2F(end, bar.bottom),
+                                                 m_Brush.Get(), 1.0f);
+                }
+
+                // Labels go under the segment, or beside it when vertical, and
+                // only where the segment is actually big enough to carry them.
+                const bool fits = vertical ? (extent >= m_LabelHeight * 2)
+                                           : (extent >= k_CompMinLabelW);
+                if (opt.ShowLabels && fits) {
+                    wchar_t value[64] = {};
+                    if (formatter) formatter(seg.Value, value, _countof(value));
+                    else           Format::Number(seg.Value, value, _countof(value));
+
+                    D2D1_RECT_F nameRect, valueRect;
+                    if (vertical) {
+                        const float textLeft  = bar.right + k_CompLabelGap;
+                        const float textRight = size.width - pad;
+                        // Centre the two rows on the segment band.
+                        const float rowsTop = cursor + (extent - m_LabelHeight * 2) / 2;
+                        nameRect  = D2D1::RectF(textLeft, rowsTop, textRight, rowsTop + m_LabelHeight);
+                        valueRect = D2D1::RectF(textLeft, rowsTop + m_LabelHeight,
+                                                textRight, rowsTop + m_LabelHeight * 2);
+                    }
+                    else {
+                        const float textLeft = cursor + 2.0f;
+                        nameRect  = D2D1::RectF(textLeft, bar.bottom, end, bar.bottom + m_LabelHeight);
+                        valueRect = D2D1::RectF(textLeft, bar.bottom + m_LabelHeight,
+                                                end, bar.bottom + m_LabelHeight * 2);
+                    }
+
+                    m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+                    DrawLabel(seg.Name.c_str(), nameRect, m_LabelFormat.Get(),
+                              DWRITE_TEXT_ALIGNMENT_LEADING);
+                    DrawLabel(value, valueRect, m_LabelFormat.Get(),
+                              DWRITE_TEXT_ALIGNMENT_LEADING);
+                }
+
+                cursor = end;
+            }
+        }
+
+        m_Brush->SetColor(ColorrefToD2D(theme.BorderColor));
+        const D2D1_RECT_F border = D2D1::RectF(
+            std::floor(bar.left) + 0.5f, std::floor(bar.top) + 0.5f,
+            std::floor(bar.right) - 0.5f, std::floor(bar.bottom) - 0.5f);
+        m_RenderTarget->DrawRectangle(border, m_Brush.Get(), 1.0f);
+
+        if (opt.HoverIndex >= 0 && opt.HoverText)
+            DrawReadout(opt.HoverText, opt.HoverX, opt.HoverY,
+                        D2D1::RectF(0, 0, size.width, size.height), theme);
+    }
+
+    return m_RenderTarget->EndDraw();
+}
+
+void GraphRenderer::RenderComposition(HWND hwnd, const RECT& clientRect,
+                                      const std::vector<CompositionSegment>& segments,
+                                      const GraphTheme& theme,
+                                      const CompositionOptions& opt,
+                                      const ValueFormatFn& formatter) {
+    if (FAILED(EnsureDeviceResources(hwnd, clientRect))) return;
+
+    if (DrawComposition(clientRect, segments, theme, opt, formatter) == D2DERR_RECREATE_TARGET)
+        DiscardDeviceResources();
+}
+
+bool GraphRenderer::RenderCompositionToDC(HDC dc, const RECT& clientRect,
+                                          const std::vector<CompositionSegment>& segments,
+                                          const GraphTheme& theme,
+                                          const CompositionOptions& opt,
+                                          const ValueFormatFn& formatter) {
+    if (!dc || !m_D2dFactory) return false;
+
+    if (!m_DcTarget) {
+        auto props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            m_Dpi, m_Dpi);
+        if (FAILED(m_D2dFactory->CreateDCRenderTarget(&props, m_DcTarget.GetAddressOf())))
+            return false;
+    }
+
+    m_DcTarget->SetDpi(m_Dpi, m_Dpi);
+    if (FAILED(m_DcTarget->BindDC(dc, &clientRect))) return false;
+
+    auto savedTarget = m_RenderTarget;
+    auto savedBrush  = m_Brush;
+    m_RenderTarget = m_DcTarget;
+
+    HRESULT hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black),
+                                                       m_Brush.ReleaseAndGetAddressOf());
+    if (SUCCEEDED(hr))
+        hr = DrawComposition(clientRect, segments, theme, opt, formatter);
+
+    m_Brush        = savedBrush;
+    m_RenderTarget = savedTarget;
+
+    if (hr == D2DERR_RECREATE_TARGET) m_DcTarget.Reset();
+    return SUCCEEDED(hr);
 }
 
 } // namespace GraphCtrl

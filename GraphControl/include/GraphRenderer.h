@@ -46,6 +46,32 @@ struct ReferenceLine {
     std::wstring Label;     // drawn right-aligned just above the line
 };
 
+using SegmentId = uint32_t;
+constexpr SegmentId InvalidSegment = UINT32_MAX;
+
+// One slice of a composition bar: a share of a whole, not a point in time.
+struct CompositionSegment {
+    SegmentId    Id    = InvalidSegment;
+    std::wstring Name;
+    float        Value = 0.0f;
+    COLORREF     Color = RGB(70, 130, 180);
+};
+
+struct CompositionOptions {
+    const wchar_t* Title      = nullptr;
+    bool           ShowLabels = true;
+    // Segments run left to right, or top to bottom when vertical -- either way
+    // in the order they were added, so a host that wants the other direction
+    // adds them the other way round.
+    bool           Vertical   = false;
+    float          Total      = 0.0f;   // 0 = the sum of the segments
+
+    int            HoverIndex = -1;
+    float          HoverX     = 0.0f;
+    float          HoverY     = 0.0f;
+    const wchar_t* HoverText  = nullptr;
+};
+
 // Everything the control tells the renderer about one frame.
 struct RenderOptions {
     bool  DrawGrid     = true;
@@ -115,6 +141,28 @@ public:
                          const AxisRange& range, const GraphTheme& theme,
                          const RenderOptions& opt, const ValueFormatFn& formatter);
 
+    // Draw into a DC the system handed us: WM_PRINTCLIENT, so the control shows
+    // up in PrintWindow captures and host print paths instead of coming out blank.
+    bool RenderToDC(HDC dc, const RECT& clientRect, const GraphData& data,
+                    const AxisRange& range, const GraphTheme& theme,
+                    const RenderOptions& opt, const ValueFormatFn& formatter);
+
+    // ---- Composition bar ----
+    void RenderComposition(HWND hwnd, const RECT& clientRect,
+                           const std::vector<CompositionSegment>& segments,
+                           const GraphTheme& theme, const CompositionOptions& opt,
+                           const ValueFormatFn& formatter);
+    bool RenderCompositionToDC(HDC dc, const RECT& clientRect,
+                               const std::vector<CompositionSegment>& segments,
+                               const GraphTheme& theme, const CompositionOptions& opt,
+                               const ValueFormatFn& formatter);
+
+    D2D1_RECT_F CompositionBarRect(const RECT& clientRect,
+                                   const CompositionOptions& opt) const;
+    int HitTestSegment(const RECT& clientRect,
+                       const std::vector<CompositionSegment>& segments,
+                       const CompositionOptions& opt, POINT pt) const;
+
     // The plot box for a client rect, in DIPs. The control uses it to turn a
     // cursor position into a sample index, so both agree on the mapping.
     D2D1_RECT_F PlotRect(const RECT& clientRect, const RenderOptions& opt) const;
@@ -123,6 +171,19 @@ public:
     static float SampleSpacing(const D2D1_RECT_F& plot, size_t capacity);
 
 private:
+    // Chrome sizes for one frame. Small plots -- a tile in a grid -- give up
+    // padding and the footer band rather than shrinking the type, so the text
+    // stays legible and the plot gets the space back.
+    struct ChromeMetrics {
+        float Padding     = 8.0f;
+        float TitleHeight = 18.0f;
+        float LabelHeight = 16.0f;
+        bool  ShowHeader  = true;
+        bool  ShowFooter  = true;
+    };
+
+    ChromeMetrics MetricsFor(const RECT& clientRect, const RenderOptions& opt) const;
+
     // Path geometry comes from the D2D factory, not the render target, so the
     // cache is device-independent and survives a lost device.
     struct SeriesGeometry {
@@ -152,6 +213,18 @@ private:
                       const AxisRange& range, const GraphTheme& theme,
                       const RenderOptions& opt, const ValueFormatFn& formatter);
 
+    // Draws one frame against a target that is not the window: the brushes
+    // belong to a target, so this swaps in a fresh set and restores after.
+    HRESULT DrawFrameOn(ID2D1RenderTarget* target, const RECT& clientRect,
+                        const GraphData& data, const AxisRange& range,
+                        const GraphTheme& theme, const RenderOptions& opt,
+                        const ValueFormatFn& formatter);
+
+    HRESULT DrawComposition(const RECT& clientRect,
+                            const std::vector<CompositionSegment>& segments,
+                            const GraphTheme& theme, const CompositionOptions& opt,
+                            const ValueFormatFn& formatter);
+
     // Swaps in a WIC-backed target, draws one frame, swaps back.
     HRESULT RenderOffscreen(IWICImagingFactory* wic, const RECT& clientRect,
                             const GraphData& data, const AxisRange& range,
@@ -172,13 +245,18 @@ private:
     void DrawGeometry(const GraphData& data, const D2D1_RECT_F& plot, const RenderOptions& opt);
 
     void DrawReferenceLines(const D2D1_RECT_F& plot, const AxisRange& range,
-                            const RenderOptions& opt);
+                            const RenderOptions& opt, const ChromeMetrics& metrics);
     void DrawValueOverlay(const D2D1_RECT_F& plot, const RenderOptions& opt,
-                          const GraphTheme& theme);
+                          const GraphTheme& theme, const ChromeMetrics& metrics);
     void DrawChrome(const D2D1_RECT_F& plot, const D2D1_RECT_F& client,
                     const AxisRange& range, const GraphTheme& theme,
-                    const RenderOptions& opt, const ValueFormatFn& formatter);
-    void DrawLegend(const D2D1_RECT_F& plot, const GraphData& data, const GraphTheme& theme);
+                    const RenderOptions& opt, const ValueFormatFn& formatter,
+                    const ChromeMetrics& metrics);
+    void DrawLegend(const D2D1_RECT_F& plot, const GraphData& data, const GraphTheme& theme,
+                    const ChromeMetrics& metrics);
+
+    // Where the current-value overlay sits, so other chrome can avoid it.
+    D2D1_RECT_F ValueOverlayRect(const D2D1_RECT_F& plot, const ChromeMetrics& metrics) const;
     void DrawCrosshair(const D2D1_RECT_F& plot, const GraphData& data,
                        const AxisRange& range, const RenderOptions& opt,
                        const GraphTheme& theme);
@@ -208,6 +286,7 @@ private:
     // Device-dependent. m_RenderTarget is what the drawing code talks to; it is
     // normally m_HwndTarget, and points at an offscreen target during an export.
     ComPtr<ID2D1HwndRenderTarget> m_HwndTarget;
+    ComPtr<ID2D1DCRenderTarget>   m_DcTarget;     // for WM_PRINTCLIENT
     ComPtr<ID2D1RenderTarget>     m_RenderTarget;
     ComPtr<ID2D1SolidColorBrush>  m_Brush;
     std::vector<std::pair<COLORREF, ComPtr<ID2D1LinearGradientBrush>>> m_FillBrushes;
