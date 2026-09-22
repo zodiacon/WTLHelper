@@ -18,6 +18,7 @@
 #define GCN_RANGECHANGED   1   // lParam -> GRAPHRANGENOTIFY*, auto-scale moved the Y range
 #define GCN_HOVERSAMPLE    2   // lParam -> GRAPHHOVERNOTIFY*, hovered sample changed
 #define GCN_GETTOOLTIP     3   // lParam -> GRAPHTOOLTIPNOTIFY*; fill SzText to override
+#define GCN_CONTEXTMENU    4   // lParam -> GRAPHCONTEXTNOTIFY*, right-click on the graph
 
 namespace GraphCtrl {
 
@@ -40,6 +41,14 @@ struct GRAPHTOOLTIPNOTIFY {
     wchar_t SzText[256];   // pre-filled with the default readout; host may override
 };
 
+// Pt is in screen coordinates, ready for TrackPopupMenu. SampleIndex is the
+// sample under the pointer, or -1 outside the plot.
+struct GRAPHCONTEXTNOTIFY {
+    NMHDR Hdr;
+    POINT Pt;
+    int   SampleIndex;
+};
+
 // Register the window class. Call once at startup (or on DLL attach).
 // Returns false if registration fails and the class does not already exist.
 bool Register(HINSTANCE hInstance);
@@ -57,6 +66,8 @@ constexpr wchar_t WC_GRAPHCONTROL[] = L"GraphControl";
 #define GCS_LEGEND      0x0020   // swatch and name per series, inside the plot
 #define GCS_STACKED     0x0040   // series accumulate instead of overlapping
 #define GCS_TOOLTIP     0x0080   // hover crosshair and value readout
+#define GCS_BARS        0x0100   // columns per sample instead of a line
+#define GCS_VALUEOVERLAY 0x0200  // large current reading inside the plot
 
 // Default look: Task Manager style, fixed 0..100 range.
 #define GCS_DEFAULT  (GCS_GRID | GCS_FILL | GCS_AXISLABELS)
@@ -80,6 +91,10 @@ public:
         MSG_WM_TIMER(OnTimer)
         MSG_WM_MOUSEMOVE(OnMouseMove)
         MSG_WM_MOUSELEAVE(OnMouseLeave)
+        MSG_WM_LBUTTONDOWN(OnLButtonDown)
+        MSG_WM_KEYDOWN(OnKeyDown)
+        MSG_WM_CONTEXTMENU(OnContextMenu)
+        MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
         MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
     END_MSG_MAP()
@@ -104,6 +119,15 @@ public:
     void SetHistoryLength(size_t samples);
     size_t GetHistoryLength() const;
 
+    // How far back a sample actually is, from the recorded times rather than
+    // from counting slots -- so a throttled timer or a suspend does not turn
+    // into a graph that quietly claims less time passed than did. Falls back to
+    // the nominal cadence before anything has been stamped.
+    float GetSampleAgeSeconds(int sampleIndex) const;
+
+    // Seconds the whole plot spans, by the same reckoning.
+    float GetHistorySeconds() const;
+
     GraphData&       GetData()       { return m_Data; }
     const GraphData& GetData() const { return m_Data; }
 
@@ -111,8 +135,26 @@ public:
     void      SetRange(float minValue, float maxValue);
     AxisRange GetRange() const { return m_Range; }
     void      SetAutoScale(bool enable, float headroom = 1.1f);
+
+    // Auto-scale eases the axis to its new maximum instead of snapping, and
+    // waits for several consecutive samples before shrinking, so one spike
+    // leaving the window does not make the whole plot jump. Growth is always
+    // immediate -- data must never be clipped. Pass 0 for an instant change.
+    void SetRangeAnimation(UINT milliseconds, int shrinkDelaySamples = 8);
     void      SetValueFormatter(ValueFormatFn formatter);
     void      SetGridDivisions(int columns, int rows);
+
+    // ---- Reference lines ----
+    // Horizontal markers at fixed values: thresholds, quotas, baselines.
+    RefLineId AddReferenceLine(float value, COLORREF color = RGB(214, 94, 94),
+                               std::wstring label = {}, bool dashed = true);
+    bool      RemoveReferenceLine(RefLineId id);
+    void      ClearReferenceLines();
+
+    // ---- Current-value overlay ----
+    // Which series the GCS_VALUEOVERLAY reading comes from. InvalidSeries (the
+    // default) means the first visible series, or the sum when stacked.
+    void SetValueOverlaySeries(SeriesId id);
 
     // ---- Control styles ----
     DWORD GetGraphStyle() const { return m_CtrlStyle; }
@@ -124,6 +166,12 @@ public:
     void SetUpdateInterval(UINT milliseconds);
     UINT GetUpdateInterval() const { return m_UpdateInterval; }
     void SetSampleSource(SampleSourceFn source);
+
+    // The cadence samples are expected to arrive at. SetUpdateInterval sets it
+    // too; a host driving its own timer sets it directly so the control can
+    // still tell when intervals have been missed.
+    void SetExpectedInterval(UINT milliseconds);
+    UINT GetExpectedInterval() const { return m_ExpectedInterval; }
     void Pause();
     void Resume();
     bool IsPaused() const { return m_Paused; }
@@ -132,11 +180,31 @@ public:
     // Samples back from the newest (0 = newest); -1 when nothing is hovered.
     int GetHoverSample() const { return m_HoverIndex; }
 
+    // A pinned crosshair stays put when the pointer moves or leaves, so a
+    // reading can be studied without holding the mouse still. Clicking the
+    // plot, or Escape, releases it.
+    bool IsHoverPinned() const { return m_HoverPinned; }
+    void SetHoverSample(int sampleIndex, bool pin = true);
+    void ClearHoverPin();
+
+    // ---- Image export ----
+    // Both redraw the current frame offscreen, so what you get is what you see.
+    bool SaveImage(const wchar_t* path);      // PNG
+    bool CopyImageToClipboard();              // CF_DIB
+
     // ---- Appearance ----
     void SetTitle(std::wstring title);
     void SetTimeSpanText(std::wstring text);   // bottom-left caption, e.g. "60 seconds"
     void SetTheme(const GraphTheme& theme);
     const GraphTheme& GetTheme() const { return m_Theme; }
+
+    // Type for the captions, title and current-value overlay. Sizes are in DIPs
+    // and the header, footer and overlay bands re-measure to match, so a bigger
+    // font gets more room rather than being clipped. A control with a custom
+    // font keeps its own text formats; the defaults are shared between graphs.
+    bool SetFont(const wchar_t* family, float labelSize = 11.0f,
+                 float titleSize = 12.5f, float valueSize = 22.0f);
+    void ResetFont();
 
     // ---- Painting ----
     void Refresh();          // immediate repaint without changing state
@@ -152,14 +220,22 @@ private:
     void OnTimer(UINT_PTR nIDEvent);
     void OnMouseMove(UINT nFlags, CPoint pt);
     void OnMouseLeave();
+    void OnLButtonDown(UINT nFlags, CPoint pt);
+    void OnKeyDown(UINT vkey, UINT repeats, UINT flags);
+    void OnContextMenu(CWindow wnd, CPoint pt);
+    LRESULT OnGetDlgCode(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     BOOL OnEraseBkgnd(CDCHandle dc);
     LRESULT OnDpiChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
     // ---- Internal helpers ----
     void RequestInvalidate();
+    void FillMissedIntervals();      // keeps the time axis honest after a stall
     void OnSamplesPushed();          // advances the grid phase, applies auto-scale
     void ApplyAutoScale();
+    void StartRangeAnimation(float target);
+    void StepRangeAnimation();
     void NotifyRangeChanged();
+    void UpdateValueText();
     void ClearHover();
     int  HitTestSample(CPoint pt) const;   // client pixels -> samples back from newest
     void BuildHoverText(int sampleIndex);
@@ -174,20 +250,35 @@ private:
 
     std::wstring m_Title;
     std::wstring m_TimeSpanText;
+    std::wstring m_ValueText;
+
+    std::vector<ReferenceLine> m_RefLines;
+    RefLineId                  m_NextRefLineId = 0;
+    SeriesId                   m_ValueSeries   = InvalidSeries;
 
     DWORD m_CtrlStyle = GCS_DEFAULT;
     int   m_GridCols  = 10;
     int   m_GridRows  = 5;
 
+    // Auto-scale easing.
+    float    m_RangeTarget     = 0.0f;
+    float    m_RangeFrom       = 0.0f;
+    uint64_t m_RangeAnimStart  = 0;
+    UINT     m_RangeAnimMs     = 250;
+    int      m_ShrinkDelay     = 8;
+    int      m_ShrinkVotes     = 0;
+
     SampleSourceFn     m_SampleSource;
     std::vector<float> m_SampleScratch;
-    UINT               m_UpdateInterval = 0;
+    UINT               m_UpdateInterval   = 0;
+    UINT               m_ExpectedInterval = 0;
     bool               m_Paused         = false;
     uint64_t           m_TotalSamples   = 0;
 
     int          m_HoverIndex    = -1;
     CPoint       m_HoverPt       = {};
     bool         m_TrackingMouse = false;
+    bool         m_HoverPinned   = false;
     std::wstring m_HoverText;
 
     int  m_UpdateDepth       = 0;
