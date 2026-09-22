@@ -1,9 +1,9 @@
-// GraphControl.cpp : Defines the functions for the static library.
+// NodeGraphControl.cpp : Defines the functions for the static library.
 //
 
 #define WIN32_LEAN_AND_MEAN
 
-#include "../include/GraphControl.h"
+#include "../include/NodeGraphControl.h"
 
 #include <commctrl.h>
 #include <memory>
@@ -13,7 +13,7 @@
 
 #pragma comment(lib, "comctl32.lib")
 
-namespace GraphCtrl {
+namespace NodeGraphCtrl {
 
 	// ---- Undo command types (private to this translation unit) -------------------
 
@@ -22,10 +22,10 @@ namespace GraphCtrl {
 		struct MoveCmd : UndoCmd {
 			NodeId Id;
 			float  OldX, OldY, NewX, NewY;
-			void Apply(GraphModel& m) override {
+			void Apply(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) { n->X = NewX; n->Y = NewY; }
 			}
-			void Revert(GraphModel& m) override {
+			void Revert(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) { n->X = OldX; n->Y = OldY; }
 			}
 		};
@@ -33,34 +33,34 @@ namespace GraphCtrl {
 		struct RenameCmd : UndoCmd {
 			NodeId       Id;
 			std::wstring OldLabel, NewLabel;
-			void Apply(GraphModel& m) override {
+			void Apply(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) n->Label = NewLabel;
 			}
-			void Revert(GraphModel& m) override {
+			void Revert(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) n->Label = OldLabel;
 			}
 		};
 
 		struct DeleteEdgeCmd : UndoCmd {
 			Edge Saved;
-			void Apply(GraphModel& m) override { m.RemoveEdge(Saved.Id); }
-			void Revert(GraphModel& m) override { m.RestoreEdge(Saved); }
+			void Apply(NodeGraphModel& m) override { m.RemoveEdge(Saved.Id); }
+			void Revert(NodeGraphModel& m) override { m.RestoreEdge(Saved); }
 		};
 
 		struct AddEdgeCmd : UndoCmd {
 			Edge Saved;
-			void Apply(GraphModel& m) override { m.RestoreEdge(Saved); }
-			void Revert(GraphModel& m) override { m.RemoveEdge(Saved.Id); }
+			void Apply(NodeGraphModel& m) override { m.RestoreEdge(Saved); }
+			void Revert(NodeGraphModel& m) override { m.RemoveEdge(Saved.Id); }
 		};
 
 		struct DeleteSelectionCmd : UndoCmd {
 			std::vector<Node> Nodes;
 			std::vector<Edge> Edges;
-			void Apply(GraphModel& m) override {
+			void Apply(NodeGraphModel& m) override {
 				for (const auto& e : Edges) m.RemoveEdge(e.Id);
 				for (const auto& n : Nodes) m.RemoveNode(n.Id);
 			}
-			void Revert(GraphModel& m) override {
+			void Revert(NodeGraphModel& m) override {
 				for (const auto& n : Nodes) m.RestoreNode(n);
 				for (const auto& e : Edges) m.RestoreEdge(e);
 			}
@@ -68,10 +68,10 @@ namespace GraphCtrl {
 
 		struct CompoundCmd : UndoCmd {
 			std::vector<std::unique_ptr<UndoCmd>> Cmds;
-			void Apply(GraphModel& m) override {
+			void Apply(NodeGraphModel& m) override {
 				for (auto& c : Cmds) c->Apply(m);
 			}
-			void Revert(GraphModel& m) override {
+			void Revert(NodeGraphModel& m) override {
 				for (auto it = Cmds.rbegin(); it != Cmds.rend(); ++it)
 					(*it)->Revert(m);
 			}
@@ -81,12 +81,12 @@ namespace GraphCtrl {
 			NodeId Id;
 			float  OldX, OldY, OldW, OldH;
 			float  NewX, NewY, NewW, NewH;
-			void Apply(GraphModel& m) override {
+			void Apply(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) {
 					n->X = NewX; n->Y = NewY; n->Width = NewW; n->Height = NewH;
 				}
 			}
-			void Revert(GraphModel& m) override {
+			void Revert(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) {
 					n->X = OldX; n->Y = OldY; n->Width = OldW; n->Height = OldH;
 				}
@@ -96,11 +96,11 @@ namespace GraphCtrl {
 		struct PasteCmd : UndoCmd {
 			std::vector<Node> PastedNodes;
 			std::vector<Edge> PastedEdges;
-			void Apply(GraphModel& m) override {
+			void Apply(NodeGraphModel& m) override {
 				for (const auto& n : PastedNodes) m.RestoreNode(n);
 				for (const auto& e : PastedEdges) m.RestoreEdge(e);
 			}
-			void Revert(GraphModel& m) override {
+			void Revert(NodeGraphModel& m) override {
 				for (const auto& e : PastedEdges) m.RemoveEdge(e.Id);
 				for (const auto& n : PastedNodes) m.RemoveNode(n.Id);
 			}
@@ -156,40 +156,40 @@ namespace GraphCtrl {
 		};
 
 		static UINT GetClipboardFormat() {
-			static UINT s_fmt = ::RegisterClipboardFormatW(L"GraphControlClipboard");
+			static UINT s_fmt = ::RegisterClipboardFormatW(L"NodeGraphControlClipboard");
 			return s_fmt;
 		}
 
 	} // anonymous namespace
 
-	// ---- WM_GRAPHEDIT label edit subclass proc -----------------------------------
+	// ---- WM_NODEGRAPHEDIT label edit subclass proc -----------------------------------
 
 	static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
 		LPARAM lParam, UINT_PTR, DWORD_PTR dwRef) {
 		HWND parent = reinterpret_cast<HWND>(dwRef);
 		if (msg == WM_KEYDOWN) {
 			if (wParam == VK_ESCAPE) {
-				PostMessage(parent, WM_GRAPHEDIT, 0, 0);
+				PostMessage(parent, WM_NODEGRAPHEDIT, 0, 0);
 				return 0;
 			}
 			if (wParam == VK_RETURN && (GetKeyState(VK_SHIFT) & 0x8000)) {
-				PostMessage(parent, WM_GRAPHEDIT, 1, 0);
+				PostMessage(parent, WM_NODEGRAPHEDIT, 1, 0);
 				return 0;
 			}
 			// Plain Enter falls through → multiline edit inserts a newline.
 		}
 		if (msg == WM_KILLFOCUS) {
-			PostMessage(parent, WM_GRAPHEDIT, 1, 0);
+			PostMessage(parent, WM_NODEGRAPHEDIT, 1, 0);
 			return 0;
 		}
 		return DefSubclassProc(hwnd, msg, wParam, lParam);
 	}
 
-	// ---- CGraphControl : message handlers ----------------------------------------
+	// ---- CNodeGraphControl : message handlers ----------------------------------------
 
-	int CGraphControl::OnCreate(LPCREATESTRUCT pcs) {
-		m_DrawGrid = (pcs->style & GCS_GRID) != 0;
-		m_Model = std::make_unique<GraphModel>();
+	int CNodeGraphControl::OnCreate(LPCREATESTRUCT pcs) {
+		m_DrawGrid = (pcs->style & NGCS_GRID) != 0;
+		m_Model = std::make_unique<NodeGraphModel>();
 
 		if (FAILED(m_Renderer.Init(pcs->hInstance))) return -1;
 
@@ -213,7 +213,7 @@ namespace GraphCtrl {
 		return 0;
 	}
 
-	void CGraphControl::OnDestroy() {
+	void CNodeGraphControl::OnDestroy() {
 		CancelLabelEdit();
 		m_TooltipWnd = nullptr;
 		m_Renderer.Shutdown();
@@ -221,10 +221,10 @@ namespace GraphCtrl {
 
 	// ---- Notification helpers ------------------------------------------------
 
-	void CGraphControl::Notify(UINT code, NodeId nodeId, EdgeId edgeId) {
+	void CNodeGraphControl::Notify(UINT code, NodeId nodeId, EdgeId edgeId) {
 		HWND parent = ::GetParent(m_hWnd);
 		if (!parent) return;
-		GRAPHNOTIFY gn{};
+		NODEGRAPHNOTIFY gn{};
 		gn.Hdr.hwndFrom = m_hWnd;
 		gn.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
 		gn.Hdr.code = code;
@@ -233,64 +233,64 @@ namespace GraphCtrl {
 		::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
 	}
 
-	void CGraphControl::NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId) {
+	void CNodeGraphControl::NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId) {
 		HWND parent = ::GetParent(m_hWnd);
 		if (!parent) return;
-		GRAPHEDGENOTIFY gn{};
+		NODEGRAPHEDGENOTIFY gn{};
 		gn.Hdr.hwndFrom = m_hWnd;
 		gn.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
-		gn.Hdr.code = GCN_EDGEADDED;
+		gn.Hdr.code = NGCN_EDGEADDED;
 		gn.FromNode = from;
 		gn.ToNode = to;
 		gn.EdgeId = edgeId;
 		::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
 	}
 
-	void CGraphControl::NotifyUndoChanged() {
+	void CNodeGraphControl::NotifyUndoChanged() {
 		HWND parent = ::GetParent(m_hWnd);
 		if (!parent) return;
 		NMHDR hdr{};
 		hdr.hwndFrom = m_hWnd;
 		hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
-		hdr.code = GCN_UNDOCHANGED;
+		hdr.code = NGCN_UNDOCHANGED;
 		::SendMessage(parent, WM_NOTIFY, hdr.idFrom, reinterpret_cast<LPARAM>(&hdr));
 	}
 
 	// ---- Undo / selection helpers --------------------------------------------
 
-	void CGraphControl::PushUndo(std::unique_ptr<UndoCmd> cmd) {
+	void CNodeGraphControl::PushUndo(std::unique_ptr<UndoCmd> cmd) {
 		m_UndoStack.push_back(std::move(cmd));
 		m_RedoStack.clear();
 		NotifyUndoChanged();
 	}
 
-	void CGraphControl::RequestInvalidate() {
+	void CNodeGraphControl::RequestInvalidate() {
 		if (m_UpdateDepth > 0) m_PendingInvalidate = true;
 		else Invalidate(FALSE);
 	}
 
-	void CGraphControl::BeginUpdate() { ++m_UpdateDepth; }
+	void CNodeGraphControl::BeginUpdate() { ++m_UpdateDepth; }
 
-	void CGraphControl::EndUpdate() {
+	void CNodeGraphControl::EndUpdate() {
 		if (--m_UpdateDepth == 0 && m_PendingInvalidate) {
 			m_PendingInvalidate = false;
 			Invalidate(FALSE);
 		}
 	}
 
-	bool CGraphControl::IsSelected(NodeId id) const {
+	bool CNodeGraphControl::IsSelected(NodeId id) const {
 		return std::find(m_SelectedNodes.begin(), m_SelectedNodes.end(), id)
 			!= m_SelectedNodes.end();
 	}
 
-	void CGraphControl::FireSelChanged() {
+	void CNodeGraphControl::FireSelChanged() {
 		NodeId primary = m_SelectedNodes.empty() ? InvalidNode : m_SelectedNodes[0];
-		Notify(GCN_SELCHANGED, primary, m_SelectedEdge);
+		Notify(NGCN_SELCHANGED, primary, m_SelectedEdge);
 	}
 
 	// ---- Minimap helpers -----------------------------------------------------
 
-	MinimapConfig CGraphControl::MakeMinimapConfig(int cw, int ch) const {
+	MinimapConfig CNodeGraphControl::MakeMinimapConfig(int cw, int ch) const {
 		MinimapConfig cfg;
 		cfg.Visible = m_Minimap.Visible;
 		cfg.Width = m_Minimap.Width;
@@ -300,7 +300,7 @@ namespace GraphCtrl {
 		return cfg;
 	}
 
-	bool CGraphControl::MinimapScreenToGraph(const MinimapConfig& cfg, const GraphModel& model,
+	bool CNodeGraphControl::MinimapScreenToGraph(const MinimapConfig& cfg, const NodeGraphModel& model,
 		float sx, float sy, float& gxOut, float& gyOut) {
 		if (model.Nodes().empty()) return false;
 
@@ -329,7 +329,7 @@ namespace GraphCtrl {
 
 	// ---- Label edit ------------------------------------------------------------
 
-	void CGraphControl::CommitLabelEdit() {
+	void CNodeGraphControl::CommitLabelEdit() {
 		if (!m_LabelEdit) return;
 
 		int len = ::GetWindowTextLengthW(m_LabelEdit);
@@ -365,10 +365,10 @@ namespace GraphCtrl {
 
 			HWND parent = ::GetParent(m_hWnd);
 			if (parent) {
-				GRAPHLABELNOTIFY gln{};
+				NODEGRAPHLABELNOTIFY gln{};
 				gln.Hdr.hwndFrom = m_hWnd;
 				gln.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
-				gln.Hdr.code = GCN_LABELCHANGED;
+				gln.Hdr.code = NGCN_LABELCHANGED;
 				gln.NodeId = id;
 				wcsncpy_s(gln.SzNewLabel, text.c_str(), _TRUNCATE);
 				::SendMessage(parent, WM_NOTIFY, gln.Hdr.idFrom, reinterpret_cast<LPARAM>(&gln));
@@ -377,7 +377,7 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::CancelLabelEdit() {
+	void CNodeGraphControl::CancelLabelEdit() {
 		if (!m_LabelEdit) return;
 		::DestroyWindow(m_LabelEdit);
 		m_LabelEdit = nullptr;
@@ -386,7 +386,7 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::BeginEditLabel(NodeId id) {
+	void CNodeGraphControl::BeginEditLabel(NodeId id) {
 		if (m_LabelEdit) CommitLabelEdit();
 		Node* n = m_Model->GetNode(id);
 		if (!n) return;
@@ -429,13 +429,13 @@ namespace GraphCtrl {
 			reinterpret_cast<DWORD_PTR>(m_hWnd));
 	}
 
-	bool CGraphControl::IsEditingLabel() const {
+	bool CNodeGraphControl::IsEditingLabel() const {
 		return m_LabelEdit != nullptr;
 	}
 
 	// ---- Deletion helpers ----------------------------------------------------
 
-	bool CGraphControl::DeleteNode(NodeId id) {
+	bool CNodeGraphControl::DeleteNode(NodeId id) {
 		Node* n = m_Model->GetNode(id);
 		if (!n) return false;
 
@@ -453,12 +453,12 @@ namespace GraphCtrl {
 
 		PushUndo(std::move(cmd));
 		FireSelChanged();
-		Notify(GCN_NODEREMOVED, id, InvalidEdge);
+		Notify(NGCN_NODEREMOVED, id, InvalidEdge);
 		RequestInvalidate();
 		return true;
 	}
 
-	bool CGraphControl::DeleteEdge(EdgeId id) {
+	bool CNodeGraphControl::DeleteEdge(EdgeId id) {
 		const Edge* e = m_Model->GetEdge(id);
 		if (!e) return false;
 
@@ -472,12 +472,12 @@ namespace GraphCtrl {
 			FireSelChanged();
 		}
 		PushUndo(std::move(cmd));
-		Notify(GCN_EDGEREMOVED, InvalidNode, id);
+		Notify(NGCN_EDGEREMOVED, InvalidNode, id);
 		RequestInvalidate();
 		return true;
 	}
 
-	bool CGraphControl::DeleteSelected() {
+	bool CNodeGraphControl::DeleteSelected() {
 		if (m_SelectedNodes.empty() && m_SelectedEdge == InvalidEdge) return false;
 
 		if (!m_SelectedNodes.empty()) {
@@ -499,7 +499,7 @@ namespace GraphCtrl {
 
 			std::vector<NodeId> removed = m_SelectedNodes;
 			for (NodeId nid : removed) {
-				Notify(GCN_NODEREMOVED, nid, InvalidEdge);
+				Notify(NGCN_NODEREMOVED, nid, InvalidEdge);
 				m_Model->RemoveNode(nid);
 			}
 			m_SelectedNodes.clear();
@@ -517,7 +517,7 @@ namespace GraphCtrl {
 
 	// ---- Undo / Redo ---------------------------------------------------------
 
-	void CGraphControl::Undo() {
+	void CNodeGraphControl::Undo() {
 		if (m_UndoStack.empty()) return;
 		auto cmd = std::move(m_UndoStack.back());
 		m_UndoStack.pop_back();
@@ -527,7 +527,7 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::Redo() {
+	void CNodeGraphControl::Redo() {
 		if (m_RedoStack.empty()) return;
 		auto cmd = std::move(m_RedoStack.back());
 		m_RedoStack.pop_back();
@@ -537,17 +537,17 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	bool CGraphControl::CanUndo() const {
+	bool CNodeGraphControl::CanUndo() const {
 		return !m_UndoStack.empty();
 	}
 
-	bool CGraphControl::CanRedo() const {
+	bool CNodeGraphControl::CanRedo() const {
 		return !m_RedoStack.empty();
 	}
 
 	// ---- Clipboard (copy / paste) --------------------------------------------
 
-	void CGraphControl::Copy() {
+	void CNodeGraphControl::Copy() {
 		if (m_SelectedNodes.empty()) return;
 
 		std::vector<const Node*> nodes;
@@ -602,7 +602,7 @@ namespace GraphCtrl {
 		::CloseClipboard();
 	}
 
-	void CGraphControl::Paste() {
+	void CNodeGraphControl::Paste() {
 		UINT fmt = GetClipboardFormat();
 		if (!::IsClipboardFormatAvailable(fmt)) return;
 		if (!::OpenClipboard(m_hWnd)) return;
@@ -677,13 +677,13 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	bool CGraphControl::CanPaste() const {
+	bool CNodeGraphControl::CanPaste() const {
 		return ::IsClipboardFormatAvailable(GetClipboardFormat()) != FALSE;
 	}
 
 	// ---- Rubber-band finalize ------------------------------------------------
 
-	void CGraphControl::FinalizeRubberBand() {
+	void CNodeGraphControl::FinalizeRubberBand() {
 		m_RubberBand.Active = false;
 		float sx0 = std::min(m_RubberBand.X0, m_RubberBand.X1);
 		float sy0 = std::min(m_RubberBand.Y0, m_RubberBand.Y1);
@@ -704,7 +704,7 @@ namespace GraphCtrl {
 
 	// ---- Message handlers ----------------------------------------------------
 
-	void CGraphControl::OnPaint(HDC /*unused*/) {
+	void CNodeGraphControl::OnPaint(HDC /*unused*/) {
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(&ps);
 		RECT rc; GetClientRect(&rc);
@@ -720,7 +720,7 @@ namespace GraphCtrl {
 		EndPaint(&ps);
 	}
 
-	void CGraphControl::OnSize(UINT /*nType*/, CSize size) {
+	void CNodeGraphControl::OnSize(UINT /*nType*/, CSize size) {
 		if (m_TooltipWnd) {
 			RECT rc2 = { 0, 0, size.cx, size.cy };
 			TOOLINFOW ti{};
@@ -745,7 +745,7 @@ namespace GraphCtrl {
 		Invalidate(FALSE);
 	}
 
-	BOOL CGraphControl::OnMouseWheel(UINT /*nFlags*/, short zDelta, CPoint pt) {
+	BOOL CNodeGraphControl::OnMouseWheel(UINT /*nFlags*/, short zDelta, CPoint pt) {
 		float delta = zDelta > 0 ? 1.1f : 1.0f / 1.1f;
 		ScreenToClient(&pt);  // lParam of WM_MOUSEWHEEL is in screen coords
 		m_Vt.OffsetX = pt.x - (pt.x - m_Vt.OffsetX) * delta;
@@ -756,7 +756,7 @@ namespace GraphCtrl {
 		return TRUE;
 	}
 
-	LRESULT CGraphControl::OnSetCursor(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	LRESULT CNodeGraphControl::OnSetCursor(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 		if (m_EdgePreview.Active) {
 			::SetCursor(::LoadCursor(nullptr, IDC_CROSS));
 			return TRUE;
@@ -792,7 +792,7 @@ namespace GraphCtrl {
 		return 0;
 	}
 
-	void CGraphControl::OnRButtonDown(UINT /*nFlags*/, CPoint pt) {
+	void CNodeGraphControl::OnRButtonDown(UINT /*nFlags*/, CPoint pt) {
 		CommitLabelEdit();
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
@@ -805,7 +805,7 @@ namespace GraphCtrl {
 		}
 	}
 
-	void CGraphControl::OnRButtonUp(UINT /*nFlags*/, CPoint pt) {
+	void CNodeGraphControl::OnRButtonUp(UINT /*nFlags*/, CPoint pt) {
 		if (!m_EdgePreview.Active) return;
 		m_EdgePreview.Active = false;
 		::ReleaseCapture();
@@ -826,7 +826,7 @@ namespace GraphCtrl {
 		Invalidate(FALSE);
 	}
 
-	void CGraphControl::OnMButtonDown(UINT /*nFlags*/, CPoint pt) {
+	void CNodeGraphControl::OnMButtonDown(UINT /*nFlags*/, CPoint pt) {
 		m_Panning = true;
 		m_PanStart = { pt.x, pt.y };
 		m_PanStartX = m_Vt.OffsetX;
@@ -834,14 +834,14 @@ namespace GraphCtrl {
 		SetCapture();
 	}
 
-	void CGraphControl::OnMButtonUp(UINT /*nFlags*/, CPoint /*pt*/) {
+	void CNodeGraphControl::OnMButtonUp(UINT /*nFlags*/, CPoint /*pt*/) {
 		if (m_Panning) {
 			m_Panning = false;
 			::ReleaseCapture();
 		}
 	}
 
-	void CGraphControl::OnLButtonDown(UINT nFlags, CPoint pt) {
+	void CNodeGraphControl::OnLButtonDown(UINT nFlags, CPoint pt) {
 		CommitLabelEdit();
 		SetFocus();
 		int sx = pt.x, sy = pt.y;
@@ -927,14 +927,14 @@ namespace GraphCtrl {
 				m_DragOffsetY = gp.y - clicked->Y;
 			}
 			SetCapture();
-			Notify(GCN_NODECLICK, hitNode, InvalidEdge);
+			Notify(NGCN_NODECLICK, hitNode, InvalidEdge);
 		}
 		else if (hitEdge != InvalidEdge) {
 			bool selChanged = (m_SelectedEdge != hitEdge || !m_SelectedNodes.empty());
 			m_SelectedNodes.clear();
 			m_SelectedEdge = hitEdge;
 			if (selChanged) FireSelChanged();
-			Notify(GCN_EDGECLICK, InvalidNode, hitEdge);
+			Notify(NGCN_EDGECLICK, InvalidNode, hitEdge);
 		}
 		else {
 			bool selChanged = (!m_SelectedNodes.empty() || m_SelectedEdge != InvalidEdge);
@@ -951,14 +951,14 @@ namespace GraphCtrl {
 		Invalidate(FALSE);
 	}
 
-	void CGraphControl::OnLButtonDblClk(UINT /*nFlags*/, CPoint pt) {
+	void CNodeGraphControl::OnLButtonDblClk(UINT /*nFlags*/, CPoint pt) {
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hitNode = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 		if (hitNode != InvalidNode)
 			BeginEditLabel(hitNode);
 	}
 
-	void CGraphControl::OnLButtonUp(UINT /*nFlags*/, CPoint /*pt*/) {
+	void CNodeGraphControl::OnLButtonUp(UINT /*nFlags*/, CPoint /*pt*/) {
 		if (m_Resize.Active) {
 			m_Resize.Active = false;
 			::ReleaseCapture();
@@ -1029,7 +1029,7 @@ namespace GraphCtrl {
 		}
 	}
 
-	void CGraphControl::OnMouseMove(UINT /*nFlags*/, CPoint pt) {
+	void CNodeGraphControl::OnMouseMove(UINT /*nFlags*/, CPoint pt) {
 		int sx = pt.x, sy = pt.y;
 
 		if (m_Resize.Active) {
@@ -1137,7 +1137,7 @@ namespace GraphCtrl {
 		}
 	}
 
-	LRESULT CGraphControl::OnNotify(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
+	LRESULT CNodeGraphControl::OnNotify(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
 		auto* nm = reinterpret_cast<NMHDR*>(lParam);
 		if (nm->code == TTN_GETDISPINFOW) {
 			auto* ti = reinterpret_cast<NMTTDISPINFOW*>(lParam);
@@ -1166,10 +1166,10 @@ namespace GraphCtrl {
 			}
 
 			if (m_TooltipBuf[0]) {
-				GRAPHTOOLTIPNOTIFY gtn{};
+				NODEGRAPHTOOLTIPNOTIFY gtn{};
 				gtn.Hdr.hwndFrom = m_hWnd;
 				gtn.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
-				gtn.Hdr.code = GCN_GETTOOLTIP;
+				gtn.Hdr.code = NGCN_GETTOOLTIP;
 				gtn.NodeId = nid;
 				gtn.EdgeId = eid;
 				wcsncpy_s(gtn.SzText, m_TooltipBuf, _TRUNCATE);
@@ -1186,7 +1186,7 @@ namespace GraphCtrl {
 		return 0;
 	}
 
-	LRESULT CGraphControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	LRESULT CNodeGraphControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 		if (wParam == VK_DELETE) { DeleteSelected(); return 0; }
 		if (::GetKeyState(VK_CONTROL) & 0x8000) {
 			if (wParam == 'Z') { Undo();  return 0; }
@@ -1198,11 +1198,11 @@ namespace GraphCtrl {
 		return 0;
 	}
 
-	BOOL CGraphControl::OnEraseBkgnd(CDCHandle) {
+	BOOL CNodeGraphControl::OnEraseBkgnd(CDCHandle) {
 		return TRUE;  // prevent flicker; we fill the background in OnPaint
 	}
 
-	LRESULT CGraphControl::OnGraphEdit(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	LRESULT CNodeGraphControl::OnNodeGraphEdit(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		if (wParam) CommitLabelEdit();
 		else        CancelLabelEdit();
 		return 0;
@@ -1210,22 +1210,22 @@ namespace GraphCtrl {
 
 	// ---- Creation / model / viewport / selection / minimap -------------------
 
-	HWND CGraphControl::Create(HWND hWndParent, int x, int y, int w, int h,
+	HWND CNodeGraphControl::Create(HWND hWndParent, int x, int y, int w, int h,
 		DWORD dwStyle, DWORD ctrlStyle) {
 		CRect rc(x, y, x + w, y + h);
-		return CWindowImpl<CGraphControl>::Create(hWndParent, rc, nullptr, dwStyle | ctrlStyle);
+		return CWindowImpl<CNodeGraphControl>::Create(hWndParent, rc, nullptr, dwStyle | ctrlStyle);
 	}
 
-	void CGraphControl::SetModel(GraphModel* model) {
+	void CNodeGraphControl::SetModel(NodeGraphModel* model) {
 		m_Model.reset(model);
 		RequestInvalidate();
 	}
 
-	GraphModel* CGraphControl::GetModel() const {
+	NodeGraphModel* CNodeGraphControl::GetModel() const {
 		return m_Model.get();
 	}
 
-	void CGraphControl::FitInView() {
+	void CNodeGraphControl::FitInView() {
 		if (!m_Model || m_Model->Nodes().empty()) return;
 
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
@@ -1246,7 +1246,7 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::FitSelected() {
+	void CNodeGraphControl::FitSelected() {
 		if (m_SelectedNodes.empty()) return;
 
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
@@ -1270,28 +1270,28 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::SetZoom(float factor) {
+	void CNodeGraphControl::SetZoom(float factor) {
 		m_Vt.Scale = std::clamp(factor, 0.05f, 50.0f);
 		RequestInvalidate();
 	}
 
-	float CGraphControl::GetZoom() const {
+	float CNodeGraphControl::GetZoom() const {
 		return m_Vt.Scale;
 	}
 
-	NodeId CGraphControl::GetSelectedNode() const {
+	NodeId CNodeGraphControl::GetSelectedNode() const {
 		return m_SelectedNodes.empty() ? InvalidNode : m_SelectedNodes[0];
 	}
 
-	EdgeId CGraphControl::GetSelectedEdge() const {
+	EdgeId CNodeGraphControl::GetSelectedEdge() const {
 		return m_SelectedEdge;
 	}
 
-	std::vector<NodeId> CGraphControl::GetSelectedNodes() const {
+	std::vector<NodeId> CNodeGraphControl::GetSelectedNodes() const {
 		return m_SelectedNodes;
 	}
 
-	void CGraphControl::SelectNode(NodeId id, bool addToSelection) {
+	void CNodeGraphControl::SelectNode(NodeId id, bool addToSelection) {
 		if (!addToSelection) m_SelectedNodes.clear();
 		if (!IsSelected(id)) m_SelectedNodes.push_back(id);
 		m_SelectedEdge = InvalidEdge;
@@ -1299,43 +1299,43 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::ClearSelection() {
+	void CNodeGraphControl::ClearSelection() {
 		m_SelectedNodes.clear();
 		m_SelectedEdge = InvalidEdge;
 		FireSelChanged();
 		RequestInvalidate();
 	}
 
-	void CGraphControl::Refresh() {
+	void CNodeGraphControl::Refresh() {
 		Invalidate(FALSE);
 	}
 
-	void CGraphControl::SetMinimapVisible(bool visible) {
+	void CNodeGraphControl::SetMinimapVisible(bool visible) {
 		m_Minimap.Visible = visible;
 		RequestInvalidate();
 	}
 
-	bool CGraphControl::IsMinimapVisible() const {
+	bool CNodeGraphControl::IsMinimapVisible() const {
 		return m_Minimap.Visible;
 	}
 
-	void CGraphControl::SetMinimapPosition(int x, int y) {
+	void CNodeGraphControl::SetMinimapPosition(int x, int y) {
 		m_Minimap.X = (x < 0) ? -1.0f : (float)x;
 		m_Minimap.Y = (y < 0) ? -1.0f : (float)y;
 		RequestInvalidate();
 	}
 
-	void CGraphControl::SetNodeStyle(NodeId id, const NodeStyle& style) {
+	void CNodeGraphControl::SetNodeStyle(NodeId id, const NodeStyle& style) {
 		Node* n = m_Model->GetNode(id);
 		if (n) { n->Style = style; RequestInvalidate(); }
 	}
 
-	void CGraphControl::SetEdgeStyle(EdgeId id, const EdgeStyle& style) {
+	void CNodeGraphControl::SetEdgeStyle(EdgeId id, const EdgeStyle& style) {
 		Edge* e = m_Model->GetEdge(id);
 		if (e) { e->Style = style; RequestInvalidate(); }
 	}
 
-	void CGraphControl::SetNodeSize(NodeId id, float w, float h) {
+	void CNodeGraphControl::SetNodeSize(NodeId id, float w, float h) {
 		Node* n = m_Model->GetNode(id);
 		if (!n) return;
 		n->Width = std::max(w, k_MinNodeWidth);
@@ -1343,7 +1343,7 @@ namespace GraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CGraphControl::SetDefaultNodeSize(float w, float h) {
+	void CNodeGraphControl::SetDefaultNodeSize(float w, float h) {
 		m_Model->SetDefaultNodeSize(w, h);
 	}
 
@@ -1353,13 +1353,13 @@ namespace GraphCtrl {
 		INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_BAR_CLASSES };
 		InitCommonControlsEx(&icc);
 		// Pre-register the window class; CWindowImpl::Create() also does this lazily.
-		ATOM a = CGraphControl::GetWndClassInfo().Register(nullptr);
+		ATOM a = CNodeGraphControl::GetWndClassInfo().Register(nullptr);
 		return a != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 	}
 
-	// ---- GraphModel implementation ----------------------------------------------
+	// ---- NodeGraphModel implementation ----------------------------------------------
 
-	NodeId GraphModel::AddNode(std::wstring label, float x, float y, float w, float h) {
+	NodeId NodeGraphModel::AddNode(std::wstring label, float x, float y, float w, float h) {
 		Node n;
 		n.Id = m_NextNodeId++;
 		n.Label = std::move(label);
@@ -1371,12 +1371,12 @@ namespace GraphCtrl {
 		return m_Nodes.back().Id;
 	}
 
-	void GraphModel::SetDefaultNodeSize(float w, float h) {
+	void NodeGraphModel::SetDefaultNodeSize(float w, float h) {
 		if (w > 0.0f) m_DefaultNodeWidth = w;
 		if (h > 0.0f) m_DefaultNodeHeight = h;
 	}
 
-	EdgeId GraphModel::AddEdge(NodeId from, NodeId to, std::wstring label) {
+	EdgeId NodeGraphModel::AddEdge(NodeId from, NodeId to, std::wstring label) {
 		Edge e;
 		e.Id = m_NextEdgeId++;
 		e.From = from;
@@ -1386,7 +1386,7 @@ namespace GraphCtrl {
 		return m_Edges.back().Id;
 	}
 
-	bool GraphModel::RemoveNode(NodeId id) {
+	bool NodeGraphModel::RemoveNode(NodeId id) {
 		auto it = std::find_if(m_Nodes.begin(), m_Nodes.end(), [id](const Node& n) { return n.Id == id; });
 		if (it == m_Nodes.end()) return false;
 		m_Nodes.erase(it);
@@ -1394,42 +1394,42 @@ namespace GraphCtrl {
 		return true;
 	}
 
-	bool GraphModel::RemoveEdge(EdgeId id) {
+	bool NodeGraphModel::RemoveEdge(EdgeId id) {
 		auto it = std::find_if(m_Edges.begin(), m_Edges.end(), [id](const Edge& e) { return e.Id == id; });
 		if (it == m_Edges.end()) return false;
 		m_Edges.erase(it);
 		return true;
 	}
 
-	void GraphModel::RestoreNode(const Node& n) {
+	void NodeGraphModel::RestoreNode(const Node& n) {
 		m_Nodes.push_back(n);
 	}
 
-	void GraphModel::RestoreEdge(const Edge& e) {
+	void NodeGraphModel::RestoreEdge(const Edge& e) {
 		m_Edges.push_back(e);
 	}
 
-	Node* GraphModel::GetNode(NodeId id) {
+	Node* NodeGraphModel::GetNode(NodeId id) {
 		for (auto& n : m_Nodes) if (n.Id == id) return &n;
 		return nullptr;
 	}
 
-	Edge* GraphModel::GetEdge(EdgeId id) {
+	Edge* NodeGraphModel::GetEdge(EdgeId id) {
 		for (auto& e : m_Edges) if (e.Id == id) return &e;
 		return nullptr;
 	}
 
-	const Node* GraphModel::GetNode(NodeId id) const {
+	const Node* NodeGraphModel::GetNode(NodeId id) const {
 		for (const auto& n : m_Nodes) if (n.Id == id) return &n;
 		return nullptr;
 	}
 
-	const Edge* GraphModel::GetEdge(EdgeId id) const {
+	const Edge* NodeGraphModel::GetEdge(EdgeId id) const {
 		for (const auto& e : m_Edges) if (e.Id == id) return &e;
 		return nullptr;
 	}
 
-	void GraphModel::Clear() {
+	void NodeGraphModel::Clear() {
 		m_Nodes.clear();
 		m_Edges.clear();
 		m_NextNodeId = 0;
@@ -1462,7 +1462,7 @@ namespace GraphCtrl {
 		}
 	}
 
-	bool GraphModel::Save(const wchar_t* path) const {
+	bool NodeGraphModel::Save(const wchar_t* path) const {
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, path, L"wb") != 0 || !f) return false;
 
@@ -1501,7 +1501,7 @@ namespace GraphCtrl {
 		return ok;
 	}
 
-	bool GraphModel::Load(const wchar_t* path) {
+	bool NodeGraphModel::Load(const wchar_t* path) {
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, path, L"rb") != 0 || !f) return false;
 
@@ -1560,4 +1560,4 @@ namespace GraphCtrl {
 		return true;
 	}
 
-} // namespace GraphCtrl
+} // namespace NodeGraphCtrl

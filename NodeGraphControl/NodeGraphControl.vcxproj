@@ -21,7 +21,7 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <ProjectGuid>{768E9381-B6E3-4D46-8257-64E5BD8409B2}</ProjectGuid>
-    <RootNamespace>GraphControl</RootNamespace>
+    <RootNamespace>NodeGraphControl</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -94,13 +94,13 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="include\GraphControl.h" />
-    <ClInclude Include="include\GraphModel.h" />
-    <ClInclude Include="include\GraphRenderer.h" />
+    <ClInclude Include="include\NodeGraphControl.h" />
+    <ClInclude Include="include\NodeGraphModel.h" />
+    <ClInclude Include="include\NodeGraphRenderer.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\GraphControl.cpp" />
-    <ClCompile Include="src\GraphRenderer.cpp" />
+    <ClCompile Include="src\NodeGraphControl.cpp" />
+    <ClCompile Include="src\NodeGraphRenderer.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1,9 +1,9 @@
-#include "../include/GraphRenderer.h"
+#include "../include/NodeGraphRenderer.h"
 #include <cmath>
 #include <algorithm>
 #include <cfloat>
 
-namespace GraphCtrl {
+namespace NodeGraphCtrl {
 
 static D2D1_COLOR_F ColorrefToD2D(COLORREF cr) {
     return D2D1::ColorF(
@@ -12,11 +12,11 @@ static D2D1_COLOR_F ColorrefToD2D(COLORREF cr) {
         GetBValue(cr) / 255.0f);
 }
 
-GraphRenderer::~GraphRenderer() {
+NodeGraphRenderer::~NodeGraphRenderer() {
     Shutdown();
 }
 
-HRESULT GraphRenderer::Init(HINSTANCE /*hInstance*/) {
+HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_D2dFactory.GetAddressOf());
     if (FAILED(hr)) return hr;
 
@@ -50,7 +50,7 @@ HRESULT GraphRenderer::Init(HINSTANCE /*hInstance*/) {
     return hr;
 }
 
-void GraphRenderer::Shutdown() {
+void NodeGraphRenderer::Shutdown() {
     DiscardDeviceResources();
     m_DashStyle.Reset();
     m_EdgeTextFormat.Reset();
@@ -59,7 +59,7 @@ void GraphRenderer::Shutdown() {
     m_D2dFactory.Reset();
 }
 
-HRESULT GraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/) {
+HRESULT NodeGraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/) {
     if (m_RenderTarget) return S_OK;
 
     auto props = D2D1::RenderTargetProperties(
@@ -76,13 +76,13 @@ HRESULT GraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/) {
     return hr;
 }
 
-void GraphRenderer::DiscardDeviceResources() {
+void NodeGraphRenderer::DiscardDeviceResources() {
     m_Brush.Reset();
     m_RenderTarget.Reset();
 }
 
-void GraphRenderer::Render(HDC hdc, const RECT& clientRect,
-                           const GraphModel& model, const ViewTransform& vt,
+void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
+                           const NodeGraphModel& model, const ViewTransform& vt,
                            const std::vector<NodeId>& selectedNodes, EdgeId selectedEdge,
                            bool drawGrid, const EdgePreview& preview,
                            const RubberBand& rubberBand, const MinimapConfig& minimap,
@@ -127,7 +127,7 @@ void GraphRenderer::Render(HDC hdc, const RECT& clientRect,
         DiscardDeviceResources();
 }
 
-void GraphRenderer::DrawEdgePreview(const EdgePreview& preview, const GraphModel& model,
+void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGraphModel& model,
                                     const ViewTransform& vt) {
     const Node* from = model.GetNode(preview.FromNode);
     if (!from) return;
@@ -155,7 +155,7 @@ void GraphRenderer::DrawEdgePreview(const EdgePreview& preview, const GraphModel
     DrawArrowhead(p1, { nx, ny });
 }
 
-void GraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
+void NodeGraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
     const float gridSpacing = 40.0f * vt.Scale;
     if (gridSpacing < 8.0f) return;
 
@@ -172,7 +172,7 @@ void GraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
         m_RenderTarget->DrawLine({ 0, y }, { (float)rc.right, y }, m_Brush.Get(), 0.5f);
 }
 
-void GraphRenderer::DrawEdge(const Edge& e, const GraphModel& model,
+void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
                              const ViewTransform& vt, bool selected) {
     const Node* from = model.GetNode(e.From);
     const Node* to   = model.GetNode(e.To);
@@ -226,7 +226,7 @@ void GraphRenderer::DrawEdge(const Edge& e, const GraphModel& model,
     }
 }
 
-void GraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
+void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
     const float size = 10.0f;
     const float angle = 0.4f; // radians half-angle
     float cosA = std::cosf(angle), sinA = std::sinf(angle);
@@ -248,7 +248,7 @@ void GraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
     m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
 }
 
-void GraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool selected) {
+void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool selected) {
     auto center = vt.ToScreen(n.X, n.Y);
     float hw = n.Width  * vt.Scale * 0.5f;
     float hh = n.Height * vt.Scale * 0.5f;
@@ -281,7 +281,7 @@ void GraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool select
     }
 }
 
-void GraphRenderer::DrawRubberBand(const RubberBand& rb) {
+void NodeGraphRenderer::DrawRubberBand(const RubberBand& rb) {
     float x0 = std::min(rb.X0, rb.X1);
     float y0 = std::min(rb.Y0, rb.Y1);
     float x1 = std::max(rb.X0, rb.X1);
@@ -293,7 +293,7 @@ void GraphRenderer::DrawRubberBand(const RubberBand& rb) {
     m_RenderTarget->DrawRectangle(rect, m_Brush.Get(), 1.5f, m_DashStyle.Get());
 }
 
-NodeId GraphRenderer::HitTestNode(const GraphModel& model, float gx, float gy) const {
+NodeId NodeGraphRenderer::HitTestNode(const NodeGraphModel& model, float gx, float gy) const {
     for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it) {
         const auto& n = *it;
         if (gx >= n.X - n.Width  * 0.5f && gx <= n.X + n.Width  * 0.5f &&
@@ -303,8 +303,8 @@ NodeId GraphRenderer::HitTestNode(const GraphModel& model, float gx, float gy) c
     return InvalidNode;
 }
 
-void GraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
-                                const GraphModel& model, const ViewTransform& vt) {
+void NodeGraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
+                                const NodeGraphModel& model, const ViewTransform& vt) {
     if (!cfg.Visible) return;
 
     D2D1_RECT_F rect = { cfg.X, cfg.Y, cfg.X + cfg.Width, cfg.Y + cfg.Height };
@@ -403,7 +403,7 @@ static void BuildHandlePositions(const Node& n, const ViewTransform& vt,
     pts[7] = { l,  my };  // W
 }
 
-void GraphRenderer::DrawResizeHandles(const Node& n, const ViewTransform& vt,
+void NodeGraphRenderer::DrawResizeHandles(const Node& n, const ViewTransform& vt,
                                       ResizeHandle hovered) {
     D2D1_POINT_2F pts[8];
     BuildHandlePositions(n, vt, pts);
@@ -421,7 +421,7 @@ void GraphRenderer::DrawResizeHandles(const Node& n, const ViewTransform& vt,
     }
 }
 
-ResizeHandle GraphRenderer::HitTestResizeHandle(const Node& n, const ViewTransform& vt,
+ResizeHandle NodeGraphRenderer::HitTestResizeHandle(const Node& n, const ViewTransform& vt,
                                                 float sx, float sy) const {
     D2D1_POINT_2F pts[8];
     BuildHandlePositions(n, vt, pts);
@@ -434,7 +434,7 @@ ResizeHandle GraphRenderer::HitTestResizeHandle(const Node& n, const ViewTransfo
     return ResizeHandle::None;
 }
 
-EdgeId GraphRenderer::HitTestEdge(const GraphModel& model, float gx, float gy, float tolerance) const {
+EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance) const {
     for (const auto& e : model.Edges()) {
         const Node* from = model.GetNode(e.From);
         const Node* to   = model.GetNode(e.To);
@@ -454,4 +454,4 @@ EdgeId GraphRenderer::HitTestEdge(const GraphModel& model, float gx, float gy, f
     return InvalidEdge;
 }
 
-} // namespace GraphCtrl
+} // namespace NodeGraphCtrl

@@ -11,44 +11,44 @@
 #include <atlgdi.h>
 #include <atltypes.h>
 
-#include "GraphModel.h"
-#include "GraphRenderer.h"
+#include "NodeGraphModel.h"
+#include "NodeGraphRenderer.h"
 
 // Notification codes sent via WM_NOTIFY to the parent window.
-#define GCN_NODECLICK      1   // lParam -> GRAPHNOTIFY*, node was left-clicked
-#define GCN_NODEDBLCLICK   2   // lParam -> GRAPHNOTIFY*, node was double-clicked (reserved)
-#define GCN_EDGECLICK      3   // lParam -> GRAPHNOTIFY*, edge was left-clicked
-#define GCN_SELCHANGED     4   // lParam -> GRAPHNOTIFY*, selection changed
-#define GCN_EDGEADDED      5   // lParam -> GRAPHEDGENOTIFY*, edge interactively created
-#define GCN_GETTOOLTIP     6   // lParam -> GRAPHTOOLTIPNOTIFY*; fill SzText to override default
-#define GCN_NODEREMOVED    7   // lParam -> GRAPHNOTIFY*, node (and incident edges) removed
-#define GCN_EDGEREMOVED    8   // lParam -> GRAPHNOTIFY*, edge removed
-#define GCN_LABELCHANGED   9   // lParam -> GRAPHLABELNOTIFY*, node label edited inline
-#define GCN_UNDOCHANGED   10   // lParam -> NMHDR*, undo/redo stack changed
+#define NGCN_NODECLICK      1   // lParam -> NODEGRAPHNOTIFY*, node was left-clicked
+#define NGCN_NODEDBLCLICK   2   // lParam -> NODEGRAPHNOTIFY*, node was double-clicked (reserved)
+#define NGCN_EDGECLICK      3   // lParam -> NODEGRAPHNOTIFY*, edge was left-clicked
+#define NGCN_SELCHANGED     4   // lParam -> NODEGRAPHNOTIFY*, selection changed
+#define NGCN_EDGEADDED      5   // lParam -> NODEGRAPHEDGENOTIFY*, edge interactively created
+#define NGCN_GETTOOLTIP     6   // lParam -> NODEGRAPHTOOLTIPNOTIFY*; fill SzText to override default
+#define NGCN_NODEREMOVED    7   // lParam -> NODEGRAPHNOTIFY*, node (and incident edges) removed
+#define NGCN_EDGEREMOVED    8   // lParam -> NODEGRAPHNOTIFY*, edge removed
+#define NGCN_LABELCHANGED   9   // lParam -> NODEGRAPHLABELNOTIFY*, node label edited inline
+#define NGCN_UNDOCHANGED   10   // lParam -> NMHDR*, undo/redo stack changed
 
-namespace GraphCtrl {
+namespace NodeGraphCtrl {
 
-struct GRAPHNOTIFY {
+struct NODEGRAPHNOTIFY {
     NMHDR   Hdr;
     NodeId  NodeId;   // InvalidNode if not applicable
     EdgeId  EdgeId;   // InvalidEdge if not applicable
 };
 
-struct GRAPHEDGENOTIFY {
+struct NODEGRAPHEDGENOTIFY {
     NMHDR   Hdr;
     NodeId  FromNode;
     NodeId  ToNode;
     EdgeId  EdgeId;
 };
 
-struct GRAPHTOOLTIPNOTIFY {
+struct NODEGRAPHTOOLTIPNOTIFY {
     NMHDR    Hdr;
     NodeId   NodeId;       // InvalidNode if not over a node
     EdgeId   EdgeId;       // InvalidEdge if not over an edge
     wchar_t  SzText[256];  // pre-filled with default label; host may override
 };
 
-struct GRAPHLABELNOTIFY {
+struct NODEGRAPHLABELNOTIFY {
     NMHDR    Hdr;
     NodeId   NodeId;
     wchar_t  SzNewLabel[256];
@@ -59,23 +59,23 @@ struct GRAPHLABELNOTIFY {
 bool Register(HINSTANCE hInstance);
 
 // Window class name to use with CreateWindowEx.
-constexpr wchar_t WC_GRAPHCONTROL[] = L"GraphControl";
+constexpr wchar_t WC_NODEGRAPHCONTROL[] = L"NodeGraphControl";
 
 // Window styles supported as creation flags (pass in dwStyle):
-//   GCS_GRID        draw a background grid
-//   GCS_AUTOZOOM    fit graph in view on model change
-#define GCS_GRID      0x0001
-#define GCS_AUTOZOOM  0x0002
+//   NGCS_GRID        draw a background grid
+//   NGCS_AUTOZOOM    fit graph in view on model change
+#define NGCS_GRID      0x0001
+#define NGCS_AUTOZOOM  0x0002
 
 // Internal message used to commit/cancel the inline label editor.
-constexpr UINT WM_GRAPHEDIT = WM_APP + 1;
+constexpr UINT WM_NODEGRAPHEDIT = WM_APP + 1;
 
 // ---- Undo command base -------------------------------------------------------
 // Concrete commands (MoveCmd, RenameCmd, ...) are implementation detail and
-// stay private to GraphControl.cpp.
+// stay private to NodeGraphControl.cpp.
 struct UndoCmd {
-    virtual void Apply(GraphModel&)  = 0;
-    virtual void Revert(GraphModel&) = 0;
+    virtual void Apply(NodeGraphModel&)  = 0;
+    virtual void Revert(NodeGraphModel&) = 0;
     virtual ~UndoCmd() = default;
 };
 
@@ -119,12 +119,12 @@ struct ResizeState {
 
 // ---- Main control ----------------------------------------------------------
 // A self-contained WTL control: derive-and-embed like any other CWindowImpl
-// class (e.g. CGraphControl m_wndGraph; m_wndGraph.Create(...);).
-class CGraphControl : public CWindowImpl<CGraphControl> {
+// class (e.g. CNodeGraphControl m_wndGraph; m_wndGraph.Create(...);).
+class CNodeGraphControl : public CWindowImpl<CNodeGraphControl> {
 public:
-    DECLARE_WND_CLASS_EX(WC_GRAPHCONTROL, CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS, -1)
+    DECLARE_WND_CLASS_EX(WC_NODEGRAPHCONTROL, CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS, -1)
 
-    BEGIN_MSG_MAP(CGraphControl)
+    BEGIN_MSG_MAP(CNodeGraphControl)
         MSG_WM_CREATE(OnCreate)
         MSG_WM_DESTROY(OnDestroy)
         MSG_WM_PAINT(OnPaint)
@@ -142,17 +142,17 @@ public:
         MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
         MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
-        MESSAGE_HANDLER(WM_GRAPHEDIT, OnGraphEdit)
+        MESSAGE_HANDLER(WM_NODEGRAPHEDIT, OnNodeGraphEdit)
     END_MSG_MAP()
 
     // Creation convenience overload; dwStyle is a normal window style, ctrlStyle
-    // combines GCS_* flags (packed into the low-order style bits, like LVS_*/ES_*).
+    // combines NGCS_* flags (packed into the low-order style bits, like LVS_*/ES_*).
     HWND Create(HWND hWndParent, int x, int y, int w, int h,
-                DWORD dwStyle = WS_CHILD | WS_VISIBLE, DWORD ctrlStyle = GCS_GRID);
+                DWORD dwStyle = WS_CHILD | WS_VISIBLE, DWORD ctrlStyle = NGCS_GRID);
 
     // Swap in a new model; the control takes ownership.
-    void SetModel(GraphModel* model);
-    GraphModel* GetModel() const;
+    void SetModel(NodeGraphModel* model);
+    NodeGraphModel* GetModel() const;
 
     // Programmatic viewport control.
     void FitInView();
@@ -167,7 +167,7 @@ public:
     void SelectNode(NodeId id, bool addToSelection = false);
     void ClearSelection();
 
-    // Deletion — also clears selection and fires GCN_NODEREMOVED / GCN_EDGEREMOVED.
+    // Deletion — also clears selection and fires NGCN_NODEREMOVED / NGCN_EDGEREMOVED.
     bool DeleteNode(NodeId id);
     bool DeleteEdge(EdgeId id);
     bool DeleteSelected();   // deletes the currently selected node(s) or edge
@@ -226,7 +226,7 @@ private:
     LRESULT OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     BOOL OnEraseBkgnd(CDCHandle dc);
-    LRESULT OnGraphEdit(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    LRESULT OnNodeGraphEdit(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
     // ---- Internal helpers ----
     void Notify(UINT code, NodeId nodeId, EdgeId edgeId);
@@ -237,15 +237,15 @@ private:
     bool IsSelected(NodeId id) const;
     void FireSelChanged();
     MinimapConfig MakeMinimapConfig(int cw, int ch) const;
-    static bool MinimapScreenToGraph(const MinimapConfig& cfg, const GraphModel& model,
+    static bool MinimapScreenToGraph(const MinimapConfig& cfg, const NodeGraphModel& model,
                                       float sx, float sy, float& gxOut, float& gyOut);
     void CommitLabelEdit();
     void CancelLabelEdit();
     void FinalizeRubberBand();
 
 private:
-    std::unique_ptr<GraphModel>   m_Model;
-    GraphRenderer                 m_Renderer;
+    std::unique_ptr<NodeGraphModel>   m_Model;
+    NodeGraphRenderer                 m_Renderer;
     ViewTransform                 m_Vt;
     std::vector<NodeId>           m_SelectedNodes;
     EdgeId                        m_SelectedEdge = InvalidEdge;
@@ -280,4 +280,4 @@ private:
     bool m_PendingInvalidate = false;
 };
 
-} // namespace GraphCtrl
+} // namespace NodeGraphCtrl

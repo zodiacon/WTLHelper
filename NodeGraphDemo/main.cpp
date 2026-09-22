@@ -1,15 +1,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
-#include "GraphControl.h"
+#include "NodeGraphControl.h"
 
-#pragma comment(lib, "GraphControl.lib")
+#pragma comment(lib, "NodeGraphControl.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 
 #include <commdlg.h>
 
-using namespace GraphCtrl;
+using namespace NodeGraphCtrl;
 
 // Control IDs
 static constexpr int IDC_GRAPH   = 101;
@@ -24,10 +24,10 @@ static constexpr int IDC_UNDO    = 109;
 static constexpr int IDC_REDO    = 110;
 static constexpr int IDC_MINIMAP = 111;
 
-static CGraphControl g_graph;
+static CNodeGraphControl g_graph;
 static HWND g_status = nullptr;
 
-static void PopulateDemo(GraphModel& m) {
+static void PopulateDemo(NodeGraphModel& m) {
     auto kernel  = m.AddNode(L"kernel32",   100, 100);
     auto ntdll   = m.AddNode(L"ntdll",      100, 220);
     auto user32  = m.AddNode(L"user32",     280, 100);
@@ -51,7 +51,7 @@ static void UpdateStatus(HWND /*hwnd*/) {
 
     wchar_t buf[256];
     if (node != InvalidNode) {
-        GraphModel* m = g_graph.GetModel();
+        NodeGraphModel* m = g_graph.GetModel();
         const Node* n = m ? m->GetNode(node) : nullptr;
         if (n) {
             swprintf_s(buf, L"Node selected: %s  (id=%u, pos=%.0f,%.0f)",
@@ -75,7 +75,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int sbH = 22;
 
         g_graph.Create(hwnd, 0, 0, rc.right, rc.bottom - sbH,
-                       WS_CHILD | WS_VISIBLE, GCS_GRID | GCS_AUTOZOOM);
+                       WS_CHILD | WS_VISIBLE, NGCS_GRID | NGCS_AUTOZOOM);
 
         g_status = CreateWindowEx(0, STATUSCLASSNAME, nullptr,
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
@@ -102,17 +102,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         auto* nm = reinterpret_cast<NMHDR*>(lParam);
         if (nm->idFrom == IDC_GRAPH) {
             switch (nm->code) {
-            case GCN_SELCHANGED:
+            case NGCN_SELCHANGED:
                 UpdateStatus(hwnd);
                 break;
-            case GCN_LABELCHANGED: {
-                auto* gln = reinterpret_cast<GRAPHLABELNOTIFY*>(lParam);
+            case NGCN_LABELCHANGED: {
+                auto* gln = reinterpret_cast<NODEGRAPHLABELNOTIFY*>(lParam);
                 wchar_t buf[300];
                 swprintf_s(buf, L"Label changed: node %u = \"%s\"", gln->NodeId, gln->SzNewLabel);
                 SetWindowText(g_status, buf);
                 break;
             }
-            case GCN_UNDOCHANGED: {
+            case NGCN_UNDOCHANGED: {
                 wchar_t buf[128];
                 swprintf_s(buf, L"Undo: %s  |  Redo: %s",
                     g_graph.CanUndo() ? L"available" : L"none",
@@ -144,7 +144,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_graph.Redo();
             break;
         case IDC_BTNADD: {
-            GraphModel* m = g_graph.GetModel();
+            NodeGraphModel* m = g_graph.GetModel();
             if (m) {
                 static int s_count = 0;
                 wchar_t label[32];
@@ -157,7 +157,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
         case IDC_BTNCLR: {
-            GraphModel* m = g_graph.GetModel();
+            NodeGraphModel* m = g_graph.GetModel();
             if (m) {
                 m->Clear();
                 InvalidateRect(g_graph.m_hWnd, nullptr, FALSE);
@@ -166,7 +166,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
         case IDC_SAVE: {
-            GraphModel* m = g_graph.GetModel();
+            NodeGraphModel* m = g_graph.GetModel();
             if (!m) break;
             OPENFILENAMEW ofn{};
             wchar_t path[MAX_PATH] = L"graph.gcf";
@@ -182,7 +182,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
         case IDC_LOAD: {
-            GraphModel* m = g_graph.GetModel();
+            NodeGraphModel* m = g_graph.GetModel();
             if (!m) break;
             OPENFILENAMEW ofn{};
             wchar_t path[MAX_PATH] = {};
@@ -216,8 +216,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
-    //if (!GraphCtrl::Register(hInstance)) {
-    //    MessageBox(nullptr, L"Failed to register GraphControl window class.", L"Error", MB_ICONERROR);
+    //if (!NodeGraphCtrl::Register(hInstance)) {
+    //    MessageBox(nullptr, L"Failed to register NodeGraphControl window class.", L"Error", MB_ICONERROR);
     //    return 1;
     //}
 
@@ -227,11 +227,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"GraphDemoWindow";
+    wc.lpszClassName = L"NodeGraphDemoWindow";
     wc.hIcon         = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, L"GraphDemoWindow", L"GraphControl Demo",
+    HWND hwnd = CreateWindowExW(0, L"NodeGraphDemoWindow", L"NodeGraphControl Demo",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 900, 650,
         nullptr, nullptr, hInstance, nullptr);

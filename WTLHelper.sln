@@ -11,9 +11,9 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "MarkdownViewLib", "Markdown
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TreeListView", "TreeListView\TreeListView.vcxproj", "{4AE29F49-DD58-4307-BAE5-0BC9E4F81BCA}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GraphControl", "GraphControl\GraphControl.vcxproj", "{768E9381-B6E3-4D46-8257-64E5BD8409B2}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NodeGraphControl", "NodeGraphControl\NodeGraphControl.vcxproj", "{768E9381-B6E3-4D46-8257-64E5BD8409B2}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GraphDemo", "GraphDemo\GraphDemo.vcxproj", "{DDD01A3F-CAA6-4C20-84F3-82E9265CCC46}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NodeGraphDemo", "NodeGraphDemo\NodeGraphDemo.vcxproj", "{DDD01A3F-CAA6-4C20-84F3-82E9265CCC46}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tests", "Tests", "{2DC4B6D7-7C16-44F5-97C3-7235FFDF0C32}"
 EndProject

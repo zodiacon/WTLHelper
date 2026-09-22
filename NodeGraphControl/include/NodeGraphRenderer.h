@@ -5,14 +5,14 @@
 #include <dwrite.h>
 #include <wrl/client.h>
 #include <vector>
-#include "GraphModel.h"
+#include "NodeGraphModel.h"
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 
 using Microsoft::WRL::ComPtr;
 
-namespace GraphCtrl {
+namespace NodeGraphCtrl {
 
 enum class ResizeHandle { None, NW, N, NE, E, SE, S, SW, W };
 
@@ -54,17 +54,17 @@ struct ResizeOverlay {
     ResizeHandle HoveredHandle = ResizeHandle::None;
 };
 
-class GraphRenderer {
+class NodeGraphRenderer {
 public:
-    GraphRenderer() = default;
-    ~GraphRenderer();
+    NodeGraphRenderer() = default;
+    ~NodeGraphRenderer();
 
     HRESULT Init(HINSTANCE hInstance);
     void    Shutdown();
 
     // Called on WM_PAINT: binds render target to dc, draws everything.
     void Render(HDC hdc, const RECT& clientRect,
-                const GraphModel& model, const ViewTransform& vt,
+                const NodeGraphModel& model, const ViewTransform& vt,
                 const std::vector<NodeId>& selectedNodes, EdgeId selectedEdge,
                 bool drawGrid, const EdgePreview& preview = {},
                 const RubberBand& rubberBand = {},
@@ -72,8 +72,8 @@ public:
                 const ResizeOverlay& resizeOverlay = {});
 
     // Hit testing in graph space.
-    NodeId HitTestNode(const GraphModel& model, float gx, float gy) const;
-    EdgeId HitTestEdge(const GraphModel& model, float gx, float gy, float tolerance = 5.0f) const;
+    NodeId HitTestNode(const NodeGraphModel& model, float gx, float gy) const;
+    EdgeId HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance = 5.0f) const;
 
     // Resize handle hit test in screen space. Returns None if no handle is hit.
     ResizeHandle HitTestResizeHandle(const Node& n, const ViewTransform& vt,
@@ -84,15 +84,15 @@ private:
     void    DiscardDeviceResources();
 
     void DrawGrid(const RECT& clientRect, const ViewTransform& vt);
-    void DrawEdge(const Edge& e, const GraphModel& model,
+    void DrawEdge(const Edge& e, const NodeGraphModel& model,
                   const ViewTransform& vt, bool selected);
-    void DrawEdgePreview(const EdgePreview& preview, const GraphModel& model,
+    void DrawEdgePreview(const EdgePreview& preview, const NodeGraphModel& model,
                          const ViewTransform& vt);
     void DrawNode(const Node& n, const ViewTransform& vt, bool selected);
     void DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir);
     void DrawRubberBand(const RubberBand& rb);
     void DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
-                     const GraphModel& model, const ViewTransform& vt);
+                     const NodeGraphModel& model, const ViewTransform& vt);
     void DrawResizeHandles(const Node& n, const ViewTransform& vt,
                            ResizeHandle hovered);
 
@@ -108,4 +108,4 @@ private:
     ComPtr<ID2D1SolidColorBrush> m_Brush;
 };
 
-} // namespace GraphCtrl
+} // namespace NodeGraphCtrl
