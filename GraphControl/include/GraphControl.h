@@ -16,6 +16,8 @@
 
 // Notification codes sent via WM_NOTIFY to the parent window.
 #define GCN_RANGECHANGED   1   // lParam -> GRAPHRANGENOTIFY*, auto-scale moved the Y range
+#define GCN_HOVERSAMPLE    2   // lParam -> GRAPHHOVERNOTIFY*, hovered sample changed
+#define GCN_GETTOOLTIP     3   // lParam -> GRAPHTOOLTIPNOTIFY*; fill SzText to override
 
 namespace GraphCtrl {
 
@@ -23,6 +25,19 @@ struct GRAPHRANGENOTIFY {
     NMHDR Hdr;
     float Min;
     float Max;
+};
+
+// SampleIndex counts back from the newest sample (0 = newest); -1 means the
+// pointer left the plot.
+struct GRAPHHOVERNOTIFY {
+    NMHDR Hdr;
+    int   SampleIndex;
+};
+
+struct GRAPHTOOLTIPNOTIFY {
+    NMHDR   Hdr;
+    int     SampleIndex;
+    wchar_t SzText[256];   // pre-filled with the default readout; host may override
 };
 
 // Register the window class. Call once at startup (or on DLL attach).
@@ -33,11 +48,15 @@ bool Register(HINSTANCE hInstance);
 constexpr wchar_t WC_GRAPHCONTROL[] = L"GraphControl";
 
 // Control styles, packed into the low-order style bits like LVS_*/ES_*.
+// All of them can also be changed after creation with ModifyGraphStyle.
 #define GCS_GRID        0x0001   // background grid
 #define GCS_SCROLLGRID  0x0002   // grid drifts left with the data
 #define GCS_FILL        0x0004   // gradient area fill under each line
 #define GCS_AUTOSCALE   0x0008   // recompute the Y maximum from the data
 #define GCS_AXISLABELS  0x0010   // draw the range captions and time span
+#define GCS_LEGEND      0x0020   // swatch and name per series, inside the plot
+#define GCS_STACKED     0x0040   // series accumulate instead of overlapping
+#define GCS_TOOLTIP     0x0080   // hover crosshair and value readout
 
 // Default look: Task Manager style, fixed 0..100 range.
 #define GCS_DEFAULT  (GCS_GRID | GCS_FILL | GCS_AXISLABELS)
@@ -59,6 +78,8 @@ public:
         MSG_WM_PAINT(OnPaint)
         MSG_WM_SIZE(OnSize)
         MSG_WM_TIMER(OnTimer)
+        MSG_WM_MOUSEMOVE(OnMouseMove)
+        MSG_WM_MOUSELEAVE(OnMouseLeave)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
         MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
     END_MSG_MAP()
@@ -93,6 +114,11 @@ public:
     void      SetValueFormatter(ValueFormatFn formatter);
     void      SetGridDivisions(int columns, int rows);
 
+    // ---- Control styles ----
+    DWORD GetGraphStyle() const { return m_CtrlStyle; }
+    void  SetGraphStyle(DWORD style);
+    void  ModifyGraphStyle(DWORD remove, DWORD add);
+
     // ---- Live update ----
     // interval == 0 stops the timer; the host can still push samples itself.
     void SetUpdateInterval(UINT milliseconds);
@@ -101,6 +127,10 @@ public:
     void Pause();
     void Resume();
     bool IsPaused() const { return m_Paused; }
+
+    // ---- Hover ----
+    // Samples back from the newest (0 = newest); -1 when nothing is hovered.
+    int GetHoverSample() const { return m_HoverIndex; }
 
     // ---- Appearance ----
     void SetTitle(std::wstring title);
@@ -120,6 +150,8 @@ private:
     void OnPaint(HDC dc);
     void OnSize(UINT nType, CSize size);
     void OnTimer(UINT_PTR nIDEvent);
+    void OnMouseMove(UINT nFlags, CPoint pt);
+    void OnMouseLeave();
     BOOL OnEraseBkgnd(CDCHandle dc);
     LRESULT OnDpiChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
@@ -128,6 +160,9 @@ private:
     void OnSamplesPushed();          // advances the grid phase, applies auto-scale
     void ApplyAutoScale();
     void NotifyRangeChanged();
+    void ClearHover();
+    int  HitTestSample(CPoint pt) const;   // client pixels -> samples back from newest
+    void BuildHoverText(int sampleIndex);
     RenderOptions MakeRenderOptions() const;
 
 private:
@@ -149,6 +184,11 @@ private:
     UINT               m_UpdateInterval = 0;
     bool               m_Paused         = false;
     uint64_t           m_TotalSamples   = 0;
+
+    int          m_HoverIndex    = -1;
+    CPoint       m_HoverPt       = {};
+    bool         m_TrackingMouse = false;
+    std::wstring m_HoverText;
 
     int  m_UpdateDepth       = 0;
     bool m_PendingInvalidate = false;

@@ -47,6 +47,7 @@ public:
 
     size_t Count() const { return m_Count; }
     float  At(size_t index) const;   // 0 = oldest retained sample
+    float  AtFromEnd(size_t k) const;  // 0 = newest sample; aligns series of unequal length
     float  Last() const;
 
     float  Min() const;
@@ -111,6 +112,14 @@ public:
     // Across visible series; returns the fallback when there is no data.
     float MaxValue(float fallback = 0.0f) const;
     float MinValue(float fallback = 0.0f) const;
+
+    // Samples every visible series holds, counted back from the newest. Stacked
+    // drawing and hit testing use this so a shorter series cannot misalign them.
+    size_t CommonCount() const;
+
+    // Largest sum across visible series at any one time slot; the auto-scale
+    // peak for a stacked graph.
+    float MaxStackedValue(float fallback = 0.0f) const;
 
 private:
     std::vector<Series> m_Series;

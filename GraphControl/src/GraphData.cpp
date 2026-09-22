@@ -57,6 +57,10 @@ float Series::At(size_t index) const {
     return m_Samples[(m_Head + cap - m_Count + index) % cap];
 }
 
+float Series::AtFromEnd(size_t k) const {
+    return k < m_Count ? At(m_Count - 1 - k) : 0.0f;
+}
+
 float Series::Last() const {
     return m_Count ? At(m_Count - 1) : 0.0f;
 }
@@ -210,6 +214,33 @@ float GraphData::MinValue(float fallback) const {
         any = true;
     }
     return any ? lo : fallback;
+}
+
+size_t GraphData::CommonCount() const {
+    bool any = false;
+    size_t n = SIZE_MAX;
+    for (const auto& s : m_Series) {
+        if (!s.Style().Visible) continue;
+        n   = std::min(n, s.Count());
+        any = true;
+    }
+    return any ? n : 0;
+}
+
+float GraphData::MaxStackedValue(float fallback) const {
+    const size_t n = CommonCount();
+    if (n == 0) return fallback;
+
+    float hi = -FLT_MAX;
+    for (size_t k = 0; k < n; k++) {
+        float sum = 0.0f;
+        for (const auto& s : m_Series) {
+            if (s.Style().Visible)
+                sum += s.AtFromEnd(k);
+        }
+        hi = std::max(hi, sum);
+    }
+    return hi;
 }
 
 } // namespace GraphCtrl

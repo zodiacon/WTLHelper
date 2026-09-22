@@ -60,6 +60,45 @@ void CGraphControl::OnTimer(UINT_PTR nIDEvent) {
     OnSamplesPushed();
 }
 
+void CGraphControl::OnMouseMove(UINT, CPoint pt) {
+    if (!(m_CtrlStyle & GCS_TOOLTIP)) return;
+
+    if (!m_TrackingMouse) {
+        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd, 0 };
+        m_TrackingMouse = ::TrackMouseEvent(&tme) != FALSE;
+    }
+
+    const int index = HitTestSample(pt);
+    if (index < 0) {
+        ClearHover();
+        return;
+    }
+
+    const bool indexChanged = (index != m_HoverIndex);
+    m_HoverIndex = index;
+    m_HoverPt    = pt;
+
+    if (indexChanged) {
+        GRAPHHOVERNOTIFY nmh{};
+        nmh.Hdr.hwndFrom = m_hWnd;
+        nmh.Hdr.idFrom   = GetDlgCtrlID();
+        nmh.Hdr.code     = GCN_HOVERSAMPLE;
+        nmh.SampleIndex  = index;
+        if (HWND parent = GetParent())
+            ::SendMessage(parent, WM_NOTIFY, nmh.Hdr.idFrom, reinterpret_cast<LPARAM>(&nmh));
+
+        BuildHoverText(index);
+    }
+
+    // Repaint on every move: the readout box follows the cursor.
+    RequestInvalidate();
+}
+
+void CGraphControl::OnMouseLeave() {
+    m_TrackingMouse = false;
+    ClearHover();
+}
+
 BOOL CGraphControl::OnEraseBkgnd(CDCHandle) {
     return TRUE;   // prevent flicker; the renderer fills the background
 }
@@ -130,6 +169,7 @@ void CGraphControl::PushSamples(const std::vector<float>& values) {
 void CGraphControl::Clear() {
     m_Data.Clear();
     m_TotalSamples = 0;
+    ClearHover();
     RequestInvalidate();
 }
 
@@ -173,6 +213,24 @@ void CGraphControl::SetGridDivisions(int columns, int rows) {
     m_GridCols = std::max(columns, 0);
     m_GridRows = std::max(rows, 0);
     RequestInvalidate();
+}
+
+// ---- Control styles ----------------------------------------------------------
+
+void CGraphControl::SetGraphStyle(DWORD style) {
+    m_CtrlStyle = style & 0xFFFF;
+    m_Range.AutoScale = (m_CtrlStyle & GCS_AUTOSCALE) != 0;
+
+    if (!(m_CtrlStyle & GCS_TOOLTIP))
+        ClearHover();
+    if (m_Range.AutoScale)
+        ApplyAutoScale();
+
+    RequestInvalidate();
+}
+
+void CGraphControl::ModifyGraphStyle(DWORD remove, DWORD add) {
+    SetGraphStyle((m_CtrlStyle & ~remove) | add);
 }
 
 // ---- Live update -------------------------------------------------------------
@@ -255,10 +313,94 @@ void CGraphControl::OnSamplesPushed() {
     RequestInvalidate();
 }
 
+void CGraphControl::ClearHover() {
+    if (m_HoverIndex < 0) return;
+
+    m_HoverIndex = -1;
+    m_HoverText.clear();
+
+    GRAPHHOVERNOTIFY nmh{};
+    nmh.Hdr.hwndFrom = m_hWnd;
+    nmh.Hdr.idFrom   = GetDlgCtrlID();
+    nmh.Hdr.code     = GCN_HOVERSAMPLE;
+    nmh.SampleIndex  = -1;
+    if (HWND parent = GetParent())
+        ::SendMessage(parent, WM_NOTIFY, nmh.Hdr.idFrom, reinterpret_cast<LPARAM>(&nmh));
+
+    RequestInvalidate();
+}
+
+int CGraphControl::HitTestSample(CPoint pt) const {
+    const size_t capacity = m_Data.Capacity();
+    if (capacity < 2) return -1;
+
+    // The newest sample a visible series holds; nothing is drawn past it.
+    size_t newest = 0;
+    for (const auto& s : m_Data.AllSeries()) {
+        if (s.Style().Visible)
+            newest = std::max(newest, s.Count());
+    }
+    if (newest == 0) return -1;
+
+    CRect rc;
+    const_cast<CGraphControl*>(this)->GetClientRect(&rc);
+
+    const RenderOptions opt  = MakeRenderOptions();
+    const D2D1_RECT_F   plot = m_Renderer.PlotRect(rc, opt);
+    const float         dip  = 96.0f / m_Renderer.GetDpi();
+    const float         x    = pt.x * dip;
+    const float         y    = pt.y * dip;
+
+    if (x < plot.left || x > plot.right || y < plot.top || y > plot.bottom) return -1;
+
+    const float dx = GraphRenderer::SampleSpacing(plot, capacity);
+    if (dx <= 0.0f) return -1;
+
+    const int k = static_cast<int>(std::lround((plot.right - x) / dx));
+    if (k < 0 || static_cast<size_t>(k) >= newest) return -1;
+    return k;
+}
+
+void CGraphControl::BuildHoverText(int sampleIndex) {
+    const size_t k = static_cast<size_t>(sampleIndex);
+
+    m_HoverText.clear();
+    for (const auto& s : m_Data.AllSeries()) {
+        if (!s.Style().Visible || k >= s.Count()) continue;
+
+        wchar_t value[64] = {};
+        if (m_Formatter) m_Formatter(s.AtFromEnd(k), value, _countof(value));
+        else             Format::Number(s.AtFromEnd(k), value, _countof(value));
+
+        if (!m_HoverText.empty()) m_HoverText += L'\n';
+        if (!s.Name().empty()) {
+            m_HoverText += s.Name();
+            m_HoverText += L": ";
+        }
+        m_HoverText += value;
+    }
+
+    // Let the host replace the text entirely.
+    GRAPHTOOLTIPNOTIFY nmh{};
+    nmh.Hdr.hwndFrom = m_hWnd;
+    nmh.Hdr.idFrom   = GetDlgCtrlID();
+    nmh.Hdr.code     = GCN_GETTOOLTIP;
+    nmh.SampleIndex  = sampleIndex;
+    wcsncpy_s(nmh.SzText, m_HoverText.c_str(), _TRUNCATE);
+
+    if (HWND parent = GetParent()) {
+        ::SendMessage(parent, WM_NOTIFY, nmh.Hdr.idFrom, reinterpret_cast<LPARAM>(&nmh));
+        m_HoverText = nmh.SzText;
+    }
+}
+
 void CGraphControl::ApplyAutoScale() {
     if (!m_Range.AutoScale) return;
 
-    float peak = m_Data.MaxValue(0.0f) * m_Range.Headroom;
+    // A stacked graph has to fit the sum of the series, not the tallest one.
+    const float observed = (m_CtrlStyle & GCS_STACKED) ? m_Data.MaxStackedValue(0.0f)
+                                                       : m_Data.MaxValue(0.0f);
+    float peak = observed * m_Range.Headroom;
     if (m_Range.RoundNice) peak = NiceCeil(peak);
     if (peak <= m_Range.Min) peak = m_Range.Min + 1.0f;
 
@@ -287,6 +429,8 @@ RenderOptions CGraphControl::MakeRenderOptions() const {
     opt.ScrollGrid = (m_CtrlStyle & GCS_SCROLLGRID) != 0;
     opt.Fill       = (m_CtrlStyle & GCS_FILL) != 0;
     opt.AxisLabels = (m_CtrlStyle & GCS_AXISLABELS) != 0;
+    opt.Legend     = (m_CtrlStyle & GCS_LEGEND) != 0;
+    opt.Stacked    = (m_CtrlStyle & GCS_STACKED) != 0;
     opt.GridCols   = m_GridCols;
     opt.GridRows   = m_GridRows;
 
@@ -300,6 +444,14 @@ RenderOptions CGraphControl::MakeRenderOptions() const {
 
     opt.Title        = m_Title.empty() ? nullptr : m_Title.c_str();
     opt.TimeSpanText = m_TimeSpanText.empty() ? nullptr : m_TimeSpanText.c_str();
+
+    if ((m_CtrlStyle & GCS_TOOLTIP) && m_HoverIndex >= 0) {
+        const float dip = 96.0f / m_Renderer.GetDpi();
+        opt.HoverIndex  = m_HoverIndex;
+        opt.HoverX      = m_HoverPt.x * dip;
+        opt.HoverY      = m_HoverPt.y * dip;
+        opt.HoverText   = m_HoverText.empty() ? nullptr : m_HoverText.c_str();
+    }
     return opt;
 }
 

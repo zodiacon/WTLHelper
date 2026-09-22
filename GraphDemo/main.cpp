@@ -16,18 +16,24 @@ static constexpr int IDC_MEM    = 102;
 static constexpr int IDC_STATUS = 103;
 
 // Commands
-static constexpr int IDC_PAUSE     = 200;
-static constexpr int IDC_CLEAR     = 201;
-static constexpr int IDC_AUTOSCALE = 202;
-static constexpr int IDC_HIST60    = 203;
-static constexpr int IDC_HIST120   = 204;
-static constexpr int IDC_HIST300   = 205;
-static constexpr int IDC_RATE250   = 206;
-static constexpr int IDC_RATE500   = 207;
-static constexpr int IDC_RATE1000  = 208;
-static constexpr int IDC_DARK      = 209;
-static constexpr int IDC_LIGHT     = 210;
-static constexpr int IDC_EXIT      = 211;
+static constexpr int IDC_PAUSE      = 200;
+static constexpr int IDC_CLEAR      = 201;
+static constexpr int IDC_AUTOSCALE  = 202;
+static constexpr int IDC_HIST60     = 203;
+static constexpr int IDC_HIST120    = 204;
+static constexpr int IDC_HIST300    = 205;
+static constexpr int IDC_RATE250    = 206;
+static constexpr int IDC_RATE500    = 207;
+static constexpr int IDC_RATE1000   = 208;
+static constexpr int IDC_DARK       = 209;
+static constexpr int IDC_LIGHT      = 210;
+static constexpr int IDC_EXIT       = 211;
+static constexpr int IDC_GRID       = 212;
+static constexpr int IDC_SCROLLGRID = 213;
+static constexpr int IDC_FILL       = 214;
+static constexpr int IDC_LEGEND     = 215;
+static constexpr int IDC_STACKED    = 216;
+static constexpr int IDC_CROSSHAIR  = 217;
 
 static constexpr UINT_PTR TIMER_MEMORY = 1;
 
@@ -35,54 +41,60 @@ static CGraphControl g_cpu;      // pull mode: the control asks for samples
 static CGraphControl g_mem;      // push mode: this app feeds it from its own timer
 static HWND          g_status = nullptr;
 
-static SeriesId g_cpuTotal  = InvalidSeries;
+static SeriesId g_cpuUser   = InvalidSeries;
 static SeriesId g_cpuKernel = InvalidSeries;
 static SeriesId g_memInUse  = InvalidSeries;
 
-static bool  g_paused    = false;
-static bool  g_autoScale = false;
-static UINT  g_interval  = 1000;
-static size_t g_history  = 60;
-static float g_totalPhys = 0.0f;
+static bool   g_paused    = false;
+static UINT   g_interval  = 1000;
+static size_t g_history   = 60;
+static float  g_totalPhys = 0.0f;
+static int    g_hover     = -1;
+static UINT_PTR g_hoverFrom = 0;   // which graph the hover reading belongs to
+
+// The style both graphs are created with, and the one the View menu edits.
+static DWORD g_style = GCS_GRID | GCS_SCROLLGRID | GCS_FILL | GCS_AXISLABELS |
+                       GCS_LEGEND | GCS_TOOLTIP;
 
 // ---- Data sources -----------------------------------------------------------
 
-// Percentage of each interval spent busy, and the part of that spent in kernel.
-static void SampleCpu(float& total, float& kernel) {
+// User and kernel shares of each interval. They sum to total utilization, so
+// the two series stack into the familiar Task Manager total.
+static void SampleCpu(float& user, float& kernel) {
     static ULONGLONG s_prevIdle = 0, s_prevKernel = 0, s_prevUser = 0;
     static bool s_first = true;
 
     FILETIME idleFt{}, kernelFt{}, userFt{};
     if (!GetSystemTimes(&idleFt, &kernelFt, &userFt)) {
-        total = kernel = 0.0f;
+        user = kernel = 0.0f;
         return;
     }
 
     auto toU64 = [](const FILETIME& ft) {
         return (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
     };
-    const ULONGLONG idle = toU64(idleFt), krnl = toU64(kernelFt), user = toU64(userFt);
+    const ULONGLONG idle = toU64(idleFt), krnl = toU64(kernelFt), usr = toU64(userFt);
 
     if (s_first) {
         s_first = false;
-        s_prevIdle = idle; s_prevKernel = krnl; s_prevUser = user;
-        total = kernel = 0.0f;
+        s_prevIdle = idle; s_prevKernel = krnl; s_prevUser = usr;
+        user = kernel = 0.0f;
         return;
     }
 
     // The kernel time reported by GetSystemTimes already includes idle time.
     const ULONGLONG dIdle   = idle - s_prevIdle;
     const ULONGLONG dKernel = krnl - s_prevKernel;
-    const ULONGLONG dUser   = user - s_prevUser;
-    s_prevIdle = idle; s_prevKernel = krnl; s_prevUser = user;
+    const ULONGLONG dUser   = usr - s_prevUser;
+    s_prevIdle = idle; s_prevKernel = krnl; s_prevUser = usr;
 
     const ULONGLONG dTotal = dKernel + dUser;
     if (dTotal == 0) {
-        total = kernel = 0.0f;
+        user = kernel = 0.0f;
         return;
     }
 
-    total  = static_cast<float>((dTotal - dIdle) * 100.0 / dTotal);
+    user   = static_cast<float>(dUser * 100.0 / dTotal);
     kernel = static_cast<float>((dKernel - dIdle) * 100.0 / dTotal);
 }
 
@@ -102,8 +114,11 @@ static float TotalPhysicalMemory() {
 static void UpdateStatus() {
     if (!g_status) return;
 
-    const Series* cpu = g_cpu.GetData().GetSeries(g_cpuTotal);
-    const Series* mem = g_mem.GetData().GetSeries(g_memInUse);
+    const Series* user   = g_cpu.GetData().GetSeries(g_cpuUser);
+    const Series* kernel = g_cpu.GetData().GetSeries(g_cpuKernel);
+    const Series* mem    = g_mem.GetData().GetSeries(g_memInUse);
+
+    const float cpuTotal = (user ? user->Last() : 0.0f) + (kernel ? kernel->Last() : 0.0f);
 
     wchar_t used[32] = L"-", peak[32] = L"-";
     if (mem && mem->Count()) {
@@ -111,29 +126,62 @@ static void UpdateStatus() {
         Format::Bytes(mem->Max(), peak, std::size(peak));
     }
 
-    wchar_t buf[256];
+    wchar_t hover[48] = L"";
+    if (g_hover >= 0)
+        swprintf_s(hover, L"  |  %s -%.1f s",
+                   g_hoverFrom == IDC_CPU ? L"CPU at" : L"memory at",
+                   g_hover * g_interval / 1000.0);
+
+    wchar_t buf[320];
     swprintf_s(buf,
-        L"CPU %.0f%% (avg %.0f%%)  |  Memory %s (peak %s)  |  history %zu samples  |  every %u ms  |  %s",
-        cpu ? cpu->Last() : 0.0f,
-        cpu ? cpu->Average() : 0.0f,
+        L"CPU %.0f%% (kernel %.0f%%)  |  Memory %s (peak %s)  |  history %zu samples  |  every %u ms  |  %s%s",
+        cpuTotal,
+        kernel ? kernel->Last() : 0.0f,
         used, peak,
         g_history, g_interval,
-        g_paused ? L"PAUSED" : L"running");
+        g_paused ? L"PAUSED" : L"running",
+        hover);
     SetWindowText(g_status, buf);
+}
+
+static void ApplyStyle() {
+    g_cpu.SetGraphStyle(g_style);
+    g_mem.SetGraphStyle(g_style);
+
+    if (!(g_style & GCS_AUTOSCALE)) {
+        g_cpu.SetRange(0, 100);
+        g_mem.SetRange(0, g_totalPhys);
+    }
 }
 
 static void SyncMenu(HWND hwnd) {
     HMENU menu = GetMenu(hwnd);
     if (!menu) return;
 
-    CheckMenuItem(menu, IDC_PAUSE, MF_BYCOMMAND | (g_paused ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(menu, IDC_AUTOSCALE, MF_BYCOMMAND | (g_autoScale ? MF_CHECKED : MF_UNCHECKED));
+    auto check = [menu](int id, bool on) {
+        CheckMenuItem(menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
+    };
+
+    check(IDC_PAUSE,      g_paused);
+    check(IDC_AUTOSCALE,  (g_style & GCS_AUTOSCALE) != 0);
+    check(IDC_GRID,       (g_style & GCS_GRID) != 0);
+    check(IDC_SCROLLGRID, (g_style & GCS_SCROLLGRID) != 0);
+    check(IDC_FILL,       (g_style & GCS_FILL) != 0);
+    check(IDC_LEGEND,     (g_style & GCS_LEGEND) != 0);
+    check(IDC_STACKED,    (g_style & GCS_STACKED) != 0);
+    check(IDC_CROSSHAIR,  (g_style & GCS_TOOLTIP) != 0);
 
     const int hist = (g_history == 60) ? IDC_HIST60 : (g_history == 120) ? IDC_HIST120 : IDC_HIST300;
     CheckMenuRadioItem(menu, IDC_HIST60, IDC_HIST300, hist, MF_BYCOMMAND);
 
     const int rate = (g_interval == 250) ? IDC_RATE250 : (g_interval == 500) ? IDC_RATE500 : IDC_RATE1000;
     CheckMenuRadioItem(menu, IDC_RATE250, IDC_RATE1000, rate, MF_BYCOMMAND);
+}
+
+static void ToggleStyle(HWND hwnd, DWORD flag) {
+    g_style ^= flag;
+    ApplyStyle();
+    SyncMenu(hwnd);
 }
 
 static void SetPaused(HWND hwnd, bool paused) {
@@ -193,14 +241,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         g_totalPhys = TotalPhysicalMemory();
 
-        // ---- CPU graph: two overlaid series, fixed 0..100, pull mode ----
-        g_cpu.Create(hwnd, 0, 0, rc.right, graphH, WS_CHILD | WS_VISIBLE,
-                     GCS_GRID | GCS_SCROLLGRID | GCS_FILL | GCS_AXISLABELS, IDC_CPU);
+        // ---- CPU graph: two series that stack into total, 0..100, pull mode ----
+        g_cpu.Create(hwnd, 0, 0, rc.right, graphH, WS_CHILD | WS_VISIBLE, g_style, IDC_CPU);
 
-        SeriesStyle total;
-        total.LineColor = RGB(17, 125, 187);
-        total.FillColor = RGB(105, 185, 235);
-        g_cpuTotal = g_cpu.AddSeries(L"Total", total);
+        SeriesStyle user;
+        user.LineColor = RGB(17, 125, 187);
+        user.FillColor = RGB(105, 185, 235);
+        g_cpuUser = g_cpu.AddSeries(L"User", user);
 
         SeriesStyle kernel;
         kernel.LineColor   = RGB(12, 80, 125);
@@ -212,16 +259,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_cpu.SetRange(0, 100);
         g_cpu.SetValueFormatter(Format::Percent);
         g_cpu.SetSampleSource([](std::vector<float>& v) {
-            float total = 0, kernel = 0;
-            SampleCpu(total, kernel);
-            v[0] = total;
+            float user = 0, kernel = 0;
+            SampleCpu(user, kernel);
+            v[0] = user;
             v[1] = kernel;
         });
 
         // ---- Memory graph: one series, scaled to installed RAM, push mode ----
         g_mem.Create(hwnd, 0, graphH, rc.right, rc.bottom - sbH - graphH,
-                     WS_CHILD | WS_VISIBLE,
-                     GCS_GRID | GCS_SCROLLGRID | GCS_FILL | GCS_AXISLABELS, IDC_MEM);
+                     WS_CHILD | WS_VISIBLE, g_style, IDC_MEM);
 
         SeriesStyle inUse;
         inUse.LineColor = RGB(139, 92, 196);
@@ -253,7 +299,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_NOTIFY: {
         auto* nm = reinterpret_cast<NMHDR*>(lParam);
-        if (nm->code == GCN_RANGECHANGED) {
+        switch (nm->code) {
+        case GCN_RANGECHANGED: {
             auto* rn = reinterpret_cast<GRAPHRANGENOTIFY*>(lParam);
             wchar_t maximum[32];
             if (nm->idFrom == IDC_CPU) Format::Percent(rn->Max, maximum, std::size(maximum));
@@ -263,6 +310,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             swprintf_s(buf, L"%s graph auto-scaled to %s",
                        nm->idFrom == IDC_CPU ? L"CPU" : L"Memory", maximum);
             SetWindowText(g_status, buf);
+            break;
+        }
+        case GCN_HOVERSAMPLE: {
+            auto* hn = reinterpret_cast<GRAPHHOVERNOTIFY*>(lParam);
+            // Moving between the two graphs means the one being left reports -1
+            // after the one being entered reports its sample; ignore that.
+            if (hn->SampleIndex >= 0) {
+                g_hover     = hn->SampleIndex;
+                g_hoverFrom = nm->idFrom;
+            }
+            else if (nm->idFrom == g_hoverFrom) {
+                g_hover     = -1;
+                g_hoverFrom = 0;
+            }
+            UpdateStatus();
+            break;
+        }
+        case GCN_GETTOOLTIP: {
+            // Prepend how far back the hovered sample is, then keep the default lines.
+            auto* tn = reinterpret_cast<GRAPHTOOLTIPNOTIFY*>(lParam);
+            wchar_t buf[256];
+            swprintf_s(buf, L"-%.1f s\n%s", tn->SampleIndex * g_interval / 1000.0, tn->SzText);
+            wcsncpy_s(tn->SzText, buf, _TRUNCATE);
+            break;
+        }
         }
         return 0;
     }
@@ -277,16 +349,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_mem.Clear();
             UpdateStatus();
             break;
-        case IDC_AUTOSCALE:
-            g_autoScale = !g_autoScale;
-            g_cpu.SetAutoScale(g_autoScale);
-            g_mem.SetAutoScale(g_autoScale);
-            if (!g_autoScale) {
-                g_cpu.SetRange(0, 100);
-                g_mem.SetRange(0, g_totalPhys);
-            }
-            SyncMenu(hwnd);
-            break;
+        case IDC_AUTOSCALE:  ToggleStyle(hwnd, GCS_AUTOSCALE);  break;
+        case IDC_GRID:       ToggleStyle(hwnd, GCS_GRID);       break;
+        case IDC_SCROLLGRID: ToggleStyle(hwnd, GCS_SCROLLGRID); break;
+        case IDC_FILL:       ToggleStyle(hwnd, GCS_FILL);       break;
+        case IDC_LEGEND:     ToggleStyle(hwnd, GCS_LEGEND);     break;
+        case IDC_STACKED:    ToggleStyle(hwnd, GCS_STACKED);    break;
+        case IDC_CROSSHAIR:  ToggleStyle(hwnd, GCS_TOOLTIP);    break;
         case IDC_HIST60:   SetHistory(hwnd, 60);  break;
         case IDC_HIST120:  SetHistory(hwnd, 120); break;
         case IDC_HIST300:  SetHistory(hwnd, 300); break;
@@ -361,8 +430,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hRate, L"&Rate");
 
     HMENU hView = CreatePopupMenu();
-    AppendMenu(hView, MF_STRING, IDC_DARK,  L"&Dark theme\tD");
-    AppendMenu(hView, MF_STRING, IDC_LIGHT, L"&Light theme\tL");
+    AppendMenu(hView, MF_STRING, IDC_GRID,       L"&Grid\tG");
+    AppendMenu(hView, MF_STRING, IDC_SCROLLGRID, L"Sc&rolling grid\tR");
+    AppendMenu(hView, MF_STRING, IDC_FILL,       L"Area &fill\tF");
+    AppendMenu(hView, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hView, MF_STRING, IDC_LEGEND,     L"L&egend\tE");
+    AppendMenu(hView, MF_STRING, IDC_STACKED,    L"&Stacked\tS");
+    AppendMenu(hView, MF_STRING, IDC_CROSSHAIR,  L"Hover &crosshair\tT");
+    AppendMenu(hView, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hView, MF_STRING, IDC_DARK,       L"&Dark theme\tD");
+    AppendMenu(hView, MF_STRING, IDC_LIGHT,      L"&Light theme\tL");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
 
     SetMenu(hwnd, hMenu);
@@ -371,6 +448,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         { FVIRTKEY, VK_SPACE, IDC_PAUSE },
         { FVIRTKEY,      'C', IDC_CLEAR },
         { FVIRTKEY,      'A', IDC_AUTOSCALE },
+        { FVIRTKEY,      'G', IDC_GRID },
+        { FVIRTKEY,      'R', IDC_SCROLLGRID },
+        { FVIRTKEY,      'F', IDC_FILL },
+        { FVIRTKEY,      'E', IDC_LEGEND },
+        { FVIRTKEY,      'S', IDC_STACKED },
+        { FVIRTKEY,      'T', IDC_CROSSHAIR },
         { FVIRTKEY,      'D', IDC_DARK },
         { FVIRTKEY,      'L', IDC_LIGHT },
     };
