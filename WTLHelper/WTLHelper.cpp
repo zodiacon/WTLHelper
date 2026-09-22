@@ -10,6 +10,7 @@
 #include "CustomHeader2.h"
 #include "CustomDateTimePicker.h"
 #include "CustomMonthCalendar.h"
+#include "CustomCheckAclUI.h"
 
 static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
 static HHOOK g_hHook;
@@ -37,6 +38,11 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 				auto win = new CCustomMonthCalendar;
 				win->SubclassWindow(hwnd);
 				win->Init();
+				return ::CallNextHookEx(nullptr, code, wp, lp);
+			}
+			if (name.CompareNoCase(L"CHECKLIST_ACLUI") == 0) {
+				auto win = new CCustomCheckAclUI;
+				win->SubclassWindow(hwnd);
 				return ::CallNextHookEx(nullptr, code, wp, lp);
 			}
 

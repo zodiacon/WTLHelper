@@ -223,6 +223,9 @@
     <ClInclude Include="CustomDateTimePicker.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="CustomCheckAclUI.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
     <ClInclude Include="CustomMonthCalendar.h">
       <Filter>Controls</Filter>
     </ClInclude>
