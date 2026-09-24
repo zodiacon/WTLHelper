@@ -32,6 +32,9 @@
     <ClCompile Include="SortHelper.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
+    <ClCompile Include="IniDocument.cpp">
+      <Filter>Helpers</Filter>
+    </ClCompile>
     <ClCompile Include="IniFile.cpp">
       <Filter>Helpers</Filter>
     </ClCompile>
@@ -134,6 +137,9 @@
       <Filter>Helpers</Filter>
     </ClInclude>
     <ClInclude Include="ToolbarHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="IniDocument.h">
       <Filter>Helpers</Filter>
     </ClInclude>
     <ClInclude Include="IniFile.h">

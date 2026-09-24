@@ -28,25 +28,25 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 			::GetClassName(hwnd, name.GetBufferSetLength(32), 32);
 
 			if (name.CompareNoCase(DATETIMEPICK_CLASS) == 0) {
-				auto win = new CCustomDateTimePicker;
-				win->SubclassWindow(hwnd);
-				win->Init();
-				return ::CallNextHookEx(nullptr, code, wp, lp);
+				::SetWindowTheme(hwnd, L"EXPLORER_DTP", L"");
+				DarkMode::setDarkWndNotifySafe(hwnd);
 			}
-			if (name.CompareNoCase(MONTHCAL_CLASS) == 0) {
+			else if (name.CompareNoCase(MONTHCAL_CLASS) == 0) {
+				// SysMonthCal32 has no DarkMode_* visual style; CCustomMonthCalendar
+				// strips visual styles and recolors via MCM_SETCOLOR instead.
 				auto win = new CCustomMonthCalendar;
 				win->SubclassWindow(hwnd);
+				DarkMode::setDarkWndNotifySafe(hwnd);
 				win->Init();
 				return ::CallNextHookEx(nullptr, code, wp, lp);
 			}
 
-			if (lpcs->style & WS_CHILD) {
+			else if (lpcs->style & WS_CHILD) {
 				if (name.CompareNoCase(WC_HEADER) == 0 || name.CompareNoCase("ATL:" WC_HEADER) == 0) {
 					auto win = new CCustomHeader2;
 					win->SubclassWindow(hwnd);
 				}
 				DarkMode::setDarkWndNotifySafe(hwnd);
-
 			}
 			else {
 				// top-level window
@@ -61,26 +61,35 @@ static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
 
 static decltype(::GetSysColor)* OrgGetSysColor;
 static decltype(::GetSysColorBrush)* OrgGetSysColorBrush;
-static bool g_ThemeChanged = true;
+
+//
+// GetSysColorBrush returns brushes that are not the caller's to delete, but a caller that got one can't tell
+// that ours are different, and some do delete what they get: the shell's AutoComplete (which starts when the user
+// types in a file dialog's File name box) deletes the COLOR_3DFACE brush. If that were the DarkMode library's own
+// brush, the library would keep painting with a dead handle and every control created afterwards would come out
+// light. So the hook hands out brushes of its own, checked on every call and recreated if they were deleted.
+//
+static HBRUSH SafeBrush(HBRUSH& brush, COLORREF color) {
+	LOGBRUSH lb;
+	if (brush && ::GetObjectType(brush) == OBJ_BRUSH && ::GetObject(brush, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID && lb.lbColor == color)
+		return brush;
+	// a brush that was deleted or is now of another color is not ours to delete (its handle may have been reused)
+	return brush = ::CreateSolidBrush(color);
+}
 
 HBRUSH WINAPI HookedGetSysColorBrush2(int index) {
 	if (g_DarkModeType != DarkModeKind::Dark)
 		return OrgGetSysColorBrush(index);
 
+	static HBRUSH windowBrush, faceBrush, textBrush;
 	switch (index) {
 		case COLOR_WINDOW:
 		case COLOR_BACKGROUND:
-			return DarkMode::getBackgroundBrush();
+			return SafeBrush(windowBrush, DarkMode::getBackgroundColor());
 		case COLOR_3DFACE:
-			return DarkMode::getCtrlBackgroundBrush();
+			return SafeBrush(faceBrush, DarkMode::getCtrlBackgroundColor());
 		case COLOR_WINDOWTEXT:
-			static auto textBrush = ::CreateSolidBrush(DarkMode::getTextColor());
-			if (g_ThemeChanged) {
-				g_ThemeChanged = false;
-				::DeleteObject(textBrush);
-				textBrush = ::CreateSolidBrush(DarkMode::getTextColor());
-			}
-			return textBrush;
+			return SafeBrush(textBrush, DarkMode::getTextColor());
 	}
 	return OrgGetSysColorBrush(index);
 }
@@ -158,7 +167,6 @@ bool WTLHelper::SwitchToMode(DarkModeKind type, HWND hWnd) {
 	if (hWnd) {
 		DarkMode::setDarkTitleBarEx(hWnd, true);
 		DarkMode::setChildCtrlsTheme(hWnd);
-		g_ThemeChanged = true;
 
 		CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(type));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
@@ -173,7 +181,6 @@ bool WTLHelper::SwitchToMode(HWND hWnd) {
 void WTLHelper::SetColorTone(ColorTone tone, HWND hWnd) {
 	DarkMode::setColorTone(static_cast<int>(tone));
 	if (hWnd) {
-		g_ThemeChanged = true;
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
 	}
 }
@@ -242,7 +249,6 @@ bool WTLHelper::SetDarkTone(DarkMode::ColorTone tone, HWND hWnd) {
 	DarkMode::setColorTone(static_cast<int>(tone));
 
 	if (hWnd) {
-		g_ThemeChanged = true;
 		CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(g_DarkModeType));
 		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
 	}

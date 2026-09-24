@@ -444,6 +444,7 @@
     <ClInclude Include="DialogHelper.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />
+    <ClInclude Include="IniDocument.h" />
     <ClInclude Include="IniFile.h" />
     <ClInclude Include="ListViewhelper.h" />
     <ClInclude Include="NativeCustomTabView.h" />
@@ -480,6 +481,7 @@
     <ClCompile Include="DarkMode\DmlibWinApi.cpp" />
     <ClCompile Include="IconHelper.cpp" />
     <ClCompile Include="IListView.cpp" />
+    <ClCompile Include="IniDocument.cpp" />
     <ClCompile Include="IniFile.cpp" />
     <ClCompile Include="ListViewhelper.cpp" />
     <ClCompile Include="OwnerDrawnMenu.cpp" />
