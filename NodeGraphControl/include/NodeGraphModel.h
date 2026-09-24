@@ -3,7 +3,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace GraphCtrl {
+namespace NodeGraphCtrl {
 
 using NodeId = uint32_t;
 using EdgeId = uint32_t;
@@ -43,7 +43,7 @@ struct Edge {
     void*        UserData = nullptr;
 };
 
-class GraphModel {
+class NodeGraphModel {
 public:
     // w=0 or h=0 means use the current default size.
     NodeId AddNode(std::wstring label, float x = 0, float y = 0,
@@ -84,4 +84,4 @@ private:
     float  m_DefaultNodeHeight = 40.0f;
 };
 
-} // namespace GraphCtrl
+} // namespace NodeGraphCtrl

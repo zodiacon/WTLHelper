@@ -411,6 +411,7 @@
     <ClInclude Include="CompoundFile.h" />
     <ClInclude Include="CompoundFileReaderWriter.h" />
     <ClInclude Include="CustomButton.h" />
+    <ClInclude Include="CustomCheckAclUI.h" />
     <ClInclude Include="CustomComboBox.h" />
     <ClInclude Include="CustomDateTimePicker.h" />
     <ClInclude Include="CustomDialog.h" />

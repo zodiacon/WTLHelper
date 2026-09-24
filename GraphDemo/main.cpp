@@ -1,211 +1,700 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <psapi.h>
 #include "GraphControl.h"
+#include "GraphGrid.h"
+#include "CompositionBar.h"
 
 #pragma comment(lib, "GraphControl.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "psapi.lib")
 
-#include <commdlg.h>
+#include <iterator>
+#include <thread>
+#include <algorithm>
 
 using namespace GraphCtrl;
 
 // Control IDs
-static constexpr int IDC_GRAPH   = 101;
-static constexpr int IDC_STATUS  = 102;
-static constexpr int IDC_BTNFIT  = 103;
-static constexpr int IDC_BTNADD  = 104;
-static constexpr int IDC_BTNCLR  = 105;
-static constexpr int IDC_SAVE    = 106;
-static constexpr int IDC_LOAD    = 107;
-static constexpr int IDC_DELSEL  = 108;
-static constexpr int IDC_UNDO    = 109;
-static constexpr int IDC_REDO    = 110;
-static constexpr int IDC_MINIMAP = 111;
+static constexpr int IDC_CPU    = 101;
+static constexpr int IDC_MEM    = 102;
+static constexpr int IDC_STATUS = 103;
+static constexpr int IDC_CORES  = 104;   // base id for the per-core tiles
+static constexpr int IDC_COMP   = 4000;  // composition bar (past the tile ids)
 
-static CGraphControl g_graph;
-static HWND g_status = nullptr;
+// Commands
+static constexpr int IDC_PAUSE      = 200;
+static constexpr int IDC_CLEAR      = 201;
+static constexpr int IDC_AUTOSCALE  = 202;
+static constexpr int IDC_HIST60     = 203;
+static constexpr int IDC_HIST120    = 204;
+static constexpr int IDC_HIST300    = 205;
+static constexpr int IDC_RATE250    = 206;
+static constexpr int IDC_RATE500    = 207;
+static constexpr int IDC_RATE1000   = 208;
+static constexpr int IDC_DARK       = 209;
+static constexpr int IDC_LIGHT      = 210;
+static constexpr int IDC_EXIT       = 211;
+static constexpr int IDC_GRID       = 212;
+static constexpr int IDC_SCROLLGRID = 213;
+static constexpr int IDC_FILL       = 214;
+static constexpr int IDC_LEGEND     = 215;
+static constexpr int IDC_STACKED    = 216;
+static constexpr int IDC_CROSSHAIR  = 217;
+static constexpr int IDC_PERCORE    = 218;
+static constexpr int IDC_BARS       = 219;
+static constexpr int IDC_VALUE      = 220;
+static constexpr int IDC_GAP        = 221;
+static constexpr int IDC_COPY       = 222;
+static constexpr int IDC_SAVEPNG    = 223;
+static constexpr int IDC_STALL      = 224;
+static constexpr int IDC_ANIMATE    = 225;
+static constexpr int IDC_BIGFONT    = 226;
+static constexpr int IDC_WORKER     = 227;
+static constexpr int IDC_COMPVERT   = 228;
 
-static void PopulateDemo(GraphModel& m) {
-    auto kernel  = m.AddNode(L"kernel32",   100, 100);
-    auto ntdll   = m.AddNode(L"ntdll",      100, 220);
-    auto user32  = m.AddNode(L"user32",     280, 100);
-    auto gdi32   = m.AddNode(L"gdi32",      280, 220);
-    auto shell32 = m.AddNode(L"shell32",    460, 100);
-    auto app     = m.AddNode(L"app.exe",    280, 340);
+static constexpr UINT_PTR TIMER_MEMORY = 1;
 
-    m.AddEdge(app,     kernel,  L"imports");
-    m.AddEdge(app,     user32,  L"imports");
-    m.AddEdge(app,     shell32, L"imports");
-    m.AddEdge(user32,  kernel,  L"imports");
-    m.AddEdge(user32,  gdi32,   L"imports");
-    m.AddEdge(shell32, kernel,  L"imports");
-    m.AddEdge(kernel,  ntdll,   L"imports");
-    m.AddEdge(gdi32,   ntdll,   L"imports");
+static CGraphControl g_cpu;      // pull mode: the control asks for samples
+static CGraphControl g_mem;      // push mode: this app feeds it from its own timer
+static CGraphGrid    g_cores;    // one tile per logical processor
+static CCompositionBar g_comp;   // memory composition strip
+static HWND          g_status = nullptr;
+
+static SeriesId g_cpuUser   = InvalidSeries;
+static SeriesId g_cpuKernel = InvalidSeries;
+static SeriesId  g_memInUse  = InvalidSeries;
+static SegmentId g_segInUse  = InvalidSegment;
+static SegmentId g_segCached = InvalidSegment;
+static SegmentId g_segFree   = InvalidSegment;
+
+static bool   g_paused    = false;
+static UINT   g_interval  = 1000;
+static size_t g_history   = 60;
+static float  g_totalPhys = 0.0f;
+static int    g_hover     = -1;
+static bool   g_showCores = false;
+static DWORD  g_coreCount = 1;
+static CGraphControl* g_menuTarget = nullptr;   // graph the context menu came from
+static bool   g_animate  = true;
+static bool   g_bigFont  = false;
+static bool   g_compVert = false;
+static UINT_PTR g_hoverFrom = 0;   // which graph the hover reading belongs to
+
+// The style both graphs are created with, and the one the View menu edits.
+static DWORD g_style = GCS_GRID | GCS_SCROLLGRID | GCS_FILL | GCS_AXISLABELS |
+                       GCS_LEGEND | GCS_TOOLTIP | GCS_VALUEOVERLAY;
+
+// The tiles are small, so they skip the axis captions and the legend.
+static DWORD CoreTileStyle() {
+    return (g_style & (GCS_GRID | GCS_SCROLLGRID | GCS_FILL | GCS_BARS |
+                       GCS_AUTOSCALE | GCS_VALUEOVERLAY | GCS_TOOLTIP));
 }
 
-static void UpdateStatus(HWND /*hwnd*/) {
-    NodeId node = g_graph.GetSelectedNode();
-    EdgeId edge = g_graph.GetSelectedEdge();
+// ---- Data sources -----------------------------------------------------------
 
-    wchar_t buf[256];
-    if (node != InvalidNode) {
-        GraphModel* m = g_graph.GetModel();
-        const Node* n = m ? m->GetNode(node) : nullptr;
-        if (n) {
-            swprintf_s(buf, L"Node selected: %s  (id=%u, pos=%.0f,%.0f)",
-                n->Label.c_str(), node, n->X, n->Y);
-            SetWindowText(g_status, buf);
-            return;
-        }
-    }
-    if (edge != InvalidEdge) {
-        swprintf_s(buf, L"Edge selected: id=%u", edge);
-        SetWindowText(g_status, buf);
+// User and kernel shares of each interval. They sum to total utilization, so
+// the two series stack into the familiar Task Manager total.
+static void SampleCpu(float& user, float& kernel) {
+    static ULONGLONG s_prevIdle = 0, s_prevKernel = 0, s_prevUser = 0;
+    static bool s_first = true;
+
+    FILETIME idleFt{}, kernelFt{}, userFt{};
+    if (!GetSystemTimes(&idleFt, &kernelFt, &userFt)) {
+        user = kernel = 0.0f;
         return;
     }
-    SetWindowText(g_status, L"Ready  |  scroll=zoom  |  middle-drag=pan  |  left-drag=move node  |  dbl-click=rename");
+
+    auto toU64 = [](const FILETIME& ft) {
+        return (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    };
+    const ULONGLONG idle = toU64(idleFt), krnl = toU64(kernelFt), usr = toU64(userFt);
+
+    if (s_first) {
+        s_first = false;
+        s_prevIdle = idle; s_prevKernel = krnl; s_prevUser = usr;
+        user = kernel = 0.0f;
+        return;
+    }
+
+    // The kernel time reported by GetSystemTimes already includes idle time.
+    const ULONGLONG dIdle   = idle - s_prevIdle;
+    const ULONGLONG dKernel = krnl - s_prevKernel;
+    const ULONGLONG dUser   = usr - s_prevUser;
+    s_prevIdle = idle; s_prevKernel = krnl; s_prevUser = usr;
+
+    const ULONGLONG dTotal = dKernel + dUser;
+    if (dTotal == 0) {
+        user = kernel = 0.0f;
+        return;
+    }
+
+    user   = static_cast<float>(dUser * 100.0 / dTotal);
+    kernel = static_cast<float>((dKernel - dIdle) * 100.0 / dTotal);
+}
+
+// Per-processor times are not in any Win32 API, so go to the native one.
+typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION {
+    LARGE_INTEGER IdleTime;
+    LARGE_INTEGER KernelTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER DpcTime;
+    LARGE_INTEGER InterruptTime;
+    ULONG         InterruptCount;
+} SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
+
+using NtQuerySystemInformationFn = LONG(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+static constexpr ULONG SystemProcessorPerformanceInformation = 8;
+
+// Fills one busy percentage per logical processor. Entries stay at
+// MissingSample if the query fails, so the tiles show a gap, not a fake zero.
+static void SamplePerCore(std::vector<float>& out) {
+    static NtQuerySystemInformationFn s_query = reinterpret_cast<NtQuerySystemInformationFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
+    static std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> s_prev;
+    static bool s_first = true;
+
+    if (!s_query || out.empty()) return;
+
+    std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> now(out.size());
+    ULONG needed = 0;
+    const ULONG bytes = static_cast<ULONG>(now.size() * sizeof(now[0]));
+    if (s_query(SystemProcessorPerformanceInformation, now.data(), bytes, &needed) < 0)
+        return;
+
+    if (s_first || s_prev.size() != now.size()) {
+        s_first = false;
+        s_prev  = now;
+        std::fill(out.begin(), out.end(), 0.0f);
+        return;
+    }
+
+    for (size_t i = 0; i < now.size(); i++) {
+        const LONGLONG dIdle   = now[i].IdleTime.QuadPart   - s_prev[i].IdleTime.QuadPart;
+        const LONGLONG dKernel = now[i].KernelTime.QuadPart - s_prev[i].KernelTime.QuadPart;
+        const LONGLONG dUser   = now[i].UserTime.QuadPart   - s_prev[i].UserTime.QuadPart;
+        const LONGLONG dTotal  = dKernel + dUser;   // kernel time already includes idle
+        out[i] = dTotal > 0 ? static_cast<float>((dTotal - dIdle) * 100.0 / dTotal) : 0.0f;
+    }
+    s_prev = now;
+}
+
+static float SampleMemoryInUse() {
+    MEMORYSTATUSEX ms{ sizeof(ms) };
+    if (!GlobalMemoryStatusEx(&ms)) return 0.0f;
+    return static_cast<float>(ms.ullTotalPhys - ms.ullAvailPhys);
+}
+
+// Roughly the Task Manager split: what is committed, what the system cache
+// holds (reclaimable), and what is untouched. SystemCache is an approximation
+// -- the exact standby/modified breakdown is not in a documented API.
+static void SampleComposition(float& inUse, float& cached, float& freeBytes) {
+    inUse = cached = freeBytes = 0.0f;
+
+    MEMORYSTATUSEX ms{ sizeof(ms) };
+    if (!GlobalMemoryStatusEx(&ms)) return;
+
+    const double total = static_cast<double>(ms.ullTotalPhys);
+    const double avail = static_cast<double>(ms.ullAvailPhys);
+
+    double cache = 0;
+    PERFORMANCE_INFORMATION pi{ sizeof(pi) };
+    if (GetPerformanceInfo(&pi, sizeof(pi)))
+        cache = static_cast<double>(pi.SystemCache) * pi.PageSize;
+
+    cache = std::min(cache, avail);            // only the reclaimable part counts here
+    inUse     = static_cast<float>(total - avail);
+    cached    = static_cast<float>(cache);
+    freeBytes = static_cast<float>(avail - cache);
+}
+
+static float TotalPhysicalMemory() {
+    MEMORYSTATUSEX ms{ sizeof(ms) };
+    return GlobalMemoryStatusEx(&ms) ? static_cast<float>(ms.ullTotalPhys) : 1.0f;
+}
+
+// ---- UI ---------------------------------------------------------------------
+
+static CGraphControl* GraphFromId(UINT_PTR id) {
+    if (id == IDC_CPU) return &g_cpu;
+    if (id == IDC_MEM) return &g_mem;
+    if (id >= IDC_CORES && g_cores.GetGraphCount())
+        return g_cores.GetGraph(id - IDC_CORES);
+    return nullptr;
+}
+
+static void UpdateStatus() {
+    if (!g_status) return;
+
+    const Series* user   = g_cpu.GetData().GetSeries(g_cpuUser);
+    const Series* kernel = g_cpu.GetData().GetSeries(g_cpuKernel);
+    const Series* mem    = g_mem.GetData().GetSeries(g_memInUse);
+
+    const float cpuTotal = (user ? user->Last() : 0.0f) + (kernel ? kernel->Last() : 0.0f);
+
+    wchar_t used[32] = L"-", peak[32] = L"-";
+    if (mem && mem->Count()) {
+        Format::Bytes(mem->Last(), used, std::size(used));
+        Format::Bytes(mem->Max(), peak, std::size(peak));
+    }
+
+    wchar_t hover[64] = L"";
+    if (g_hover >= 0) {
+        const CGraphControl* from = GraphFromId(g_hoverFrom);
+        const float age = from ? const_cast<CGraphControl*>(from)->GetSampleAgeSeconds(g_hover)
+                               : 0.0f;
+        swprintf_s(hover, L"  |  %s -%.1f s",
+                   g_hoverFrom == IDC_CPU ? L"CPU at" : L"memory at", age);
+    }
+
+    wchar_t buf[320];
+    swprintf_s(buf,
+        L"CPU %.0f%% (kernel %.0f%%)  |  Memory %s (peak %s)  |  history %zu samples  |  every %u ms  |  %s%s",
+        cpuTotal,
+        kernel ? kernel->Last() : 0.0f,
+        used, peak,
+        g_history, g_interval,
+        g_paused ? L"PAUSED" : L"running",
+        hover);
+    SetWindowText(g_status, buf);
+}
+
+static void ApplyStyle() {
+    g_cpu.SetGraphStyle(g_style);
+    g_mem.SetGraphStyle(g_style);
+    g_cores.SetChildStyle(CoreTileStyle());
+
+    if (!(g_style & GCS_AUTOSCALE)) {
+        g_cpu.SetRange(0, 100);
+        g_mem.SetRange(0, g_totalPhys);
+        g_cores.SetRange(0, 100);
+    }
+    else {
+        g_cores.SetAutoScale(true);
+    }
+}
+
+static void SyncMenu(HWND hwnd) {
+    HMENU menu = GetMenu(hwnd);
+    if (!menu) return;
+
+    auto check = [menu](int id, bool on) {
+        CheckMenuItem(menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
+    };
+
+    check(IDC_PAUSE,      g_paused);
+    check(IDC_AUTOSCALE,  (g_style & GCS_AUTOSCALE) != 0);
+    check(IDC_GRID,       (g_style & GCS_GRID) != 0);
+    check(IDC_SCROLLGRID, (g_style & GCS_SCROLLGRID) != 0);
+    check(IDC_FILL,       (g_style & GCS_FILL) != 0);
+    check(IDC_LEGEND,     (g_style & GCS_LEGEND) != 0);
+    check(IDC_STACKED,    (g_style & GCS_STACKED) != 0);
+    check(IDC_CROSSHAIR,  (g_style & GCS_TOOLTIP) != 0);
+    check(IDC_BARS,       (g_style & GCS_BARS) != 0);
+    check(IDC_VALUE,      (g_style & GCS_VALUEOVERLAY) != 0);
+    check(IDC_PERCORE,    g_showCores);
+    check(IDC_ANIMATE,    g_animate);
+    check(IDC_BIGFONT,    g_bigFont);
+    check(IDC_COMPVERT,   g_compVert);
+
+    const int hist = (g_history == 60) ? IDC_HIST60 : (g_history == 120) ? IDC_HIST120 : IDC_HIST300;
+    CheckMenuRadioItem(menu, IDC_HIST60, IDC_HIST300, hist, MF_BYCOMMAND);
+
+    const int rate = (g_interval == 250) ? IDC_RATE250 : (g_interval == 500) ? IDC_RATE500 : IDC_RATE1000;
+    CheckMenuRadioItem(menu, IDC_RATE250, IDC_RATE1000, rate, MF_BYCOMMAND);
+}
+
+static void ToggleStyle(HWND hwnd, DWORD flag) {
+    g_style ^= flag;
+    ApplyStyle();
+    SyncMenu(hwnd);
+}
+
+static void SetPaused(HWND hwnd, bool paused) {
+    g_paused = paused;
+    if (paused) {
+        g_cpu.Pause();
+        g_cores.Pause();
+        KillTimer(hwnd, TIMER_MEMORY);
+    }
+    else {
+        g_cpu.Resume();
+        g_cores.Resume();
+        SetTimer(hwnd, TIMER_MEMORY, g_interval, nullptr);
+    }
+    SyncMenu(hwnd);
+    UpdateStatus();
+}
+
+static void SetInterval(HWND hwnd, UINT ms) {
+    g_interval = ms;
+    g_cpu.SetUpdateInterval(ms);
+    g_cores.SetUpdateInterval(ms);
+    g_mem.SetExpectedInterval(ms);      // driven by this app's timer, not its own
+    if (!g_paused) SetTimer(hwnd, TIMER_MEMORY, ms, nullptr);
+
+    // The time-span caption follows the history length and the sample rate.
+    wchar_t span[32];
+    swprintf_s(span, L"%.0f seconds", g_history * ms / 1000.0);
+    g_cpu.SetTimeSpanText(span);
+    g_mem.SetTimeSpanText(span);
+
+    SyncMenu(hwnd);
+    UpdateStatus();
+}
+
+static void SetHistory(HWND hwnd, size_t samples) {
+    g_history = samples;
+    g_cpu.SetHistoryLength(samples);
+    g_mem.SetHistoryLength(samples);
+    g_cores.SetHistoryLength(samples);
+    SetInterval(hwnd, g_interval);   // refreshes the caption and the menu
+}
+
+static void LayoutChildren(int w, int h) {
+    const int sbH   = 22;
+    const int compH = 74;    // horizontal: a strip along the bottom
+    const int compW = 210;   // vertical: a column down the right
+
+    const int graphW = g_compVert ? w - compW : w;
+    const int rest   = g_compVert ? (h - sbH) : (h - sbH - compH);
+    const int graphH = rest / 2;
+    const int lowerH = rest - graphH;
+
+    if (g_cpu.m_hWnd)
+        SetWindowPos(g_cpu.m_hWnd, nullptr, 0, 0, graphW, graphH, SWP_NOZORDER);
+    if (g_mem.m_hWnd)
+        SetWindowPos(g_mem.m_hWnd, nullptr, 0, graphH, graphW, lowerH, SWP_NOZORDER);
+    if (g_cores.m_hWnd)
+        SetWindowPos(g_cores.m_hWnd, nullptr, 0, graphH, graphW, lowerH, SWP_NOZORDER);
+
+    if (g_comp.m_hWnd) {
+        if (g_compVert)
+            SetWindowPos(g_comp.m_hWnd, nullptr, graphW, 0, compW, h - sbH, SWP_NOZORDER);
+        else
+            SetWindowPos(g_comp.m_hWnd, nullptr, 0, graphH + lowerH, w, compH, SWP_NOZORDER);
+    }
+    if (g_status)
+        SendMessage(g_status, WM_SIZE, 0, 0);
+}
+
+// The lower pane shows one of the two; the hidden one keeps collecting.
+static void ShowCoreGrid(HWND hwnd, bool show) {
+    g_showCores = show;
+    if (g_mem.m_hWnd)   ::ShowWindow(g_mem.m_hWnd,   show ? SW_HIDE : SW_SHOW);
+    if (g_cores.m_hWnd) ::ShowWindow(g_cores.m_hWnd, show ? SW_SHOW : SW_HIDE);
+    SyncMenu(hwnd);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         RECT rc; GetClientRect(hwnd, &rc);
-        int sbH = 22;
+        const int sbH = 22;
+        const int graphH = (rc.bottom - sbH) / 2;
 
-        g_graph.Create(hwnd, 0, 0, rc.right, rc.bottom - sbH,
-                       WS_CHILD | WS_VISIBLE, GCS_GRID | GCS_AUTOZOOM);
+        g_totalPhys = TotalPhysicalMemory();
+
+        // ---- CPU graph: two series that stack into total, 0..100, pull mode ----
+        g_cpu.Create(hwnd, 0, 0, rc.right, graphH, WS_CHILD | WS_VISIBLE, g_style, IDC_CPU);
+
+        SeriesStyle user;
+        user.LineColor = RGB(17, 125, 187);
+        user.FillColor = RGB(105, 185, 235);
+        g_cpuUser = g_cpu.AddSeries(L"User", user);
+
+        SeriesStyle kernel;
+        kernel.LineColor   = RGB(12, 80, 125);
+        kernel.FillColor   = RGB(40, 105, 160);
+        kernel.FillOpacity = 0.55f;
+        g_cpuKernel = g_cpu.AddSeries(L"Kernel", kernel);
+
+        g_cpu.SetTitle(L"% Utilization");
+        g_cpu.SetRange(0, 100);
+        g_cpu.SetValueFormatter(Format::Percent);
+        g_cpu.SetSampleSource([](std::vector<float>& v) {
+            float user = 0, kernel = 0;
+            SampleCpu(user, kernel);
+            v[0] = user;
+            v[1] = kernel;
+        });
+
+        // ---- Memory graph: one series, scaled to installed RAM, push mode ----
+        g_mem.Create(hwnd, 0, graphH, rc.right, rc.bottom - sbH - graphH,
+                     WS_CHILD | WS_VISIBLE, g_style, IDC_MEM);
+
+        SeriesStyle inUse;
+        inUse.LineColor = RGB(139, 92, 196);
+        inUse.FillColor = RGB(165, 130, 215);
+        g_memInUse = g_mem.AddSeries(L"In use", inUse);
+
+        g_mem.SetTitle(L"Memory in use");
+        g_mem.SetRange(0, g_totalPhys);
+        g_mem.SetValueFormatter(Format::Bytes);
+
+        // A threshold marker on the CPU graph.
+        g_cpu.AddReferenceLine(80.0f, RGB(214, 94, 94), L"80%");
+
+        // ---- Per-core grid: one tile per logical processor ----
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        g_coreCount = si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1;
+
+        g_cores.Create(hwnd, 0, graphH, rc.right, rc.bottom - sbH - graphH,
+                       WS_CHILD | WS_CLIPCHILDREN, CoreTileStyle(), 0, IDC_CORES);
+
+        SeriesStyle core;
+        core.LineColor = RGB(17, 125, 187);
+        core.FillColor = RGB(105, 185, 235);
+        g_cores.SetSeriesStyle(core);
+        g_cores.SetTitlePrefix(L"CPU");
+        g_cores.SetRange(0, 100);
+        g_cores.SetValueFormatter(Format::Percent);
+        g_cores.SetGraphCount(g_coreCount);
+        g_cores.SetSampleSource([](std::vector<float>& v) { SamplePerCore(v); });
+
+        // ---- Memory composition strip ----
+        g_comp.Create(hwnd, 0, 0, rc.right, 70, WS_CHILD | WS_VISIBLE, CBS_DEFAULT, IDC_COMP);
+        g_segInUse  = g_comp.AddSegment(L"In use", RGB(139, 92, 196));
+        g_segCached = g_comp.AddSegment(L"Cached", RGB(96, 118, 170));
+        g_segFree   = g_comp.AddSegment(L"Free",   RGB(64, 64, 72));
+        g_comp.SetTitle(L"Memory composition");
+        g_comp.SetValueFormatter(Format::Bytes);
+        g_comp.SetTotal(g_totalPhys);
 
         g_status = CreateWindowEx(0, STATUSCLASSNAME, nullptr,
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
             0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)IDC_STATUS, nullptr, nullptr);
 
-        PopulateDemo(*g_graph.GetModel());
-        g_graph.FitInView();
-        g_graph.SetMinimapVisible(true);
-        UpdateStatus(hwnd);
+        SetHistory(hwnd, g_history);   // also starts the timers via SetInterval
         return 0;
     }
 
-    case WM_SIZE: {
-        int w = LOWORD(lParam), h = HIWORD(lParam);
-        int sbH = 22;
-        if (g_graph.m_hWnd)
-            SetWindowPos(g_graph.m_hWnd, nullptr, 0, 0, w, h - sbH, SWP_NOZORDER);
-        if (g_status)
-            SendMessage(g_status, WM_SIZE, 0, 0);
+    case WM_SIZE:
+        LayoutChildren(LOWORD(lParam), HIWORD(lParam));
         return 0;
-    }
+
+    case WM_TIMER:
+        if (wParam == TIMER_MEMORY) {
+            g_mem.PushSample(g_memInUse, SampleMemoryInUse());
+
+            float inUse = 0, cached = 0, freeBytes = 0;
+            SampleComposition(inUse, cached, freeBytes);
+            const float composition[] = { inUse, cached, freeBytes };
+            g_comp.SetValues(composition, 3);
+
+            UpdateStatus();
+        }
+        return 0;
 
     case WM_NOTIFY: {
         auto* nm = reinterpret_cast<NMHDR*>(lParam);
-        if (nm->idFrom == IDC_GRAPH) {
-            switch (nm->code) {
-            case GCN_SELCHANGED:
-                UpdateStatus(hwnd);
-                break;
-            case GCN_LABELCHANGED: {
-                auto* gln = reinterpret_cast<GRAPHLABELNOTIFY*>(lParam);
-                wchar_t buf[300];
-                swprintf_s(buf, L"Label changed: node %u = \"%s\"", gln->NodeId, gln->SzNewLabel);
-                SetWindowText(g_status, buf);
-                break;
+        switch (nm->code) {
+        case GCN_RANGECHANGED: {
+            auto* rn = reinterpret_cast<GRAPHRANGENOTIFY*>(lParam);
+            wchar_t maximum[32];
+            if (nm->idFrom == IDC_CPU) Format::Percent(rn->Max, maximum, std::size(maximum));
+            else                       Format::Bytes(rn->Max, maximum, std::size(maximum));
+
+            wchar_t buf[128];
+            swprintf_s(buf, L"%s graph auto-scaled to %s",
+                       nm->idFrom == IDC_CPU ? L"CPU" : L"Memory", maximum);
+            SetWindowText(g_status, buf);
+            break;
+        }
+        case GCN_HOVERSAMPLE: {
+            auto* hn = reinterpret_cast<GRAPHHOVERNOTIFY*>(lParam);
+            // Moving between the two graphs means the one being left reports -1
+            // after the one being entered reports its sample; ignore that.
+            if (hn->SampleIndex >= 0) {
+                g_hover     = hn->SampleIndex;
+                g_hoverFrom = nm->idFrom;
             }
-            case GCN_UNDOCHANGED: {
-                wchar_t buf[128];
-                swprintf_s(buf, L"Undo: %s  |  Redo: %s",
-                    g_graph.CanUndo() ? L"available" : L"none",
-                    g_graph.CanRedo() ? L"available" : L"none");
-                SetWindowText(g_status, buf);
-                break;
+            else if (nm->idFrom == g_hoverFrom) {
+                g_hover     = -1;
+                g_hoverFrom = 0;
             }
+            UpdateStatus();
+            break;
+        }
+        case GCN_CONTEXTMENU: {
+            auto* cn = reinterpret_cast<GRAPHCONTEXTNOTIFY*>(lParam);
+            g_menuTarget = (nm->idFrom == IDC_CPU) ? &g_cpu
+                         : (nm->idFrom == IDC_MEM) ? &g_mem
+                         : nullptr;
+            if (!g_menuTarget && g_cores.GetGraphCount()) {
+                const size_t tile = nm->idFrom - IDC_CORES;
+                g_menuTarget = g_cores.GetGraph(tile);
             }
+            if (!g_menuTarget) break;
+
+            HMENU popup = CreatePopupMenu();
+            AppendMenu(popup, MF_STRING, IDC_COPY,    L"&Copy image");
+            AppendMenu(popup, MF_STRING, IDC_SAVEPNG, L"&Save image...");
+            AppendMenu(popup, MF_SEPARATOR, 0, nullptr);
+            AppendMenu(popup, MF_STRING, IDC_PAUSE,
+                       g_paused ? L"&Resume" : L"&Pause");
+            TrackPopupMenu(popup, TPM_RIGHTBUTTON, cn->Pt.x, cn->Pt.y, 0, hwnd, nullptr);
+            DestroyMenu(popup);
+            break;
+        }
+        case GCN_GETTOOLTIP: {
+            // Prepend how far back the hovered sample is, then keep the default lines.
+            auto* tn = reinterpret_cast<GRAPHTOOLTIPNOTIFY*>(lParam);
+            CGraphControl* from = GraphFromId(nm->idFrom);
+            const float age = from ? from->GetSampleAgeSeconds(tn->SampleIndex) : 0.0f;
+
+            wchar_t buf[256];
+            swprintf_s(buf, L"-%.1f s\n%s", age, tn->SzText);
+            wcsncpy_s(tn->SzText, buf, _TRUNCATE);
+            break;
+        }
         }
         return 0;
     }
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case IDC_MINIMAP:
-            g_graph.SetMinimapVisible(!g_graph.IsMinimapVisible());
+        case IDC_PAUSE:
+            SetPaused(hwnd, !g_paused);
             break;
-        case IDC_BTNFIT:
-            g_graph.FitInView();
+        case IDC_CLEAR:
+            g_cpu.Clear();
+            g_mem.Clear();
+            g_cores.Clear();
+            UpdateStatus();
             break;
-        case IDC_DELSEL:
-            g_graph.DeleteSelected();
-            UpdateStatus(hwnd);
+        case IDC_AUTOSCALE:  ToggleStyle(hwnd, GCS_AUTOSCALE);  break;
+        case IDC_GRID:       ToggleStyle(hwnd, GCS_GRID);       break;
+        case IDC_SCROLLGRID: ToggleStyle(hwnd, GCS_SCROLLGRID); break;
+        case IDC_FILL:       ToggleStyle(hwnd, GCS_FILL);       break;
+        case IDC_LEGEND:     ToggleStyle(hwnd, GCS_LEGEND);     break;
+        case IDC_STACKED:    ToggleStyle(hwnd, GCS_STACKED);    break;
+        case IDC_CROSSHAIR:  ToggleStyle(hwnd, GCS_TOOLTIP);    break;
+        case IDC_BARS:       ToggleStyle(hwnd, GCS_BARS);       break;
+        case IDC_VALUE:      ToggleStyle(hwnd, GCS_VALUEOVERLAY); break;
+        case IDC_PERCORE:
+            ShowCoreGrid(hwnd, !g_showCores);
             break;
-        case IDC_UNDO:
-            g_graph.Undo();
-            break;
-        case IDC_REDO:
-            g_graph.Redo();
-            break;
-        case IDC_BTNADD: {
-            GraphModel* m = g_graph.GetModel();
-            if (m) {
-                static int s_count = 0;
-                wchar_t label[32];
-                swprintf_s(label, L"node%d", ++s_count);
-                float cx = 200.0f + (s_count % 5) * 160.0f;
-                float cy = 200.0f + (s_count / 5) * 100.0f;
-                m->AddNode(label, cx, cy);
-                InvalidateRect(g_graph.m_hWnd, nullptr, FALSE);
+        case IDC_GAP:
+            // Simulate a source that stopped answering for a few intervals.
+            for (int i = 0; i < 4; i++) {
+                const float missing[2] = { MissingSample, MissingSample };
+                g_cpu.PushSamples(missing, 2);
+                g_mem.PushSample(g_memInUse, MissingSample);
             }
+            UpdateStatus();
+            break;
+        case IDC_HIST60:   SetHistory(hwnd, 60);  break;
+        case IDC_HIST120:  SetHistory(hwnd, 120); break;
+        case IDC_HIST300:  SetHistory(hwnd, 300); break;
+        case IDC_RATE250:  SetInterval(hwnd, 250);  break;
+        case IDC_RATE500:  SetInterval(hwnd, 500);  break;
+        case IDC_RATE1000: SetInterval(hwnd, 1000); break;
+        case IDC_DARK:
+            g_cpu.SetTheme(GraphTheme::Dark());
+            g_mem.SetTheme(GraphTheme::Dark());
+            g_cores.SetTheme(GraphTheme::Dark());
+            g_comp.SetTheme(GraphTheme::Dark());
+            break;
+        case IDC_LIGHT:
+            g_cpu.SetTheme(GraphTheme::Light());
+            g_mem.SetTheme(GraphTheme::Light());
+            g_cores.SetTheme(GraphTheme::Light());
+            g_comp.SetTheme(GraphTheme::Light());
+            break;
+        case IDC_STALL: {
+            // Block the UI thread outright. The control notices the intervals
+            // that went by and back-fills them, so the axis keeps its scale.
+            SetWindowText(g_status, L"Stalling the UI thread for 3 seconds...");
+            UpdateWindow(g_status);
+            Sleep(3000);
+            UpdateStatus();
             break;
         }
-        case IDC_BTNCLR: {
-            GraphModel* m = g_graph.GetModel();
-            if (m) {
-                m->Clear();
-                InvalidateRect(g_graph.m_hWnd, nullptr, FALSE);
-                UpdateStatus(hwnd);
+        case IDC_ANIMATE:
+            g_animate = !g_animate;
+            g_cpu.SetRangeAnimation(g_animate ? 250 : 0);
+            g_mem.SetRangeAnimation(g_animate ? 250 : 0);
+            g_cores.SetRangeAnimation(g_animate ? 250 : 0);
+            SyncMenu(hwnd);
+            break;
+        case IDC_BIGFONT:
+            g_bigFont = !g_bigFont;
+            if (g_bigFont) {
+                g_cpu.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
+                g_mem.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
+                g_cores.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
+                g_comp.SetFont(L"Consolas", 14.0f, 17.0f, 30.0f);
             }
+            else {
+                g_cpu.ResetFont();
+                g_mem.ResetFont();
+                g_cores.SetFont(nullptr);
+                g_comp.ResetFont();
+            }
+            SyncMenu(hwnd);
             break;
-        }
-        case IDC_SAVE: {
-            GraphModel* m = g_graph.GetModel();
-            if (!m) break;
-            OPENFILENAMEW ofn{};
-            wchar_t path[MAX_PATH] = L"graph.gcf";
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner   = hwnd;
-            ofn.lpstrFilter = L"Graph Control File\0*.gcf\0All Files\0*.*\0";
-            ofn.lpstrFile   = path;
-            ofn.nMaxFile    = MAX_PATH;
-            ofn.lpstrDefExt = L"gcf";
-            ofn.Flags       = OFN_OVERWRITEPROMPT;
-            if (GetSaveFileNameW(&ofn))
-                m->Save(path);
-            break;
-        }
-        case IDC_LOAD: {
-            GraphModel* m = g_graph.GetModel();
-            if (!m) break;
-            OPENFILENAMEW ofn{};
-            wchar_t path[MAX_PATH] = {};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner   = hwnd;
-            ofn.lpstrFilter = L"Graph Control File\0*.gcf\0All Files\0*.*\0";
-            ofn.lpstrFile   = path;
-            ofn.nMaxFile    = MAX_PATH;
-            ofn.Flags       = OFN_FILEMUSTEXIST;
-            if (GetOpenFileNameW(&ofn)) {
-                if (m->Load(path)) {
-                    g_graph.FitInView();
-                    UpdateStatus(hwnd);
-                } else {
-                    MessageBox(hwnd, L"Failed to load file.", L"Error", MB_ICONERROR);
+        case IDC_WORKER: {
+            // Ten samples from a background thread, straight into the CPU graph
+            // through PostSample -- no locking, no touching the UI from there.
+            SetWindowText(g_status, L"Posting samples from a worker thread...");
+            std::thread([] {
+                for (int i = 0; i < 10; i++) {
+                    const float spike[] = { 20.0f + i * 6.0f, 5.0f };
+                    g_cpu.PostSamples(spike, 2);
+                    Sleep(100);
                 }
+            }).detach();
+            break;
+        }
+        case IDC_COMPVERT: {
+            g_compVert = !g_compVert;
+            g_comp.SetVertical(g_compVert);
+
+            CRect rc;
+            GetClientRect(hwnd, &rc);
+            LayoutChildren(rc.Width(), rc.Height());
+            SyncMenu(hwnd);
+            break;
+        }
+        case IDC_COPY: {
+            CGraphControl* target = g_menuTarget ? g_menuTarget : &g_cpu;
+            SetWindowText(g_status, target->CopyImageToClipboard()
+                                    ? L"Graph copied to the clipboard"
+                                    : L"Could not copy the graph");
+            break;
+        }
+        case IDC_SAVEPNG: {
+            CGraphControl* target = g_menuTarget ? g_menuTarget : &g_cpu;
+
+            wchar_t path[MAX_PATH] = L"graph.png";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner   = hwnd;
+            ofn.lpstrFilter = L"PNG Image\0*.png\0All Files\0*.*\0";
+            ofn.lpstrFile   = path;
+            ofn.nMaxFile    = MAX_PATH;
+            ofn.lpstrDefExt = L"png";
+            ofn.Flags       = OFN_OVERWRITEPROMPT;
+            if (GetSaveFileNameW(&ofn)) {
+                SetWindowText(g_status, target->SaveImage(path)
+                                        ? L"Graph saved"
+                                        : L"Could not save the graph");
             }
             break;
         }
+        case IDC_EXIT:
+            DestroyWindow(hwnd);
+            break;
         }
         return 0;
 
     case WM_DESTROY:
+        KillTimer(hwnd, TIMER_MEMORY);
         PostQuitMessage(0);
         return 0;
     }
@@ -215,11 +704,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
-
-    //if (!GraphCtrl::Register(hInstance)) {
-    //    MessageBox(nullptr, L"Failed to register GraphControl window class.", L"Error", MB_ICONERROR);
-    //    return 1;
-    //}
 
     WNDCLASSEXW wc{};
     wc.cbSize        = sizeof(wc);
@@ -233,43 +717,76 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     HWND hwnd = CreateWindowExW(0, L"GraphDemoWindow", L"GraphControl Demo",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 900, 650,
+        CW_USEDEFAULT, CW_USEDEFAULT, 820, 640,
         nullptr, nullptr, hInstance, nullptr);
+    if (!hwnd) return 1;
 
     HMENU hMenu = CreateMenu();
 
     HMENU hFile = CreatePopupMenu();
-    AppendMenu(hFile, MF_STRING, IDC_SAVE, L"&Save...\tCtrl+S");
-    AppendMenu(hFile, MF_STRING, IDC_LOAD, L"&Load...\tCtrl+O");
+    AppendMenu(hFile, MF_STRING, IDC_COPY,    L"&Copy image\tCtrl+C");
+    AppendMenu(hFile, MF_STRING, IDC_SAVEPNG, L"&Save image...\tCtrl+S");
+    AppendMenu(hFile, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hFile, MF_STRING, IDC_EXIT, L"E&xit\tAlt+F4");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
 
-    HMENU hEdit = CreatePopupMenu();
-    AppendMenu(hEdit, MF_STRING, IDC_UNDO, L"&Undo\tCtrl+Z");
-    AppendMenu(hEdit, MF_STRING, IDC_REDO, L"&Redo\tCtrl+Y");
-    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
-
     HMENU hGraph = CreatePopupMenu();
-    AppendMenu(hGraph, MF_STRING, IDC_BTNFIT,  L"&Fit in View\tF");
-    AppendMenu(hGraph, MF_STRING, IDC_BTNADD,  L"&Add Node\tA");
-    AppendMenu(hGraph, MF_STRING, IDC_DELSEL,  L"&Delete Selected\tDel");
+    AppendMenu(hGraph, MF_STRING, IDC_PAUSE,     L"&Pause\tSpace");
+    AppendMenu(hGraph, MF_STRING, IDC_CLEAR,     L"&Clear\tC");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
-    AppendMenu(hGraph, MF_STRING, IDC_MINIMAP, L"Toggle &Minimap\tM");
-    AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
-    AppendMenu(hGraph, MF_STRING, IDC_BTNCLR,  L"&Clear All");
+    AppendMenu(hGraph, MF_STRING, IDC_AUTOSCALE, L"&Auto-scale\tA");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hGraph, L"&Graph");
+
+    HMENU hHistory = CreatePopupMenu();
+    AppendMenu(hHistory, MF_STRING, IDC_HIST60,  L"&60 samples");
+    AppendMenu(hHistory, MF_STRING, IDC_HIST120, L"&120 samples");
+    AppendMenu(hHistory, MF_STRING, IDC_HIST300, L"&300 samples");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hHistory, L"&History");
+
+    HMENU hRate = CreatePopupMenu();
+    AppendMenu(hRate, MF_STRING, IDC_RATE250,  L"&250 ms");
+    AppendMenu(hRate, MF_STRING, IDC_RATE500,  L"&500 ms");
+    AppendMenu(hRate, MF_STRING, IDC_RATE1000, L"&1 second");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hRate, L"&Rate");
+
+    HMENU hView = CreatePopupMenu();
+    AppendMenu(hView, MF_STRING, IDC_GRID,       L"&Grid\tG");
+    AppendMenu(hView, MF_STRING, IDC_SCROLLGRID, L"Sc&rolling grid\tR");
+    AppendMenu(hView, MF_STRING, IDC_FILL,       L"Area &fill\tF");
+    AppendMenu(hView, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hView, MF_STRING, IDC_LEGEND,     L"L&egend\tE");
+    AppendMenu(hView, MF_STRING, IDC_STACKED,    L"&Stacked\tS");
+    AppendMenu(hView, MF_STRING, IDC_CROSSHAIR,  L"Hover &crosshair\tT");
+    AppendMenu(hView, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hView, MF_STRING, IDC_DARK,       L"&Dark theme\tD");
+    AppendMenu(hView, MF_STRING, IDC_LIGHT,      L"&Light theme\tL");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
 
     SetMenu(hwnd, hMenu);
 
-    // Keyboard accelerators
     ACCEL accels[] = {
-        { FVIRTKEY,               'M', IDC_MINIMAP },
-        { FVIRTKEY,               'F', IDC_BTNFIT },
-        { FVIRTKEY,               'A', IDC_BTNADD },
-        { FVIRTKEY,        VK_DELETE, IDC_DELSEL  },
-        { FVIRTKEY | FCONTROL,    'S', IDC_SAVE   },
-        { FVIRTKEY | FCONTROL,    'O', IDC_LOAD   },
-        { FVIRTKEY | FCONTROL,    'Z', IDC_UNDO   },
-        { FVIRTKEY | FCONTROL,    'Y', IDC_REDO   },
+        { FVIRTKEY, VK_SPACE, IDC_PAUSE },
+        { FVIRTKEY,      'C', IDC_CLEAR },
+        { FVIRTKEY,      'A', IDC_AUTOSCALE },
+        { FVIRTKEY,      'G', IDC_GRID },
+        { FVIRTKEY,      'R', IDC_SCROLLGRID },
+        { FVIRTKEY,      'F', IDC_FILL },
+        { FVIRTKEY,      'E', IDC_LEGEND },
+        { FVIRTKEY,      'S', IDC_STACKED },
+        { FVIRTKEY,      'T', IDC_CROSSHAIR },
+        { FVIRTKEY,      'B', IDC_BARS },
+        { FVIRTKEY,      'V', IDC_VALUE },
+        { FVIRTKEY,      'P', IDC_PERCORE },
+        { FVIRTKEY,      'N', IDC_GAP },
+        { FVIRTKEY | FCONTROL, 'C', IDC_COPY },
+        { FVIRTKEY | FCONTROL, 'S', IDC_SAVEPNG },
+        { FVIRTKEY,      'K', IDC_STALL },
+        { FVIRTKEY,      'W', IDC_WORKER },
+        { FVIRTKEY,      'Y', IDC_ANIMATE },
+        { FVIRTKEY,      'Z', IDC_BIGFONT },
+        { FVIRTKEY,      'U', IDC_COMPVERT },
+        { FVIRTKEY,      'D', IDC_DARK },
+        { FVIRTKEY,      'L', IDC_LIGHT },
     };
     HACCEL hAccel = CreateAcceleratorTable(accels, (int)std::size(accels));
 
@@ -278,7 +795,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (g_graph.IsEditingLabel() || !TranslateAccelerator(hwnd, hAccel, &msg)) {
+        if (!TranslateAccelerator(hwnd, hAccel, &msg)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }

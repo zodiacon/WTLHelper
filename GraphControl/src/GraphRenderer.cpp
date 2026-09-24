@@ -1,457 +1,1484 @@
 #include "../include/GraphRenderer.h"
-#include <cmath>
 #include <algorithm>
-#include <cfloat>
+#include <cmath>
+#include <memory>
 
 namespace GraphCtrl {
 
-static D2D1_COLOR_F ColorrefToD2D(COLORREF cr) {
+static D2D1_COLOR_F ColorrefToD2D(COLORREF cr, float alpha = 1.0f) {
     return D2D1::ColorF(
         GetRValue(cr) / 255.0f,
         GetGValue(cr) / 255.0f,
-        GetBValue(cr) / 255.0f);
+        GetBValue(cr) / 255.0f,
+        alpha);
 }
+
+// Defaults for the band heights, used until the formats have been measured.
+constexpr float k_DefaultTitleHeight = 18.0f;
+constexpr float k_DefaultLabelHeight = 16.0f;
+constexpr float k_DefaultValueHeight = 32.0f;
+constexpr float k_Padding            = 8.0f;
+
+// Default type sizes in DIPs.
+constexpr float k_DefaultLabelSize = 11.0f;
+constexpr float k_DefaultTitleSize = 12.5f;
+constexpr float k_DefaultValueSize = 22.0f;
+
+// Overlay metrics (legend rows, readout box, value overlay).
+constexpr float k_SwatchSize   = 10.0f;
+constexpr float k_OverlayPad   = 7.0f;
+constexpr float k_LegendInset  = 10.0f;
+constexpr float k_ReadoutMaxW  = 280.0f;
+
+// Bars occupy this share of one sample slot, leaving a gap between columns.
+constexpr float k_BarSlotFill = 0.8f;
+
+// Gradient brushes are cached by color. A graph uses a handful; the bound is
+// there so a host that recolors series at runtime cannot grow the cache forever.
+constexpr size_t k_MaxFillBrushes = 16;
+
+GraphTheme GraphTheme::Dark() {
+    return GraphTheme{};
+}
+
+GraphTheme GraphTheme::Light() {
+    GraphTheme t;
+    t.Background     = RGB(255, 255, 255);
+    t.PlotColor      = RGB(249, 249, 249);
+    t.GridColor      = RGB(220, 220, 220);
+    t.BorderColor    = RGB(160, 160, 160);
+    t.TextColor      = RGB(70, 70, 70);
+    t.CrosshairColor = RGB(120, 120, 120);
+    t.PanelColor     = RGB(252, 252, 252);
+    t.ValueColor     = RGB(40, 40, 40);
+    return t;
+}
+
+bool GraphRenderer::GeometryKey::Matches(const GeometryKey& o) const {
+    return Version == o.Version && VisibleMask == o.VisibleMask &&
+           SeriesCount == o.SeriesCount && Capacity == o.Capacity &&
+           Left == o.Left && Top == o.Top && Right == o.Right && Bottom == o.Bottom &&
+           RangeMin == o.RangeMin && RangeMax == o.RangeMax &&
+           Stacked == o.Stacked && Fill == o.Fill && Bars == o.Bars;
+}
+
+// ---- Shared device-independent resources -------------------------------------
+//
+// The D2D factory, the DWrite factory, the text formats and the stroke style are
+// identical for every graph and carry no per-window state, so one set serves all
+// of them. A grid of 32 tiles used to build 32 factories and 128 text formats.
+//
+// One set per thread rather than per process: a SINGLE_THREADED D2D factory must
+// not be used from another thread, and DrawLabel sets the alignment on a text
+// format immediately before drawing with it. Controls on separate UI threads
+// therefore get separate sets. Ownership is reference counted against Init and
+// Shutdown, so the set goes away with the last graph instead of at exit, when
+// COM may already be torn down.
+
+namespace {
+
+struct SharedGraphics {
+    ComPtr<ID2D1Factory>      D2dFactory;
+    ComPtr<IDWriteFactory>    DwFactory;
+    ComPtr<IDWriteTextFormat> LabelFormat;
+    ComPtr<IDWriteTextFormat> TitleFormat;
+    ComPtr<IDWriteTextFormat> OverlayFormat;
+    ComPtr<IDWriteTextFormat> ValueFormat;
+    ComPtr<ID2D1StrokeStyle>  DashStyle;
+};
+
+thread_local SharedGraphics* t_shared     = nullptr;
+thread_local int             t_sharedRefs = 0;
+
+HRESULT CreateFormat(IDWriteFactory* dw, const wchar_t* family, float size,
+                     DWRITE_FONT_WEIGHT weight, DWRITE_PARAGRAPH_ALIGNMENT vertical,
+                     IDWriteTextFormat** out) {
+    HRESULT hr = dw->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+                                      DWRITE_FONT_STRETCH_NORMAL, size, L"en-US", out);
+    if (FAILED(hr)) return hr;
+    (*out)->SetParagraphAlignment(vertical);
+    (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    return S_OK;
+}
+
+HRESULT BuildSharedGraphics(SharedGraphics& g) {
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, g.D2dFactory.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(g.DwFactory.GetAddressOf()));
+    if (FAILED(hr)) return hr;
+
+    hr = CreateFormat(g.DwFactory.Get(), L"Segoe UI", k_DefaultLabelSize,
+                      DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                      g.LabelFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    hr = CreateFormat(g.DwFactory.Get(), L"Segoe UI", k_DefaultTitleSize,
+                      DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                      g.TitleFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    // The readout stacks one line per series, so it is top-aligned, not centered.
+    hr = CreateFormat(g.DwFactory.Get(), L"Segoe UI", k_DefaultLabelSize,
+                      DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+                      g.OverlayFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    g.OverlayFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    hr = CreateFormat(g.DwFactory.Get(), L"Segoe UI", k_DefaultValueSize,
+                      DWRITE_FONT_WEIGHT_LIGHT, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                      g.ValueFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties();
+    ssp.dashStyle = D2D1_DASH_STYLE_DASH;
+    return g.D2dFactory->CreateStrokeStyle(ssp, nullptr, 0, g.DashStyle.GetAddressOf());
+}
+
+SharedGraphics* AcquireShared(HRESULT& hr) {
+    hr = S_OK;
+    if (!t_shared) {
+        auto holder = std::make_unique<SharedGraphics>();
+        hr = BuildSharedGraphics(*holder);
+        if (FAILED(hr)) return nullptr;
+        t_shared     = holder.release();
+        t_sharedRefs = 0;
+    }
+    t_sharedRefs++;
+    return t_shared;
+}
+
+void ReleaseShared() {
+    if (!t_shared) return;
+    if (--t_sharedRefs <= 0) {
+        delete t_shared;
+        t_shared     = nullptr;
+        t_sharedRefs = 0;
+    }
+}
+
+} // namespace
 
 GraphRenderer::~GraphRenderer() {
     Shutdown();
 }
 
-HRESULT GraphRenderer::Init(HINSTANCE /*hInstance*/) {
-    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_D2dFactory.GetAddressOf());
+HRESULT GraphRenderer::Init() {
+    if (m_SharedHeld) return S_OK;
+
+    HRESULT hr = S_OK;
+    SharedGraphics* g = AcquireShared(hr);
+    if (!g) return FAILED(hr) ? hr : E_FAIL;
+
+    m_SharedHeld    = true;
+    m_D2dFactory    = g->D2dFactory;
+    m_DwFactory     = g->DwFactory;
+    m_LabelFormat   = g->LabelFormat;
+    m_TitleFormat   = g->TitleFormat;
+    m_OverlayFormat = g->OverlayFormat;
+    m_ValueFormat   = g->ValueFormat;
+    m_DashStyle     = g->DashStyle;
+
+    RecomputeMetrics();
+    return S_OK;
+}
+
+// Safe to call more than once: the control shuts the renderer down on WM_DESTROY
+// and the destructor runs it again.
+// One line of this format, with a little air around it.
+float GraphRenderer::MeasuredHeight(IDWriteTextFormat* format, float fallback) const {
+    if (!m_DwFactory || !format) return fallback;
+
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(m_DwFactory->CreateTextLayout(L"Xg", 2, format, 1000.0f, 1000.0f,
+                                             layout.GetAddressOf())))
+        return fallback;
+
+    DWRITE_TEXT_METRICS tm{};
+    if (FAILED(layout->GetMetrics(&tm)) || tm.height <= 0.0f) return fallback;
+    return std::ceil(tm.height) + 2.0f;
+}
+
+void GraphRenderer::RecomputeMetrics() {
+    m_TitleHeight = MeasuredHeight(m_TitleFormat.Get(), k_DefaultTitleHeight);
+    m_LabelHeight = MeasuredHeight(m_LabelFormat.Get(), k_DefaultLabelHeight);
+    m_ValueHeight = MeasuredHeight(m_ValueFormat.Get(), k_DefaultValueHeight);
+}
+
+HRESULT GraphRenderer::SetFont(const wchar_t* family, float labelSize,
+                               float titleSize, float valueSize) {
+    if (!m_DwFactory || !family || !*family) return E_INVALIDARG;
+    if (labelSize <= 0.0f || titleSize <= 0.0f || valueSize <= 0.0f) return E_INVALIDARG;
+
+    // Private formats: the shared ones back every other graph on this thread.
+    ComPtr<IDWriteTextFormat> label, title, overlay, value;
+    HRESULT hr = CreateFormat(m_DwFactory.Get(), family, labelSize,
+                              DWRITE_FONT_WEIGHT_NORMAL,
+                              DWRITE_PARAGRAPH_ALIGNMENT_CENTER, label.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-        __uuidof(IDWriteFactory),
-        reinterpret_cast<IUnknown**>(m_DwFactory.GetAddressOf()));
+    hr = CreateFormat(m_DwFactory.Get(), family, titleSize,
+                      DWRITE_FONT_WEIGHT_NORMAL,
+                      DWRITE_PARAGRAPH_ALIGNMENT_CENTER, title.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    hr = m_DwFactory->CreateTextFormat(
-        L"Segoe UI", nullptr,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        13.0f, L"en-US",
-        m_TextFormat.GetAddressOf());
+    hr = CreateFormat(m_DwFactory.Get(), family, labelSize,
+                      DWRITE_FONT_WEIGHT_NORMAL,
+                      DWRITE_PARAGRAPH_ALIGNMENT_NEAR, overlay.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    overlay->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    hr = CreateFormat(m_DwFactory.Get(), family, valueSize,
+                      DWRITE_FONT_WEIGHT_LIGHT,
+                      DWRITE_PARAGRAPH_ALIGNMENT_CENTER, value.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    m_TextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    m_TextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    m_LabelFormat   = label;
+    m_TitleFormat   = title;
+    m_OverlayFormat = overlay;
+    m_ValueFormat   = value;
+    m_PrivateFonts  = true;
 
-    hr = m_DwFactory->CreateTextFormat(
-        L"Segoe UI", nullptr,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-        11.0f, L"en-US",
-        m_EdgeTextFormat.GetAddressOf());
-    if (FAILED(hr)) return hr;
-    m_EdgeTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    m_EdgeTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    RecomputeMetrics();
+    return S_OK;
+}
 
-    D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties();
-    ssp.dashStyle = D2D1_DASH_STYLE_DASH;
-    hr = m_D2dFactory->CreateStrokeStyle(ssp, nullptr, 0, m_DashStyle.GetAddressOf());
-    return hr;
+void GraphRenderer::ResetFont() {
+    if (!m_PrivateFonts || !t_shared) return;
+
+    m_LabelFormat   = t_shared->LabelFormat;
+    m_TitleFormat   = t_shared->TitleFormat;
+    m_OverlayFormat = t_shared->OverlayFormat;
+    m_ValueFormat   = t_shared->ValueFormat;
+    m_PrivateFonts  = false;
+
+    RecomputeMetrics();
 }
 
 void GraphRenderer::Shutdown() {
     DiscardDeviceResources();
+    m_Geometry.clear();
+    m_GeometryValid = false;
+
     m_DashStyle.Reset();
-    m_EdgeTextFormat.Reset();
-    m_TextFormat.Reset();
+    m_ValueFormat.Reset();
+    m_OverlayFormat.Reset();
+    m_TitleFormat.Reset();
+    m_LabelFormat.Reset();
     m_DwFactory.Reset();
     m_D2dFactory.Reset();
+
+    m_PrivateFonts = false;
+    if (m_SharedHeld) {
+        ReleaseShared();
+        m_SharedHeld = false;
+    }
 }
 
-HRESULT GraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/) {
-    if (m_RenderTarget) return S_OK;
+HRESULT GraphRenderer::EnsureDeviceResources(HWND hwnd, const RECT& clientRect) {
+    if (!m_D2dFactory) return E_FAIL;
+
+    const auto pixelSize = D2D1::SizeU(
+        static_cast<UINT32>(std::max<LONG>(clientRect.right - clientRect.left, 1)),
+        static_cast<UINT32>(std::max<LONG>(clientRect.bottom - clientRect.top, 1)));
+
+    if (m_HwndTarget) {
+        const auto current = m_HwndTarget->GetPixelSize();
+        if (current.width != pixelSize.width || current.height != pixelSize.height)
+            m_HwndTarget->Resize(pixelSize);
+        return S_OK;
+    }
+
+    auto props = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+        m_Dpi, m_Dpi);
+
+    HRESULT hr = m_D2dFactory->CreateHwndRenderTarget(
+        props,
+        D2D1::HwndRenderTargetProperties(hwnd, pixelSize),
+        m_HwndTarget.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    m_RenderTarget = m_HwndTarget;
+    return m_RenderTarget->CreateSolidColorBrush(
+        D2D1::ColorF(D2D1::ColorF::Black), m_Brush.GetAddressOf());
+}
+
+void GraphRenderer::DiscardDeviceResources() {
+    m_FillBrushes.clear();
+    m_Brush.Reset();
+    m_RenderTarget.Reset();
+    m_HwndTarget.Reset();
+    m_DcTarget.Reset();
+}
+
+void GraphRenderer::Resize(UINT width, UINT height) {
+    if (m_HwndTarget && width && height)
+        m_HwndTarget->Resize(D2D1::SizeU(width, height));
+}
+
+void GraphRenderer::SetDpi(float dpi) {
+    if (dpi <= 0.0f) return;
+    m_Dpi = dpi;
+    if (m_RenderTarget)
+        m_RenderTarget->SetDpi(dpi, dpi);
+}
+
+// ---- Shared geometry ---------------------------------------------------------
+
+// Below this much height the chrome starts giving way to the plot.
+constexpr float k_CompactHeight = 120.0f;
+constexpr float k_FooterHeight  = 90.0f;
+constexpr float k_CompactPad    = 2.0f;
+
+GraphRenderer::ChromeMetrics GraphRenderer::MetricsFor(const RECT& clientRect,
+                                                       const RenderOptions& opt) const {
+    const float scale = 96.0f / m_Dpi;   // pixels -> DIPs
+    const float h = (clientRect.bottom - clientRect.top) * scale;
+
+    ChromeMetrics m;
+    m.TitleHeight = m_TitleHeight;
+    m.LabelHeight = m_LabelHeight;
+    m.Padding     = (h < k_CompactHeight) ? k_CompactPad : k_Padding;
+    m.ShowHeader  = (opt.Title && *opt.Title) || opt.AxisLabels;
+    // The footer only carries the axis minimum and the time span; on a tile
+    // that is a poor trade for a fifth of the plot.
+    m.ShowFooter  = opt.AxisLabels && h >= k_FooterHeight;
+    return m;
+}
+
+D2D1_RECT_F GraphRenderer::PlotRect(const RECT& clientRect, const RenderOptions& opt) const {
+    const float scale = 96.0f / m_Dpi;   // pixels -> DIPs
+    const float w = (clientRect.right - clientRect.left) * scale;
+    const float h = (clientRect.bottom - clientRect.top) * scale;
+
+    const ChromeMetrics m = MetricsFor(clientRect, opt);
+
+    return D2D1::RectF(
+        m.Padding,
+        m.Padding + (m.ShowHeader ? m.TitleHeight : 0.0f),
+        w - m.Padding,
+        h - m.Padding - (m.ShowFooter ? m.LabelHeight : 0.0f));
+}
+
+float GraphRenderer::SampleSpacing(const D2D1_RECT_F& plot, size_t capacity) {
+    const float w = plot.right - plot.left;
+    return capacity > 1 ? w / (capacity - 1) : w;
+}
+
+// ---- Brushes -----------------------------------------------------------------
+
+ID2D1LinearGradientBrush* GraphRenderer::FillBrush(COLORREF color, float opacity,
+                                                   const D2D1_RECT_F& plot) {
+    ComPtr<ID2D1LinearGradientBrush> brush;
+    for (const auto& entry : m_FillBrushes) {
+        if (entry.first == color) {
+            brush = entry.second;
+            break;
+        }
+    }
+
+    if (!brush) {
+        const D2D1_GRADIENT_STOP stops[] = {
+            { 0.0f, ColorrefToD2D(color, 1.00f) },
+            { 1.0f, ColorrefToD2D(color, 0.10f) },
+        };
+        ComPtr<ID2D1GradientStopCollection> collection;
+        if (FAILED(m_RenderTarget->CreateGradientStopCollection(
+                stops, ARRAYSIZE(stops), collection.GetAddressOf())))
+            return nullptr;
+
+        if (FAILED(m_RenderTarget->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(), D2D1::Point2F()),
+                collection.Get(), brush.GetAddressOf())))
+            return nullptr;
+
+        if (m_FillBrushes.size() >= k_MaxFillBrushes)
+            m_FillBrushes.erase(m_FillBrushes.begin());   // oldest out
+        m_FillBrushes.emplace_back(color, brush);
+    }
+
+    brush->SetStartPoint(D2D1::Point2F(plot.left, plot.top));
+    brush->SetEndPoint(D2D1::Point2F(plot.left, plot.bottom));
+    brush->SetOpacity(opacity);
+    return brush.Get();
+}
+
+// ---- Grid --------------------------------------------------------------------
+
+void GraphRenderer::DrawGrid(const D2D1_RECT_F& plot, const RenderOptions& opt,
+                             const GraphTheme& theme) {
+    m_Brush->SetColor(ColorrefToD2D(theme.GridColor));
+
+    const float w = plot.right - plot.left;
+    const float h = plot.bottom - plot.top;
+
+    if (opt.GridCols > 0) {
+        const float cell   = w / opt.GridCols;
+        const float offset = opt.ScrollGrid ? opt.GridPhase * cell : 0.0f;
+        for (int i = 0; i <= opt.GridCols; i++) {
+            const float x = std::floor(plot.left + i * cell - offset) + 0.5f;
+            if (x <= plot.left || x >= plot.right) continue;
+            m_RenderTarget->DrawLine(D2D1::Point2F(x, plot.top),
+                                     D2D1::Point2F(x, plot.bottom), m_Brush.Get(), 1.0f);
+        }
+    }
+
+    if (opt.GridRows > 0) {
+        const float cell = h / opt.GridRows;
+        for (int j = 1; j < opt.GridRows; j++) {
+            const float y = std::floor(plot.top + j * cell) + 0.5f;
+            m_RenderTarget->DrawLine(D2D1::Point2F(plot.left, y),
+                                     D2D1::Point2F(plot.right, y), m_Brush.Get(), 1.0f);
+        }
+    }
+}
+
+// ---- Geometry building -------------------------------------------------------
+
+// Emits one figure per run of consecutive present samples, so a missing sample
+// breaks the line and the fill instead of being drawn as a dive to the floor.
+template <typename ValueFn, typename XFn, typename YFn, typename BaseFn>
+static void EmitRuns(ID2D1GeometrySink* sink, size_t n, ValueFn value, XFn xAt, YFn yOf,
+                     bool filled, BaseFn baseY) {
+    size_t i = 0;
+    while (i < n) {
+        while (i < n && IsMissing(value(i))) i++;
+        const size_t start = i;
+        while (i < n && !IsMissing(value(i))) i++;
+        const size_t end = i;                    // exclusive
+        if (end - start < 2) continue;           // a lone sample has nothing to join
+
+        if (filled) {
+            sink->BeginFigure(D2D1::Point2F(xAt(start), baseY(start)), D2D1_FIGURE_BEGIN_FILLED);
+            for (size_t j = start; j < end; j++)
+                sink->AddLine(D2D1::Point2F(xAt(j), yOf(value(j))));
+            for (size_t j = end; j-- > start; )
+                sink->AddLine(D2D1::Point2F(xAt(j), baseY(j)));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+        else {
+            sink->BeginFigure(D2D1::Point2F(xAt(start), yOf(value(start))), D2D1_FIGURE_BEGIN_HOLLOW);
+            for (size_t j = start + 1; j < end; j++)
+                sink->AddLine(D2D1::Point2F(xAt(j), yOf(value(j))));
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+        }
+    }
+}
+
+void GraphRenderer::BuildOverlay(const GraphData& data, const D2D1_RECT_F& plot,
+                                 const AxisRange& range, bool fill) {
+    const float span = (range.Max - range.Min) != 0.0f ? (range.Max - range.Min) : 1.0f;
+    auto yOf = [&](float v) {
+        float t = (v - range.Min) / span;
+        t = std::clamp(t, 0.0f, 1.0f);
+        return plot.bottom - t * (plot.bottom - plot.top);
+    };
+
+    const auto& all = data.AllSeries();
+    for (size_t si = 0; si < all.size(); si++) {
+        const Series& s = all[si];
+        if (!s.Style().Visible) continue;
+
+        const size_t n = s.Count();
+        if (n < 2) continue;
+
+        const float dx = SampleSpacing(plot, s.Capacity());
+        // Newest sample sits at the right edge, so a partly filled history grows
+        // in from the right the way the Task Manager graphs do.
+        auto xAt   = [&](size_t i) { return plot.right - (n - 1 - i) * dx; };
+        auto value = [&](size_t i) { return s.At(i); };
+        auto base  = [&](size_t)   { return plot.bottom; };
+
+        if (fill && s.Style().FillOpacity > 0.0f) {
+            ComPtr<ID2D1PathGeometry> geometry;
+            ComPtr<ID2D1GeometrySink> sink;
+            if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) &&
+                SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
+                EmitRuns(sink.Get(), n, value, xAt, yOf, true, base);
+                sink->Close();
+                m_Geometry[si].Fill = geometry;
+            }
+        }
+
+        ComPtr<ID2D1PathGeometry> line;
+        ComPtr<ID2D1GeometrySink> lineSink;
+        if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(line.GetAddressOf())) &&
+            SUCCEEDED(line->Open(lineSink.GetAddressOf()))) {
+            EmitRuns(lineSink.Get(), n, value, xAt, yOf, false, base);
+            lineSink->Close();
+            m_Geometry[si].Line = line;
+        }
+    }
+}
+
+// Stacked: each series sits on the running total of the ones before it. Only the
+// slots every visible series holds are drawn, so a shorter series cannot shift
+// the ones above it. A missing sample contributes nothing to the baseline and
+// breaks that series' own band.
+void GraphRenderer::BuildStacked(const GraphData& data, const D2D1_RECT_F& plot,
+                                 const AxisRange& range, bool fill) {
+    const size_t n = data.CommonCount();
+    if (n < 2) return;
+
+    size_t capacity = 0;
+    for (const auto& s : data.AllSeries()) {
+        if (s.Style().Visible)
+            capacity = std::max(capacity, s.Capacity());
+    }
+    if (capacity < 2) return;
+
+    const float dx   = SampleSpacing(plot, capacity);
+    const float span = (range.Max - range.Min) != 0.0f ? (range.Max - range.Min) : 1.0f;
+
+    auto yOf = [&](float v) {
+        float t = (v - range.Min) / span;
+        t = std::clamp(t, 0.0f, 1.0f);
+        return plot.bottom - t * (plot.bottom - plot.top);
+    };
+    auto xAt = [&](size_t i) { return plot.right - (n - 1 - i) * dx; };   // i: oldest -> newest
+
+    m_Baseline.assign(n, 0.0f);
+
+    const auto& all = data.AllSeries();
+    for (size_t si = 0; si < all.size(); si++) {
+        const Series& s = all[si];
+        if (!s.Style().Visible) continue;
+
+        auto raw   = [&](size_t i) { return s.AtFromEnd(n - 1 - i); };
+        auto value = [&](size_t i) {
+            const float v = raw(i);
+            return IsMissing(v) ? MissingSample : m_Baseline[i] + v;
+        };
+        auto base = [&](size_t i) { return yOf(m_Baseline[i]); };
+
+        if (fill && s.Style().FillOpacity > 0.0f) {
+            ComPtr<ID2D1PathGeometry> geometry;
+            ComPtr<ID2D1GeometrySink> sink;
+            if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) &&
+                SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
+                EmitRuns(sink.Get(), n, value, xAt, yOf, true, base);
+                sink->Close();
+                m_Geometry[si].Fill = geometry;
+            }
+        }
+
+        ComPtr<ID2D1PathGeometry> line;
+        ComPtr<ID2D1GeometrySink> lineSink;
+        if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(line.GetAddressOf())) &&
+            SUCCEEDED(line->Open(lineSink.GetAddressOf()))) {
+            EmitRuns(lineSink.Get(), n, value, xAt, yOf, false, base);
+            lineSink->Close();
+            m_Geometry[si].Line = line;
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            const float v = raw(i);
+            if (!IsMissing(v)) m_Baseline[i] += v;
+        }
+    }
+}
+
+// Bars: one column per sample. Overlaid series sit side by side within a slot;
+// stacked ones share a column and pile up.
+void GraphRenderer::BuildBars(const GraphData& data, const D2D1_RECT_F& plot,
+                              const AxisRange& range, bool stacked) {
+    const float span = (range.Max - range.Min) != 0.0f ? (range.Max - range.Min) : 1.0f;
+    auto yOf = [&](float v) {
+        float t = (v - range.Min) / span;
+        t = std::clamp(t, 0.0f, 1.0f);
+        return plot.bottom - t * (plot.bottom - plot.top);
+    };
+
+    const auto& all = data.AllSeries();
+
+    size_t visible = 0;
+    for (const auto& s : all)
+        if (s.Style().Visible) visible++;
+    if (visible == 0) return;
+
+    const size_t common = stacked ? data.CommonCount() : 0;
+    if (stacked) {
+        if (common == 0) return;
+        m_Baseline.assign(common, 0.0f);
+    }
+
+    size_t slot = 0;
+    for (size_t si = 0; si < all.size(); si++) {
+        const Series& s = all[si];
+        if (!s.Style().Visible) continue;
+
+        const size_t n = stacked ? common : s.Count();
+        if (n == 0) { slot++; continue; }
+
+        const float dx = SampleSpacing(plot, s.Capacity());
+        const float groupW = dx * k_BarSlotFill;
+        // Side by side when overlaid, one shared column when stacked.
+        const float barW = std::max(1.0f, stacked ? groupW : groupW / visible);
+
+        ComPtr<ID2D1PathGeometry> geometry;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) ||
+            FAILED(geometry->Open(sink.GetAddressOf()))) {
+            slot++;
+            continue;
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            const float v = stacked ? s.AtFromEnd(n - 1 - i) : s.At(i);
+            if (IsMissing(v)) continue;
+
+            const float center = plot.right - (n - 1 - i) * dx;
+            const float left   = stacked ? center - barW / 2
+                                         : center - groupW / 2 + slot * barW;
+            const float right  = left + barW;
+
+            const float bottomValue = stacked ? m_Baseline[i] : range.Min;
+            const float yTop    = yOf(stacked ? m_Baseline[i] + v : v);
+            const float yBottom = yOf(bottomValue);
+            if (std::fabs(yBottom - yTop) < 0.5f) continue;
+
+            sink->BeginFigure(D2D1::Point2F(left, yBottom), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(left, yTop));
+            sink->AddLine(D2D1::Point2F(right, yTop));
+            sink->AddLine(D2D1::Point2F(right, yBottom));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+
+        sink->Close();
+        m_Geometry[si].Fill = geometry;
+
+        if (stacked) {
+            for (size_t i = 0; i < n; i++) {
+                const float v = s.AtFromEnd(n - 1 - i);
+                if (!IsMissing(v)) m_Baseline[i] += v;
+            }
+        }
+        slot++;
+    }
+}
+
+void GraphRenderer::EnsureGeometry(const GraphData& data, const D2D1_RECT_F& plot,
+                                   const AxisRange& range, const RenderOptions& opt) {
+    GeometryKey key;
+    key.Version     = data.Version();
+    key.SeriesCount = data.SeriesCount();
+    key.Capacity    = data.Capacity();
+    key.Left        = plot.left;
+    key.Top         = plot.top;
+    key.Right       = plot.right;
+    key.Bottom      = plot.bottom;
+    key.RangeMin    = range.Min;
+    key.RangeMax    = range.Max;
+    key.Stacked     = opt.Stacked;
+    key.Fill        = opt.Fill;
+    key.Bars        = opt.Bars;
+
+    size_t bit = 0;
+    for (const auto& s : data.AllSeries()) {
+        if (s.Style().Visible) key.VisibleMask |= (1ull << (bit & 63));
+        bit++;
+    }
+
+    if (m_GeometryValid && m_Geometry.size() == data.SeriesCount() && key.Matches(m_GeometryKey))
+        return;
+
+    m_Geometry.assign(data.SeriesCount(), SeriesGeometry{});
+
+    if (opt.Bars)         BuildBars(data, plot, range, opt.Stacked);
+    else if (opt.Stacked) BuildStacked(data, plot, range, opt.Fill);
+    else                  BuildOverlay(data, plot, range, opt.Fill);
+
+    m_GeometryKey   = key;
+    m_GeometryValid = true;
+}
+
+void GraphRenderer::DrawGeometry(const GraphData& data, const D2D1_RECT_F& plot,
+                                 const RenderOptions& opt) {
+    const auto& all = data.AllSeries();
+    for (size_t si = 0; si < all.size() && si < m_Geometry.size(); si++) {
+        const Series& s = all[si];
+        if (!s.Style().Visible) continue;
+
+        const SeriesStyle& style = s.Style();
+
+        if (m_Geometry[si].Fill) {
+            // Bars need enough opacity to read as solid columns.
+            const float opacity = opt.Bars ? std::max(style.FillOpacity, 0.7f)
+                                           : style.FillOpacity;
+            if (auto* brush = FillBrush(style.FillColor, opacity, plot))
+                m_RenderTarget->FillGeometry(m_Geometry[si].Fill.Get(), brush);
+
+            if (opt.Bars) {
+                m_Brush->SetColor(ColorrefToD2D(style.LineColor));
+                m_RenderTarget->DrawGeometry(m_Geometry[si].Fill.Get(), m_Brush.Get(), 1.0f);
+            }
+        }
+
+        if (m_Geometry[si].Line) {
+            m_Brush->SetColor(ColorrefToD2D(style.LineColor));
+            m_RenderTarget->DrawGeometry(m_Geometry[si].Line.Get(), m_Brush.Get(),
+                                         style.LineWidth,
+                                         style.Dashed ? m_DashStyle.Get() : nullptr);
+        }
+    }
+}
+
+// ---- Overlays ----------------------------------------------------------------
+
+void GraphRenderer::DrawReferenceLines(const D2D1_RECT_F& plot, const AxisRange& range,
+                                       const RenderOptions& opt, const ChromeMetrics& metrics) {
+    if (!opt.RefLines || opt.RefLineCount == 0) return;
+
+    // Both the value overlay and these labels are right-aligned near the top,
+    // so a high reference line would otherwise print over the reading.
+    const bool haveValue = opt.ValueOverlay && opt.ValueText && *opt.ValueText &&
+                           (plot.bottom - plot.top >= m_ValueHeight + 8.0f);
+    const D2D1_RECT_F valueRect = ValueOverlayRect(plot, metrics);
+
+    const float span = (range.Max - range.Min) != 0.0f ? (range.Max - range.Min) : 1.0f;
+
+    for (size_t i = 0; i < opt.RefLineCount; i++) {
+        const ReferenceLine& rl = opt.RefLines[i];
+        if (rl.Value < range.Min || rl.Value > range.Max) continue;   // off the axis
+
+        const float t = (rl.Value - range.Min) / span;
+        const float y = std::floor(plot.bottom - t * (plot.bottom - plot.top)) + 0.5f;
+
+        m_Brush->SetColor(ColorrefToD2D(rl.Color));
+        m_RenderTarget->DrawLine(D2D1::Point2F(plot.left, y), D2D1::Point2F(plot.right, y),
+                                 m_Brush.Get(), rl.Width,
+                                 rl.Dashed ? m_DashStyle.Get() : nullptr);
+
+        if (!rl.Label.empty()) {
+            D2D1_RECT_F rc = D2D1::RectF(plot.left, y - m_LabelHeight - 1.0f,
+                                         plot.right - 6.0f, y - 1.0f);
+
+            // Sitting under the value overlay: put the label below its line.
+            if (haveValue && rc.top < valueRect.bottom && rc.bottom > valueRect.top)
+                rc = D2D1::RectF(plot.left, y + 1.0f, plot.right - 6.0f, y + 1.0f + m_LabelHeight);
+
+            DrawLabel(rl.Label.c_str(), rc, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
+    }
+}
+
+D2D1_RECT_F GraphRenderer::ValueOverlayRect(const D2D1_RECT_F& plot,
+                                            const ChromeMetrics&) const {
+    return D2D1::RectF(plot.left + k_LegendInset, plot.top + 6.0f,
+                       plot.right - k_LegendInset, plot.top + 6.0f + m_ValueHeight);
+}
+
+void GraphRenderer::DrawValueOverlay(const D2D1_RECT_F& plot, const RenderOptions& opt,
+                                     const GraphTheme& theme, const ChromeMetrics& metrics) {
+    if (!opt.ValueText || !*opt.ValueText) return;
+    if (plot.bottom - plot.top < m_ValueHeight + 8.0f) return;
+
+    m_Brush->SetColor(ColorrefToD2D(theme.ValueColor));
+    DrawLabel(opt.ValueText, ValueOverlayRect(plot, metrics), m_ValueFormat.Get(),
+              DWRITE_TEXT_ALIGNMENT_TRAILING);
+}
+
+void GraphRenderer::DrawLegend(const D2D1_RECT_F& plot, const GraphData& data,
+                               const GraphTheme& theme, const ChromeMetrics&) {
+    m_LabelFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    int   rows   = 0;
+    float widest = 0.0f;
+    for (const auto& s : data.AllSeries()) {
+        if (!s.Style().Visible || s.Name().empty()) continue;
+        ComPtr<IDWriteTextLayout> layout;
+        if (SUCCEEDED(m_DwFactory->CreateTextLayout(
+                s.Name().c_str(), static_cast<UINT32>(s.Name().size()),
+                m_LabelFormat.Get(), 200.0f, m_LabelHeight, layout.GetAddressOf()))) {
+            DWRITE_TEXT_METRICS tm{};
+            layout->GetMetrics(&tm);
+            widest = std::max(widest, tm.widthIncludingTrailingWhitespace);
+        }
+        rows++;
+    }
+    if (rows == 0) return;
+
+    const float w = k_OverlayPad * 2 + k_SwatchSize + 6.0f + widest;
+    const float h = k_OverlayPad * 2 + rows * m_LabelHeight;
+    const float x = plot.left + k_LegendInset;
+    const float y = plot.top + k_LegendInset;
+    if (x + w > plot.right || y + h > plot.bottom) return;
+
+    const auto panel = D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), 4.0f, 4.0f);
+    m_Brush->SetColor(ColorrefToD2D(theme.PanelColor, 0.85f));
+    m_RenderTarget->FillRoundedRectangle(panel, m_Brush.Get());
+    m_Brush->SetColor(ColorrefToD2D(theme.BorderColor, 0.8f));
+    m_RenderTarget->DrawRoundedRectangle(panel, m_Brush.Get(), 1.0f);
+
+    float rowY = y + k_OverlayPad;
+    for (const auto& s : data.AllSeries()) {
+        if (!s.Style().Visible || s.Name().empty()) continue;
+
+        const float swatchY = rowY + (m_LabelHeight - k_SwatchSize) / 2;
+        const auto swatch = D2D1::RoundedRect(
+            D2D1::RectF(x + k_OverlayPad, swatchY,
+                        x + k_OverlayPad + k_SwatchSize, swatchY + k_SwatchSize), 2.0f, 2.0f);
+        m_Brush->SetColor(ColorrefToD2D(s.Style().LineColor));
+        m_RenderTarget->FillRoundedRectangle(swatch, m_Brush.Get());
+
+        m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+        DrawLabel(s.Name().c_str(),
+                  D2D1::RectF(x + k_OverlayPad + k_SwatchSize + 6.0f, rowY, x + w, rowY + m_LabelHeight),
+                  m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
+
+        rowY += m_LabelHeight;
+    }
+}
+
+void GraphRenderer::DrawReadout(const wchar_t* text, float x, float y,
+                                const D2D1_RECT_F& plot, const GraphTheme& theme) {
+    if (!text || !*text) return;
+
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(m_DwFactory->CreateTextLayout(text, static_cast<UINT32>(wcslen(text)),
+            m_OverlayFormat.Get(), k_ReadoutMaxW, 400.0f, layout.GetAddressOf())))
+        return;
+
+    DWRITE_TEXT_METRICS tm{};
+    layout->GetMetrics(&tm);
+
+    const float w = tm.widthIncludingTrailingWhitespace + k_OverlayPad * 2;
+    const float h = tm.height + k_OverlayPad * 2;
+
+    // Prefer below-right of the cursor; flip or clamp when that would overflow.
+    float bx = x + 14.0f;
+    float by = y + 14.0f;
+    if (bx + w > plot.right) bx = x - 14.0f - w;
+    if (by + h > plot.bottom) by = plot.bottom - h - 2.0f;
+    bx = std::max(bx, plot.left + 2.0f);
+    by = std::max(by, plot.top + 2.0f);
+
+    const auto box = D2D1::RoundedRect(D2D1::RectF(bx, by, bx + w, by + h), 4.0f, 4.0f);
+    m_Brush->SetColor(ColorrefToD2D(theme.PanelColor, 0.95f));
+    m_RenderTarget->FillRoundedRectangle(box, m_Brush.Get());
+    m_Brush->SetColor(ColorrefToD2D(theme.BorderColor));
+    m_RenderTarget->DrawRoundedRectangle(box, m_Brush.Get(), 1.0f);
+
+    m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+    m_RenderTarget->DrawTextLayout(D2D1::Point2F(bx + k_OverlayPad, by + k_OverlayPad),
+                                   layout.Get(), m_Brush.Get());
+}
+
+void GraphRenderer::DrawCrosshair(const D2D1_RECT_F& plot, const GraphData& data,
+                                  const AxisRange& range, const RenderOptions& opt,
+                                  const GraphTheme& theme) {
+    if (opt.HoverIndex < 0) return;
+
+    size_t capacity = 0;
+    for (const auto& s : data.AllSeries()) {
+        if (s.Style().Visible)
+            capacity = std::max(capacity, s.Capacity());
+    }
+    if (capacity < 2) return;
+
+    const size_t k  = static_cast<size_t>(opt.HoverIndex);
+    const float  dx = SampleSpacing(plot, capacity);
+    const float  x  = plot.right - k * dx;
+    if (x < plot.left || x > plot.right) return;
+
+    const float span = (range.Max - range.Min) != 0.0f ? (range.Max - range.Min) : 1.0f;
+    auto yOf = [&](float v) {
+        float t = (v - range.Min) / span;
+        t = std::clamp(t, 0.0f, 1.0f);
+        return plot.bottom - t * (plot.bottom - plot.top);
+    };
+
+    m_Brush->SetColor(ColorrefToD2D(theme.CrosshairColor, 0.85f));
+    m_RenderTarget->DrawLine(D2D1::Point2F(x, plot.top), D2D1::Point2F(x, plot.bottom),
+                             m_Brush.Get(), 1.0f, m_DashStyle.Get());
+
+    float baseline = 0.0f;
+    for (const auto& s : data.AllSeries()) {
+        if (!s.Style().Visible || k >= s.Count()) continue;
+
+        const float value = s.AtFromEnd(k);
+        if (IsMissing(value)) continue;          // no dot where there is no reading
+
+        const float top = opt.Stacked ? baseline + value : value;
+        if (opt.Stacked) baseline = top;
+
+        const auto dot = D2D1::Ellipse(D2D1::Point2F(x, yOf(top)), 3.5f, 3.5f);
+        m_Brush->SetColor(ColorrefToD2D(s.Style().LineColor));
+        m_RenderTarget->FillEllipse(dot, m_Brush.Get());
+        m_Brush->SetColor(ColorrefToD2D(theme.PanelColor));
+        m_RenderTarget->DrawEllipse(dot, m_Brush.Get(), 1.0f);
+    }
+
+    DrawReadout(opt.HoverText, opt.HoverX, opt.HoverY, plot, theme);
+}
+
+// ---- Chrome ------------------------------------------------------------------
+
+void GraphRenderer::DrawLabel(const wchar_t* text, const D2D1_RECT_F& rc,
+                              IDWriteTextFormat* format, DWRITE_TEXT_ALIGNMENT align) {
+    if (!text || !*text) return;
+    format->SetTextAlignment(align);
+    m_RenderTarget->DrawTextW(text, static_cast<UINT32>(wcslen(text)), format, rc,
+                              m_Brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+void GraphRenderer::DrawChrome(const D2D1_RECT_F& plot, const D2D1_RECT_F& client,
+                               const AxisRange& range, const GraphTheme& theme,
+                               const RenderOptions& opt, const ValueFormatFn& formatter,
+                               const ChromeMetrics& metrics) {
+    m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+
+    // Header band: title on the left, axis maximum on the right.
+    const D2D1_RECT_F header = D2D1::RectF(client.left + metrics.Padding,
+                                           plot.top - metrics.TitleHeight,
+                                           client.right - metrics.Padding, plot.top);
+    DrawLabel(opt.Title, header, m_TitleFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    if (!opt.AxisLabels) return;
+
+    wchar_t buffer[64] = {};
+    if (formatter) formatter(range.Max, buffer, _countof(buffer));
+    else           Format::Number(range.Max, buffer, _countof(buffer));
+    DrawLabel(buffer, header, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+    if (!metrics.ShowFooter) return;   // compact: the plot keeps that band
+
+    // Footer band: time span on the left, axis minimum on the right.
+    const D2D1_RECT_F footer = D2D1::RectF(client.left + metrics.Padding, plot.bottom,
+                                           client.right - metrics.Padding,
+                                           plot.bottom + metrics.LabelHeight);
+    DrawLabel(opt.TimeSpanText, footer, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    buffer[0] = 0;
+    if (formatter) formatter(range.Min, buffer, _countof(buffer));
+    else           Format::Number(range.Min, buffer, _countof(buffer));
+    DrawLabel(buffer, footer, m_LabelFormat.Get(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+}
+
+// ---- Frame -------------------------------------------------------------------
+
+HRESULT GraphRenderer::DrawFrame(const RECT& clientRect, const GraphData& data,
+                                 const AxisRange& range, const GraphTheme& theme,
+                                 const RenderOptions& opt, const ValueFormatFn& formatter) {
+    const D2D1_SIZE_F size = m_RenderTarget->GetSize();   // DIPs
+    if (size.width <= 0.0f || size.height <= 0.0f) return S_OK;
+
+    const D2D1_RECT_F client  = D2D1::RectF(0.0f, 0.0f, size.width, size.height);
+    const D2D1_RECT_F plot    = PlotRect(clientRect, opt);
+    const ChromeMetrics metrics = MetricsFor(clientRect, opt);
+
+    m_RenderTarget->BeginDraw();
+    m_RenderTarget->Clear(ColorrefToD2D(theme.Background));
+
+    if (plot.right - plot.left >= 4.0f && plot.bottom - plot.top >= 4.0f) {
+        m_Brush->SetColor(ColorrefToD2D(theme.PlotColor));
+        m_RenderTarget->FillRectangle(plot, m_Brush.Get());
+
+        if (opt.DrawGrid)
+            DrawGrid(plot, opt, theme);
+
+        EnsureGeometry(data, plot, range, opt);
+
+        m_RenderTarget->PushAxisAlignedClip(plot, D2D1_ANTIALIAS_MODE_ALIASED);
+        DrawGeometry(data, plot, opt);
+        DrawReferenceLines(plot, range, opt, metrics);
+        m_RenderTarget->PopAxisAlignedClip();
+
+        m_Brush->SetColor(ColorrefToD2D(theme.BorderColor));
+        const D2D1_RECT_F border = D2D1::RectF(
+            std::floor(plot.left) + 0.5f, std::floor(plot.top) + 0.5f,
+            std::floor(plot.right) - 0.5f, std::floor(plot.bottom) - 0.5f);
+        m_RenderTarget->DrawRectangle(border, m_Brush.Get(), 1.0f);
+
+        if (opt.ValueOverlay)
+            DrawValueOverlay(plot, opt, theme, metrics);
+        if (opt.Legend)
+            DrawLegend(plot, data, theme, metrics);
+
+        DrawCrosshair(plot, data, range, opt, theme);
+        DrawChrome(plot, client, range, theme, opt, formatter, metrics);
+    }
+
+    return m_RenderTarget->EndDraw();
+}
+
+void GraphRenderer::Render(HWND hwnd, const RECT& clientRect, const GraphData& data,
+                           const AxisRange& range, const GraphTheme& theme,
+                           const RenderOptions& opt, const ValueFormatFn& formatter) {
+    if (FAILED(EnsureDeviceResources(hwnd, clientRect))) return;
+
+    if (DrawFrame(clientRect, data, range, theme, opt, formatter) == D2DERR_RECREATE_TARGET)
+        DiscardDeviceResources();
+}
+
+// ---- Image export ------------------------------------------------------------
+
+namespace {
+
+// WIC needs COM. Hosts may or may not have initialised it, and a host that chose
+// MTA must not be overridden, so a changed-mode failure is simply left alone.
+struct ComScope {
+    bool Owned = false;
+    ComScope() {
+        Owned = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+    }
+    ~ComScope() {
+        if (Owned) CoUninitialize();
+    }
+    ComScope(const ComScope&)            = delete;
+    ComScope& operator=(const ComScope&) = delete;
+};
+
+bool WritePng(IWICImagingFactory* wic, IWICBitmap* bitmap, const wchar_t* path) {
+    ComPtr<IWICStream> stream;
+    if (FAILED(wic->CreateStream(stream.GetAddressOf()))) return false;
+    if (FAILED(stream->InitializeFromFilename(path, GENERIC_WRITE))) return false;
+
+    ComPtr<IWICBitmapEncoder> encoder;
+    if (FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf())))
+        return false;
+    if (FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache))) return false;
+
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> options;
+    if (FAILED(encoder->CreateNewFrame(frame.GetAddressOf(), options.GetAddressOf())))
+        return false;
+    if (FAILED(frame->Initialize(options.Get()))) return false;
+
+    UINT w = 0, h = 0;
+    bitmap->GetSize(&w, &h);
+    if (FAILED(frame->SetSize(w, h))) return false;
+
+    WICPixelFormatGUID format = GUID_WICPixelFormatDontCare;
+    if (FAILED(frame->SetPixelFormat(&format))) return false;
+    if (FAILED(frame->WriteSource(bitmap, nullptr))) return false;
+
+    return SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+}
+
+// CF_DIB, bottom-up 32bpp: the form the widest range of consumers accepts.
+bool PutDibOnClipboard(HWND owner, IWICBitmap* bitmap) {
+    UINT w = 0, h = 0;
+    bitmap->GetSize(&w, &h);
+    if (!w || !h) return false;
+
+    WICRect rect{ 0, 0, static_cast<INT>(w), static_cast<INT>(h) };
+    ComPtr<IWICBitmapLock> lock;
+    if (FAILED(bitmap->Lock(&rect, WICBitmapLockRead, lock.GetAddressOf()))) return false;
+
+    UINT stride = 0, bytes = 0;
+    BYTE* pixels = nullptr;
+    if (FAILED(lock->GetStride(&stride)) || FAILED(lock->GetDataPointer(&bytes, &pixels)))
+        return false;
+
+    const SIZE_T rowBytes = static_cast<SIZE_T>(w) * 4;
+    const SIZE_T total    = sizeof(BITMAPINFOHEADER) + rowBytes * h;
+
+    HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, total);
+    if (!handle) return false;
+
+    auto* header = static_cast<BITMAPINFOHEADER*>(GlobalLock(handle));
+    if (!header) {
+        GlobalFree(handle);
+        return false;
+    }
+
+    *header = {};
+    header->biSize        = sizeof(BITMAPINFOHEADER);
+    header->biWidth       = static_cast<LONG>(w);
+    header->biHeight      = static_cast<LONG>(h);   // positive: bottom-up
+    header->biPlanes      = 1;
+    header->biBitCount    = 32;
+    header->biCompression = BI_RGB;
+    header->biSizeImage   = static_cast<DWORD>(rowBytes * h);
+
+    auto* dest = reinterpret_cast<BYTE*>(header + 1);
+    for (UINT row = 0; row < h; row++)
+        memcpy(dest + rowBytes * row, pixels + static_cast<SIZE_T>(stride) * (h - 1 - row), rowBytes);
+
+    GlobalUnlock(handle);
+
+    if (!OpenClipboard(owner)) {
+        GlobalFree(handle);
+        return false;
+    }
+    EmptyClipboard();
+    const bool ok = ::SetClipboardData(CF_DIB, handle) != nullptr;
+    CloseClipboard();
+
+    if (!ok) GlobalFree(handle);   // the clipboard did not take ownership
+    return ok;
+}
+
+} // namespace
+
+HRESULT GraphRenderer::RenderOffscreen(IWICImagingFactory* wic, const RECT& clientRect,
+                                       const GraphData& data, const AxisRange& range,
+                                       const GraphTheme& theme, const RenderOptions& opt,
+                                       const ValueFormatFn& formatter, IWICBitmap** out) {
+    if (!m_D2dFactory || !wic || !out) return E_FAIL;
+    *out = nullptr;
+
+    const UINT w = static_cast<UINT>(std::max<LONG>(clientRect.right - clientRect.left, 1));
+    const UINT h = static_cast<UINT>(std::max<LONG>(clientRect.bottom - clientRect.top, 1));
+
+    ComPtr<IWICBitmap> bitmap;
+    HRESULT hr = wic->CreateBitmap(w, h, GUID_WICPixelFormat32bppPBGRA,
+                                   WICBitmapCacheOnLoad, bitmap.GetAddressOf());
+    if (FAILED(hr)) return hr;
 
     auto props = D2D1::RenderTargetProperties(
         D2D1_RENDER_TARGET_TYPE_DEFAULT,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-        0, 0,
-        D2D1_RENDER_TARGET_USAGE_NONE,
-        D2D1_FEATURE_LEVEL_DEFAULT);
+        m_Dpi, m_Dpi);
 
-    HRESULT hr = m_D2dFactory->CreateDCRenderTarget(&props, m_RenderTarget.GetAddressOf());
+    ComPtr<ID2D1RenderTarget> target;
+    hr = m_D2dFactory->CreateWicBitmapRenderTarget(bitmap.Get(), props, target.GetAddressOf());
     if (FAILED(hr)) return hr;
 
-    hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), m_Brush.GetAddressOf());
+    hr = DrawFrameOn(target.Get(), clientRect, data, range, theme, opt, formatter);
+    if (FAILED(hr)) return hr;
+
+    *out = bitmap.Detach();
+    return S_OK;
+}
+
+HRESULT GraphRenderer::DrawFrameOn(ID2D1RenderTarget* target, const RECT& clientRect,
+                                   const GraphData& data, const AxisRange& range,
+                                   const GraphTheme& theme, const RenderOptions& opt,
+                                   const ValueFormatFn& formatter) {
+    if (!target) return E_POINTER;
+
+    // The geometry cache comes from the factory, so it carries over untouched;
+    // only the brushes have to be rebuilt against this target.
+    auto savedTarget = m_RenderTarget;
+    auto savedBrush  = m_Brush;
+    auto savedFills  = std::move(m_FillBrushes);
+    m_FillBrushes.clear();
+
+    m_RenderTarget = target;
+    HRESULT hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black),
+                                                       m_Brush.ReleaseAndGetAddressOf());
+    if (SUCCEEDED(hr))
+        hr = DrawFrame(clientRect, data, range, theme, opt, formatter);
+
+    m_FillBrushes  = std::move(savedFills);
+    m_Brush        = savedBrush;
+    m_RenderTarget = savedTarget;
     return hr;
 }
 
-void GraphRenderer::DiscardDeviceResources() {
-    m_Brush.Reset();
-    m_RenderTarget.Reset();
+bool GraphRenderer::RenderToDC(HDC dc, const RECT& clientRect, const GraphData& data,
+                               const AxisRange& range, const GraphTheme& theme,
+                               const RenderOptions& opt, const ValueFormatFn& formatter) {
+    if (!dc || !m_D2dFactory) return false;
+
+    if (!m_DcTarget) {
+        auto props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            m_Dpi, m_Dpi);
+        if (FAILED(m_D2dFactory->CreateDCRenderTarget(&props, m_DcTarget.GetAddressOf())))
+            return false;
+    }
+
+    m_DcTarget->SetDpi(m_Dpi, m_Dpi);
+    if (FAILED(m_DcTarget->BindDC(dc, &clientRect))) return false;
+
+    const HRESULT hr = DrawFrameOn(m_DcTarget.Get(), clientRect, data, range, theme,
+                                   opt, formatter);
+    if (hr == D2DERR_RECREATE_TARGET) {
+        m_DcTarget.Reset();
+        return false;
+    }
+    return SUCCEEDED(hr);
 }
 
-void GraphRenderer::Render(HDC hdc, const RECT& clientRect,
-                           const GraphModel& model, const ViewTransform& vt,
-                           const std::vector<NodeId>& selectedNodes, EdgeId selectedEdge,
-                           bool drawGrid, const EdgePreview& preview,
-                           const RubberBand& rubberBand, const MinimapConfig& minimap,
-                           const ResizeOverlay& resizeOverlay) {
-    if (FAILED(EnsureDeviceResources(hdc, clientRect))) return;
+bool GraphRenderer::SaveImage(const wchar_t* path, const RECT& clientRect,
+                              const GraphData& data, const AxisRange& range,
+                              const GraphTheme& theme, const RenderOptions& opt,
+                              const ValueFormatFn& formatter) {
+    if (!path || !*path) return false;
 
-    HRESULT hr = m_RenderTarget->BindDC(hdc, &clientRect);
-    if (hr == D2DERR_RECREATE_TARGET) {
-        DiscardDeviceResources();
-        if (FAILED(EnsureDeviceResources(hdc, clientRect))) return;
-        m_RenderTarget->BindDC(hdc, &clientRect);
+    ComScope com;
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(wic.GetAddressOf()))))
+        return false;
+
+    ComPtr<IWICBitmap> bitmap;
+    if (FAILED(RenderOffscreen(wic.Get(), clientRect, data, range, theme, opt, formatter,
+                               bitmap.GetAddressOf())))
+        return false;
+
+    return WritePng(wic.Get(), bitmap.Get(), path);
+}
+
+bool GraphRenderer::CopyToClipboard(HWND owner, const RECT& clientRect,
+                                    const GraphData& data, const AxisRange& range,
+                                    const GraphTheme& theme, const RenderOptions& opt,
+                                    const ValueFormatFn& formatter) {
+    ComScope com;
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(wic.GetAddressOf()))))
+        return false;
+
+    ComPtr<IWICBitmap> bitmap;
+    if (FAILED(RenderOffscreen(wic.Get(), clientRect, data, range, theme, opt, formatter,
+                               bitmap.GetAddressOf())))
+        return false;
+
+    return PutDibOnClipboard(owner, bitmap.Get());
+}
+
+// ---- Composition bar ---------------------------------------------------------
+//
+// Not a time series: one band split into segments that sum to a total, the way
+// Task Manager shows memory composition. It shares this renderer so it gets the
+// same theme, fonts, DPI handling and device resources.
+
+constexpr float k_CompBarThickness = 44.0f;   // height, or width when vertical
+constexpr float k_CompMinLabelW    = 54.0f;
+constexpr float k_CompLabelGap     = 6.0f;
+constexpr float k_CompBarShare     = 0.35f;   // of the width, when labels sit beside it
+
+D2D1_RECT_F GraphRenderer::CompositionBarRect(const RECT& clientRect,
+                                              const CompositionOptions& opt) const {
+    const float scale = 96.0f / m_Dpi;
+    const float w = (clientRect.right - clientRect.left) * scale;
+    const float h = (clientRect.bottom - clientRect.top) * scale;
+
+    const float pad    = (h < k_CompactHeight) ? k_CompactPad : k_Padding;
+    const float header = (opt.Title && *opt.Title) ? m_TitleHeight : 0.0f;
+
+    const float top    = pad + header;
+    const float bottom = h - pad;
+    if (bottom - top <= 0.0f || w - pad * 2 <= 0.0f) return D2D1::RectF(0, 0, 0, 0);
+
+    if (opt.Vertical) {
+        // The bar runs the full height; labels, if any, sit to its right.
+        const float available = w - pad * 2;
+        float barWidth = std::min(k_CompBarThickness, std::max(6.0f, available));
+        float left     = pad;
+
+        if (opt.ShowLabels)
+            barWidth = std::min(barWidth, std::max(6.0f, available * k_CompBarShare));
+        else
+            left = pad + std::max(0.0f, (available - barWidth) / 2);   // centred
+
+        return D2D1::RectF(left, top, left + barWidth, bottom);
     }
+
+    // Horizontal: the bar plus its label rows sit as one block, centred.
+    const float labels = opt.ShowLabels ? m_LabelHeight * 2 : 0.0f;
+    float barHeight = std::min(k_CompBarThickness, std::max(6.0f, bottom - top - labels));
+    const float blockTop = top + std::max(0.0f, (bottom - top - barHeight - labels) / 2);
+
+    return D2D1::RectF(pad, blockTop, w - pad, blockTop + barHeight);
+}
+
+int GraphRenderer::HitTestSegment(const RECT& clientRect,
+                                  const std::vector<CompositionSegment>& segments,
+                                  const CompositionOptions& opt, POINT pt) const {
+    if (segments.empty()) return -1;
+
+    const D2D1_RECT_F bar = CompositionBarRect(clientRect, opt);
+    if (bar.right - bar.left <= 0.0f) return -1;
+
+    const float scale = 96.0f / m_Dpi;
+    const float x = pt.x * scale;
+    const float y = pt.y * scale;
+    if (x < bar.left || x > bar.right || y < bar.top || y > bar.bottom) return -1;
+
+    float total = opt.Total;
+    if (total <= 0.0f) {
+        total = 0.0f;
+        for (const auto& s : segments) total += std::max(0.0f, s.Value);
+    }
+    if (total <= 0.0f) return -1;
+
+    const float span = opt.Vertical ? (bar.bottom - bar.top) : (bar.right - bar.left);
+    const float along = opt.Vertical ? y : x;
+    float cursor = opt.Vertical ? bar.top : bar.left;
+
+    for (size_t i = 0; i < segments.size(); i++) {
+        const float extent = (std::max(0.0f, segments[i].Value) / total) * span;
+        if (along >= cursor && along < cursor + extent) return static_cast<int>(i);
+        cursor += extent;
+    }
+    return static_cast<int>(segments.size()) - 1;   // rounding at the far edge
+}
+
+HRESULT GraphRenderer::DrawComposition(const RECT& clientRect,
+                                       const std::vector<CompositionSegment>& segments,
+                                       const GraphTheme& theme,
+                                       const CompositionOptions& opt,
+                                       const ValueFormatFn& formatter) {
+    const D2D1_SIZE_F size = m_RenderTarget->GetSize();
+    if (size.width <= 0.0f || size.height <= 0.0f) return S_OK;
+
+    const float scale  = 96.0f / m_Dpi;
+    const float pad    = ((clientRect.bottom - clientRect.top) * scale < k_CompactHeight)
+                         ? k_CompactPad : k_Padding;
+    const D2D1_RECT_F bar = CompositionBarRect(clientRect, opt);
 
     m_RenderTarget->BeginDraw();
-    m_RenderTarget->Clear(D2D1::ColorF(0.15f, 0.15f, 0.15f));
+    m_RenderTarget->Clear(ColorrefToD2D(theme.Background));
 
-    if (drawGrid) DrawGrid(clientRect, vt);
-
-    for (const auto& e : model.Edges())
-        DrawEdge(e, model, vt, e.Id == selectedEdge);
-
-    if (preview.Active)
-        DrawEdgePreview(preview, model, vt);
-
-    for (const auto& n : model.Nodes()) {
-        bool sel = std::find(selectedNodes.begin(), selectedNodes.end(), n.Id) != selectedNodes.end();
-        DrawNode(n, vt, sel);
+    if (opt.Title && *opt.Title) {
+        m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+        DrawLabel(opt.Title,
+                  D2D1::RectF(pad, pad, size.width - pad, pad + m_TitleHeight),
+                  m_TitleFormat.Get(), DWRITE_TEXT_ALIGNMENT_LEADING);
     }
 
-    if (rubberBand.Active)
-        DrawRubberBand(rubberBand);
+    if (bar.right - bar.left >= 4.0f && bar.bottom - bar.top >= 4.0f) {
+        float total = opt.Total;
+        if (total <= 0.0f) {
+            total = 0.0f;
+            for (const auto& s : segments) total += std::max(0.0f, s.Value);
+        }
 
-    if (resizeOverlay.Node != InvalidNode) {
-        const Node* rn = model.GetNode(resizeOverlay.Node);
-        if (rn) DrawResizeHandles(*rn, vt, resizeOverlay.HoveredHandle);
+        m_Brush->SetColor(ColorrefToD2D(theme.PlotColor));
+        m_RenderTarget->FillRectangle(bar, m_Brush.Get());
+
+        if (total > 0.0f) {
+            const bool  vertical = opt.Vertical;
+            const float span  = vertical ? (bar.bottom - bar.top) : (bar.right - bar.left);
+            const float limit  = vertical ? bar.bottom : bar.right;
+            float       cursor = vertical ? bar.top : bar.left;
+
+            for (size_t i = 0; i < segments.size(); i++) {
+                const CompositionSegment& seg = segments[i];
+                const float extent = (std::max(0.0f, seg.Value) / total) * span;
+                if (extent <= 0.0f) continue;
+
+                const float end = std::min(cursor + extent, limit);
+                const D2D1_RECT_F rc = vertical
+                    ? D2D1::RectF(bar.left, cursor, bar.right, end)
+                    : D2D1::RectF(cursor, bar.top, end, bar.bottom);
+
+                m_Brush->SetColor(ColorrefToD2D(seg.Color));
+                m_RenderTarget->FillRectangle(rc, m_Brush.Get());
+
+                // The hovered segment lifts slightly rather than changing hue.
+                if (static_cast<int>(i) == opt.HoverIndex) {
+                    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f));
+                    m_RenderTarget->FillRectangle(rc, m_Brush.Get());
+                }
+
+                if (end < limit) {
+                    m_Brush->SetColor(ColorrefToD2D(theme.Background, 0.9f));
+                    if (vertical)
+                        m_RenderTarget->DrawLine(D2D1::Point2F(bar.left, end),
+                                                 D2D1::Point2F(bar.right, end),
+                                                 m_Brush.Get(), 1.0f);
+                    else
+                        m_RenderTarget->DrawLine(D2D1::Point2F(end, bar.top),
+                                                 D2D1::Point2F(end, bar.bottom),
+                                                 m_Brush.Get(), 1.0f);
+                }
+
+                // Labels go under the segment, or beside it when vertical, and
+                // only where the segment is actually big enough to carry them.
+                const bool fits = vertical ? (extent >= m_LabelHeight * 2)
+                                           : (extent >= k_CompMinLabelW);
+                if (opt.ShowLabels && fits) {
+                    wchar_t value[64] = {};
+                    if (formatter) formatter(seg.Value, value, _countof(value));
+                    else           Format::Number(seg.Value, value, _countof(value));
+
+                    D2D1_RECT_F nameRect, valueRect;
+                    if (vertical) {
+                        const float textLeft  = bar.right + k_CompLabelGap;
+                        const float textRight = size.width - pad;
+                        // Centre the two rows on the segment band.
+                        const float rowsTop = cursor + (extent - m_LabelHeight * 2) / 2;
+                        nameRect  = D2D1::RectF(textLeft, rowsTop, textRight, rowsTop + m_LabelHeight);
+                        valueRect = D2D1::RectF(textLeft, rowsTop + m_LabelHeight,
+                                                textRight, rowsTop + m_LabelHeight * 2);
+                    }
+                    else {
+                        const float textLeft = cursor + 2.0f;
+                        nameRect  = D2D1::RectF(textLeft, bar.bottom, end, bar.bottom + m_LabelHeight);
+                        valueRect = D2D1::RectF(textLeft, bar.bottom + m_LabelHeight,
+                                                end, bar.bottom + m_LabelHeight * 2);
+                    }
+
+                    m_Brush->SetColor(ColorrefToD2D(theme.TextColor));
+                    DrawLabel(seg.Name.c_str(), nameRect, m_LabelFormat.Get(),
+                              DWRITE_TEXT_ALIGNMENT_LEADING);
+                    DrawLabel(value, valueRect, m_LabelFormat.Get(),
+                              DWRITE_TEXT_ALIGNMENT_LEADING);
+                }
+
+                cursor = end;
+            }
+        }
+
+        m_Brush->SetColor(ColorrefToD2D(theme.BorderColor));
+        const D2D1_RECT_F border = D2D1::RectF(
+            std::floor(bar.left) + 0.5f, std::floor(bar.top) + 0.5f,
+            std::floor(bar.right) - 0.5f, std::floor(bar.bottom) - 0.5f);
+        m_RenderTarget->DrawRectangle(border, m_Brush.Get(), 1.0f);
+
+        if (opt.HoverIndex >= 0 && opt.HoverText)
+            DrawReadout(opt.HoverText, opt.HoverX, opt.HoverY,
+                        D2D1::RectF(0, 0, size.width, size.height), theme);
     }
 
-    DrawMinimap(minimap, clientRect, model, vt);
+    return m_RenderTarget->EndDraw();
+}
 
-    hr = m_RenderTarget->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET)
+void GraphRenderer::RenderComposition(HWND hwnd, const RECT& clientRect,
+                                      const std::vector<CompositionSegment>& segments,
+                                      const GraphTheme& theme,
+                                      const CompositionOptions& opt,
+                                      const ValueFormatFn& formatter) {
+    if (FAILED(EnsureDeviceResources(hwnd, clientRect))) return;
+
+    if (DrawComposition(clientRect, segments, theme, opt, formatter) == D2DERR_RECREATE_TARGET)
         DiscardDeviceResources();
 }
 
-void GraphRenderer::DrawEdgePreview(const EdgePreview& preview, const GraphModel& model,
-                                    const ViewTransform& vt) {
-    const Node* from = model.GetNode(preview.FromNode);
-    if (!from) return;
+bool GraphRenderer::RenderCompositionToDC(HDC dc, const RECT& clientRect,
+                                          const std::vector<CompositionSegment>& segments,
+                                          const GraphTheme& theme,
+                                          const CompositionOptions& opt,
+                                          const ValueFormatFn& formatter) {
+    if (!dc || !m_D2dFactory) return false;
 
-    auto p0 = vt.ToScreen(from->X, from->Y);
-    D2D1_POINT_2F p1 = { preview.ScreenX, preview.ScreenY };
-
-    float dx = p1.x - p0.x, dy = p1.y - p0.y;
-    float len = std::sqrtf(dx * dx + dy * dy);
-    if (len < 1.0f) return;
-
-    float nx = dx / len, ny = dy / len;
-
-    // Clip start to source node border
-    float hw = from->Width  * vt.Scale * 0.5f;
-    float hh = from->Height * vt.Scale * 0.5f;
-    float t0 = std::min(std::fabsf(nx) > 0.0f ? hw / std::fabsf(nx) : 1e9f,
-                        std::fabsf(ny) > 0.0f ? hh / std::fabsf(ny) : 1e9f);
-    t0 = std::min(t0, len);
-
-    D2D1_POINT_2F start = { p0.x + nx * t0, p0.y + ny * t0 };
-
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.3f, 0.75f));
-    m_RenderTarget->DrawLine(start, p1, m_Brush.Get(), 2.0f, m_DashStyle.Get());
-    DrawArrowhead(p1, { nx, ny });
-}
-
-void GraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
-    const float gridSpacing = 40.0f * vt.Scale;
-    if (gridSpacing < 8.0f) return;
-
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f));
-    m_Brush->SetOpacity(1.0f);
-
-    float startX = fmodf(vt.OffsetX, gridSpacing);
-    float startY = fmodf(vt.OffsetY, gridSpacing);
-
-    for (float x = startX; x < rc.right; x += gridSpacing)
-        m_RenderTarget->DrawLine({ x, 0 }, { x, (float)rc.bottom }, m_Brush.Get(), 0.5f);
-
-    for (float y = startY; y < rc.bottom; y += gridSpacing)
-        m_RenderTarget->DrawLine({ 0, y }, { (float)rc.right, y }, m_Brush.Get(), 0.5f);
-}
-
-void GraphRenderer::DrawEdge(const Edge& e, const GraphModel& model,
-                             const ViewTransform& vt, bool selected) {
-    const Node* from = model.GetNode(e.From);
-    const Node* to   = model.GetNode(e.To);
-    if (!from || !to) return;
-
-    auto p0 = vt.ToScreen(from->X, from->Y);
-    auto p1 = vt.ToScreen(to->X,   to->Y);
-
-    float dx = p1.x - p0.x, dy = p1.y - p0.y;
-    float len = std::sqrtf(dx * dx + dy * dy);
-    if (len < 1.0f) return;
-
-    float nx = dx / len, ny = dy / len;
-
-    // Clip endpoints to node boundaries.
-    float hw0 = from->Width  * vt.Scale * 0.5f;
-    float hh0 = from->Height * vt.Scale * 0.5f;
-    float hw1 = to->Width    * vt.Scale * 0.5f;
-    float hh1 = to->Height   * vt.Scale * 0.5f;
-
-    float t0 = std::min(std::fabsf(nx) > 0.0f ? hw0 / std::fabsf(nx) : 1e9f,
-                        std::fabsf(ny) > 0.0f ? hh0 / std::fabsf(ny) : 1e9f);
-    t0 = std::min(t0, len * 0.5f);
-    float t1 = std::min(std::fabsf(nx) > 0.0f ? hw1 / std::fabsf(nx) : 1e9f,
-                        std::fabsf(ny) > 0.0f ? hh1 / std::fabsf(ny) : 1e9f);
-    t1 = std::min(t1, len * 0.5f);
-
-    D2D1_POINT_2F start = { p0.x + nx * t0, p0.y + ny * t0 };
-    D2D1_POINT_2F end   = { p1.x - nx * t1, p1.y - ny * t1 };
-
-    float strokeWidth = e.Style.Width * (selected ? 2.0f : 1.0f);
-    m_Brush->SetColor(selected
-        ? D2D1::ColorF(D2D1::ColorF::Yellow)
-        : ColorrefToD2D(e.Style.Color));
-    m_RenderTarget->DrawLine(start, end, m_Brush.Get(), strokeWidth);
-
-    if (e.Style.Directed)
-        DrawArrowhead(end, { nx, ny });
-
-    if (!e.Label.empty()) {
-        D2D1_POINT_2F mid = { (start.x + end.x) * 0.5f, (start.y + end.y) * 0.5f };
-        const float lw = 110.0f, lh = 18.0f;
-        D2D1_RECT_F lr = { mid.x - lw * 0.5f, mid.y - lh * 0.5f,
-                           mid.x + lw * 0.5f, mid.y + lh * 0.5f };
-        m_Brush->SetColor(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.88f));
-        m_RenderTarget->FillRectangle(lr, m_Brush.Get());
-        m_Brush->SetColor(selected ? D2D1::ColorF(D2D1::ColorF::Yellow)
-                                   : D2D1::ColorF(0.85f, 0.85f, 0.85f));
-        m_RenderTarget->DrawTextW(e.Label.c_str(), (UINT32)e.Label.size(),
-            m_EdgeTextFormat.Get(), lr, m_Brush.Get());
-    }
-}
-
-void GraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
-    const float size = 10.0f;
-    const float angle = 0.4f; // radians half-angle
-    float cosA = std::cosf(angle), sinA = std::sinf(angle);
-
-    float bx = -dir.x * size, by = -dir.y * size;
-    // Rotate back-vector by +angle and -angle
-    D2D1_POINT_2F l = { bx * cosA - by * sinA,  bx * sinA + by * cosA };
-    D2D1_POINT_2F r = { bx * cosA + by * sinA, -bx * sinA + by * cosA };
-
-    ComPtr<ID2D1PathGeometry> path;
-    ComPtr<ID2D1GeometrySink> sink;
-    m_D2dFactory->CreatePathGeometry(path.GetAddressOf());
-    path->Open(sink.GetAddressOf());
-    sink->BeginFigure(tip, D2D1_FIGURE_BEGIN_FILLED);
-    sink->AddLine({ tip.x + l.x, tip.y + l.y });
-    sink->AddLine({ tip.x + r.x, tip.y + r.y });
-    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-    sink->Close();
-    m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
-}
-
-void GraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool selected) {
-    auto center = vt.ToScreen(n.X, n.Y);
-    float hw = n.Width  * vt.Scale * 0.5f;
-    float hh = n.Height * vt.Scale * 0.5f;
-    float r  = n.Style.CornerRadius * vt.Scale;
-
-    D2D1_ROUNDED_RECT rr{
-        { center.x - hw, center.y - hh, center.x + hw, center.y + hh },
-        r, r
-    };
-
-    // Fill
-    m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
-    m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
-
-    // Border
-    float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
-    m_Brush->SetColor(selected
-        ? D2D1::ColorF(D2D1::ColorF::Yellow)
-        : ColorrefToD2D(n.Style.BorderColor));
-    m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
-
-    // Label
-    if (!n.Label.empty()) {
-        m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
-        m_RenderTarget->DrawTextW(
-            n.Label.c_str(), (UINT32)n.Label.size(),
-            m_TextFormat.Get(),
-            rr.rect,
-            m_Brush.Get());
-    }
-}
-
-void GraphRenderer::DrawRubberBand(const RubberBand& rb) {
-    float x0 = std::min(rb.X0, rb.X1);
-    float y0 = std::min(rb.Y0, rb.Y1);
-    float x1 = std::max(rb.X0, rb.X1);
-    float y1 = std::max(rb.Y0, rb.Y1);
-    D2D1_RECT_F rect = { x0, y0, x1, y1 };
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.0f, 0.25f));
-    m_RenderTarget->FillRectangle(rect, m_Brush.Get());
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.0f, 1.0f));
-    m_RenderTarget->DrawRectangle(rect, m_Brush.Get(), 1.5f, m_DashStyle.Get());
-}
-
-NodeId GraphRenderer::HitTestNode(const GraphModel& model, float gx, float gy) const {
-    for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it) {
-        const auto& n = *it;
-        if (gx >= n.X - n.Width  * 0.5f && gx <= n.X + n.Width  * 0.5f &&
-            gy >= n.Y - n.Height * 0.5f && gy <= n.Y + n.Height * 0.5f)
-            return n.Id;
-    }
-    return InvalidNode;
-}
-
-void GraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
-                                const GraphModel& model, const ViewTransform& vt) {
-    if (!cfg.Visible) return;
-
-    D2D1_RECT_F rect = { cfg.X, cfg.Y, cfg.X + cfg.Width, cfg.Y + cfg.Height };
-
-    m_Brush->SetColor(D2D1::ColorF(0.05f, 0.05f, 0.05f, 0.85f));
-    m_RenderTarget->FillRectangle(rect, m_Brush.Get());
-
-    m_Brush->SetColor(D2D1::ColorF(0.55f, 0.55f, 0.55f));
-    m_RenderTarget->DrawRectangle(rect, m_Brush.Get(), 1.0f);
-
-    if (model.Nodes().empty()) return;
-
-    // Compute graph content bounds
-    float gMinX = FLT_MAX, gMinY = FLT_MAX, gMaxX = -FLT_MAX, gMaxY = -FLT_MAX;
-    for (const auto& n : model.Nodes()) {
-        gMinX = std::min(gMinX, n.X - n.Width  * 0.5f);
-        gMinY = std::min(gMinY, n.Y - n.Height * 0.5f);
-        gMaxX = std::max(gMaxX, n.X + n.Width  * 0.5f);
-        gMaxY = std::max(gMaxY, n.Y + n.Height * 0.5f);
-    }
-    float gW = std::max(gMaxX - gMinX, 1.0f);
-    float gH = std::max(gMaxY - gMinY, 1.0f);
-
-    const float pad = 8.0f;
-    float mmW = cfg.Width  - pad * 2.0f;
-    float mmH = cfg.Height - pad * 2.0f;
-    float mmScale = std::min(mmW / gW, mmH / gH);
-
-    float drawW  = gW * mmScale;
-    float drawH  = gH * mmScale;
-    float originX = cfg.X + pad + (mmW - drawW) * 0.5f;
-    float originY = cfg.Y + pad + (mmH - drawH) * 0.5f;
-
-    m_RenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
-
-    // Edges
-    m_Brush->SetColor(D2D1::ColorF(0.6f, 0.6f, 0.6f, 0.8f));
-    for (const auto& e : model.Edges()) {
-        const Node* from = model.GetNode(e.From);
-        const Node* to   = model.GetNode(e.To);
-        if (!from || !to) continue;
-        D2D1_POINT_2F p0 = { originX + (from->X - gMinX) * mmScale,
-                              originY + (from->Y - gMinY) * mmScale };
-        D2D1_POINT_2F p1 = { originX + (to->X   - gMinX) * mmScale,
-                              originY + (to->Y   - gMinY) * mmScale };
-        m_RenderTarget->DrawLine(p0, p1, m_Brush.Get(), 0.75f);
+    if (!m_DcTarget) {
+        auto props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            m_Dpi, m_Dpi);
+        if (FAILED(m_D2dFactory->CreateDCRenderTarget(&props, m_DcTarget.GetAddressOf())))
+            return false;
     }
 
-    // Nodes as small filled rectangles
-    for (const auto& n : model.Nodes()) {
-        float hw = std::max(n.Width  * mmScale * 0.5f, 2.0f);
-        float hh = std::max(n.Height * mmScale * 0.5f, 2.0f);
-        float cx = originX + (n.X - gMinX) * mmScale;
-        float cy = originY + (n.Y - gMinY) * mmScale;
-        D2D1_RECT_F nr = { cx - hw, cy - hh, cx + hw, cy + hh };
-        m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
-        m_RenderTarget->FillRectangle(nr, m_Brush.Get());
-    }
+    m_DcTarget->SetDpi(m_Dpi, m_Dpi);
+    if (FAILED(m_DcTarget->BindDC(dc, &clientRect))) return false;
 
-    // Viewport indicator — the currently visible area in graph space
-    float vpGX0 = -vt.OffsetX / vt.Scale;
-    float vpGY0 = -vt.OffsetY / vt.Scale;
-    float vpGX1 = ((float)clientRect.right  - vt.OffsetX) / vt.Scale;
-    float vpGY1 = ((float)clientRect.bottom - vt.OffsetY) / vt.Scale;
+    auto savedTarget = m_RenderTarget;
+    auto savedBrush  = m_Brush;
+    m_RenderTarget = m_DcTarget;
 
-    D2D1_RECT_F vpRect = {
-        originX + (vpGX0 - gMinX) * mmScale,
-        originY + (vpGY0 - gMinY) * mmScale,
-        originX + (vpGX1 - gMinX) * mmScale,
-        originY + (vpGY1 - gMinY) * mmScale
-    };
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f));
-    m_RenderTarget->FillRectangle(vpRect, m_Brush.Get());
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.5f, 0.9f));
-    m_RenderTarget->DrawRectangle(vpRect, m_Brush.Get(), 1.0f, m_DashStyle.Get());
+    HRESULT hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black),
+                                                       m_Brush.ReleaseAndGetAddressOf());
+    if (SUCCEEDED(hr))
+        hr = DrawComposition(clientRect, segments, theme, opt, formatter);
 
-    m_RenderTarget->PopAxisAlignedClip();
-}
+    m_Brush        = savedBrush;
+    m_RenderTarget = savedTarget;
 
-static void BuildHandlePositions(const Node& n, const ViewTransform& vt,
-                                  D2D1_POINT_2F pts[8]) {
-    auto c = vt.ToScreen(n.X, n.Y);
-    float hw = n.Width  * vt.Scale * 0.5f;
-    float hh = n.Height * vt.Scale * 0.5f;
-    float l = c.x - hw, r = c.x + hw;
-    float t = c.y - hh, b = c.y + hh;
-    float mx = c.x, my = c.y;
-    // Order matches ResizeHandle enum: NW N NE E SE S SW W
-    pts[0] = { l,  t  };  // NW
-    pts[1] = { mx, t  };  // N
-    pts[2] = { r,  t  };  // NE
-    pts[3] = { r,  my };  // E
-    pts[4] = { r,  b  };  // SE
-    pts[5] = { mx, b  };  // S
-    pts[6] = { l,  b  };  // SW
-    pts[7] = { l,  my };  // W
-}
-
-void GraphRenderer::DrawResizeHandles(const Node& n, const ViewTransform& vt,
-                                      ResizeHandle hovered) {
-    D2D1_POINT_2F pts[8];
-    BuildHandlePositions(n, vt, pts);
-    const float hs = 4.5f;
-    for (int i = 0; i < 8; ++i) {
-        auto h = static_cast<ResizeHandle>(i + 1);
-        D2D1_RECT_F r = { pts[i].x - hs, pts[i].y - hs,
-                          pts[i].x + hs, pts[i].y + hs };
-        m_Brush->SetColor(h == hovered
-            ? D2D1::ColorF(D2D1::ColorF::Yellow)
-            : D2D1::ColorF(1.0f, 1.0f, 1.0f));
-        m_RenderTarget->FillRectangle(r, m_Brush.Get());
-        m_Brush->SetColor(D2D1::ColorF(0.2f, 0.2f, 0.2f));
-        m_RenderTarget->DrawRectangle(r, m_Brush.Get(), 1.0f);
-    }
-}
-
-ResizeHandle GraphRenderer::HitTestResizeHandle(const Node& n, const ViewTransform& vt,
-                                                float sx, float sy) const {
-    D2D1_POINT_2F pts[8];
-    BuildHandlePositions(n, vt, pts);
-    const float hs = 6.0f;
-    for (int i = 0; i < 8; ++i) {
-        if (sx >= pts[i].x - hs && sx <= pts[i].x + hs &&
-            sy >= pts[i].y - hs && sy <= pts[i].y + hs)
-            return static_cast<ResizeHandle>(i + 1);
-    }
-    return ResizeHandle::None;
-}
-
-EdgeId GraphRenderer::HitTestEdge(const GraphModel& model, float gx, float gy, float tolerance) const {
-    for (const auto& e : model.Edges()) {
-        const Node* from = model.GetNode(e.From);
-        const Node* to   = model.GetNode(e.To);
-        if (!from || !to) continue;
-
-        float dx = to->X - from->X, dy = to->Y - from->Y;
-        float len2 = dx * dx + dy * dy;
-        if (len2 < 1.0f) continue;
-
-        float t = ((gx - from->X) * dx + (gy - from->Y) * dy) / len2;
-        t = std::clamp(t, 0.0f, 1.0f);
-        float px = from->X + t * dx - gx;
-        float py = from->Y + t * dy - gy;
-        if (px * px + py * py <= tolerance * tolerance)
-            return e.Id;
-    }
-    return InvalidEdge;
+    if (hr == D2DERR_RECREATE_TARGET) m_DcTarget.Reset();
+    return SUCCEEDED(hr);
 }
 
 } // namespace GraphCtrl
