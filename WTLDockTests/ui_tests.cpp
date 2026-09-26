@@ -94,10 +94,10 @@ TabStrip StripOf(Fixture& f, DockGroup* group) {
 	HWND gw = f.Host.GroupWindow(group);
 	RECT client;
 	::GetClientRect(gw, &client);
-	const auto& metrics = f.Host.Metrics();
+	const auto& metrics = f.Host.MetricsFor(f.Host.GroupDpi(group));
 	const auto parts = ComputeGroupParts(*group, client, metrics);
 	CClientDC dc(gw);
-	dc.SelectFont(f.Host.Font());
+	dc.SelectFont(f.Host.FontFor(f.Host.GroupDpi(group)));
 	std::vector<TabSpec> specs;
 	for (auto p : group->Panes()) {
 		SIZE size{};
@@ -208,7 +208,7 @@ void Verify(Fixture& f, int line) {
 		Check(::GetParent(p->hWnd) == gw, "content is a child of its group window", line);
 		RECT client;
 		::GetClientRect(gw, &client);
-		const RECT expected = ComputeGroupParts(*g, client, f.Host.Metrics()).Content;
+		const RECT expected = ComputeGroupParts(*g, client, f.Host.MetricsFor(f.Host.GroupDpi(g))).Content;
 		const RECT actual = RectIn(p->hWnd, gw);
 		Check(EqualRect(&actual, &expected) != FALSE, "content fills the content area of its group", line);
 	}
@@ -962,7 +962,7 @@ TEST(Host_FloatAndDockCommands) {
 	f.Props->Caps = PaneCaps::CanClose;					// may not float
 	CHECK(f.Host.CanExecute(DockCommand::Float, f.Sol));
 	CHECK(!f.Host.CanExecute(DockCommand::Float, f.Props));
-	CHECK(!f.Host.CanExecute(DockCommand::Float, f.A));	// documents stay put
+	CHECK(f.Host.CanExecute(DockCommand::Float, f.A));	// documents float as well
 	CHECK(!f.Host.CanExecute(DockCommand::Dock, f.Sol));
 
 	f.Host.Layout().DockTo(f.Output, f.Sol->Group(), DockPosition::Tab);
@@ -976,7 +976,6 @@ TEST(Host_FloatAndDockCommands) {
 	VERIFY(f);
 	// it was in the tab group on the left when it floated, so that is the edge it returns to
 	CHECK(f.Output->State() == PaneState::Docked && f.Output->Group()->Side() == DockSide::Left);
-	CHECK(!f.Host.FloatPane(f.A));
 	CHECK(!f.Host.DockFloating(f.Sol));
 	CHECK(f.Host.ToggleFloat(f.Sol) && f.Sol->State() == PaneState::Floating);
 	CHECK(f.Host.ToggleFloat(f.Sol) && f.Sol->State() == PaneState::Docked);
@@ -1234,7 +1233,7 @@ TEST(Host_ALayoutChangeCancelsTheDrag) {
 	VERIFY(f);
 }
 
-TEST(Host_DocumentsOnlyDockAmongDocuments) {
+TEST(Host_DocumentsDockOnlyAmongDocumentsOrFloat) {
 	Fixture f;
 	f.AddStandard();
 	auto& l = f.Host.Layout();
@@ -1244,10 +1243,10 @@ TEST(Host_DocumentsOnlyDockAmongDocuments) {
 	CHECK(f.Host.BeginDrag(f.A, false, ScreenCenterOf(f, f.B->Group())));
 	CHECK(f.Host.VisibleGuides() == 5);									// a compass, no edges
 	f.Host.UpdateDrag(ScreenCenterOf(f, f.Sol->Group()));
-	CHECK(f.Host.VisibleGuides() == 0 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::None);	// not among tool windows, not floating
+	CHECK(f.Host.VisibleGuides() == 0 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float);	// not among tool windows: floating is all that is left
 	f.Host.UpdateDrag(NowhereOnScreen);
-	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::None);
-	CHECK(!f.Host.EndDrag(true));
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float);
+	CHECK(!f.Host.EndDrag(false));
 	CHECK(f.A->State() == PaneState::Document);
 
 	// onto the other group, as a tab; and below it, as a new group
@@ -1949,6 +1948,891 @@ TEST(Host_TheNextDocumentWrapsAround) {
 	CHECK(group->ActivePane() == d.B);
 }
 
+// ---- Documents: floating and tab groups -------------------------------------------------
+
+TEST(Host_DocumentsFloatIntoWindowsOfTheirOwn) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	CHECK(f.Host.CanExecute(DockCommand::Float, d.B) && !f.Host.CanExecute(DockCommand::Dock, d.B));
+
+	const RECT rc = OffScreen(100, 100, 420, 320);
+	CHECK(f.Host.FloatPane(d.B, &rc));
+	VERIFY(f);
+	CHECK(d.B->State() == PaneState::Floating && FramesOf(f).size() == 1);
+	CHECK(!f.Host.CanExecute(DockCommand::Float, d.B) && f.Host.CanExecute(DockCommand::Dock, d.B));
+
+	// the document has its tab strip (and a close button) in the frame
+	HWND window = f.Host.GroupWindow(d.B->Group());
+	CHECK(window && ::GetParent(window) == FramesOf(f)[0]);
+	const auto strip = StripOf(f, d.B->Group());
+	CHECK(strip.Tabs.size() == 1 && !IsRectEmpty(&strip.Close[0]));
+	CHECK(::IsWindowVisible(d.B->hWnd) != FALSE && ::GetParent(d.B->hWnd) == window);
+
+	// the frame is titled after it, and closing the frame closes the document
+	wchar_t title[64]{};
+	::GetWindowTextW(FramesOf(f)[0], title, _countof(title));
+	CHECK(std::wstring(title) == L"b.cpp");
+
+	// back among the documents
+	CHECK(f.Host.Execute(DockCommand::Dock, d.B));
+	VERIFY(f);
+	CHECK(d.B->State() == PaneState::Document && d.B->Group() == d.A->Group() && FramesOf(f).empty());
+
+	// toggling, and closing the window closes the pane
+	CHECK(f.Host.ToggleFloat(d.C) && d.C->State() == PaneState::Floating);
+	VERIFY(f);
+	CHECK(f.Host.CloseFloatWindow(d.C->Group()->Float()->Id()));
+	VERIFY(f);
+	CHECK(d.C->State() == PaneState::Hidden && FramesOf(f).empty());
+}
+
+TEST(Host_ADocumentTabDraggedAwayFloatsAndCanBeDroppedBack) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	CHECK(f.Host.BeginDrag(d.B, false, ScreenCenterOf(f, d.A->Group())));
+	f.Host.UpdateDrag(NowhereOnScreen);
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float);
+	CHECK(f.Host.EndDrag(true));
+	VERIFY(f);
+	CHECK(d.B->State() == PaneState::Floating && d.B->Group()->IsDocument());
+
+	// dropping another document tab on the floating window makes a tab there
+	CHECK(f.Host.BeginDrag(d.C, false, ScreenCenterOf(f, d.A->Group())));
+	f.Host.UpdateDrag(ScreenCenterOf(f, d.B->Group()));
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Tab && f.Host.CurrentDropTarget().Group == d.B->Group());
+	CHECK(f.Host.EndDrag(true));
+	VERIFY(f);
+	CHECK(d.C->Group() == d.B->Group() && d.C->State() == PaneState::Floating);
+
+	// and the whole window goes back with the Dock command on either tab
+	CHECK(f.Host.Execute(DockCommand::Dock, d.C));
+	VERIFY(f);
+	CHECK(d.B->State() == PaneState::Document && d.C->State() == PaneState::Document && d.B->Group() == d.A->Group());
+}
+
+TEST(Host_TabGroupCommands) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto& l = f.Host.Layout();
+	CHECK(!f.Host.CanExecute(DockCommand::MoveToNextGroup, d.A));			// there is only one group
+	CHECK(f.Host.CanExecute(DockCommand::NewHorizontalGroup, d.B) && f.Host.CanExecute(DockCommand::NewVerticalGroup, d.B));
+
+	CHECK(f.Host.Execute(DockCommand::NewVerticalGroup, d.B));
+	VERIFY(f);
+	CHECK(l.DocumentGroups().size() == 2 && d.B->Group() != d.A->Group());
+	CHECK(d.B->Group() == l.DocumentGroups()[1]);							// beside, to the right
+	CHECK(f.Host.CanExecute(DockCommand::MoveToNextGroup, d.A) && f.Host.CanExecute(DockCommand::MoveToPreviousGroup, d.A));
+
+	CHECK(f.Host.Execute(DockCommand::NewHorizontalGroup, d.C));			// C was with A: it goes below
+	VERIFY(f);
+	CHECK(l.DocumentGroups().size() == 3);
+	CHECK(!f.Host.CanExecute(DockCommand::NewHorizontalGroup, d.B));		// alone in its group
+
+	// moving on wraps around, and a group emptied by it is gone
+	CHECK(f.Host.Execute(DockCommand::MoveToNextGroup, d.B));
+	VERIFY(f);
+	CHECK(d.B->Group() == d.A->Group() && l.DocumentGroups().size() == 2);
+	CHECK(f.Host.Execute(DockCommand::MoveToPreviousGroup, d.B));
+	VERIFY(f);
+	CHECK(d.B->Group() == d.C->Group() && l.DocumentGroups().size() == 2);
+	CHECK_VALID(l);
+}
+
+TEST(Host_NewDocumentsOpenInTheGroupThatWasUsedLast) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto& l = f.Host.Layout();
+	CHECK(f.Host.Execute(DockCommand::NewVerticalGroup, d.C));
+	VERIFY(f);
+
+	auto extra = f.Add(L"d.cpp", PaneKind::Document);
+	f.Host.ActivatePane(d.A);
+	CHECK(f.Host.ShowPane(extra));
+	CHECK(extra->Group() == d.A->Group());
+	f.Host.ActivatePane(d.C);
+	auto more = f.Add(L"e.cpp", PaneKind::Document);
+	CHECK(f.Host.ShowPane(more));
+	CHECK(more->Group() == d.C->Group());
+	VERIFY(f);
+	CHECK(l.ActiveDocumentGroup() == d.C->Group());
+}
+
+// ---- Keyboard and the window switcher ---------------------------------------------------
+
+// A key message for a window, as the message loop would hand it to PreTranslateMessage.
+MSG KeyMessage(HWND window, UINT message, UINT vk) {
+	MSG msg{};
+	msg.hwnd = window;
+	msg.message = message;
+	msg.wParam = vk;
+	return msg;
+}
+
+TEST(Host_TheMostRecentPanesComeFirstInTheSwitcher) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.ActivatePane(f.A);
+	f.Host.ActivatePane(f.Sol);
+	f.Host.ActivatePane(f.B);
+	f.Host.ActivatePane(f.Props);
+	Pump();
+
+	CHECK(f.Host.ShowNavigator(true));
+	CHECK(f.Host.IsNavigatorOpen() && f.Host.NavigatorWindow() && ::IsWindowVisible(f.Host.NavigatorWindow()));
+	const auto& docs = f.Host.Navigator().Items(DockNavigator::Column::Documents);
+	const auto& tools = f.Host.Navigator().Items(DockNavigator::Column::Tools);
+	CHECK(docs.size() == 2 && docs[0] == f.B && docs[1] == f.A);
+	CHECK(tools.size() == 3 && tools[0] == f.Props && tools[1] == f.Sol && tools[2] == f.Output);
+	CHECK(f.Host.Navigator().Selected() == f.B);						// a tool window is active: the last document used
+	f.Host.CancelNavigator();
+	CHECK(!f.Host.IsNavigatorOpen() && !f.Host.NavigatorWindow());
+}
+
+TEST(Host_TheSwitcherMovesWithTheKeysAndGoesWhereControlIsReleased) {
+	Fixture f;
+	f.AddStandard();
+	auto c = f.Add(L"c.cpp", PaneKind::Document);
+	f.Host.Layout().Show(c);
+	f.Host.ActivatePane(f.A);
+	f.Host.ActivatePane(f.B);
+	f.Host.ActivatePane(c);				// most recent first: c, b, a
+	Pump();
+
+	// Ctrl+Tab (as the shortcut handler sees it): opens on b.cpp, another Tab goes on to a.cpp
+	CHECK(f.Host.HandleShortcut(VK_TAB, true, true, false, false));
+	CHECK(f.Host.IsNavigatorOpen() && f.Host.Navigator().Selected() == f.B);
+	MSG tab = KeyMessage(f.Frame, WM_KEYDOWN, VK_TAB);
+	CHECK(f.Host.PreTranslateMessage(&tab));							// while it is open the keys are its
+	CHECK(f.Host.Navigator().Selected() == f.A);
+	CHECK(f.Host.HandleShortcut(VK_TAB, true, true, true, false));		// Ctrl+Shift+Tab: back
+	CHECK(f.Host.Navigator().Selected() == f.B);
+	CHECK(f.Host.HandleShortcut(VK_DOWN, true, false, false, false) && f.Host.Navigator().Selected() == f.A);
+	CHECK(f.Host.HandleShortcut(VK_UP, true, false, false, false) && f.Host.Navigator().Selected() == f.B);
+
+	// releasing Control goes to the selected pane
+	MSG release = KeyMessage(f.Frame, WM_KEYUP, VK_CONTROL);
+	CHECK(!f.Host.PreTranslateMessage(&release));						// the release is not swallowed
+	CHECK(!f.Host.IsNavigatorOpen());
+	CHECK(f.Host.ActivePane() == f.B);
+	VERIFY(f);
+
+	// backwards from the start: the least recently used file
+	CHECK(f.Host.HandleShortcut(VK_TAB, true, true, true, false));
+	CHECK(f.Host.Navigator().Selected() == f.A);
+	f.Host.CancelNavigator();
+}
+
+TEST(Host_TheSwitcherReachesToolWindowsAndAutoHiddenOnes) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.Layout().AutoHide(f.Output->Group());
+	f.Host.ActivatePane(f.A);
+	Pump();
+
+	CHECK(f.Host.ShowNavigator(true));
+	CHECK(f.Host.HandleShortcut(VK_RIGHT, true, false, false, false));	// to the tool windows
+	CHECK(f.Host.Navigator().CurrentColumn() == DockNavigator::Column::Tools);
+	while (f.Host.Navigator().Selected() != f.Output)
+		f.Host.NavigatorMove(1);
+	CHECK(f.Host.HandleShortcut(VK_RETURN, true, false, false, false));
+	CHECK(!f.Host.IsNavigatorOpen());
+	CHECK(f.Host.FlyoutPane() == f.Output);								// an auto-hidden pane slides out
+	f.Host.HideFlyout();
+
+	// Escape gives up
+	f.Host.ActivatePane(f.A);
+	CHECK(f.Host.ShowNavigator(true));
+	f.Host.NavigatorSwitchColumn();
+	MSG escape = KeyMessage(f.Frame, WM_KEYDOWN, VK_ESCAPE);
+	CHECK(f.Host.PreTranslateMessage(&escape));
+	CHECK(!f.Host.IsNavigatorOpen() && f.Host.ActivePane() == f.A);
+	CHECK(!f.Host.CommitNavigator());
+}
+
+TEST(Host_ClickingARowOfTheSwitcherGoesThere) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.ActivatePane(f.Sol);
+	Pump();
+	CHECK(f.Host.ShowNavigator(true));
+	CDockHost& host = f.Host;
+	HWND window = host.NavigatorWindow();
+	CHECK(window != nullptr);
+
+	// the rows are where the layout says, and pointing at one selects it
+	RECT rc;
+	::GetClientRect(window, &rc);
+	CHECK(Width(rc) > 100 && Height(rc) > 60);
+	const auto& tools = host.Navigator().Items(DockNavigator::Column::Tools);
+	int row = -1;
+	for (int i = 0; i < (int)tools.size(); i++)
+		if (tools[i] == f.Output)
+			row = i;
+	CHECK(row >= 0);
+
+	auto layoutRow = [&](DockNavigator::Column column, int index) {
+		// the same computation the window does
+		const int counts[2] = { (int)host.Navigator().Items(DockNavigator::Column::Documents).size(), (int)tools.size() };
+		const int first[2] = { 0, 0 };
+		auto layout = ComputeNavigatorLayout(counts, first, (int)host.Navigator().CurrentColumn(), host.Navigator().Row(), host.Metrics());
+		return layout.Rows[(int)column][index];
+	};
+	const RECT target = layoutRow(DockNavigator::Column::Tools, row);
+	::SendMessage(window, WM_MOUSEMOVE, 0, Pt(1, 1));						// the first move only tells where the mouse is
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(target));
+	CHECK(host.Navigator().Selected() == f.Output);
+
+	::SendMessage(window, WM_LBUTTONDOWN, MK_LBUTTON, Center(target));
+	CHECK(!host.IsNavigatorOpen() && host.ActivePane() == f.Output);
+	VERIFY(f);
+}
+
+TEST(Host_TheSwitcherClosesWhenTheLayoutChanges) {
+	Fixture f;
+	f.AddStandard();
+	CHECK(f.Host.ShowNavigator(true));
+	CHECK(f.Host.Layout().Hide(f.Props));
+	CHECK(!f.Host.IsNavigatorOpen());
+	CHECK(f.Host.ShowNavigator(true));
+	f.Host.CancelNavigator();
+
+	// destroying the host with the switcher open is fine (the fixture does it)
+	CHECK(f.Host.ShowNavigator(false));
+	CHECK(f.Host.IsNavigatorOpen());
+}
+
+TEST(Host_TheSwitcherIsDrawnInTheTheme) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.ActivatePane(f.A);
+	Pump();
+	CHECK(f.Host.ShowNavigator(true));
+	HWND window = f.Host.NavigatorWindow();
+	const DockTheme theme = f.Host.Theme();
+
+	RECT rc;
+	::GetClientRect(window, &rc);
+	auto sampleAt = [&](int x, int y) {
+		CClientDC screen(nullptr);
+		CDC dc;
+		dc.CreateCompatibleDC(screen);
+		CBitmap bmp;
+		bmp.CreateCompatibleBitmap(screen, Width(rc), Height(rc));
+		HBITMAP old = dc.SelectBitmap(bmp);
+		::PrintWindow(window, dc, PW_CLIENTONLY);
+		const COLORREF color = dc.GetPixel(x, y);
+		dc.SelectBitmap(old);
+		return color;
+	};
+
+	const int counts[2] = { 2, 3 };
+	const int first[2] = { 0, 0 };
+	const auto layout = ComputeNavigatorLayout(counts, first, (int)f.Host.Navigator().CurrentColumn(), f.Host.Navigator().Row(), f.Host.Metrics());
+	const RECT selected = layout.Rows[(int)f.Host.Navigator().CurrentColumn()][f.Host.Navigator().Row()];
+	const RECT other = layout.Rows[1][2];
+	CHECK(sampleAt(selected.right - 3, selected.top + 2) == theme.CaptionActiveBack);
+	CHECK(sampleAt(other.right - 3, other.top + 2) == theme.GroupBack);
+
+	f.Host.SetTheme(DockTheme::Dark());
+	Pump();
+	const DockTheme dark = DockTheme::Dark();
+	CHECK(sampleAt(selected.right - 3, selected.top + 2) == dark.CaptionActiveBack);
+	CHECK(sampleAt(other.right - 3, other.top + 2) == dark.GroupBack);
+	f.Host.CancelNavigator();
+}
+
+TEST(Host_LongListsInTheSwitcherScroll) {
+	Fixture f;
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 30; i++) {
+		auto pane = f.Add((L"doc" + std::to_wstring(i)).c_str(), PaneKind::Document);
+		f.Host.Layout().Show(pane);
+		docs.push_back(pane);
+	}
+	Pump();
+	CHECK(f.Host.ShowNavigator(true));
+	for (int i = 0; i < 20; i++)
+		f.Host.NavigatorMove(1);
+	const int row = f.Host.Navigator().Row();
+	auto window = f.Host.NavigatorWindow();
+	CHECK(row == 20 && f.Host.Navigator().Selected() == docs[20]);
+	RECT client;
+	::GetClientRect(window, &client);
+	CHECK(Height(client) > 0);
+	f.Host.NavigatorMove(-30);												// all the way round
+	CHECK(f.Host.Navigator().Row() == 20);
+	CHECK(f.Host.CommitNavigator());
+	CHECK(f.Host.ActivePane() == docs[20]);
+	VERIFY(f);
+}
+
+TEST(Host_ShortcutsSwitchAndCloseTabs) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto group = d.A->Group();
+	f.Host.ActivatePane(d.A);
+
+	CHECK(f.Host.HandleShortcut(VK_F6, true, true, false, false) && group->ActivePane() == d.B);
+	CHECK(f.Host.HandleShortcut(VK_F6, true, true, true, false) && group->ActivePane() == d.A);
+	CHECK(!f.Host.HandleShortcut(VK_F6, false, true, false, false));		// releases are not shortcuts
+	CHECK(!f.Host.HandleShortcut(VK_F6, true, false, false, false));		// F6 alone is nobody's
+
+	// Ctrl+F4 closes the active document, and asks first like any other close
+	int asked = 0;
+	f.Host.OnPaneClosing = [&](DockPane*) { asked++; return true; };
+	f.Host.ActivatePane(d.B);
+	CHECK(f.Host.HandleShortcut(VK_F4, true, true, false, false));
+	CHECK(asked == 1 && d.B->State() == PaneState::Hidden);
+	VERIFY(f);
+	d.C->Caps = PaneCaps::None;
+	f.Host.ActivatePane(d.C);
+	CHECK(!f.Host.HandleShortcut(VK_F4, true, true, false, false) && d.C->State() == PaneState::Document);
+
+	// with the shortcuts off, none of it works
+	f.Host.SetShortcutsEnabled(false);
+	f.Host.ActivatePane(d.A);
+	CHECK(!f.Host.HandleShortcut(VK_F6, true, true, false, false) && !f.Host.HandleShortcut(VK_TAB, true, true, false, false));
+	CHECK(!f.Host.IsNavigatorOpen());
+}
+
+TEST(Host_ShortcutsMoveBetweenGroupsAndCloseToolWindows) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.ActivatePane(f.Sol);
+	auto& l = f.Host.Layout();
+
+	// the order: the main tree left to right (Sol, documents, Props, Output), then the floating windows
+	CHECK(f.Host.HandleShortcut(VK_F6, true, false, false, true) && f.Host.ActivePane() == f.B);
+	CHECK(f.Host.HandleShortcut(VK_F6, true, false, false, true) && f.Host.ActivePane() == f.Props);
+	CHECK(f.Host.HandleShortcut(VK_F6, true, false, false, true) && f.Host.ActivePane() == f.Output);
+	CHECK(f.Host.HandleShortcut(VK_F6, true, false, false, true) && f.Host.ActivePane() == f.Sol);		// wraps
+	CHECK(f.Host.HandleShortcut(VK_F6, true, false, true, true) && f.Host.ActivePane() == f.Output);	// Shift+Alt+F6
+
+	// a floating window is part of the round, after the main window
+	CHECK(l.Float(f.Output, OffScreen(50, 50, 300, 200)));
+	f.Host.ActivatePane(f.Props);
+	CHECK(f.Host.HandleShortcut(VK_F6, true, false, false, true) && f.Host.ActivePane() == f.Output);
+	VERIFY(f);
+
+	// Shift+Escape closes a tool window, but not a document
+	CHECK(f.Host.HandleShortcut(VK_ESCAPE, true, false, true, false));
+	CHECK(f.Output->State() == PaneState::Hidden);
+	f.Host.ActivatePane(f.B);
+	CHECK(!f.Host.HandleShortcut(VK_ESCAPE, true, false, true, false) && f.B->State() == PaneState::Document);
+	VERIFY(f);
+}
+
+// Cancels the menu that the tests open, from inside its message loop.
+void CALLBACK EndMenuTimer(HWND, UINT, UINT_PTR id, DWORD) {
+	::KillTimer(nullptr, id);
+	::EndMenu();
+}
+
+TEST(Host_AltMinusOpensTheMenuOfTheActivePane) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.ActivatePane(f.Sol);
+	int built = 0;
+	DockPane* menuPane = nullptr;
+	f.Host.OnBuildPaneMenu = [&](DockPane* pane, HMENU) {
+		built++;
+		menuPane = pane;
+	};
+	::SetTimer(nullptr, 0, 80, EndMenuTimer);
+	CHECK(f.Host.HandleShortcut(VK_OEM_MINUS, true, false, false, true));
+	CHECK(built == 1 && menuPane == f.Sol);
+
+	f.Host.OnBuildPaneMenu = nullptr;
+	Pump();
+}
+
+TEST(Host_KeysForOtherWindowsAreLeftAlone) {
+	Fixture f;
+	f.AddStandard();
+	HWND stranger = ::CreateWindowExW(0, L"STATIC", L"elsewhere", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, nullptr, nullptr);
+	MSG msg = KeyMessage(stranger, WM_KEYDOWN, VK_F6);
+	CHECK(!f.Host.PreTranslateMessage(&msg));
+	msg = KeyMessage(f.Frame, WM_MOUSEMOVE, 0);
+	CHECK(!f.Host.PreTranslateMessage(&msg));
+	msg = KeyMessage(f.Host, WM_KEYDOWN, 'A');
+	CHECK(!f.Host.PreTranslateMessage(&msg));
+	CHECK(!f.Host.PreTranslateMessage(nullptr));
+
+	// the navigator takes keys from anywhere while it is open
+	f.Host.ShowNavigator(true);
+	msg = KeyMessage(stranger, WM_KEYDOWN, VK_ESCAPE);
+	CHECK(f.Host.PreTranslateMessage(&msg) && !f.Host.IsNavigatorOpen());
+	::DestroyWindow(stranger);
+}
+
+// ---- Accessibility -----------------------------------------------------------------------
+
+struct AccChild {
+	LONG Id{};
+	std::wstring Name;
+	LONG Role{};
+	LONG State{};
+	RECT Where{};
+	bool IsWindow{};
+};
+
+CComPtr<IAccessible> AccessibleOfClient(HWND window) {
+	CComPtr<IAccessible> acc;
+	if (FAILED(::AccessibleObjectFromWindow(window, (DWORD)OBJID_CLIENT, IID_IAccessible, (void**)&acc)))
+		acc.Release();
+	return acc;
+}
+
+VARIANT ChildId(LONG id) {
+	VARIANT v;
+	::VariantInit(&v);
+	v.vt = VT_I4;
+	v.lVal = id;
+	return v;
+}
+
+std::wstring NameOf(IAccessible* acc, LONG id) {
+	CComBSTR name;
+	if (acc->get_accName(ChildId(id), &name) == S_OK && name)
+		return std::wstring(name, name.Length());
+	return {};
+}
+
+LONG RoleOf(IAccessible* acc, LONG id) {
+	VARIANT role;
+	::VariantInit(&role);
+	if (acc->get_accRole(ChildId(id), &role) != S_OK || role.vt != VT_I4)
+		return -1;
+	return role.lVal;
+}
+
+LONG StateOf(IAccessible* acc, LONG id) {
+	VARIANT state;
+	::VariantInit(&state);
+	if (acc->get_accState(ChildId(id), &state) != S_OK || state.vt != VT_I4)
+		return -1;
+	return state.lVal;
+}
+
+RECT LocationOf(IAccessible* acc, LONG id) {
+	long l = 0, t = 0, w = 0, h = 0;
+	acc->accLocation(&l, &t, &w, &h, ChildId(id));
+	return { l, t, l + w, t + h };
+}
+
+std::vector<AccChild> ChildrenOf(IAccessible* acc) {
+	std::vector<AccChild> list;
+	long count = 0;
+	acc->get_accChildCount(&count);
+	for (long id = 1; id <= count; id++) {
+		AccChild c;
+		c.Id = id;
+		c.Name = NameOf(acc, id);
+		c.Role = RoleOf(acc, id);
+		c.State = StateOf(acc, id);
+		c.Where = LocationOf(acc, id);
+		CComPtr<IDispatch> child;
+		c.IsWindow = acc->get_accChild(ChildId(id), &child) == S_OK && child != nullptr;
+		list.push_back(c);
+	}
+	return list;
+}
+
+const AccChild* FindChild(const std::vector<AccChild>& list, const wchar_t* name) {
+	for (auto& c : list)
+		if (c.Name == name)
+			return &c;
+	return nullptr;
+}
+
+TEST(Accessibility_AGroupExposesItsCaptionButtonsAndContent) {
+	Fixture f;
+	f.AddStandard();
+	auto acc = AccessibleOfClient(f.Host.GroupWindow(f.Sol->Group()));
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	CHECK(NameOf(acc, CHILDID_SELF) == L"Sol" && RoleOf(acc, CHILDID_SELF) == ROLE_SYSTEM_GROUPING);
+
+	const auto children = ChildrenOf(acc);
+	const AccChild* title = FindChild(children, L"Sol");
+	const AccChild* pin = FindChild(children, L"Auto Hide");
+	const AccChild* close = FindChild(children, L"Close");
+	CHECK(title && title->Role == ROLE_SYSTEM_TITLEBAR && pin && pin->Role == ROLE_SYSTEM_PUSHBUTTON && close && close->Role == ROLE_SYSTEM_PUSHBUTTON);
+	CHECK(!children.empty() && children.back().IsWindow);							// the content comes last
+	if (!title || !pin || !close)
+		return;
+
+	// their places are where they are drawn
+	const auto parts = ComputeGroupParts(*f.Sol->Group(), [&] { RECT rc; ::GetClientRect(f.Host.GroupWindow(f.Sol->Group()), &rc); return rc; }(), f.Host.Metrics());
+	RECT caption = parts.Caption;
+	::MapWindowPoints(f.Host.GroupWindow(f.Sol->Group()), nullptr, reinterpret_cast<POINT*>(&caption), 2);
+	CHECK(EqualRect(&title->Where, &caption) != FALSE);
+	CHECK(close->Where.right <= caption.right && close->Where.left > pin->Where.right - 1 && pin->Where.left >= caption.left);
+
+	// hit testing finds them
+	VARIANT hit;
+	::VariantInit(&hit);
+	const POINT center{ (close->Where.left + close->Where.right) / 2, (close->Where.top + close->Where.bottom) / 2 };
+	CHECK(acc->accHitTest(center.x, center.y, &hit) == S_OK && hit.vt == VT_I4 && hit.lVal == close->Id);
+	::VariantClear(&hit);
+	CHECK(acc->accHitTest(-30000, 0, &hit) == S_FALSE);
+
+	// the default actions do what the buttons do
+	CComBSTR action;
+	CHECK(acc->get_accDefaultAction(ChildId(pin->Id), &action) == S_OK && std::wstring(action) == L"Press");
+	CHECK(acc->accDoDefaultAction(ChildId(pin->Id)) == S_OK);
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::AutoHide);
+
+	// the group window went with the pane; the old object answers with errors instead of crashing
+	long count = 0;
+	CHECK(FAILED(acc->get_accChildCount(&count)) || count >= 0);
+}
+
+TEST(Accessibility_TabsAreExposedAndCanBeSelectedAndClosed) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto group = d.A->Group();
+	HWND window = f.Host.GroupWindow(group);
+	auto acc = AccessibleOfClient(window);
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	f.Host.ActivatePane(d.B);
+
+	auto children = ChildrenOf(acc);
+	const AccChild* a = FindChild(children, L"a.cpp");
+	const AccChild* b = FindChild(children, L"b.cpp");
+	const AccChild* c = FindChild(children, L"c.cpp");
+	CHECK(a && b && c && a->Role == ROLE_SYSTEM_PAGETAB);
+	CHECK(FindChild(children, L"Close a.cpp") && FindChild(children, L"Close c.cpp"));
+	CHECK(NameOf(acc, CHILDID_SELF) == L"Documents");
+	if (!a || !b || !c)
+		return;
+	CHECK((b->State & STATE_SYSTEM_SELECTED) && !(a->State & STATE_SYSTEM_SELECTED) && !(c->State & STATE_SYSTEM_SELECTED));
+	CHECK((a->State & STATE_SYSTEM_SELECTABLE) && (a->State & STATE_SYSTEM_FOCUSABLE));
+
+	// the tab rectangles are the ones the strip has
+	const auto strip = StripOf(f, group);
+	RECT expected = strip.Tabs[1];
+	::MapWindowPoints(window, nullptr, reinterpret_cast<POINT*>(&expected), 2);
+	CHECK(EqualRect(&b->Where, &expected) != FALSE);
+
+	// what is selected
+	VARIANT selection;
+	::VariantInit(&selection);
+	CHECK(acc->get_accSelection(&selection) == S_OK && selection.vt == VT_I4 && selection.lVal == b->Id);
+
+	// selecting and the default action activate the tab
+	CHECK(acc->accSelect(SELFLAG_TAKESELECTION, ChildId(c->Id)) == S_OK);
+	CHECK(group->ActivePane() == d.C);
+	CComBSTR action;
+	CHECK(acc->get_accDefaultAction(ChildId(a->Id), &action) == S_OK && std::wstring(action) == L"Switch");
+	CHECK(acc->accDoDefaultAction(ChildId(a->Id)) == S_OK);
+	CHECK(group->ActivePane() == d.A);
+	VERIFY(f);
+
+	// navigating among them
+	children = ChildrenOf(acc);
+	a = FindChild(children, L"a.cpp");
+	VARIANT next;
+	::VariantInit(&next);
+	CHECK(acc->accNavigate(NAVDIR_NEXT, ChildId(a->Id), &next) == S_OK && next.vt == VT_I4 && NameOf(acc, next.lVal) == L"Close a.cpp");
+	VARIANT first, last;
+	::VariantInit(&first);
+	::VariantInit(&last);
+	CHECK(acc->accNavigate(NAVDIR_FIRSTCHILD, ChildId(CHILDID_SELF), &first) == S_OK && first.vt == VT_I4 && first.lVal == 1);
+	CHECK(acc->accNavigate(NAVDIR_LASTCHILD, ChildId(CHILDID_SELF), &last) == S_OK && last.vt == VT_DISPATCH);
+	::VariantClear(&last);
+	CHECK(acc->accNavigate(NAVDIR_PREVIOUS, ChildId(1), &next) == S_FALSE);
+
+	// the close button of a tab
+	const AccChild* closeB = FindChild(children, L"Close b.cpp");
+	CHECK(closeB != nullptr);
+	if (closeB)
+		CHECK(acc->accDoDefaultAction(ChildId(closeB->Id)) == S_OK && d.B->State() == PaneState::Hidden);
+	VERIFY(f);
+}
+
+TEST(Accessibility_ATabScrolledOutOfTheStripIsOffscreen) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 25; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	Pump();
+	auto group = docs[0]->Group();
+	auto acc = AccessibleOfClient(f.Host.GroupWindow(group));
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	const auto state = f.Host.GetTabState(group);
+	CHECK(state.Overflow && state.Visible < 25);
+
+	const auto children = ChildrenOf(acc);
+	int tabs = 0, offscreen = 0;
+	for (auto& c : children) {
+		if (c.Role == ROLE_SYSTEM_PAGETAB) {
+			tabs++;
+			offscreen += (c.State & STATE_SYSTEM_OFFSCREEN) != 0;
+		}
+	}
+	CHECK(tabs == 25 && offscreen == 25 - state.Visible);
+	CHECK(FindChild(children, L"Tab list") && FindChild(children, L"Tab list")->Role == ROLE_SYSTEM_BUTTONDROPDOWN);
+}
+
+TEST(Accessibility_TheHostListsTheGroupsAndTheAutoHideBars) {
+	Fixture f;
+	f.AddStandard();
+	CHECK(f.Host.Layout().AutoHide(f.Sol->Group()));
+	Pump();
+	auto acc = AccessibleOfClient(f.Host);
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	CHECK(NameOf(acc, CHILDID_SELF) == L"Docking area" && RoleOf(acc, CHILDID_SELF) == ROLE_SYSTEM_PANE);
+
+	const auto children = ChildrenOf(acc);
+	const AccChild* item = FindChild(children, L"Sol (auto hidden left)");
+	CHECK(item != nullptr && item->Role == ROLE_SYSTEM_PUSHBUTTON);
+	int windows = 0;
+	for (auto& c : children)
+		windows += c.IsWindow;
+	CHECK(windows == 3);														// documents, Props, Output
+	if (!item)
+		return;
+
+	RECT bar;
+	CHECK(f.Host.GetBarItemRect(f.Sol, bar));
+	::MapWindowPoints(f.Host, nullptr, reinterpret_cast<POINT*>(&bar), 2);
+	CHECK(EqualRect(&item->Where, &bar) != FALSE);
+
+	CHECK(acc->accDoDefaultAction(ChildId(item->Id)) == S_OK);
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	CHECK((StateOf(acc, item->Id) & STATE_SYSTEM_PRESSED) != 0);
+	f.Host.HideFlyout();
+}
+
+TEST(Accessibility_TheObjectSurvivesItsWindow) {
+	CComPtr<IAccessible> acc;
+	{
+		Fixture f;
+		f.AddStandard();
+		acc = AccessibleOfClient(f.Host.GroupWindow(f.Sol->Group()));
+		CHECK(acc != nullptr);
+	}
+	// the window is gone: the object is not, and says so
+	if (acc) {
+		long count = 0;
+		CComBSTR name;
+		CHECK(FAILED(acc->get_accChildCount(&count)));
+		CHECK(FAILED(acc->get_accName(ChildId(CHILDID_SELF), &name)));
+		VARIANT hit;
+		::VariantInit(&hit);
+		CHECK(FAILED(acc->accHitTest(0, 0, &hit)));
+		CHECK(FAILED(acc->accDoDefaultAction(ChildId(1))));
+	}
+}
+
+TEST(Accessibility_TheObjectIsAutomationCallable) {
+	Fixture f;
+	f.AddStandard();
+	auto acc = AccessibleOfClient(f.Host.GroupWindow(f.Sol->Group()));
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	CComQIPtr<IDispatch> dispatch(acc);
+	CHECK(dispatch != nullptr);
+	UINT infos = 0;
+	CHECK(dispatch->GetTypeInfoCount(&infos) == S_OK);
+	if (infos == 0)
+		return;		// no type library on this machine: nothing more to say
+
+	// what a scripting client does: look the property up by name and get it
+	OLECHAR* names[] = { const_cast<OLECHAR*>(L"accName") };
+	DISPID id = 0;
+	CHECK(dispatch->GetIDsOfNames(IID_NULL, names, 1, LOCALE_USER_DEFAULT, &id) == S_OK);
+	VARIANTARG arg = ChildId(CHILDID_SELF);
+	DISPPARAMS params{ &arg, nullptr, 1, 0 };
+	CComVariant result;
+	CHECK(dispatch->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_PROPERTYGET, &params, &result, nullptr, nullptr) == S_OK);
+	CHECK(result.vt == VT_BSTR && std::wstring(result.bstrVal) == L"Sol");
+}
+
+TEST(Accessibility_AGroupTellsClientsWhenItsTabsChange) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	static int events = 0;
+	events = 0;
+	HWINEVENTHOOK hook = ::SetWinEventHook(EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER, nullptr,
+		[](HWINEVENTHOOK, DWORD, HWND, LONG idObject, LONG, DWORD, DWORD) { events += idObject == OBJID_CLIENT; },
+		::GetCurrentProcessId(), ::GetCurrentThreadId(), WINEVENT_OUTOFCONTEXT);
+	CHECK(hook != nullptr);
+	Pump();
+	events = 0;
+	f.Host.Layout().Hide(d.C);
+	Pump();
+	::Sleep(20);
+	Pump();
+	const int afterHide = events;
+	f.Host.Layout().Show(d.C);
+	Pump();
+	::Sleep(20);
+	Pump();
+	::UnhookWinEvent(hook);
+	CHECK(afterHide >= 1 && events > afterHide);
+}
+
+// ---- Per-window DPI --------------------------------------------------------------------
+
+TEST(Host_AFloatingWindowOnAnotherMonitorUsesItsOwnMetrics) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.Float(f.Sol, OffScreen(100, 100, 500, 400)));
+	CHECK(l.DockTo(f.Props, f.Sol->Group(), DockPosition::Bottom));			// two groups: both have a caption
+	VERIFY(f);
+	const int id = f.Sol->Group()->Float()->Id();
+	const int hostDpi = f.Host.Dpi();
+	CHECK(f.Host.FloatDpi(id) == f.Host.GroupDpi(f.Sol->Group()) && f.Host.FloatDpi(id) >= 96);
+
+	HWND frame = f.Host.FloatWindow(id);
+	RECT before;
+	::GetWindowRect(frame, &before);
+	MINMAXINFO info{};
+	::SendMessage(frame, WM_GETMINMAXINFO, 0, (LPARAM)&info);
+	const LONG minWidthBefore = info.ptMinTrackSize.x;
+
+	// the window is dragged to a monitor that is twice as sharp
+	const int sharp = f.Host.FloatDpi(id) * 2;
+	RECT bigger = before;
+	bigger.right = bigger.left + Width(before) * 2;
+	bigger.bottom = bigger.top + Height(before) * 2;
+	CHECK(f.Host.SetFloatDpi(id, sharp, &bigger));
+	VERIFY(f);
+	CHECK(f.Host.FloatDpi(id) == sharp && f.Host.GroupDpi(f.Sol->Group()) == sharp && f.Host.GroupDpi(f.Output->Group()) == hostDpi);
+
+	RECT after;
+	::GetWindowRect(frame, &after);
+	CHECK(EqualRect(&after, &bigger) != FALSE);
+
+	// its groups have the chrome of that DPI: a caption twice as high, and their content starts below it
+	const DockMetrics sharpMetrics = DockMetrics::ForDpi(sharp);
+	CHECK(&f.Host.MetricsFor(sharp) != &f.Host.Metrics() && f.Host.MetricsFor(sharp).CaptionHeight == sharpMetrics.CaptionHeight);
+	CHECK(f.Host.MetricsFor(sharp).CaptionHeight > f.Host.Metrics().CaptionHeight);
+	HWND solWindow = f.Host.GroupWindow(f.Sol->Group());
+	const int contentTop = RectIn(f.Sol->hWnd, solWindow).top;
+	CHECK(contentTop >= sharpMetrics.CaptionHeight && contentTop < sharpMetrics.CaptionHeight + 4);
+	CHECK(f.Host.FontFor(sharp) != f.Host.Font());
+
+	// while the main window's groups keep theirs
+	HWND outputWindow = f.Host.GroupWindow(f.Output->Group());
+	CHECK(RectIn(f.Output->hWnd, outputWindow).top < sharpMetrics.CaptionHeight);
+
+	// the window cannot be made smaller than its content needs at that DPI
+	::SendMessage(frame, WM_GETMINMAXINFO, 0, (LPARAM)&info);
+	CHECK(info.ptMinTrackSize.x > minWidthBefore);
+
+	// a real WM_DPICHANGED does the same, and takes the rectangle it is given
+	RECT back = before;
+	::SendMessage(frame, WM_DPICHANGED, MAKEWPARAM(hostDpi, hostDpi), (LPARAM)&back);
+	VERIFY(f);
+	CHECK(f.Host.FloatDpi(id) == hostDpi);
+	::GetWindowRect(frame, &after);
+	CHECK(EqualRect(&after, &before) != FALSE);
+
+	// and docking it puts the panes in the main window with the main window's metrics
+	CHECK(f.Host.SetFloatDpi(id, sharp));
+	CHECK(f.Host.Execute(DockCommand::Dock, f.Sol));
+	VERIFY(f);
+	CHECK(f.Host.GroupDpi(f.Sol->Group()) == hostDpi);
+}
+
+TEST(Host_TheGroupsOfAFloatAtAnotherDpiDrawWithItsFonts) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.Float(f.Sol, OffScreen(100, 100, 500, 400)));
+	CHECK(l.DockTo(f.Props, f.Sol->Group(), DockPosition::Bottom));
+	const int id = f.Sol->Group()->Float()->Id();
+	CHECK(f.Host.SetFloatDpi(id, f.Host.Dpi() * 2));
+	Pump();
+
+	// the caption of a group is drawn in the colours of the theme and as high as the DPI says
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+	RECT rc;
+	::GetClientRect(window, &rc);
+	CClientDC screen(nullptr);
+	CDC dc;
+	dc.CreateCompatibleDC(screen);
+	CBitmap bmp;
+	bmp.CreateCompatibleBitmap(screen, Width(rc), Height(rc));
+	HBITMAP old = dc.SelectBitmap(bmp);
+	::PrintWindow(window, dc, PW_CLIENTONLY);
+	const DockMetrics metrics = DockMetrics::ForDpi(f.Host.Dpi() * 2);
+	const DockTheme theme = f.Host.Theme();
+	const int inside = metrics.CaptionHeight - 2;								// still in the caption: at the host's DPI this is below it
+	const COLORREF captionColor = dc.GetPixel(2, inside);
+	const COLORREF belowCaption = dc.GetPixel(2, metrics.CaptionHeight + 2);
+	dc.SelectBitmap(old);
+	CHECK(captionColor == theme.CaptionActiveBack || captionColor == theme.CaptionInactiveBack);
+	CHECK(belowCaption != captionColor);
+}
+
+TEST(Host_ANewFloatTakesTheDpiOfItsMonitor) {
+	Fixture f;
+	f.AddStandard();
+	// a float that is made has the DPI of the frame window that shows it, which is what Windows says it is
+	CHECK(f.Host.Layout().Float(f.Sol, OffScreen(100, 100, 500, 400)));
+	const int id = f.Sol->Group()->Float()->Id();
+	HWND frame = f.Host.FloatWindow(id);
+	CHECK(frame != nullptr);
+	CHECK(f.Host.FloatDpi(id) == (int)::GetDpiForWindow(frame));
+	VERIFY(f);
+}
+
+TEST(Host_SavedFloatsKeepTheirDpi) {
+	std::string text;
+	{
+		Fixture f;
+		f.AddStandard();
+		CHECK(f.Host.Layout().Float(f.Sol, OffScreen(100, 100, 500, 400)));
+		CHECK(f.Host.SetFloatDpi(f.Sol->Group()->Float()->Id(), 192));
+		text = f.Host.SaveState(false);
+	}
+	Fixture g;
+	g.AddStandard();
+	CHECK(g.Host.LoadState(text, {}, nullptr, false));
+	CHECK(g.Sol->State() == PaneState::Floating);
+	// the frame is on a monitor of its own DPI, which the layout then follows
+	const int id = g.Sol->Group()->Float()->Id();
+	CHECK(g.Host.FloatDpi(id) == (int)::GetDpiForWindow(g.Host.FloatWindow(id)));
+	VERIFY(g);
+}
+
+TEST(Host_MovingAFloatingWindowByItsTitleBarKeepsTheGuides) {
+	Fixture f;
+	f.AddStandard();
+	CHECK(f.Host.Layout().Float(f.Output, OffScreen(100, 100, 400, 300)));
+	const int id = f.Output->Group()->Float()->Id();
+	HWND frame = f.Host.FloatWindow(id);
+	::SendMessage(frame, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+	::SendMessage(frame, WM_ENTERSIZEMOVE, 0, 0);
+	CHECK(f.Host.IsDragging());
+
+	// the window is moved (the move loop does this) and the drag goes on
+	for (int i = 1; i <= 3; i++) {
+		::SetWindowPos(frame, nullptr, -11800 + i * 30, 120 + i * 10, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+		CHECK(f.Host.IsDragging());
+		f.Host.UpdateDrag(ScreenCenterOf(f, f.Sol->Group()));
+		CHECK(f.Host.IsDragging() && f.Host.VisibleGuides() > 0);
+	}
+	::SendMessage(frame, WM_EXITSIZEMOVE, 0, 0);
+	CHECK(!f.Host.IsDragging());
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -1967,7 +2851,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	int applied = 0;
 	const int failuresBefore = g_failures;
 
-	for (int step = 0; step < 600; step++) {
+	for (int step = 0; step < 1000; step++) {
 		std::vector<DockGroup*> groups;
 		l.ForEachGroup([&](DockGroup& g) { groups.push_back(&g); });
 		auto anyPane = [&] { return panes[pick(panes.size())]; };
@@ -1975,7 +2859,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 		const RECT rc = OffScreen(20, 20, 300, 280);
 
 		bool ok = false;
-		switch (pick(22)) {
+		switch (pick(26)) {
 			case 0: ok = l.Show(anyPane()); break;
 			case 1: ok = l.Hide(anyPane()); break;
 			case 2: ok = l.DockTo(anyPane(), anyGroup(), (DockPosition)pick(5)); break;
@@ -1995,7 +2879,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 				break;
 			}
 			case 11: ok = f.Host.ClosePane(anyPane()); break;
-			case 12: ok = f.Host.Execute((DockCommand)pick(6), anyPane()); break;
+			case 12: ok = f.Host.Execute((DockCommand)pick(10), anyPane()); break;
 			case 13: ok = l.ReorderTab(anyPane(), (int)pick(4)); break;
 			case 14: f.Host.ActivatePane(anyPane()); break;
 			case 15: ok = f.Host.ToggleFloat(anyPane()); break;
@@ -2032,6 +2916,33 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 			}
 			case 20: ok = f.Host.ShowFlyout(anyPane(), pick(2) != 0); break;
 			case 21: f.Host.HideFlyout(); break;
+			case 22:
+				// a floating window moves to a monitor with another DPI
+				if (!l.Floats().empty()) {
+					const int dpis[] = { 96, 120, 144, 192 };
+					ok = f.Host.SetFloatDpi(l.Floats()[pick(l.Floats().size())]->Id(), dpis[pick(4)]);
+				}
+				break;
+			case 23:
+				// the window switcher: open, wander, go or give up
+				if (f.Host.ShowNavigator(pick(2) != 0)) {
+					for (int i = 0, n = (int)pick(4); i < n; i++)
+						pick(3) ? f.Host.NavigatorMove(1) : f.Host.NavigatorSwitchColumn();
+					if (pick(3) == 0)
+						f.Host.CancelNavigator();
+					else
+						ok = f.Host.CommitNavigator();
+				}
+				break;
+			case 24: ok = f.Host.HandleShortcut(pick(2) ? VK_F6 : VK_F4, true, pick(2) != 0, pick(2) != 0, pick(2) != 0); break;
+			case 25: {
+				// saving the state and loading it again changes nothing
+				const std::wstring before = l.Dump();
+				const std::string state = f.Host.SaveState(false);
+				ok = f.Host.LoadState(state, {}, nullptr, false);
+				CHECK_STR(l.Dump(), before);
+				break;
+			}
 			case 18:
 				if (!l.Floats().empty())
 					ok = l.SetFloatRect(l.Floats()[pick(l.Floats().size())].get(), OffScreen((int)pick(500), (int)pick(300), 250 + (int)pick(300), 250 + (int)pick(200)));
@@ -2048,13 +2959,14 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 			Verify(f, __LINE__);
 		}
 	}
-	wprintf(L"        (%d of 600 operations applied)\n", applied);
-	CHECK(applied > 200);
+	wprintf(L"        (%d of 1000 operations applied)\n", applied);
+	CHECK(applied > 300);
 }
 
 }
 
 void RunUiTests() {
+	::CoInitialize(nullptr);
 	_Module.Init(nullptr, ::GetModuleHandle(nullptr));
 	wprintf(L"\nDocking window tests\n\n");
 
@@ -2101,7 +3013,7 @@ void RunUiTests() {
 	Run_Host_DroppingAwayFromTheGuidesFloatsThePane();
 	Run_Host_ControlKeepsAPaneFromDocking();
 	Run_Host_ALayoutChangeCancelsTheDrag();
-	Run_Host_DocumentsOnlyDockAmongDocuments();
+	Run_Host_DocumentsDockOnlyAmongDocumentsOrFloat();
 	Run_Host_DraggingATabOutOfItsGroupDocksItElsewhere();
 	Run_Host_DraggingACaptionTakesTheWholeGroup();
 	Run_Host_LosingTheMouseCaptureCancelsTheDrag();
@@ -2125,7 +3037,35 @@ void RunUiTests() {
 	Run_Host_ThePaneMenuListsPanesAndShowsThem();
 	Run_Host_AllDocumentsCanBeClosedAtOnce();
 	Run_Host_TheNextDocumentWrapsAround();
+	Run_Host_DocumentsFloatIntoWindowsOfTheirOwn();
+	Run_Host_ADocumentTabDraggedAwayFloatsAndCanBeDroppedBack();
+	Run_Host_TabGroupCommands();
+	Run_Host_NewDocumentsOpenInTheGroupThatWasUsedLast();
+	Run_Host_TheMostRecentPanesComeFirstInTheSwitcher();
+	Run_Host_TheSwitcherMovesWithTheKeysAndGoesWhereControlIsReleased();
+	Run_Host_TheSwitcherReachesToolWindowsAndAutoHiddenOnes();
+	Run_Host_ClickingARowOfTheSwitcherGoesThere();
+	Run_Host_TheSwitcherClosesWhenTheLayoutChanges();
+	Run_Host_TheSwitcherIsDrawnInTheTheme();
+	Run_Host_LongListsInTheSwitcherScroll();
+	Run_Host_ShortcutsSwitchAndCloseTabs();
+	Run_Host_ShortcutsMoveBetweenGroupsAndCloseToolWindows();
+	Run_Host_AltMinusOpensTheMenuOfTheActivePane();
+	Run_Host_KeysForOtherWindowsAreLeftAlone();
+	Run_Accessibility_AGroupExposesItsCaptionButtonsAndContent();
+	Run_Accessibility_TabsAreExposedAndCanBeSelectedAndClosed();
+	Run_Accessibility_ATabScrolledOutOfTheStripIsOffscreen();
+	Run_Accessibility_TheHostListsTheGroupsAndTheAutoHideBars();
+	Run_Accessibility_TheObjectSurvivesItsWindow();
+	Run_Accessibility_TheObjectIsAutomationCallable();
+	Run_Accessibility_AGroupTellsClientsWhenItsTabsChange();
+	Run_Host_AFloatingWindowOnAnotherMonitorUsesItsOwnMetrics();
+	Run_Host_TheGroupsOfAFloatAtAnotherDpiDrawWithItsFonts();
+	Run_Host_ANewFloatTakesTheDpiOfItsMonitor();
+	Run_Host_SavedFloatsKeepTheirDpi();
+	Run_Host_MovingAFloatingWindowByItsTitleBarKeepsTheGuides();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();
+	::CoUninitialize();
 }

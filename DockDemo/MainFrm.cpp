@@ -51,6 +51,9 @@ LRESULT CMainFrame::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 		return *CreateEditor(parent);
 	});
 
+	if (auto loop = _Module.GetMessageLoop())
+		loop->AddMessageFilter(this);
+
 	m_StateFile = FileNextToExe(L"DockDemo.state.json");
 	m_LayoutsFile = FileNextToExe(L"DockDemo.layouts.json");
 
@@ -67,6 +70,18 @@ LRESULT CMainFrame::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	if (::GetFileAttributes(m_StateFile.c_str()) != INVALID_FILE_ATTRIBUTES && !m_Dock.LoadStateFromFile(m_StateFile, {}, &error))
 		MessageBox((L"The saved state could not be used, starting with the default layout.\n" + error).c_str(), L"DockDemo", MB_ICONWARNING);
 	UpdateStatus();
+	return 0;
+}
+
+LRESULT CMainFrame::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
+	if (auto loop = _Module.GetMessageLoop())
+		loop->RemoveMessageFilter(this);
+	handled = FALSE;
+	return 0;
+}
+
+LRESULT CMainFrame::OnSwitcher(WORD, WORD, HWND, BOOL&) {
+	m_Dock.ShowNavigator(true, false);
 	return 0;
 }
 
@@ -286,6 +301,11 @@ void CMainFrame::BuildMenu() {
 	m_ActiveMenu.AppendMenu(MF_STRING, ID_ACT_AUTOHIDE, L"&Auto hide");
 	m_ActiveMenu.AppendMenu(MF_STRING, ID_ACT_FLOAT, L"&Float / Dock");
 	m_ActiveMenu.AppendMenu(MF_SEPARATOR);
+	m_ActiveMenu.AppendMenu(MF_STRING, ID_ACT_GROUP, L"New &horizontal tab group");
+	m_ActiveMenu.AppendMenu(MF_STRING, ID_ACT_GROUP + 1, L"New &vertical tab group");
+	m_ActiveMenu.AppendMenu(MF_STRING, ID_ACT_GROUP + 2, L"Move to &next tab group");
+	m_ActiveMenu.AppendMenu(MF_STRING, ID_ACT_GROUP + 3, L"Move to p&revious tab group");
+	m_ActiveMenu.AppendMenu(MF_SEPARATOR);
 	static const wchar_t* const sides[] = { L"Left", L"Right", L"Top", L"Bottom" };
 	CMenu edge, beside;
 	edge.CreatePopupMenu();
@@ -313,8 +333,9 @@ void CMainFrame::BuildMenu() {
 	window.AppendMenu(MF_SEPARATOR);
 	window.AppendMenu(MF_STRING, ID_CLOSE_DOCS, L"Close all doc&uments");
 	window.AppendMenu(MF_STRING, ID_CLOSE_DOCS_BUT, L"Close all documents but t&he active one");
-	window.AppendMenu(MF_STRING, ID_NEXT_DOC, L"Ne&xt document");
-	window.AppendMenu(MF_STRING, ID_PREV_DOC, L"&Previous document");
+	window.AppendMenu(MF_STRING, ID_NEXT_DOC, L"Ne&xt document	Ctrl+F6");
+	window.AppendMenu(MF_STRING, ID_PREV_DOC, L"&Previous document	Ctrl+Shift+F6");
+	window.AppendMenu(MF_STRING, ID_SWITCHER, L"&Window switcher	Ctrl+Tab");
 	menu.AppendMenu(MF_POPUP, (UINT_PTR)window.m_hMenu, L"&Window");
 	window.Detach();
 
@@ -358,11 +379,14 @@ LRESULT CMainFrame::OnInitMenuPopup(UINT, WPARAM wp, LPARAM, BOOL& handled) {
 		const bool placed = pane && pane->Group();
 		m_ActiveMenu.EnableMenuItem(ID_ACT_HIDE, MF_BYCOMMAND | (placed ? MF_ENABLED : MF_GRAYED));
 		m_ActiveMenu.EnableMenuItem(ID_ACT_AUTOHIDE, MF_BYCOMMAND | (placed && pane->State() == PaneState::Docked ? MF_ENABLED : MF_GRAYED));
-		m_ActiveMenu.EnableMenuItem(ID_ACT_FLOAT, MF_BYCOMMAND | (placed && pane->Kind() == PaneKind::Tool && (pane->State() == PaneState::Docked || pane->State() == PaneState::Floating) ? MF_ENABLED : MF_GRAYED));
+		m_ActiveMenu.EnableMenuItem(ID_ACT_FLOAT, MF_BYCOMMAND | (m_Dock.CanExecute(DockCommand::Float, pane) || m_Dock.CanExecute(DockCommand::Dock, pane) ? MF_ENABLED : MF_GRAYED));
+		const DockCommand groupCommands[] = { DockCommand::NewHorizontalGroup, DockCommand::NewVerticalGroup, DockCommand::MoveToNextGroup, DockCommand::MoveToPreviousGroup };
+		for (int i = 0; i < 4; i++)
+			m_ActiveMenu.EnableMenuItem(ID_ACT_GROUP + i, MF_BYCOMMAND | (m_Dock.CanExecute(groupCommands[i], pane) ? MF_ENABLED : MF_GRAYED));
 		for (UINT i = 1; i < (UINT)m_ActiveMenu.GetMenuItemCount(); i++) {
 			// the submenus only make sense for a tool pane (documents live in the document area)
 			if (CMenuHandle sub = m_ActiveMenu.GetSubMenu(i); sub.m_hMenu)
-				m_ActiveMenu.EnableMenuItem(i, MF_BYPOSITION | (placed ? MF_ENABLED : MF_GRAYED));
+				m_ActiveMenu.EnableMenuItem(i, MF_BYPOSITION | (placed && pane->Kind() == PaneKind::Tool ? MF_ENABLED : MF_GRAYED));
 		}
 	}
 	else if (popup == m_TabMenu.m_hMenu) {
@@ -399,6 +423,10 @@ LRESULT CMainFrame::OnActiveCommand(WORD, WORD id, HWND, BOOL&) {
 		ok = pane->Group() && layout.AutoHide(pane->Group());
 	else if (id == ID_ACT_FLOAT)
 		ok = m_Dock.ToggleFloat(pane);
+	else if (id >= ID_ACT_GROUP && id < ID_ACT_GROUP + 4) {
+		const DockCommand groupCommands[] = { DockCommand::NewHorizontalGroup, DockCommand::NewVerticalGroup, DockCommand::MoveToNextGroup, DockCommand::MoveToPreviousGroup };
+		ok = m_Dock.Execute(groupCommands[id - ID_ACT_GROUP], pane);
+	}
 	else if (id >= ID_ACT_EDGE && id < ID_ACT_EDGE + 4)
 		ok = layout.DockToEdge(pane, (DockSide)(id - ID_ACT_EDGE));
 	else if (id >= ID_ACT_BESIDE && id < ID_ACT_BESIDE + 4)
@@ -508,7 +536,10 @@ LRESULT CMainFrame::OnHelp(WORD, WORD, HWND, BOOL&) {
 		L"Double click a tool window's caption (or a tab) to float it, and the caption or title bar of the floating window to dock it again.\n"
 		L"Layout > Save state keeps the arrangement (floating windows, window position and active pane included) and restores it at the next start; named layouts are kept in DockDemo.layouts.json.\n\n"
 		L"Drag a tab or a caption to dock it somewhere else: drop it on a compass marker (tab, split) or an edge marker of the window, or anywhere else to float it. Hold Ctrl to float without docking, Esc to cancel.\n"
-		L"Drag a floating window by its title bar over the markers to dock it.",
+		L"Drag a floating window by its title bar over the markers to dock it.\n\n"
+		L"Documents float and split as well: drop a tab on the side of another document group for a new tab group, or use the Active pane menu.\n"
+		L"Keyboard: Ctrl+Tab window switcher (hold Ctrl, Tab or arrows to choose), Ctrl+F6 next document, Ctrl+F4 close document, "
+		L"Alt+F6 next pane, Shift+Esc close tool window, Alt+- window menu.",
 		L"DockDemo", MB_ICONINFORMATION);
 	return 0;
 }

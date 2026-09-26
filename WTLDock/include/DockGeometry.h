@@ -64,6 +64,24 @@ int TabWidth(const TabSpec& tab, const DockMetrics& metrics);
 RECT TabIconRect(const RECT& tab, const DockMetrics& metrics);
 RECT TabTextRect(const RECT& tab, const TabSpec& spec, const DockMetrics& metrics);
 
+//
+// The window switcher: two columns (documents, tool windows), each a header above a list of rows, and a footer that
+// describes the selected item. Lists longer than MaxRows scroll.
+//
+inline constexpr int NavigatorMaxRows = 14;
+
+struct NavigatorLayout {
+	SIZE Size{};				// of the client area
+	RECT Header[2]{};
+	RECT Column[2]{};			// the rows' area
+	std::vector<RECT> Rows[2];	// the visible rows (their index is First[c] + i)
+	int First[2]{};
+	RECT Footer{};
+};
+// 'counts': the number of items in each column. 'first' is the first visible row of each column as of last time; the
+// result's First keeps 'selected' (the row of the selected column, -1 for none) in view.
+NavigatorLayout ComputeNavigatorLayout(const int counts[2], const int first[2], int selectedColumn, int selectedRow, const DockMetrics& metrics);
+
 // If the top of the rectangle (its title bar) is out of reach on every monitor, moves it onto the nearest one, keeping
 // its size if it fits. Returns whether it moved the rectangle.
 bool KeepRectOnScreen(RECT& rect, int reachable = 40);

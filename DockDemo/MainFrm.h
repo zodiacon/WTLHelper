@@ -1,12 +1,20 @@
 #pragma once
 
 // The playground: a frame with a CDockHost whose panes are real controls.
-class CMainFrame : public CFrameWindowImpl<CMainFrame> {
+class CMainFrame : public CFrameWindowImpl<CMainFrame>, public CMessageFilter {
 public:
 	DECLARE_FRAME_WND_CLASS_EX(L"DockDemoFrame", 0, 0, COLOR_APPWORKSPACE)
 
+	// the docking area's keyboard shortcuts (Ctrl+Tab, Ctrl+F6, ...) are taken from the message loop
+	BOOL PreTranslateMessage(MSG* pMsg) override {
+		if (m_Dock.PreTranslateMessage(pMsg))
+			return TRUE;
+		return CFrameWindowImpl<CMainFrame>::PreTranslateMessage(pMsg);
+	}
+
 	BEGIN_MSG_MAP(CMainFrame)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
 		MESSAGE_HANDLER(WM_INITMENUPOPUP, OnInitMenuPopup)
 		MESSAGE_HANDLER(WM_CLOSE, OnClose)
@@ -20,6 +28,7 @@ public:
 		COMMAND_ID_HANDLER(ID_CLOSE_DOCS, OnCloseDocuments)
 		COMMAND_ID_HANDLER(ID_CLOSE_DOCS_BUT, OnCloseDocuments)
 		COMMAND_ID_HANDLER(ID_NEXT_DOC, OnNextDocument)
+		COMMAND_ID_HANDLER(ID_SWITCHER, OnSwitcher)
 		COMMAND_ID_HANDLER(ID_PREV_DOC, OnNextDocument)
 		COMMAND_ID_HANDLER(ID_DUMP, OnDump)
 		COMMAND_ID_HANDLER(ID_DARK, OnDark)
@@ -34,6 +43,7 @@ public:
 		COMMAND_ID_HANDLER(ID_ACT_HIDE, OnActiveCommand)
 		COMMAND_ID_HANDLER(ID_ACT_AUTOHIDE, OnActiveCommand)
 		COMMAND_ID_HANDLER(ID_ACT_FLOAT, OnActiveCommand)
+		COMMAND_RANGE_HANDLER(ID_ACT_GROUP, ID_ACT_GROUP + 3, OnActiveCommand)
 		COMMAND_RANGE_HANDLER(ID_ACT_EDGE, ID_ACT_EDGE + 3, OnActiveCommand)
 		COMMAND_RANGE_HANDLER(ID_ACT_BESIDE, ID_ACT_BESIDE + 3, OnActiveCommand)
 		COMMAND_RANGE_HANDLER(ID_ACT_TAB, ID_ACT_TAB + 49, OnActiveCommand)
@@ -45,9 +55,10 @@ public:
 private:
 	enum : UINT {
 		ID_RESET = 1001, ID_SAVE, ID_LOAD, ID_FORGET, ID_SAVE_NAMED, ID_DELETE_NAMED, ID_DUMP, ID_DARK, ID_HELP_USAGE, ID_EXIT,
-		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC,
+		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC, ID_SWITCHER,
 		ID_PANE_INFO = 3000,	// added to the tab context menu by OnBuildPaneMenu
 		ID_ACT_HIDE = 1100, ID_ACT_AUTOHIDE, ID_ACT_FLOAT,
+		ID_ACT_GROUP = 1105,	// + new horizontal group, new vertical group, move to next, move to previous
 		ID_ACT_EDGE = 1110,		// + Left, Right, Top, Bottom
 		ID_ACT_BESIDE = 1120,	// the same relative to the document area
 		ID_ACT_TAB = 1200,		// + index in the list of tool panes
@@ -60,6 +71,8 @@ private:
 	LRESULT OnInitMenuPopup(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwitcher(WORD, WORD, HWND, BOOL&);
 	LRESULT OnReset(WORD, WORD, HWND, BOOL&);
 	LRESULT OnSave(WORD, WORD, HWND, BOOL&);
 	LRESULT OnLoad(WORD, WORD, HWND, BOOL&);

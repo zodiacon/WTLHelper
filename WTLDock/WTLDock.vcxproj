@@ -90,10 +90,12 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\DockAccessible.h" />
     <ClInclude Include="include\DockDrop.h" />
     <ClInclude Include="include\DockGeometry.h" />
     <ClInclude Include="include\DockHost.h" />
     <ClInclude Include="include\DockLayout.h" />
+    <ClInclude Include="include\DockNavigator.h" />
     <ClInclude Include="include\DockNode.h" />
     <ClInclude Include="include\DockPane.h" />
     <ClInclude Include="include\DockStore.h" />
@@ -122,6 +124,9 @@
     <ClCompile Include="src\DockLayout.cpp" />
     <ClCompile Include="src\DockSerializer.cpp" />
     <ClCompile Include="src\DockStore.cpp" />
+    <ClCompile Include="src\DockAccessible.cpp" />
+    <ClCompile Include="src\DockNavigator.cpp" />
+    <ClCompile Include="src\DockNavigatorWnd.cpp" />
     <ClCompile Include="src\Json.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

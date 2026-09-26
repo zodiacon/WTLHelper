@@ -166,16 +166,21 @@ public:
 	DockSplit& Root() const {
 		return *m_Root;
 	}
+	// The DPI of the monitor the window is on: the pixel sizes in its tree are at this DPI (DockLayout::SetFloatDpi).
+	int Dpi() const {
+		return m_Dpi;
+	}
 
 private:
 	friend class DockLayout;
 	friend struct DockSerializer;
 
-	DockFloat(int id, const RECT& rect) : m_Id(id), m_Rect(rect), m_Root(std::make_unique<DockSplit>(Axis::Horizontal)) {
+	DockFloat(int id, const RECT& rect, int dpi) : m_Id(id), m_Rect(rect), m_Dpi(dpi), m_Root(std::make_unique<DockSplit>(Axis::Horizontal)) {
 	}
 
 	int m_Id;
 	RECT m_Rect;
+	int m_Dpi;
 	std::unique_ptr<DockSplit> m_Root;
 };
 

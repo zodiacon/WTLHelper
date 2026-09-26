@@ -4,6 +4,8 @@
 #include "DockGeometry.h"
 #include "DockTheme.h"
 #include "DockStore.h"
+#include "DockNavigator.h"
+#include "DockAccessible.h"
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -19,6 +21,7 @@ namespace WTLDock {
 
 class CDockGroupWnd;
 class CDockFloatFrame;
+class CDockNavigatorWnd;
 class SplitterTracker;
 class DockDragSession;
 struct DropTarget;
@@ -30,7 +33,12 @@ enum class DockCommand {
 	CloseAll,		// all panes of its group
 	AutoHide,		// its group
 	Float,			// the pane, into a window of its own
-	Dock,			// the group of a floating or auto-hidden pane, docked (at its edge of the window)
+	Dock,			// the group of a floating or auto-hidden pane, docked (at its edge of the window; a document among the documents)
+	// documents: tab groups side by side
+	NewHorizontalGroup,		// the document goes into a new group below its group (the groups are stacked)
+	NewVerticalGroup,		// ... beside its group
+	MoveToNextGroup,		// the document goes to the next document group of the main window (the first after the last)
+	MoveToPreviousGroup,
 };
 
 // A snapshot of a group's tab strip.
@@ -57,7 +65,7 @@ struct TabStripState {
 //
 // The content windows are destroyed together with the host.
 //
-class CDockHost : public ATL::CWindowImpl<CDockHost> {
+class CDockHost : public ATL::CWindowImpl<CDockHost>, private IDockAccessibleOwner {
 public:
 	DECLARE_WND_CLASS_EX(L"WTLDock_Host", CS_DBLCLKS, 0)
 
@@ -83,6 +91,12 @@ public:
 	HFONT BoldFont() const {
 		return m_BoldFont;
 	}
+	// Floating windows are at the DPI of their monitor, which can differ from the main window's: their groups use the
+	// metrics and fonts of that DPI (these are the host's own for the host's DPI).
+	const DockMetrics& MetricsFor(int dpi) const;
+	HFONT FontFor(int dpi) const;
+	// the DPI a group is drawn at: that of its floating window, else the host's
+	int GroupDpi(const DockGroup* group) const;
 
 	// the pane that has (or last had) the keyboard focus
 	DockPane* ActivePane() const {
@@ -112,10 +126,10 @@ public:
 	// Floating. The layout stores a floating window's rectangle (outer, in screen coordinates); the host makes a
 	// frame window for it and keeps the two in step: moving or sizing the frame updates the layout and the other way round.
 	//
-	// Floats a docked tool pane (with its tab group if it is alone in it). Without a rectangle the pane goes where it
-	// floated last, or else next to where it was docked.
+	// Floats a docked pane, a document as well (with its tab group if it is alone in it). Without a rectangle the pane
+	// goes where it floated last, or else next to where it was docked.
 	bool FloatPane(DockPane* pane, const RECT* screenRect = nullptr);
-	// Docks the group of a floating pane where the pane was docked before.
+	// Docks the group of a floating pane where the pane was docked before; a document joins the documents of the main window.
 	bool DockFloating(DockPane* pane);
 	// FloatPane for a docked pane, DockFloating for a floating one (what a double click on a caption does).
 	bool ToggleFloat(DockPane* pane);
@@ -125,6 +139,10 @@ public:
 	bool CloseFloatWindow(int floatId);
 	// The frame window of a floating tree (DockFloat::Id), or null.
 	HWND FloatWindow(int floatId) const;
+	// A floating window moved to a monitor with another DPI: its layout and its groups follow, and the window takes
+	// the rectangle Windows suggests (screen coordinates). The frames call this for WM_DPICHANGED; so can a test.
+	bool SetFloatDpi(int floatId, int dpi, const RECT* screenRect = nullptr);
+	int FloatDpi(int floatId) const;
 	// A floating window that would be out of reach (its monitor is gone) is moved onto a screen. Default on.
 	void SetKeepFloatsOnScreen(bool keep) {
 		m_KeepOnScreen = keep;
@@ -222,6 +240,44 @@ public:
 	// the next (or previous) tab of the document group that has the focus, wrapping around
 	bool ActivateNextDocument(bool forward = true);
 
+	//
+	// Keyboard. PreTranslateMessage takes the shortcuts below for key messages that go to the docking area, its
+	// floating windows or the window switcher: call it from the message loop (CMessageFilter) or from the frame's
+	// PreTranslateMessage. The shortcuts:
+	//   Ctrl+Tab, Ctrl+Shift+Tab   the window switcher: two lists (files and tool windows, most recently used first);
+	//                              keep Ctrl down and press Tab / arrows to move, release Ctrl to go there, Esc to cancel
+	//   Ctrl+F6, Ctrl+Shift+F6     the next / previous document tab of the active group
+	//   Ctrl+F4                    closes the active document
+	//   Alt+F6, Shift+Alt+F6       the next / previous group (documents and tool windows) in the order of the layout
+	//   Shift+Esc                  closes the active tool window
+	//   Alt+-                      the menu of the active pane (as on its tab or caption)
+	//
+	bool PreTranslateMessage(MSG* msg);
+	// The same for a key that the caller has already decoded (also used by the tests).
+	bool HandleShortcut(UINT vk, bool down, bool ctrl, bool shift, bool alt);
+	void SetShortcutsEnabled(bool enabled) {
+		m_Shortcuts = enabled;
+	}
+	// the next (or previous) group's active pane, wrapping around; false if there is no other one
+	bool ActivateNextPane(bool forward = true);
+	bool ShowActivePaneMenu();
+
+	// The switcher. 'holdingControl': it was opened with Ctrl held and closes (going to the selected pane) when
+	// Ctrl is released. Another ShowNavigator moves the selection on. It closes by itself if the layout changes.
+	bool ShowNavigator(bool forward = true, bool holdingControl = false);
+	bool IsNavigatorOpen() const {
+		return m_NavOpen;
+	}
+	const DockNavigator& Navigator() const {
+		return m_Nav;
+	}
+	HWND NavigatorWindow() const;
+	void NavigatorMove(int rows);
+	void NavigatorSwitchColumn();
+	// goes to the selected pane and closes the switcher
+	bool CommitNavigator();
+	void CancelNavigator();
+
 	// the window of a group (in the main tree, a floating one or the flyout), or null
 	HWND GroupWindow(const DockGroup* group) const;
 	TabStripState GetTabState(const DockGroup* group) const;
@@ -256,12 +312,14 @@ public:
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_REAP, OnReap)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 	END_MSG_MAP()
 
 private:
 	friend class CDockGroupWnd;
 	friend class CDockFloatFrame;
 	friend class DockDragSession;
+	friend class CDockNavigatorWnd;
 
 	struct BarItem {
 		DockGroup* Group;
@@ -284,6 +342,16 @@ private:
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnReap(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+
+	// IDockAccessibleOwner: the auto-hide bar items are the host's own children, the group windows its windows
+	HWND AccWindow() const override {
+		return m_hWnd;
+	}
+	std::wstring AccName() const override;
+	LONG AccRole() const override;
+	std::vector<AccElement> AccElements() const override;
+	std::vector<HWND> AccChildWindows() const override;
 
 	void UpdateDpi();
 	void CreateFonts();
@@ -330,6 +398,12 @@ private:
 	DockMetrics m_Metrics;
 	int m_Dpi{ 96 };
 	CFont m_Font, m_BoldFont, m_VerticalFont;
+	struct DpiResources {
+		DockMetrics Metrics;
+		CFont Font, BoldFont, VerticalFont;
+	};
+	mutable std::map<int, std::unique_ptr<DpiResources>> m_DpiSets;		// for floating windows at other DPIs
+	const DpiResources& ResourcesFor(int dpi) const;
 
 	std::map<const DockGroup*, CDockGroupWnd*> m_Groups;
 	std::vector<CDockGroupWnd*> m_Retired;
@@ -339,6 +413,7 @@ private:
 	HWND m_NotifyTarget{};
 	HWINEVENTHOOK m_FocusHook{};
 	bool m_Syncing{};
+	bool m_FrameMoving{};		// a floating window has been moved: its rectangle is all that changed
 	bool m_KeepOnScreen{ true };
 	PaneFactory m_PaneFactory;
 	std::function<HWND(DockPane&, HWND)> m_ContentFactory;
@@ -358,6 +433,17 @@ private:
 	std::wstring m_HoverId;			// the bar item the mouse rests on
 	bool m_TrackingMouse{};
 	int m_AnimMs{ 120 }, m_HoverMs{ 300 }, m_LeaveMs{ 500 };
+
+	DockAccessible* m_Acc{};
+
+	// keyboard
+	bool IsDockWindow(HWND hWnd) const;
+	bool m_Shortcuts{ true };
+	std::vector<std::wstring> m_Mru;		// ids of the panes that had the focus, the last first
+	DockNavigator m_Nav;
+	std::unique_ptr<CDockNavigatorWnd> m_NavWnd;
+	bool m_NavOpen{};
+	uint64_t m_NavVersion{};
 
 	std::unique_ptr<SplitterTracker> m_Splitters;
 	std::unique_ptr<DockDragSession> m_Drag;

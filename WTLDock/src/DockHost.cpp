@@ -3,6 +3,7 @@
 #include "DockFloatFrame.h"
 #include "SplitterTracker.h"
 #include "DockDragSession.h"
+#include "DockNavigatorWnd.h"
 #include "Json.h"
 #include "Utf8.h"
 #include <algorithm>
@@ -129,8 +130,14 @@ void CDockHost::OnFrameMoved(CDockFloatFrame* frame) {
 	RECT rc;
 	frame->GetWindowRect(&rc);
 	auto f = FindFloat(frame->Id());
-	if (f && !IsRectEmpty(&rc) && !EqualRect(&rc, &f->Rect()))
+	if (f && !IsRectEmpty(&rc) && !EqualRect(&rc, &f->Rect())) {
+		// moving a window is not a change that ends a drag of that window (the guides stay while it is carried around)
+		m_FrameMoving = true;
 		m_Layout.SetFloatRect(f, rc);
+		m_FrameMoving = false;
+		if (m_Drag)
+			m_Drag->Rebase();
+	}
 }
 
 RECT CDockHost::OuterRectForClient(const RECT& client, int dpi) const {
@@ -189,15 +196,19 @@ std::wstring CDockHost::FloatTitle(const DockFloat& window) const {
 }
 
 bool CDockHost::FloatPane(DockPane* pane, const RECT* screenRect) {
-	if (!pane || pane->Kind() != PaneKind::Tool || pane->State() == PaneState::Floating)
+	if (!pane || pane->State() == PaneState::Floating || pane->State() == PaneState::AutoHide)
 		return false;
 	const RECT rc = screenRect ? *screenRect : DefaultFloatRect(pane);
 	return m_Layout.Float(pane, rc);
 }
 
 bool CDockHost::DockFloating(DockPane* pane) {
-	if (!pane || pane->State() != PaneState::Floating || pane->Kind() != PaneKind::Tool)
+	if (!pane || pane->State() != PaneState::Floating)
 		return false;
+	if (pane->Kind() == PaneKind::Document) {
+		auto target = m_Layout.PrimaryDocumentGroup();
+		return target && m_Layout.MoveGroupTo(pane->Group(), target, DockPosition::Tab);
+	}
 	return m_Layout.MoveGroupToEdge(pane->Group(), pane->LastSide());
 }
 
@@ -331,7 +342,7 @@ bool CDockHost::BeginFrameMove(int floatId) {
 	if (!f || f->Root().Children().size() != 1 || !f->Root().Children()[0]->IsGroup())
 		return false;
 	DockPane* pane = f->Root().Children()[0]->AsGroup()->ActivePane();
-	if (!pane || pane->Kind() != PaneKind::Tool)
+	if (!pane)
 		return false;
 	POINT cursor;
 	::GetCursorPos(&cursor);
@@ -346,7 +357,7 @@ void CDockHost::Sync() {
 	if (!m_hWnd || m_Syncing)
 		return;
 	m_Syncing = true;
-	if (m_Drag && m_Drag->Stale())
+	if (m_Drag && m_Drag->Stale() && !m_FrameMoving)
 		m_Drag.reset();		// its targets are gone
 
 	// a flyout that has the focus keeps it, even if its window is rebuilt below
@@ -408,6 +419,18 @@ void CDockHost::Sync() {
 	const HWND owner = ::GetAncestor(m_hWnd, GA_ROOT);
 	for (auto& f : m_Layout.Floats()) {
 		RECT rc = f->Rect();
+		// a window is never smaller than what is in it needs (that has grown if a group came or the DPI went up)
+		{
+			const SIZE min = FloatMinClientSize(f->Id());
+			const RECT outer = OuterRectForClient({ 0, 0, min.cx, min.cy }, f->Dpi());
+			RECT grown = rc;
+			grown.right = grown.left + std::max(Width(rc), Width(outer));
+			grown.bottom = grown.top + std::max(Height(rc), Height(outer));
+			if (!EqualRect(&grown, &rc)) {
+				rc = grown;
+				m_Layout.SetFloatRect(f.get(), rc);		// (the change handler does nothing while we are syncing)
+			}
+		}
 		if (auto it = m_Frames.find(f->Id()); it != m_Frames.end()) {
 			RECT actual;
 			it->second->GetWindowRect(&actual);
@@ -428,6 +451,9 @@ void CDockHost::Sync() {
 			continue;
 		}
 		m_Frames[f->Id()] = frame;
+		// the window is on the monitor its rectangle says: that is the DPI of what is in it
+		if (const int actual = (int)::GetDpiForWindow(frame->m_hWnd); actual >= 48 && actual != f->Dpi())
+			m_Layout.SetFloatDpi(f.get(), actual);
 		frame->ApplyTheme();
 		frame->ShowWindow(SW_SHOWNOACTIVATE);
 	}
@@ -530,6 +556,9 @@ void CDockHost::Sync() {
 		}
 	}
 	m_Syncing = false;
+	// the switcher's lists are stale
+	if (m_NavOpen && m_NavVersion != m_Layout.Version())
+		CancelNavigator();
 	if (OnLayoutChanged)
 		OnLayoutChanged();
 }
@@ -543,6 +572,13 @@ void CDockHost::SetActivePane(DockPane* pane) {
 	if (id == m_ActiveId)
 		return;
 	m_ActiveId = id;
+	m_Layout.NoteActive(pane);
+	if (pane) {
+		std::erase(m_Mru, id);
+		m_Mru.insert(m_Mru.begin(), id);
+		if (m_Mru.size() > 200)
+			m_Mru.resize(200);
+	}
 	for (auto& [group, window] : m_Groups)
 		window->Invalidate(FALSE);
 	// a floating window is titled after its active pane
@@ -593,20 +629,79 @@ void CALLBACK CDockHost::FocusEventProc(HWINEVENTHOOK hook, DWORD, HWND hWnd, LO
 // creation, sizing, DPI, theme
 //
 
-void CDockHost::CreateFonts() {
-	for (auto font : { &m_Font, &m_BoldFont, &m_VerticalFont })
+namespace {
+
+void MakeFonts(int dpi, CFont& normal, CFont& bold, CFont& vertical) {
+	for (auto font : { &normal, &bold, &vertical })
 		if (!font->IsNull())
 			font->DeleteObject();
 
 	NONCLIENTMETRICSW ncm{ sizeof(ncm) };
-	::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, m_Dpi);
-	m_Font.CreateFontIndirect(&ncm.lfMessageFont);
-	LOGFONT bold = ncm.lfMessageFont;
-	bold.lfWeight = FW_BOLD;
-	m_BoldFont.CreateFontIndirect(&bold);
-	LOGFONT vertical = ncm.lfMessageFont;
-	vertical.lfEscapement = vertical.lfOrientation = 900;
-	m_VerticalFont.CreateFontIndirect(&vertical);
+	::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
+	normal.CreateFontIndirect(&ncm.lfMessageFont);
+	LOGFONT boldFont = ncm.lfMessageFont;
+	boldFont.lfWeight = FW_BOLD;
+	bold.CreateFontIndirect(&boldFont);
+	LOGFONT verticalFont = ncm.lfMessageFont;
+	verticalFont.lfEscapement = verticalFont.lfOrientation = 900;
+	vertical.CreateFontIndirect(&verticalFont);
+}
+
+}
+
+void CDockHost::CreateFonts() {
+	MakeFonts(m_Dpi, m_Font, m_BoldFont, m_VerticalFont);
+}
+
+const CDockHost::DpiResources& CDockHost::ResourcesFor(int dpi) const {
+	auto& slot = m_DpiSets[dpi];
+	if (!slot) {
+		slot = std::make_unique<DpiResources>();
+		slot->Metrics = DockMetrics::ForDpi(dpi);
+		MakeFonts(dpi, slot->Font, slot->BoldFont, slot->VerticalFont);
+	}
+	return *slot;
+}
+
+const DockMetrics& CDockHost::MetricsFor(int dpi) const {
+	return dpi == m_Dpi ? m_Metrics : ResourcesFor(dpi).Metrics;
+}
+
+HFONT CDockHost::FontFor(int dpi) const {
+	return dpi == m_Dpi ? m_Font.m_hFont : ResourcesFor(dpi).Font.m_hFont;
+}
+
+int CDockHost::GroupDpi(const DockGroup* group) const {
+	if (group && group->Location() == GroupLocation::Float && group->Float())
+		return group->Float()->Dpi();
+	return m_Dpi;
+}
+
+int CDockHost::FloatDpi(int floatId) const {
+	auto f = FindFloat(floatId);
+	return f ? f->Dpi() : m_Dpi;
+}
+
+bool CDockHost::SetFloatDpi(int floatId, int dpi, const RECT* screenRect) {
+	auto f = FindFloat(floatId);
+	if (!f || !m_Layout.SetFloatDpi(f, dpi))
+		return false;
+	auto it = m_Frames.find(floatId);
+	if (it == m_Frames.end() || !it->second)
+		return true;
+	if (screenRect && !IsRectEmpty(screenRect)) {
+		it->second->SetWindowPos(nullptr, screenRect->left, screenRect->top, Width(*screenRect), Height(*screenRect), SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+	else {
+		// what the panes need has changed with the DPI: the window has to be at least that big
+		const SIZE min = FloatMinClientSize(floatId);
+		const RECT outer = OuterRectForClient({ 0, 0, min.cx, min.cy }, dpi);
+		RECT rc;
+		it->second->GetWindowRect(&rc);
+		if (Width(rc) < Width(outer) || Height(rc) < Height(outer))
+			it->second->SetWindowPos(nullptr, 0, 0, std::max(Width(rc), Width(outer)), std::max(Height(rc), Height(outer)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+	return true;
 }
 
 void CDockHost::UpdateDpi() {
@@ -655,6 +750,15 @@ LRESULT CDockHost::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CDockHost::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
 	m_Layout.SetChangeHandler({});
 	m_Drag.reset();
+	if (m_Acc) {
+		m_Acc->Detach();
+		m_Acc->Release();
+		m_Acc = nullptr;
+	}
+	m_NavOpen = false;
+	if (m_NavWnd && m_NavWnd->IsWindow())
+		m_NavWnd->DestroyWindow();
+	m_NavWnd.reset();
 	ClearFlyout();
 	KillTimer(TimerHover);
 	if (m_FocusHook) {
@@ -1208,9 +1312,16 @@ bool CDockHost::CanExecute(DockCommand command, const DockPane* pane) const {
 			return pane->State() == PaneState::Docked &&
 				std::all_of(panes.begin(), panes.end(), [](auto p) { return Has(p->Caps, PaneCaps::CanAutoHide); });
 		case DockCommand::Float:
-			return pane->Kind() == PaneKind::Tool && pane->State() == PaneState::Docked && Has(pane->Caps, PaneCaps::CanFloat);
+			return (pane->State() == PaneState::Docked || pane->State() == PaneState::Document) && m_Layout.CanFloatPane(pane);
 		case DockCommand::Dock:
-			return pane->Kind() == PaneKind::Tool && (pane->State() == PaneState::Floating || pane->State() == PaneState::AutoHide);
+			return pane->State() == PaneState::Floating || pane->State() == PaneState::AutoHide;
+		case DockCommand::NewHorizontalGroup:
+		case DockCommand::NewVerticalGroup:
+			// a group of one tab stays behind empty otherwise
+			return pane->State() == PaneState::Document && panes.size() > 1;
+		case DockCommand::MoveToNextGroup:
+		case DockCommand::MoveToPreviousGroup:
+			return pane->State() == PaneState::Document && m_Layout.DocumentGroups().size() > 1;
 	}
 	return false;
 }
@@ -1228,6 +1339,17 @@ bool CDockHost::Execute(DockCommand command, DockPane* pane) {
 			return FloatPane(pane);
 		case DockCommand::Dock:
 			return pane->State() == PaneState::AutoHide ? m_Layout.Unhide(pane->Group()) : DockFloating(pane);
+		case DockCommand::NewHorizontalGroup:
+			return m_Layout.DockTo(pane, pane->Group(), DockPosition::Bottom);
+		case DockCommand::NewVerticalGroup:
+			return m_Layout.DockTo(pane, pane->Group(), DockPosition::Right);
+		case DockCommand::MoveToNextGroup:
+		case DockCommand::MoveToPreviousGroup: {
+			const auto groups = m_Layout.DocumentGroups();
+			const int n = (int)groups.size();
+			const int index = (int)(std::find(groups.begin(), groups.end(), pane->Group()) - groups.begin());
+			return m_Layout.DockTo(pane, groups[(index + (command == DockCommand::MoveToNextGroup ? 1 : n - 1)) % n], DockPosition::Tab);
+		}
 		default:
 			break;
 	}
@@ -1255,13 +1377,20 @@ void CDockHost::ShowPaneMenu(DockPane* pane, POINT screen) {
 		add(DockCommand::CloseOthers, L"Close All &But This");
 		add(DockCommand::CloseAll, L"Close &All Tabs");
 	}
+	menu.AppendMenu(MF_SEPARATOR);
+	if (pane->State() == PaneState::Floating)
+		add(DockCommand::Dock, L"&Dock");
+	else
+		add(DockCommand::Float, L"Floa&t");
 	if (pane->Kind() == PaneKind::Tool) {
-		menu.AppendMenu(MF_SEPARATOR);
-		if (pane->State() == PaneState::Floating)
-			add(DockCommand::Dock, L"&Dock");
-		else
-			add(DockCommand::Float, L"Floa&t");
 		add(DockCommand::AutoHide, L"&Auto Hide");
+	}
+	else if (pane->State() == PaneState::Document) {
+		menu.AppendMenu(MF_SEPARATOR);
+		add(DockCommand::NewHorizontalGroup, L"New &Horizontal Tab Group");
+		add(DockCommand::NewVerticalGroup, L"New &Vertical Tab Group");
+		add(DockCommand::MoveToNextGroup, L"Move to &Next Tab Group");
+		add(DockCommand::MoveToPreviousGroup, L"Move to &Previous Tab Group");
 	}
 	if (OnBuildPaneMenu) {
 		menu.AppendMenu(MF_SEPARATOR);
@@ -1301,7 +1430,8 @@ std::string CDockHost::SaveState(bool includeWindowPlacement) const {
 	if (!Json::Parse(m_Layout.Save(), state, &parseError) || !state.IsObject())
 		return m_Layout.Save();
 
-	if (auto active = ActivePane(); active && active->Group())
+	// (the pane that has the focus, if it is what its group shows)
+	if (auto active = ActivePane(); active && active->Group() && active->Group()->ActivePane() == active)
 		state.Add("activePane", Json::Value::MakeString(Utf8FromWide(active->Id())));
 
 	HWND top = ::GetAncestor(m_hWnd, GA_ROOT);
@@ -1501,6 +1631,240 @@ bool CDockHost::ActivateNextDocument(bool forward) {
 	DockPane* next = group->Panes()[(group->ActiveIndex() + (forward ? 1 : n - 1)) % n];
 	ActivatePane(next);
 	return true;
+}
+
+//
+// keyboard
+//
+
+bool CDockHost::IsDockWindow(HWND hWnd) const {
+	if (!hWnd)
+		return false;
+	const HWND mine = ::GetAncestor(m_hWnd, GA_ROOT);
+	const HWND root = ::GetAncestor(hWnd, GA_ROOT);
+	return root && (root == mine || ::GetWindow(root, GW_OWNER) == mine);
+}
+
+bool CDockHost::PreTranslateMessage(MSG* msg) {
+	if (!m_hWnd || !msg)
+		return false;
+	const bool down = msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN;
+	const bool up = msg->message == WM_KEYUP || msg->message == WM_SYSKEYUP;
+	if (!down && !up)
+		return false;
+	if (!m_NavOpen && !IsDockWindow(msg->hwnd))
+		return false;
+	auto pressed = [](int vk) { return (::GetKeyState(vk) & 0x8000) != 0; };
+	return HandleShortcut((UINT)msg->wParam, down, pressed(VK_CONTROL), pressed(VK_SHIFT), pressed(VK_MENU));
+}
+
+bool CDockHost::HandleShortcut(UINT vk, bool down, bool ctrl, bool shift, bool alt) {
+	if (m_NavOpen) {
+		if (!down) {
+			// letting go of Ctrl is choosing (the message goes on to the focus window)
+			if (vk == VK_CONTROL && m_NavWnd && ::IsWindowVisible(m_NavWnd->m_hWnd))
+				CommitNavigator();
+			return false;
+		}
+		switch (vk) {
+			case VK_CONTROL: case VK_SHIFT: case VK_MENU:
+				return false;
+			case VK_TAB: NavigatorMove(shift ? -1 : 1); return true;
+			case VK_DOWN: NavigatorMove(1); return true;
+			case VK_UP: NavigatorMove(-1); return true;
+			case VK_LEFT: case VK_RIGHT: NavigatorSwitchColumn(); return true;
+			case VK_ESCAPE: CancelNavigator(); return true;
+			case VK_RETURN: case VK_SPACE: CommitNavigator(); return true;
+			default: return true;		// keys the switcher does not know are not for anyone else either
+		}
+	}
+	if (!m_Shortcuts || !down)
+		return false;
+
+	const DockPane* active = ActivePane();
+	if (ctrl && !alt) {
+		switch (vk) {
+			case VK_TAB:
+				return ShowNavigator(!shift, true);
+			case VK_F6:
+				return ActivateNextDocument(!shift);
+			case VK_F4:
+				if (active && active->Kind() == PaneKind::Document && !shift)
+					return ClosePane(const_cast<DockPane*>(active));
+				return false;
+		}
+	}
+	else if (alt && !ctrl) {
+		if (vk == VK_F6)
+			return ActivateNextPane(!shift);
+		if (vk == VK_OEM_MINUS && !shift)
+			return ShowActivePaneMenu();
+	}
+	else if (shift && !ctrl && !alt && vk == VK_ESCAPE) {
+		if (active && active->Kind() == PaneKind::Tool)
+			return ClosePane(const_cast<DockPane*>(active));
+	}
+	return false;
+}
+
+bool CDockHost::ActivateNextPane(bool forward) {
+	std::vector<DockGroup*> groups;
+	m_Layout.ForEachGroup([&](DockGroup& g) {
+		if (g.Location() != GroupLocation::AutoHide && g.ActivePane())
+			groups.push_back(&g);
+		});
+	const int n = (int)groups.size();
+	if (n == 0)
+		return false;
+
+	int index = -1;
+	if (auto active = ActivePane(); active && active->Group())
+		index = (int)(std::find(groups.begin(), groups.end(), active->Group()) - groups.begin());
+	if (index >= n)
+		index = -1;
+	const int next = index < 0 ? (forward ? 0 : n - 1) : (index + (forward ? 1 : n - 1)) % n;
+	DockPane* pane = groups[next]->ActivePane();
+	if (pane == ActivePane())
+		return false;
+	ActivatePane(pane);
+	return true;
+}
+
+bool CDockHost::ShowActivePaneMenu() {
+	DockPane* pane = ActivePane();
+	if (!pane || !pane->Group())
+		return false;
+	HWND window = GroupWindow(pane->Group());
+	if (!window)
+		return false;
+	RECT rc;
+	::GetWindowRect(window, &rc);
+	ShowPaneMenu(pane, { rc.left + m_Metrics.TextPadding, rc.top + m_Metrics.CaptionHeight });
+	return true;
+}
+
+HWND CDockHost::NavigatorWindow() const {
+	return m_NavOpen && m_NavWnd ? m_NavWnd->m_hWnd : nullptr;
+}
+
+bool CDockHost::ShowNavigator(bool forward, bool holdingControl) {
+	if (m_NavOpen) {
+		NavigatorMove(forward ? 1 : -1);
+		return true;
+	}
+	m_Nav.Build(m_Layout, m_Mru);
+	if (m_Nav.Empty())
+		return false;
+	m_Nav.Start(ActivePane(), forward);
+	m_NavVersion = m_Layout.Version();
+	if (!m_NavWnd)
+		m_NavWnd = std::make_unique<CDockNavigatorWnd>(*this);
+	m_NavOpen = true;
+	m_NavWnd->Open(::GetAncestor(m_hWnd, GA_ROOT), holdingControl && (::GetAsyncKeyState(VK_CONTROL) & 0x8000));
+	if (!m_NavWnd->m_hWnd) {
+		m_NavOpen = false;
+		return false;
+	}
+	return true;
+}
+
+void CDockHost::NavigatorMove(int rows) {
+	if (!m_NavOpen)
+		return;
+	m_Nav.MoveRow(rows);
+	m_NavWnd->Refresh();
+}
+
+void CDockHost::NavigatorSwitchColumn() {
+	if (!m_NavOpen)
+		return;
+	m_Nav.MoveColumn();
+	m_NavWnd->Refresh();
+}
+
+bool CDockHost::CommitNavigator() {
+	if (!m_NavOpen)
+		return false;
+	DockPane* pane = m_Nav.Selected();
+	CancelNavigator();
+	return pane && ShowPane(pane);
+}
+
+void CDockHost::CancelNavigator() {
+	if (!m_NavOpen)
+		return;
+	m_NavOpen = false;
+	if (m_NavWnd)
+		m_NavWnd->Close();
+}
+
+//
+// accessibility
+//
+
+LRESULT CDockHost::OnGetObject(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
+	if ((LONG)lp != OBJID_CLIENT) {
+		handled = FALSE;
+		return 0;
+	}
+	if (!m_Acc)
+		m_Acc = DockAccessible::Create(this);
+	if (!m_Acc) {
+		handled = FALSE;
+		return 0;
+	}
+	return ::LresultFromObject(IID_IAccessible, wp, m_Acc);
+}
+
+std::wstring CDockHost::AccName() const {
+	return L"Docking area";
+}
+
+LONG CDockHost::AccRole() const {
+	return ROLE_SYSTEM_PANE;
+}
+
+std::vector<HWND> CDockHost::AccChildWindows() const {
+	// the group windows that are on show, front to back
+	std::vector<HWND> windows;
+	for (HWND w = ::GetWindow(m_hWnd, GW_CHILD); w; w = ::GetWindow(w, GW_HWNDNEXT)) {
+		if (!::IsWindowVisible(w))
+			continue;
+		for (auto& [group, window] : m_Groups) {
+			if (window->m_hWnd == w) {
+				windows.push_back(w);
+				break;
+			}
+		}
+	}
+	return windows;
+}
+
+std::vector<AccElement> CDockHost::AccElements() const {
+	// the items of the auto-hide bars
+	std::vector<AccElement> list;
+	CClientDC dc(m_hWnd);
+	HFONT old = dc.SelectFont(m_Font);
+	POINT origin{ 0, 0 };
+	::ClientToScreen(m_hWnd, &origin);
+	auto self = const_cast<CDockHost*>(this);
+	static const wchar_t* const sides[] = { L"left", L"right", L"top", L"bottom" };
+	for (int side = 0; side < SideCount; side++) {
+		for (auto& item : BarItems((DockSide)side, dc.m_hDC)) {
+			DockPane* pane = item.Pane;
+			AccElement e;
+			e.Name = pane->Title + L" (auto hidden " + sides[side] + L")";
+			e.Role = ROLE_SYSTEM_PUSHBUTTON;
+			e.State = m_FlyoutId == pane->Id() ? STATE_SYSTEM_PRESSED : 0;
+			e.Screen = item.Rect;
+			OffsetRect(&e.Screen, origin.x, origin.y);
+			e.Action = L"Show";
+			e.Invoke = [self, pane] { self->ShowFlyout(pane, true); };
+			list.push_back(std::move(e));
+		}
+	}
+	dc.SelectFont(old);
+	return list;
 }
 
 }

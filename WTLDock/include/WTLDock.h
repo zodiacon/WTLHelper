@@ -13,3 +13,4 @@
 #include "DockGeometry.h"
 #include "DockDrop.h"
 #include "DockStore.h"
+#include "DockNavigator.h"

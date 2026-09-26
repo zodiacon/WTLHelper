@@ -282,4 +282,39 @@ bool KeepRectOnScreen(RECT& rect, int reachable) {
 	return true;
 }
 
+NavigatorLayout ComputeNavigatorLayout(const int counts[2], const int first[2], int selectedColumn, int selectedRow, const DockMetrics& metrics) {
+	NavigatorLayout layout;
+	const int columnWidth = ::MulDiv(240, metrics.IconSize, 16);		// the icon size follows the DPI
+	const int rowHeight = metrics.TabHeight + metrics.TabGap * 2;
+	const int headerHeight = metrics.CaptionHeight;
+	const int margin = metrics.TextPadding * 2;
+	const int rows = std::max(1, std::min(NavigatorMaxRows, std::max(counts[0], counts[1])));
+
+	const int top = margin;
+	const int bodyTop = top + headerHeight;
+	for (int c = 0; c < 2; c++) {
+		const int left = margin + c * (columnWidth + margin);
+		layout.Header[c] = { left, top, left + columnWidth, top + headerHeight };
+		layout.Column[c] = { left, bodyTop, left + columnWidth, bodyTop + rows * rowHeight };
+
+		int f = std::clamp(first[c], 0, std::max(0, counts[c] - rows));
+		if (c == selectedColumn && selectedRow >= 0) {
+			if (selectedRow < f)
+				f = selectedRow;
+			else if (selectedRow >= f + rows)
+				f = selectedRow - rows + 1;
+		}
+		layout.First[c] = f;
+		const int visible = std::max(0, std::min(rows, counts[c] - f));
+		for (int i = 0; i < visible; i++)
+			layout.Rows[c].push_back({ left, bodyTop + i * rowHeight, left + columnWidth, bodyTop + (i + 1) * rowHeight });
+	}
+
+	const int width = margin * 3 + columnWidth * 2;
+	const int footerTop = bodyTop + rows * rowHeight + margin / 2;
+	layout.Footer = { margin, footerTop, width - margin, footerTop + headerHeight };
+	layout.Size = { width, layout.Footer.bottom + margin };
+	return layout;
+}
+
 }

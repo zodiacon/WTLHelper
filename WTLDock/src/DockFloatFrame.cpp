@@ -69,8 +69,19 @@ LRESULT CDockFloatFrame::OnSize(UINT, WPARAM wp, LPARAM, BOOL&) {
 	return 0;
 }
 
-LRESULT CDockFloatFrame::OnWindowPosChanged(UINT, WPARAM, LPARAM, BOOL& handled) {
+LRESULT CDockFloatFrame::OnDpiChanged(UINT, WPARAM wp, LPARAM lp, BOOL&) {
+	// the window has been dragged to a monitor with another DPI
 	if (!m_Retired)
+		m_Host.SetFloatDpi(m_Id, HIWORD(wp), reinterpret_cast<const RECT*>(lp));
+	return 0;
+}
+
+LRESULT CDockFloatFrame::OnWindowPosChanged(UINT, WPARAM, LPARAM lp, BOOL& handled) {
+	// (windows that show, hide or stack above each other get these without moving: what the window has is then
+	// no news, and the layout may know better)
+	const auto pos = reinterpret_cast<const WINDOWPOS*>(lp);
+	const bool moved = !(pos->flags & SWP_NOMOVE) || !(pos->flags & SWP_NOSIZE);
+	if (!m_Retired && moved)
 		m_Host.OnFrameMoved(this);
 	handled = FALSE;		// DefWindowProc turns this into WM_SIZE / WM_MOVE
 	return 0;
@@ -84,7 +95,7 @@ LRESULT CDockFloatFrame::OnGetMinMaxInfo(UINT, WPARAM, LPARAM lp, BOOL& handled)
 	if (client.cx <= 0 && client.cy <= 0)
 		return 0;
 	RECT rc{ 0, 0, client.cx, client.cy };
-	::AdjustWindowRectExForDpi(&rc, (DWORD)GetWindowLongPtr(GWL_STYLE), FALSE, (DWORD)GetWindowLongPtr(GWL_EXSTYLE), ::GetDpiForWindow(m_hWnd));
+	::AdjustWindowRectExForDpi(&rc, (DWORD)GetWindowLongPtr(GWL_STYLE), FALSE, (DWORD)GetWindowLongPtr(GWL_EXSTYLE), m_Host.FloatDpi(m_Id));
 	auto info = reinterpret_cast<MINMAXINFO*>(lp);
 	info->ptMinTrackSize.x = std::max<LONG>(info->ptMinTrackSize.x, Width(rc));
 	info->ptMinTrackSize.y = std::max<LONG>(info->ptMinTrackSize.y, Height(rc));

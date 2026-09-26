@@ -217,6 +217,7 @@ std::string DockSerializer::Save(const DockLayout& layout) {
 	for (auto& f : layout.m_Floats) {
 		Value o = Value::MakeObject();
 		o.Add("rect", MakeInts({ f->m_Rect.left, f->m_Rect.top, f->m_Rect.right, f->m_Rect.bottom }));
+		o.Add("dpi", Value::MakeNumber(f->m_Dpi));
 		o.Add("root", SaveNode(*f->m_Root));
 		floats.Push(std::move(o));
 	}
@@ -249,7 +250,7 @@ DockPane* DockSerializer::ResolvePane(Context& ctx, const std::string& id) {
 	return ctx.Factory && !wide.empty() ? ctx.Factory(ctx.Layout, wide) : nullptr;
 }
 
-// Returns null for a group that is skipped (e.g. a document group outside the main tree) or, with ctx.Error set, for a bad one.
+// Returns null for a group that is skipped (a document group in an auto-hide bar) or, with ctx.Error set, for a bad one.
 std::unique_ptr<DockGroup> DockSerializer::LoadGroup(Context& ctx, const Value& v, GroupLocation where) {
 	auto kindValue = v.Find("kind");
 	auto panes = v.Find("panes");
@@ -263,7 +264,7 @@ std::unique_ptr<DockGroup> DockSerializer::LoadGroup(Context& ctx, const Value& 
 	}
 
 	const PaneKind kind = kindValue->String == "document" ? PaneKind::Document : PaneKind::Tool;
-	if (kind == PaneKind::Document && where != GroupLocation::Main)
+	if (kind == PaneKind::Document && where == GroupLocation::AutoHide)
 		return nullptr;
 
 	auto group = std::make_unique<DockGroup>(kind);
@@ -413,7 +414,15 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const LoadO
 			auto rootValue = item.Find("root");
 			if (!ParseInts(item.Find("rect"), rc, 4) || !rootValue)
 				return fail(L"bad floating window");
+			// a floating window has the DPI of its own monitor: its sizes are kept as they are (files from before
+			// there was one had them at the DPI of the file, like the main window)
+			int floatDpi = 0;
+			const bool hasDpi = ParseInt(item.Find("dpi"), floatDpi) && floatDpi >= 48 && floatDpi <= 960;
+			const double savedScale = ctx.Scale;
+			if (hasDpi)
+				ctx.Scale = 1;
 			auto node = LoadNode(ctx, *rootValue, GroupLocation::Float, 1);
+			ctx.Scale = savedScale;
 			if (!ctx.Error.empty())
 				return fail(ctx.Error);
 			if (!node || !node->IsSplit())
@@ -421,7 +430,7 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const LoadO
 			RECT rect{ rc[0], rc[1], rc[2], rc[3] };
 			if (IsRectEmpty(&rect))
 				return fail(L"empty floating window rectangle");
-			std::unique_ptr<DockFloat> window(new DockFloat(++nextId, rect));
+			std::unique_ptr<DockFloat> window(new DockFloat(++nextId, rect, hasDpi ? floatDpi : layout.m_Dpi));
 			window->m_Root.reset(static_cast<DockSplit*>(node.release()));
 			floats.push_back(std::move(window));
 		}

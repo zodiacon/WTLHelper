@@ -19,7 +19,7 @@ void CDockGroupWnd::Relayout() {
 	if (m_Group) {
 		RECT rc;
 		GetClientRect(&rc);
-		const GroupParts parts = ComputeGroupParts(*m_Group, rc, m_Host.Metrics());
+		const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
 		const RECT& c = parts.Content;
 		const auto active = m_Group->ActivePane();
 		m_Host.EnsureContent(active);
@@ -33,6 +33,7 @@ void CDockGroupWnd::Relayout() {
 				::ShowWindow(pane->hWnd, SW_HIDE);
 		}
 	}
+	NotifyStructure();
 	Invalidate(FALSE);
 }
 
@@ -123,7 +124,7 @@ void CDockGroupWnd::DropInfo(std::vector<RECT>& zones, std::vector<RECT>& tabs, 
 		return r;
 	};
 
-	const GroupParts parts = ComputeGroupParts(*m_Group, rc, m_Host.Metrics());
+	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
 	if (parts.HasCaption)
 		zones.push_back(toScreen(parts.Caption));
 	if (parts.HasTabs) {
@@ -171,7 +172,7 @@ CDockGroupWnd::Strip CDockGroupWnd::LayoutStrip(const GroupParts& parts, CDCHand
 	if (!m_Group || !parts.HasTabs)
 		return strip;
 
-	HFONT old = dc.SelectFont(m_Host.Font());
+	HFONT old = dc.SelectFont(Font());
 	for (auto pane : m_Group->Panes()) {
 		SIZE size{};
 		dc.GetTextExtent(pane->Title.c_str(), (int)pane->Title.size(), &size);
@@ -185,7 +186,7 @@ CDockGroupWnd::Strip CDockGroupWnd::LayoutStrip(const GroupParts& parts, CDCHand
 		m_LastActive = active;
 		m_ScrollLocked = false;
 	}
-	strip.Layout = LayoutTabStrip(strip.Specs, parts.Tabs, m_Host.Metrics(), m_First, m_ScrollLocked ? -1 : active);
+	strip.Layout = LayoutTabStrip(strip.Specs, parts.Tabs, Metrics(), m_First, m_ScrollLocked ? -1 : active);
 	m_First = strip.Layout.First;
 	return strip;
 }
@@ -197,7 +198,7 @@ TabStripState CDockGroupWnd::State() {
 	RECT rc;
 	GetClientRect(&rc);
 	CClientDC dc(m_hWnd);
-	const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, m_Host.Metrics()), dc.m_hDC);
+	const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, Metrics()), dc.m_hDC);
 	state.First = strip.Layout.First;
 	state.Visible = (int)strip.Layout.Tabs.size();
 	state.Overflow = strip.Layout.Overflow;
@@ -241,7 +242,7 @@ bool CDockGroupWnd::MenuVisible() const {
 }
 
 CaptionButtons CDockGroupWnd::ButtonsFor(const GroupParts& parts) const {
-	return ComputeCaptionButtons(parts.Caption, CloseButtonVisible(), PinVisible(), MenuVisible(), m_Host.Metrics());
+	return ComputeCaptionButtons(parts.Caption, CloseButtonVisible(), PinVisible(), MenuVisible(), Metrics());
 }
 
 CDockGroupWnd::Button CDockGroupWnd::ButtonOf(Hit::Kind kind) {
@@ -266,7 +267,7 @@ void CDockGroupWnd::RunButton(Button button) {
 	else if (button == Button::Menu) {
 		RECT rc;
 		GetClientRect(&rc);
-		const CaptionButtons b = ButtonsFor(ComputeGroupParts(*m_Group, rc, m_Host.Metrics()));
+		const CaptionButtons b = ButtonsFor(ComputeGroupParts(*m_Group, rc, Metrics()));
 		POINT screen{ b.Menu.left, b.Menu.bottom };
 		ClientToScreen(&screen);
 		m_Host.ShowPaneMenu(pane, screen);
@@ -279,7 +280,7 @@ CDockGroupWnd::Hit CDockGroupWnd::Locate(POINT pt) {
 		return hit;
 	RECT rc;
 	GetClientRect(&rc);
-	const auto& metrics = m_Host.Metrics();
+	const auto& metrics = Metrics();
 	const GroupParts parts = ComputeGroupParts(*m_Group, rc, metrics);
 
 	if (parts.HasCaption && PtInRect(&parts.Caption, pt)) {
@@ -318,7 +319,7 @@ void CDockGroupWnd::DrawCloseGlyph(CDCHandle dc, const RECT& button, bool hot, C
 
 	const int inset = Width(button) / 4 + 1;
 	CPen pen;
-	pen.CreatePen(PS_SOLID, std::max(1, m_Host.Dpi() / 96), hot ? theme.ButtonGlyphHot : idle);
+	pen.CreatePen(PS_SOLID, std::max(1, Dpi() / 96), hot ? theme.ButtonGlyphHot : idle);
 	HPEN old = dc.SelectPen(pen);
 	dc.MoveTo(button.left + inset, button.top + inset);
 	dc.LineTo(button.right - inset, button.bottom - inset);
@@ -336,7 +337,7 @@ void CDockGroupWnd::DrawPinGlyph(CDCHandle dc, const RECT& button, bool pinned, 
 	const int s = std::max(3, Width(button) / 2 - 3);
 	const int cx = (button.left + button.right) / 2, cy = (button.top + button.bottom) / 2;
 	CPen pen;
-	pen.CreatePen(PS_SOLID, std::max(1, m_Host.Dpi() / 96), hot ? theme.ButtonGlyphHot : idle);
+	pen.CreatePen(PS_SOLID, std::max(1, Dpi() / 96), hot ? theme.ButtonGlyphHot : idle);
 	HPEN old = dc.SelectPen(pen);
 	auto line = [&](int x0, int y0, int x1, int y1) {
 		if (pinned) {
@@ -395,7 +396,7 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 	CMemoryDC dc(hdc, clip);
 
 	const auto& theme = m_Host.Theme();
-	const auto& metrics = m_Host.Metrics();
+	const auto& metrics = Metrics();
 	RECT rc;
 	GetClientRect(&rc);
 	dc.FillSolidRect(&rc, theme.GroupBack);
@@ -406,7 +407,7 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 	const GroupParts parts = ComputeGroupParts(*m_Group, rc, metrics);
 	const auto active = m_Group->ActivePane();
 	const bool activeGroup = m_Host.IsActive(m_Group);
-	dc.SelectFont(m_Host.Font());
+	dc.SelectFont(Font());
 
 	if (parts.HasCaption) {
 		dc.FillSolidRect(&parts.Caption, activeGroup ? theme.CaptionActiveBack : theme.CaptionInactiveBack);
@@ -430,7 +431,7 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 	if (parts.HasTabs) {
 		dc.FillSolidRect(&parts.Tabs, theme.TabStripBack);
 		const bool stripAtBottom = m_Group->TabsAtBottom && !m_Group->IsDocument();
-		const int accent = std::max(2, m_Host.Dpi() * 2 / 96);
+		const int accent = std::max(2, Dpi() * 2 / 96);
 		const Strip strip = LayoutStrip(parts, dc.m_hDC);
 		const auto& panes = m_Group->Panes();
 
@@ -504,7 +505,7 @@ void CDockGroupWnd::SetHot(int tab, bool close, bool overflow) {
 	if (m_Group) {
 		RECT rc;
 		GetClientRect(&rc);
-		const GroupParts parts = ComputeGroupParts(*m_Group, rc, m_Host.Metrics());
+		const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
 		InvalidateRect(&parts.Tabs, FALSE);
 	}
 }
@@ -555,7 +556,7 @@ LRESULT CDockGroupWnd::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL&) {
 		case Hit::Kind::Overflow: {
 			RECT rc;
 			GetClientRect(&rc);
-			const GroupParts parts = ComputeGroupParts(*m_Group, rc, m_Host.Metrics());
+			const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
 			CClientDC dc(m_hWnd);
 			const auto strip = LayoutStrip(parts, dc.m_hDC);
 			ShowOverflowMenu(strip.Layout.OverflowButton, m_Group->TabsAtBottom && !m_Group->IsDocument());
@@ -630,7 +631,7 @@ LRESULT CDockGroupWnd::OnMButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 		RECT rc;
 		GetClientRect(&rc);
 		CClientDC dc(m_hWnd);
-		const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, m_Host.Metrics()), dc.m_hDC);
+		const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, Metrics()), dc.m_hDC);
 		if (pressed < (int)strip.Specs.size() && strip.Specs[pressed].Closable)
 			m_Host.ClosePane(PaneAt(pressed));
 	}
@@ -679,8 +680,8 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 			m_CaptionPending = false;
 			return 0;
 		}
-		if (std::abs(pt.x - m_CaptionStart.x) >= ::GetSystemMetricsForDpi(SM_CXDRAG, m_Host.Dpi()) ||
-			std::abs(pt.y - m_CaptionStart.y) >= ::GetSystemMetricsForDpi(SM_CYDRAG, m_Host.Dpi())) {
+		if (std::abs(pt.x - m_CaptionStart.x) >= ::GetSystemMetricsForDpi(SM_CXDRAG, Dpi()) ||
+			std::abs(pt.y - m_CaptionStart.y) >= ::GetSystemMetricsForDpi(SM_CYDRAG, Dpi())) {
 			DockPane* pane = m_Group->ActivePane();
 			if (!pane || !BeginDockDrag(pane, true, pt))
 				m_CaptionPending = false;		// nothing to drag (e.g. the group is in an auto-hide bar)
@@ -697,15 +698,15 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 		// away from the tab strip the drag is no longer about the order of the tabs but about where the pane goes
 		RECT bounds;
 		GetClientRect(&bounds);
-		const GroupParts parts = ComputeGroupParts(*m_Group, bounds, m_Host.Metrics());
-		const int band = std::max(::GetSystemMetricsForDpi(SM_CYDRAG, m_Host.Dpi()), m_Host.Metrics().TabHeight / 2);
+		const GroupParts parts = ComputeGroupParts(*m_Group, bounds, Metrics());
+		const int band = std::max(::GetSystemMetricsForDpi(SM_CYDRAG, Dpi()), Metrics().TabHeight / 2);
 		if (pt.y < parts.Tabs.top - band || pt.y >= parts.Tabs.bottom + band || pt.x < bounds.left - band || pt.x >= bounds.right + band) {
 			if (BeginDockDrag(m_DragPane, false, pt))
 				return 0;
 		}
 
 		if (!m_Dragging) {
-			const int threshold = ::GetSystemMetricsForDpi(SM_CXDRAG, m_Host.Dpi());
+			const int threshold = ::GetSystemMetricsForDpi(SM_CXDRAG, Dpi());
 			m_Dragging = std::abs(pt.x - m_DragStart.x) >= threshold;
 		}
 		if (m_Dragging) {
@@ -713,7 +714,7 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 			RECT rc;
 			GetClientRect(&rc);
 			CClientDC dc(m_hWnd);
-			const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, m_Host.Metrics()), dc.m_hDC);
+			const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, Metrics()), dc.m_hDC);
 			const auto& panes = m_Group->Panes();
 			const int index = (int)(std::find(panes.begin(), panes.end(), m_DragPane) - panes.begin());
 			auto center = [&](int tab) {
@@ -763,7 +764,7 @@ LRESULT CDockGroupWnd::OnMouseWheel(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
 	ScreenToClient(&pt);
 	RECT rc;
 	GetClientRect(&rc);
-	const GroupParts parts = ComputeGroupParts(*m_Group, rc, m_Host.Metrics());
+	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
 	if (!parts.HasTabs || !PtInRect(&parts.Tabs, pt))
 		return 0;
 
@@ -813,6 +814,169 @@ void CDockGroupWnd::ShowOverflowMenu(const RECT& button, bool stripAtBottom) {
 	if (cmd >= 1 && cmd <= panes.size()) {
 		m_ScrollLocked = false;
 		m_Host.ActivatePane(panes[cmd - 1]);
+	}
+}
+
+//
+// accessibility
+//
+
+LRESULT CDockGroupWnd::OnGetObject(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
+	if ((LONG)lp != OBJID_CLIENT) {
+		handled = FALSE;
+		return 0;
+	}
+	if (!m_Acc)
+		m_Acc = DockAccessible::Create(this);
+	if (!m_Acc) {
+		handled = FALSE;
+		return 0;
+	}
+	return ::LresultFromObject(IID_IAccessible, wp, m_Acc);
+}
+
+CDockGroupWnd::~CDockGroupWnd() {
+	if (m_Acc) {
+		m_Acc->Detach();
+		m_Acc->Release();
+	}
+}
+
+std::wstring CDockGroupWnd::AccName() const {
+	if (!m_Group)
+		return {};
+	if (m_Group->IsDocument())
+		return L"Documents";
+	auto pane = m_Group->ActivePane();
+	return pane ? pane->Title : std::wstring();
+}
+
+LONG CDockGroupWnd::AccRole() const {
+	return ROLE_SYSTEM_GROUPING;
+}
+
+std::vector<HWND> CDockGroupWnd::AccChildWindows() const {
+	std::vector<HWND> windows;
+	if (m_Group) {
+		auto pane = m_Group->ActivePane();
+		if (pane && pane->hWnd && ::IsWindow(pane->hWnd) && ::GetParent(pane->hWnd) == m_hWnd)
+			windows.push_back(pane->hWnd);
+	}
+	return windows;
+}
+
+std::vector<AccElement> CDockGroupWnd::AccElements() const {
+	std::vector<AccElement> list;
+	if (!m_Group || !m_hWnd)
+		return list;
+
+	// laying the strip out keeps the scroll position, like drawing does
+	auto self = const_cast<CDockGroupWnd*>(this);
+	CDockHost* host = &m_Host;
+	RECT rc;
+	GetClientRect(&rc);
+	POINT origin{ 0, 0 };
+	::ClientToScreen(m_hWnd, &origin);
+	auto toScreen = [&](RECT r) {
+		OffsetRect(&r, origin.x, origin.y);
+		return r;
+	};
+	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	DockPane* active = m_Group->ActivePane();
+
+	auto button = [&](const wchar_t* name, LONG role, const RECT& where, const wchar_t* action, Button which) {
+		AccElement e;
+		e.Name = name;
+		e.Role = role;
+		e.Screen = toScreen(where);
+		e.Action = action;
+		e.Invoke = [self, which] { self->RunButton(which); };
+		list.push_back(std::move(e));
+	};
+
+	if (parts.HasCaption) {
+		AccElement caption;
+		caption.Name = active ? active->Title : std::wstring();
+		caption.Role = ROLE_SYSTEM_TITLEBAR;
+		caption.Screen = toScreen(parts.Caption);
+		list.push_back(std::move(caption));
+
+		const CaptionButtons b = ButtonsFor(parts);
+		if (b.HasMenu)
+			button(L"Window Position", ROLE_SYSTEM_BUTTONMENU, b.Menu, L"Open", Button::Menu);
+		if (b.HasPin)
+			button(m_Group->Location() == GroupLocation::AutoHide ? L"Dock" : L"Auto Hide", ROLE_SYSTEM_PUSHBUTTON, b.Pin, L"Press", Button::Pin);
+		if (b.HasClose)
+			button(L"Close", ROLE_SYSTEM_PUSHBUTTON, b.Close, L"Press", Button::Close);
+	}
+
+	if (parts.HasTabs) {
+		CClientDC dc(m_hWnd);
+		const Strip strip = self->LayoutStrip(parts, dc.m_hDC);
+		const int first = strip.Layout.First;
+		const int visible = (int)strip.Layout.Tabs.size();
+		const DockPane* focused = m_Host.ActivePane();
+		const auto& panes = m_Group->Panes();
+		for (int i = 0; i < (int)panes.size(); i++) {
+			DockPane* pane = panes[i];
+			const bool shown = i >= first && i < first + visible;
+
+			AccElement tab;
+			tab.Name = pane->Title;
+			tab.Role = ROLE_SYSTEM_PAGETAB;
+			tab.State = STATE_SYSTEM_SELECTABLE | STATE_SYSTEM_FOCUSABLE;
+			if (pane == active)
+				tab.State |= STATE_SYSTEM_SELECTED;
+			if (pane == focused)
+				tab.State |= STATE_SYSTEM_FOCUSED;
+			if (shown)
+				tab.Screen = toScreen(strip.Layout.Tabs[i - first]);
+			else
+				tab.State |= STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
+			tab.Action = L"Switch";
+			tab.Invoke = tab.Select = [host, pane] { host->ActivatePane(pane); };
+			list.push_back(std::move(tab));
+
+			if (strip.Specs[i].Closable) {
+				AccElement close;
+				close.Name = L"Close " + pane->Title;
+				close.Role = ROLE_SYSTEM_PUSHBUTTON;
+				if (shown)
+					close.Screen = toScreen(strip.Layout.Close[i - first]);
+				else
+					close.State = STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
+				close.Action = L"Press";
+				close.Invoke = [host, pane] { host->ClosePane(pane); };
+				list.push_back(std::move(close));
+			}
+		}
+		if (strip.Layout.Overflow) {
+			AccElement more;
+			more.Name = L"Tab list";
+			more.Role = ROLE_SYSTEM_BUTTONDROPDOWN;
+			more.Screen = toScreen(strip.Layout.OverflowButton);
+			more.Action = L"Open";
+			const RECT where = strip.Layout.OverflowButton;
+			const bool bottom = m_Group->TabsAtBottom && !m_Group->IsDocument();
+			more.Invoke = [self, where, bottom] { self->ShowOverflowMenu(where, bottom); };
+			list.push_back(std::move(more));
+		}
+	}
+	return list;
+}
+
+// Tells the clients that the children (tabs, buttons) are not the ones they knew.
+void CDockGroupWnd::NotifyStructure() {
+	if (!m_hWnd || !m_Group)
+		return;
+	std::wstring signature = std::to_wstring(m_Group->ActiveIndex()) + L"|" + std::to_wstring((int)m_Group->Location());
+	for (auto pane : m_Group->Panes())
+		signature += L"|" + pane->Title;
+	if (signature != m_AccSignature) {
+		const bool first = m_AccSignature.empty();
+		m_AccSignature = std::move(signature);
+		if (!first)
+			::NotifyWinEvent(EVENT_OBJECT_REORDER, m_hWnd, OBJID_CLIENT, CHILDID_SELF);
 	}
 }
 

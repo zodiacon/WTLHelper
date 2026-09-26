@@ -94,22 +94,40 @@ std::vector<int> ComputeLengths(const std::vector<SizeSpec>& specs, const std::v
 
 }
 
+int DockLayout::NodeDpi(const DockNode& node) const {
+	const DockNode* top = &node;
+	while (top->Parent())
+		top = top->Parent();
+	if (top == m_Root.get())
+		return m_Dpi;
+	for (auto& f : m_Floats)
+		if (f->m_Root.get() == top)
+			return f->m_Dpi;
+	// a group of an auto-hide bar has no parent: it belongs to the main window
+	return m_Dpi;
+}
+
 int DockLayout::MinLength(const DockNode& node, Axis axis) const {
+	return MinLengthAt(node, axis, NodeDpi(node));
+}
+
+// the minimum sizes are in the DPI of the layout; the tree they are in may be at another one
+int DockLayout::MinLengthAt(const DockNode& node, Axis axis, int dpi) const {
 	if (auto group = node.AsGroup()) {
 		int min = Along(m_Metrics.MinGroupSize, axis);
 		for (auto p : group->Panes())
 			min = std::max(min, Along(p->MinSize, axis));
-		return min;
+		return ScaleTo(min, dpi);
 	}
 
 	auto split = node.AsSplit();
 	int result = 0;
 	for (auto& c : split->Children()) {
-		int m = MinLength(*c, axis);
+		int m = MinLengthAt(*c, axis, dpi);
 		result = split->GetAxis() == axis ? result + m : std::max(result, m);
 	}
 	if (split->GetAxis() == axis && !split->Children().empty())
-		result += m_Metrics.SplitterThickness * ((int)split->Children().size() - 1);
+		result += ScaleTo(m_Metrics.SplitterThickness, dpi) * ((int)split->Children().size() - 1);
 	return result;
 }
 
@@ -142,15 +160,15 @@ void DockLayout::Arrange(const RECT& client) {
 	}
 
 	m_Root->Rect = r;
-	ArrangeSplit(*m_Root);
+	ArrangeSplit(*m_Root, m_Dpi);
 }
 
 void DockLayout::Arrange(DockFloat& window, const RECT& client) {
 	window.m_Root->Rect = client;
-	ArrangeSplit(*window.m_Root);
+	ArrangeSplit(*window.m_Root, window.m_Dpi);
 }
 
-void DockLayout::ArrangeSplit(DockSplit& split) {
+void DockLayout::ArrangeSplit(DockSplit& split, int dpi) {
 	auto& kids = split.m_Children;
 	const int n = (int)kids.size();
 	if (n == 0)
@@ -158,14 +176,14 @@ void DockLayout::ArrangeSplit(DockSplit& split) {
 
 	const Axis axis = split.m_Axis;
 	const bool horizontal = axis == Axis::Horizontal;
-	const int gap = m_Metrics.SplitterThickness;
+	const int gap = ScaleTo(m_Metrics.SplitterThickness, dpi);
 	const int avail = std::max(0, Length(split.Rect, axis) - gap * (n - 1));
 
 	std::vector<SizeSpec> specs;
 	std::vector<int> mins;
 	for (auto& c : kids) {
 		specs.push_back(c->Size);
-		mins.push_back(MinLength(*c, axis));
+		mins.push_back(MinLengthAt(*c, axis, dpi));
 	}
 	const auto lens = ComputeLengths(specs, mins, avail);
 
@@ -183,7 +201,7 @@ void DockLayout::ArrangeSplit(DockSplit& split) {
 		kids[i]->Rect = r;
 		pos += lens[i] + gap;
 		if (auto inner = kids[i]->AsSplit())
-			ArrangeSplit(*inner);
+			ArrangeSplit(*inner, dpi);
 	}
 }
 

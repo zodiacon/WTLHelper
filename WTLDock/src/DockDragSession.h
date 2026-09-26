@@ -26,6 +26,10 @@ public:
 		return m_Host.m_Layout.Version() != m_Version;
 	}
 
+	// the layout changed in a way that leaves the targets as they are (a floating window was moved)
+	void Rebase() {
+		m_Version = m_Host.m_Layout.Version();
+	}
 	const DropTarget& Target() const {
 		return m_Target;
 	}

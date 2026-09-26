@@ -57,8 +57,12 @@ public:
 	int Dpi() const {
 		return m_Dpi;
 	}
-	// Scales every pixel size from the current DPI to the new one.
+	// Scales every pixel size of the main window from the current DPI to the new one. Floating windows have a DPI of
+	// their own (they may be on another monitor) and are left alone.
 	void SetDpi(int dpi);
+	// A floating window moved to a monitor with another DPI: the pixel sizes of its tree are scaled to it. (Minimum
+	// sizes and splitters are always worked out at the DPI of the tree they are in.)
+	bool SetFloatDpi(DockFloat* window, int dpi);
 
 	//
 	// panes
@@ -80,6 +84,14 @@ public:
 	}
 	// the group that anchors the document area
 	DockGroup* PrimaryDocumentGroup() const;
+	// the document groups of the main window, in the order of the tree (left to right, top to bottom)
+	std::vector<DockGroup*> DocumentGroups() const;
+	// Where Show() puts a document: the group of the document that was active last (in the main window or in a
+	// floating one), or else the primary group.
+	DockGroup* ActiveDocumentGroup() const;
+	// Remembers that a pane has been made active by the user (the layout can't tell: it is what has the focus).
+	// Only documents matter; nothing changes visibly.
+	void NoteActive(const DockPane* pane);
 	const std::vector<std::unique_ptr<DockGroup>>& AutoHideGroups(DockSide side) const {
 		return m_AutoHide[(int)side];
 	}
@@ -99,7 +111,8 @@ public:
 	bool Activate(DockPane* pane);
 	bool ReorderTab(DockPane* pane, int index);
 
-	// floating (tool panes only; rect is in screen coordinates)
+	// floating (rect is in screen coordinates). A document floats into a window with a document group of its own that
+	// other documents can be dropped on; a whole document group can float as long as another one stays in the main window.
 	bool CanFloatPane(const DockPane* pane) const;
 	bool CanFloatGroup(const DockGroup& group) const;
 	bool Float(DockPane* pane, const RECT& rect);
@@ -143,6 +156,8 @@ public:
 		return m_BarRects[(int)side];
 	}
 	int MinLength(const DockNode& node, Axis axis) const;
+	// the DPI the pixel sizes of the tree that holds the node are at
+	int NodeDpi(const DockNode& node) const;
 
 	static std::vector<SplitterHit> Splitters(DockSplit& root);
 	static DockGroup* GroupAt(DockSplit& root, POINT pt);
@@ -196,7 +211,11 @@ private:
 	void InsertAtEdge(DockSplit& root, std::unique_ptr<DockNode> node, DockSide side, int length);
 	void AddFloat(std::unique_ptr<DockGroup> group, const RECT& rect);
 	int DefaultLength(const DockGroup& group, DockSide side) const;
-	void ArrangeSplit(DockSplit& split);
+	void ArrangeSplit(DockSplit& split, int dpi);
+	int MinLengthAt(const DockNode& node, Axis axis, int dpi) const;
+	int ScaleTo(int value, int dpi) const {
+		return dpi == m_Dpi ? value : ::MulDiv(value, dpi, m_Dpi);
+	}
 
 	std::unique_ptr<DockSplit> m_Root;
 	std::vector<std::unique_ptr<DockGroup>> m_AutoHide[SideCount];
@@ -208,6 +227,7 @@ private:
 	int m_NextFloatId{};
 	int m_Dpi{ 96 };
 	int m_AppVersion{};
+	const DockPane* m_ActiveDocument{};
 	std::function<void()> m_OnChanged;
 };
 

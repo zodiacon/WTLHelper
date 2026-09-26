@@ -72,15 +72,35 @@ void DockLayout::SetDpi(int dpi) {
 		visit(root);
 	};
 	scaleNodes(*m_Root);
-	for (auto& f : m_Floats)
-		scaleNodes(*f->m_Root);
-	ForEachGroup([&](DockGroup& g) { g.AutoHideLength = scale(g.AutoHideLength); });
+	ForEachGroup([&](DockGroup& g) {
+		if (g.m_Where != GroupLocation::Float)
+			g.AutoHideLength = scale(g.AutoHideLength);
+		});
 	for (auto& p : m_Panes) {
 		p->PreferredSize = { scale(p->PreferredSize.cx), scale(p->PreferredSize.cy) };
 		p->MinSize = { scale(p->MinSize.cx), scale(p->MinSize.cy) };
 	}
 	m_Dpi = dpi;
 	Commit();
+}
+
+bool DockLayout::SetFloatDpi(DockFloat* window, int dpi) {
+	if (dpi < 48 || dpi > 960 || std::none_of(m_Floats.begin(), m_Floats.end(), [&](auto& f) { return f.get() == window; }))
+		return false;
+	if (window->m_Dpi == dpi)
+		return true;
+	const int from = window->m_Dpi;
+	std::function<void(DockNode&)> visit = [&](DockNode& n) {
+		if (!n.Size.IsStar())
+			n.Size.Value = std::max(1.0, std::round(n.Size.Value * dpi / from));
+		if (auto split = n.AsSplit())
+			for (auto& c : split->Children())
+				visit(*c);
+		};
+	visit(*window->m_Root);
+	window->m_Dpi = dpi;
+	Commit();
+	return true;
 }
 
 bool DockLayout::RemovePane(DockPane* pane) {
@@ -90,6 +110,8 @@ bool DockLayout::RemovePane(DockPane* pane) {
 		DetachPane(pane);
 		Commit();
 	}
+	if (m_ActiveDocument == pane)
+		m_ActiveDocument = nullptr;
 	m_Panes.erase(std::find_if(m_Panes.begin(), m_Panes.end(), [&](auto& p) { return p.get() == pane; }));
 	return true;
 }
@@ -121,6 +143,26 @@ DockGroup* DockLayout::PrimaryDocumentGroup() const {
 			nonEmpty = &g;
 		});
 	return nonEmpty ? nonEmpty : first;
+}
+
+std::vector<DockGroup*> DockLayout::DocumentGroups() const {
+	std::vector<DockGroup*> groups;
+	VisitGroups(*m_Root, [&](DockGroup& g) {
+		if (g.IsDocument())
+			groups.push_back(&g);
+		});
+	return groups;
+}
+
+DockGroup* DockLayout::ActiveDocumentGroup() const {
+	if (m_ActiveDocument && m_ActiveDocument->m_Group && m_ActiveDocument->m_Group->m_Where != GroupLocation::AutoHide)
+		return m_ActiveDocument->m_Group;
+	return PrimaryDocumentGroup();
+}
+
+void DockLayout::NoteActive(const DockPane* pane) {
+	if (pane && pane->Kind() == PaneKind::Document && Owns(pane) && pane->m_Group)
+		m_ActiveDocument = pane;
 }
 
 void DockLayout::ForEachGroup(const std::function<void(DockGroup&)>& fn) const {
@@ -304,7 +346,9 @@ void DockLayout::RecordPlacement(DockPane* pane) {
 			}
 			break;
 		case PaneState::Floating:
-			pane->m_LastState = PaneState::Floating;
+			// a closed document comes back among the documents; where it floated is only remembered for floating it again
+			if (pane->Kind() == PaneKind::Tool)
+				pane->m_LastState = PaneState::Floating;
 			pane->m_LastFloatRect = g->m_Float->Rect();
 			break;
 		default:
@@ -344,6 +388,9 @@ std::unique_ptr<DockGroup> DockLayout::ReleaseGroup(DockGroup* group) {
 int DockLayout::DefaultLength(const DockGroup& group, DockSide side) const {
 	Axis axis = AxisOf(side);
 	int length = Length(group.Rect, axis);
+	// a group that comes from a floating window was measured at the DPI of that window
+	if (length > 0 && group.m_Where == GroupLocation::Float && group.m_Float && group.m_Float->m_Dpi != m_Dpi)
+		length = std::max(1, ::MulDiv(length, m_Dpi, group.m_Float->m_Dpi));
 	if (length <= 0 && group.AutoHideLength > 0)
 		length = group.AutoHideLength;
 	if (length <= 0 && group.ActivePane())
@@ -419,7 +466,7 @@ void DockLayout::InsertAtEdge(DockSplit& root, std::unique_ptr<DockNode> node, D
 }
 
 void DockLayout::AddFloat(std::unique_ptr<DockGroup> group, const RECT& rect) {
-	std::unique_ptr<DockFloat> window(new DockFloat(++m_NextFloatId, rect));
+	std::unique_ptr<DockFloat> window(new DockFloat(++m_NextFloatId, rect, m_Dpi));
 	group->Size = SizeSpec::Star();
 	group->m_Parent = window->m_Root.get();
 	window->m_Root->m_Children.push_back(std::move(group));
@@ -438,7 +485,7 @@ bool DockLayout::Show(DockPane* pane) {
 
 	switch (pane->m_LastState) {
 		case PaneState::Document:
-			if (auto docs = PrimaryDocumentGroup())
+			if (auto docs = ActiveDocumentGroup())
 				return DockTo(pane, docs, DockPosition::Tab);
 			return false;
 
@@ -480,6 +527,7 @@ bool DockLayout::Hide(DockPane* pane) {
 bool DockLayout::Activate(DockPane* pane) {
 	if (!Owns(pane) || !pane->m_Group)
 		return false;
+	NoteActive(pane);
 	auto g = pane->m_Group;
 	int index = (int)(std::find(g->m_Panes.begin(), g->m_Panes.end(), pane) - g->m_Panes.begin());
 	if (g->m_Active != index) {
@@ -505,7 +553,10 @@ bool DockLayout::ReorderTab(DockPane* pane, int index) {
 }
 
 bool DockLayout::CanFloatGroup(const DockGroup& group) const {
-	if (group.IsDocument() || group.m_Panes.empty())
+	if (group.m_Panes.empty())
+		return false;
+	// the main window keeps a document group
+	if (group.IsDocument() && group.m_Where == GroupLocation::Main && DocumentGroups().size() < 2)
 		return false;
 	return std::all_of(group.m_Panes.begin(), group.m_Panes.end(), [](auto p) { return Has(p->Caps, PaneCaps::CanFloat); });
 }
@@ -513,11 +564,13 @@ bool DockLayout::CanFloatGroup(const DockGroup& group) const {
 bool DockLayout::Float(DockPane* pane, const RECT& rect) {
 	if (IsRectEmpty(&rect) || !CanFloatPane(pane))
 		return false;
-	if (pane->m_Group && pane->m_Group->m_Panes.size() == 1)
+	if (pane->m_Group && pane->m_Group->m_Panes.size() == 1 && CanFloatGroup(*pane->m_Group))
 		return FloatGroup(pane->m_Group, rect);
 	if (pane->m_Group)
 		DetachPane(pane);
 	AddFloat(NewGroup(pane), rect);
+	if (pane->Kind() == PaneKind::Document)
+		m_ActiveDocument = pane;
 	Commit();
 	return true;
 }
@@ -573,6 +626,8 @@ bool DockLayout::DockTo(DockPane* pane, DockGroup* target, DockPosition pos, int
 		target->AddPane(pane, tabIndex);
 	else
 		InsertBeside(target, NewGroup(pane), pos);
+	if (pane->Kind() == PaneKind::Document)
+		m_ActiveDocument = pane;
 	Commit();
 	return true;
 }
@@ -596,6 +651,10 @@ bool DockLayout::CanMoveGroupTo(const DockGroup* group, const DockGroup* target,
 		return false;
 	if (group->IsDocument() && !target->IsDocument())
 		return false;
+	// a document group that leaves the main window has to leave another one behind
+	if (group->IsDocument() && group->m_Where == GroupLocation::Main && pos != DockPosition::Tab &&
+		target->m_Where != GroupLocation::Main && DocumentGroups().size() < 2)
+		return false;
 	return pos != DockPosition::Tab || group->Kind() == target->Kind();
 }
 
@@ -608,7 +667,7 @@ bool DockLayout::CanMoveGroupToEdge(const DockGroup* group) const {
 }
 
 bool DockLayout::CanFloatPane(const DockPane* pane) const {
-	return Owns(pane) && pane->Kind() == PaneKind::Tool && Has(pane->Caps, PaneCaps::CanFloat);
+	return Owns(pane) && Has(pane->Caps, PaneCaps::CanFloat);
 }
 
 bool DockLayout::MoveGroupTo(DockGroup* group, DockGroup* target, DockPosition pos) {
@@ -617,6 +676,8 @@ bool DockLayout::MoveGroupTo(DockGroup* group, DockGroup* target, DockPosition p
 
 	for (auto p : group->m_Panes)
 		RecordPlacement(p);
+	if (group->IsDocument() && group->ActivePane())
+		m_ActiveDocument = group->ActivePane();
 
 	if (pos == DockPosition::Tab) {
 		auto panes = std::move(group->m_Panes);
@@ -740,8 +801,6 @@ bool DockLayout::Validate(std::wstring* error) const {
 			return fail(L"empty group");
 		if (g.m_Active < 0 || (g.m_Active > 0 && g.m_Active >= (int)g.m_Panes.size()))
 			return fail(L"active index out of range");
-		if (g.IsDocument() && where != GroupLocation::Main)
-			return fail(L"document group outside the main tree");
 		for (auto p : g.m_Panes) {
 			if (!Owns(p))
 				return fail(L"unregistered pane in a group");
@@ -797,6 +856,8 @@ bool DockLayout::Validate(std::wstring* error) const {
 	for (auto& f : m_Floats) {
 		if (f->m_Root->m_Parent)
 			return fail(L"float root has a parent");
+		if (f->m_Dpi < 48 || f->m_Dpi > 960)
+			return fail(L"float with a bad DPI");
 		if (!checkSplit(*f->m_Root, true, GroupLocation::Float, f.get()))
 			return false;
 	}

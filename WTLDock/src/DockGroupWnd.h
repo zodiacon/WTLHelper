@@ -1,17 +1,19 @@
 #pragma once
 
 #include "DockHost.h"
+#include "DockAccessible.h"
 
 namespace WTLDock {
 
 // The window of one group: draws the caption and the tab strip and hosts the active pane's content window.
 // Created and owned by CDockHost; not for direct use.
-class CDockGroupWnd : public ATL::CWindowImpl<CDockGroupWnd> {
+class CDockGroupWnd : public ATL::CWindowImpl<CDockGroupWnd>, private IDockAccessibleOwner {
 public:
 	DECLARE_WND_CLASS_EX(L"WTLDock_Group", CS_DBLCLKS, 0)
 
 	explicit CDockGroupWnd(CDockHost& host) : m_Host(host) {
 	}
+	~CDockGroupWnd();
 
 	DockGroup* Group() const {
 		return m_Group;
@@ -49,6 +51,7 @@ public:
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 		// what content windows say to their parent goes to the frame
 		MESSAGE_HANDLER(WM_COMMAND, OnForward)
 		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
@@ -87,6 +90,28 @@ private:
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+
+	// IDockAccessibleOwner
+	HWND AccWindow() const override {
+		return m_hWnd;
+	}
+	std::wstring AccName() const override;
+	LONG AccRole() const override;
+	std::vector<AccElement> AccElements() const override;
+	std::vector<HWND> AccChildWindows() const override;
+	void NotifyStructure();
+
+	// A group in a floating window is at the DPI of that window's monitor, whatever the main window's is.
+	int Dpi() const {
+		return m_Host.GroupDpi(m_Group);
+	}
+	const DockMetrics& Metrics() const {
+		return m_Host.MetricsFor(Dpi());
+	}
+	HFONT Font() const {
+		return m_Host.FontFor(Dpi());
+	}
 
 	Strip LayoutStrip(const GroupParts& parts, CDCHandle dc);
 	Hit Locate(POINT pt);
@@ -109,6 +134,8 @@ private:
 
 	CDockHost& m_Host;
 	DockGroup* m_Group{};
+	DockAccessible* m_Acc{};
+	std::wstring m_AccSignature;
 
 	// tab strip state
 	int m_First{};				// first visible tab

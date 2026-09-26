@@ -360,8 +360,7 @@ TEST(DockTo_DocumentRules) {
 	CHECK(!l.DockTo(p.B, p.Sol->Group(), DockPosition::Tab));				// a document is not a tool pane
 	CHECK(!l.DockTo(p.B, p.Sol->Group(), DockPosition::Right));
 	CHECK(!l.DockToEdge(p.B, DockSide::Left));
-	CHECK(!l.Float(p.B, { 0, 0, 100, 100 }));
-	CHECK(!l.FloatGroup(p.A->Group(), { 0, 0, 100, 100 }));
+	CHECK(!l.FloatGroup(p.A->Group(), { 0, 0, 100, 100 }));			// the main window keeps its document group
 	CHECK_DUMP(l, L"main: V(H(T[Sol]@250 D[a.cpp,>b.cpp] T[Props]@200) T[Output]@150)\nhidden: Ext Pinned c.cpp");
 }
 
@@ -747,7 +746,7 @@ TEST(Load_DropsPanesOfTheWrongKindAndDuplicates) {
 	CHECK_VALID(copy);
 }
 
-TEST(Load_DocumentGroupsInFloatsAreDropped) {
+TEST(Load_DocumentGroupsInAutoHideAreDropped) {
 	DockLayout copy;
 	Panes p = Register(copy);
 	const char* text = R"({
@@ -760,7 +759,7 @@ TEST(Load_DocumentGroupsInFloatsAreDropped) {
 			{ "type": "group", "kind": "tool", "panes": ["Props"] } ] } } ]
 	})";
 	CHECK(copy.Load(text));
-	CHECK_DUMP(copy, L"main: H(D[a.cpp])\nautohide left: T[Sol]@210\nfloat: (1,2,301,302) V(T[Props])\nhidden: Output Ext Pinned b.cpp c.cpp");
+	CHECK_DUMP(copy, L"main: H(D[a.cpp])\nautohide left: T[Sol]@210\nfloat: (1,2,301,302) V(D[c.cpp] T[Props])\nhidden: Output Ext Pinned b.cpp");
 }
 
 TEST(Load_RejectsBadInputAndLeavesTheLayoutAlone) {
@@ -1309,7 +1308,8 @@ TEST(Drop_ApplyingADropDocksOrFloats) {
 		CHECK(ApplyDrop(l, p.Props, true, t));
 		CHECK(l.Floats().size() == 2);
 		DockPane* doc = p.A;
-		CHECK(!ApplyDrop(l, doc, false, t));		// documents do not float
+		CHECK(ApplyDrop(l, doc, false, t));		// documents float too
+		CHECK(doc->State() == PaneState::Floating && l.PrimaryDocumentGroup()->Panes().empty());
 	}
 }
 
@@ -1317,7 +1317,7 @@ TEST(Model_CanQueriesMatchTheOperations) {
 	DockLayout l;
 	Panes p = BuildStandard(l);
 	l.Show(p.Ext);
-	CHECK(l.CanFloatPane(p.Sol) && !l.CanFloatPane(p.A));
+	CHECK(l.CanFloatPane(p.Sol) && l.CanFloatPane(p.A));
 	p.Sol->Caps = PaneCaps::None;
 	CHECK(!l.CanFloatPane(p.Sol) && !l.Float(p.Sol, { 0, 0, 100, 100 }));
 	CHECK(l.CanDockToEdge(p.Props) && !l.CanDockToEdge(p.A) && !l.CanDockToEdge(nullptr));
@@ -1502,6 +1502,396 @@ TEST(Screen_ARectangleThatIsOutOfReachComesBack) {
 	CHECK(Width(huge) <= Width(mi.rcWork) + 10000 && huge.left < 50000);
 }
 
+// ---- Documents: tab groups and floating -------------------------------------------------
+
+TEST(Documents_FloatIntoAWindowOfTheirOwn) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	const RECT rc{ 100, 100, 500, 400 };
+	CHECK(l.CanFloatPane(p.B) && l.Float(p.B, rc));
+	CHECK(p.B->State() == PaneState::Floating && p.B->Group()->IsDocument() && p.B->Group()->Location() == GroupLocation::Float);
+	CHECK(l.Floats().size() == 1 && EqualRect(&l.Floats()[0]->Rect(), &rc));
+	CHECK(p.A->State() == PaneState::Document && p.C->State() == PaneState::Document);
+	CHECK_VALID(l);
+
+	// other documents can join it, as tabs and as a split
+	CHECK(l.CanDockTo(p.C, p.B->Group(), DockPosition::Tab) && l.DockTo(p.C, p.B->Group(), DockPosition::Tab));
+	CHECK(p.C->State() == PaneState::Floating && p.C->Group() == p.B->Group());
+	CHECK(l.DockTo(p.A, p.B->Group(), DockPosition::Right));
+	CHECK(p.A->State() == PaneState::Floating && p.A->Group() != p.B->Group());
+	CHECK(l.PrimaryDocumentGroup()->Panes().empty());			// the main window is left with an empty document area
+	CHECK_VALID(l);
+
+	// tool windows still do not become documents, and documents still do not go to the window edges
+	CHECK(!l.DockTo(p.Sol, p.B->Group(), DockPosition::Tab));
+	CHECK(!l.CanDockToEdge(p.B));
+	CHECK(!l.DockToEdge(p.B, DockSide::Left, l.Floats()[0].get()));
+}
+
+TEST(Documents_TheMainWindowKeepsADocumentGroup) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.DocumentGroups().size() == 1);
+	CHECK(!l.CanFloatGroup(*p.A->Group()));						// it is the only one
+	CHECK(l.Float(p.A, { 0, 0, 300, 200 }));					// the pane can, the group stays behind empty
+	CHECK(p.A->State() == PaneState::Floating && l.DocumentGroups().size() == 1 && l.PrimaryDocumentGroup()->Panes().empty());
+	CHECK_VALID(l);
+
+	// with a second group, either can float
+	DockLayout m;
+	p = BuildStandard(m);
+	m.Show(p.B);
+	m.Show(p.C);
+	CHECK(m.DockTo(p.C, p.B->Group(), DockPosition::Right));
+	CHECK(m.DocumentGroups().size() == 2);
+	CHECK(m.CanFloatGroup(*p.B->Group()) && m.CanFloatGroup(*p.C->Group()));
+	CHECK(m.FloatGroup(p.B->Group(), { 10, 10, 310, 210 }));
+	CHECK(p.B->State() == PaneState::Floating && m.DocumentGroups().size() == 1 && m.PrimaryDocumentGroup() == p.C->Group());
+	CHECK(!m.CanFloatGroup(*p.C->Group()));
+	CHECK_VALID(m);
+}
+
+TEST(Documents_TheLastGroupOfTheMainWindowCannotBeSplitOffIntoAFloat) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	CHECK(l.Float(p.B, { 0, 0, 300, 200 }));
+	CHECK(!l.CanMoveGroupTo(p.A->Group(), p.B->Group(), DockPosition::Right));	// would leave the main window without one
+	CHECK(!l.MoveGroupTo(p.A->Group(), p.B->Group(), DockPosition::Right));
+	CHECK(l.CanMoveGroupTo(p.A->Group(), p.B->Group(), DockPosition::Tab));		// the group stays, empty
+	CHECK(l.MoveGroupTo(p.A->Group(), p.B->Group(), DockPosition::Tab));
+	CHECK(l.PrimaryDocumentGroup()->Panes().empty() && p.A->Group() == p.B->Group());
+	CHECK_VALID(l);
+}
+
+TEST(Documents_DocumentGroupsAreListedInTreeOrder) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	CHECK(l.DockTo(p.B, p.A->Group(), DockPosition::Right));	// A | B
+	CHECK(l.DockTo(p.C, p.A->Group(), DockPosition::Bottom));	// (A / C) | B
+	auto groups = l.DocumentGroups();
+	CHECK(groups.size() == 3 && groups[0] == p.A->Group() && groups[1] == p.C->Group() && groups[2] == p.B->Group());
+	CHECK_VALID(l);
+}
+
+TEST(Documents_ShowOpensThemInTheActiveGroup) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	CHECK(l.DockTo(p.B, p.A->Group(), DockPosition::Right));	// A | B
+	CHECK(l.ActiveDocumentGroup() == p.B->Group());				// the last one docked
+	l.Show(p.C);
+	CHECK(p.C->Group() == p.B->Group());
+
+	l.Hide(p.C);
+	l.Activate(p.A);
+	CHECK(l.ActiveDocumentGroup() == p.A->Group());
+	l.Show(p.C);
+	CHECK(p.C->Group() == p.A->Group());
+
+	// the pane that was active has gone: back to the primary group
+	l.Hide(p.C);
+	l.Hide(p.A);
+	CHECK(l.ActiveDocumentGroup() == l.PrimaryDocumentGroup());
+	l.NoteActive(p.Sol);										// tool windows do not count
+	CHECK(l.ActiveDocumentGroup() == l.PrimaryDocumentGroup());
+	CHECK_VALID(l);
+
+	// a document in a floating window is where new ones go when it was the one used last
+	l.Show(p.A);
+	CHECK(l.Float(p.A, { 0, 0, 300, 200 }));
+	l.Show(p.C);
+	CHECK(p.C->Group() == p.A->Group());
+	l.RemovePane(p.A);											// forgetting a pane forgets it as the active one
+	CHECK(l.ActiveDocumentGroup() == l.PrimaryDocumentGroup() || l.ActiveDocumentGroup() == p.C->Group());
+	CHECK_VALID(l);
+}
+
+TEST(Documents_AClosedFloatingDocumentComesBackAmongTheDocuments) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	const RECT rc{ 20, 30, 420, 330 };
+	CHECK(l.Float(p.B, rc));
+	l.Activate(p.A);
+	CHECK(l.Hide(p.B));
+	CHECK(EqualRect(&p.B->LastFloatRect(), &rc));				// remembered for floating it again
+	CHECK(l.Show(p.B));
+	CHECK(p.B->State() == PaneState::Document && p.B->Group() == p.A->Group());
+	CHECK_VALID(l);
+}
+
+TEST(Documents_FloatingGroupsCanBeMovedBack) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	CHECK(l.Float(p.B, { 0, 0, 300, 200 }));
+	CHECK(l.CanMoveGroupTo(p.B->Group(), p.A->Group(), DockPosition::Tab));
+	CHECK(l.MoveGroupTo(p.B->Group(), p.A->Group(), DockPosition::Tab));
+	CHECK(p.B->State() == PaneState::Document && l.Floats().empty() && p.B->Group() == p.A->Group());
+	CHECK_VALID(l);
+}
+
+TEST(Documents_SplitsAndFloatsSurviveSaveAndLoad) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	CHECK(l.DockTo(p.B, p.A->Group(), DockPosition::Right));
+	CHECK(l.Float(p.C, { 10, 20, 410, 320 }));
+	const auto dump = l.Dump();
+	const auto text = l.Save();
+
+	DockLayout copy;
+	Register(copy);
+	CHECK(copy.Load(text));
+	CHECK_STR(copy.Dump(), dump);
+	CHECK(copy.FindPane(L"c.cpp")->State() == PaneState::Floating && copy.FindPane(L"c.cpp")->Group()->IsDocument());
+	CHECK(copy.DocumentGroups().size() == 2);
+	CHECK_VALID(copy);
+}
+
+// ---- The window switcher ------------------------------------------------------------------
+
+TEST(Navigator_ListsPlacedPanesMostRecentFirst) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	l.Float(p.Props, { 0, 0, 300, 200 });
+	l.AutoHide(p.Output->Group());
+
+	DockNavigator nav;
+	nav.Build(l, { L"c.cpp", L"Props", L"nothing", L"Ext" });		// Ext is not placed, "nothing" is not a pane
+	const auto& docs = nav.Items(DockNavigator::Column::Documents);
+	const auto& tools = nav.Items(DockNavigator::Column::Tools);
+	CHECK(docs.size() == 3 && docs[0] == p.C && docs[1] == p.A && docs[2] == p.B);
+	CHECK(tools.size() == 3 && tools[0] == p.Props && tools[1] == p.Sol && tools[2] == p.Output);
+	CHECK(!nav.Empty() && nav.CurrentColumn() == DockNavigator::Column::Documents && nav.Row() == 0);
+
+	DockLayout empty;
+	DockNavigator none;
+	none.Build(empty, {});
+	CHECK(none.Empty() && none.Selected() == nullptr);
+	none.MoveRow(1);
+	none.MoveColumn();
+	CHECK(none.Selected() == nullptr);
+}
+
+TEST(Navigator_StartsOnThePreviousDocument) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	DockNavigator nav;
+	nav.Build(l, { L"b.cpp", L"c.cpp", L"a.cpp" });
+	nav.Start(p.B, true);
+	CHECK(nav.Selected() == p.C);										// the one used before b.cpp
+	nav.Start(p.B, false);
+	CHECK(nav.Selected() == p.A);										// going backwards: the least recently used
+	nav.Start(p.Sol, true);
+	CHECK(nav.Selected() == p.B);										// a tool window is active: the most recent document
+	nav.Start(nullptr, true);
+	CHECK(nav.Selected() == p.B);
+
+	// only tool windows: they are what there is
+	DockLayout t;
+	Panes q = Register(t);
+	t.Show(q.Sol);
+	t.Show(q.Props);
+	nav.Build(t, {});
+	nav.Start(q.Sol, true);
+	CHECK(nav.CurrentColumn() == DockNavigator::Column::Tools && nav.Selected() == q.Props);
+
+	// a single item cannot move on
+	DockLayout one;
+	Panes r = Register(one);
+	one.Show(r.A);
+	nav.Build(one, {});
+	nav.Start(r.A, true);
+	CHECK(nav.Selected() == r.A);
+}
+
+TEST(Navigator_MovesWithinAndBetweenTheLists) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	DockNavigator nav;
+	nav.Build(l, {});
+	CHECK(nav.Items(DockNavigator::Column::Documents).size() == 3 && nav.Items(DockNavigator::Column::Tools).size() == 3);
+	nav.MoveRow(1);
+	CHECK(nav.Row() == 1);
+	nav.MoveRow(-2);													// wraps
+	CHECK(nav.Row() == 2);
+	nav.MoveRow(1);
+	CHECK(nav.Row() == 0);
+	nav.MoveRow(2);
+	nav.MoveColumn();
+	CHECK(nav.CurrentColumn() == DockNavigator::Column::Tools && nav.Row() == 2);
+	nav.MoveColumn();
+	CHECK(nav.CurrentColumn() == DockNavigator::Column::Documents);
+
+	CHECK(nav.Select(p.Sol) && nav.CurrentColumn() == DockNavigator::Column::Tools && nav.Selected() == p.Sol);
+	CHECK(!nav.Select(p.Ext) && !nav.Select(DockNavigator::Column::Tools, 3) && !nav.Select(DockNavigator::Column::Tools, -1));
+	CHECK(nav.Selected() == p.Sol);
+
+	// a shorter list clamps the row
+	l.Hide(p.Output);
+	nav.Build(l, {});
+	nav.Select(DockNavigator::Column::Documents, 2);
+	nav.MoveColumn();
+	CHECK(nav.Row() == 1 && nav.Selected() == p.Props);
+}
+
+TEST(Geometry_TheSwitcherLayoutScrollsLongLists) {
+	const DockMetrics metrics = DockMetrics::ForDpi(96);
+	const int counts[2] = { 40, 3 };
+	int first[2] = { 0, 0 };
+
+	auto layout = ComputeNavigatorLayout(counts, first, 0, 0, metrics);
+	CHECK((int)layout.Rows[0].size() == NavigatorMaxRows && layout.Rows[1].size() == 3 && layout.First[0] == 0);
+	CHECK(layout.Size.cx > 0 && layout.Size.cy > layout.Column[0].bottom);
+	CHECK(layout.Header[0].bottom == layout.Column[0].top && layout.Column[0].right < layout.Column[1].left);
+	CHECK(layout.Footer.top >= layout.Column[0].bottom && layout.Footer.bottom <= layout.Size.cy);
+	for (int i = 1; i < (int)layout.Rows[0].size(); i++)
+		CHECK(layout.Rows[0][i].top == layout.Rows[0][i - 1].bottom);
+
+	// the selection is kept in view, going down and coming back
+	layout = ComputeNavigatorLayout(counts, first, 0, 20, metrics);
+	CHECK(layout.First[0] == 20 - NavigatorMaxRows + 1);
+	first[0] = layout.First[0];
+	layout = ComputeNavigatorLayout(counts, first, 0, 19, metrics);
+	CHECK(layout.First[0] == first[0]);									// still in view: it does not move
+	layout = ComputeNavigatorLayout(counts, first, 0, 3, metrics);
+	CHECK(layout.First[0] == 3);
+	layout = ComputeNavigatorLayout(counts, first, 0, 39, metrics);
+	CHECK(layout.First[0] == 40 - NavigatorMaxRows && (int)layout.Rows[0].size() == NavigatorMaxRows);
+
+	// nothing in it yet still has a size, and a higher DPI a bigger one
+	const int none[2] = { 0, 0 };
+	const int noFirst[2] = { 0, 0 };
+	auto small = ComputeNavigatorLayout(none, noFirst, -1, -1, metrics);
+	auto big = ComputeNavigatorLayout(none, noFirst, -1, -1, DockMetrics::ForDpi(192));
+	CHECK(small.Size.cx > 0 && small.Rows[0].empty() && big.Size.cx > small.Size.cx && big.Size.cy > small.Size.cy);
+}
+
+// ---- Floating windows at a DPI of their own ------------------------------------------------
+
+// a floating window with two tool groups side by side (fixed sizes), which is what a second monitor sees
+static DockFloat* MakeTwoGroupFloat(DockLayout& l, Panes& p) {
+	CHECK(l.Float(p.Sol, { 100, 100, 900, 500 }));
+	DockFloat* window = l.Floats()[0].get();
+	CHECK(l.DockToEdge(p.Props, DockSide::Right, window));
+	return l.Floats()[0].get();
+}
+
+TEST(FloatDpi_TheSizesInAFloatFollowItsMonitor) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	DockFloat* window = MakeTwoGroupFloat(l, p);
+	CHECK(window->Dpi() == 96);
+	const auto& kids = window->Root().Children();
+	CHECK(kids.size() == 2 && !kids[1]->Size.IsStar() && kids[1]->Size.Value == 200);
+	const auto firstLine = [](const std::wstring& dump) { return dump.substr(0, dump.find(L'\n')); };
+	const auto mainBefore = firstLine(l.Dump());
+
+	l.Arrange(*window, { 0, 0, 1000, 600 });
+	const int minBefore = l.MinLength(window->Root(), Axis::Horizontal);
+	const int gapBefore = kids[1]->Rect.left - kids[0]->Rect.right;
+	CHECK(gapBefore == l.Metrics().SplitterThickness);
+
+	CHECK(l.SetFloatDpi(window, 192));
+	CHECK(window->Dpi() == 192 && l.Dpi() == 96);
+	CHECK(!window->Root().Children()[1]->Size.IsStar() && window->Root().Children()[1]->Size.Value == 400);
+	CHECK(firstLine(l.Dump()) == mainBefore);					// the main tree is as it was
+
+	// what a group needs is worked out at the DPI of its tree
+	CHECK(l.MinLength(window->Root(), Axis::Horizontal) == minBefore * 2);
+	l.Arrange(*window, { 0, 0, 2000, 1200 });
+	CHECK(window->Root().Children()[1]->Rect.left - window->Root().Children()[0]->Rect.right == gapBefore * 2);
+	CHECK(Width(window->Root().Children()[1]->Rect) == 400);
+	CHECK_VALID(l);
+
+	// nothing to do, or nothing sensible to do
+	const uint64_t version = l.Version();
+	CHECK(l.SetFloatDpi(window, 192) && l.Version() == version);
+	CHECK(!l.SetFloatDpi(window, 10) && !l.SetFloatDpi(window, 5000) && !l.SetFloatDpi(nullptr, 96) && l.Version() == version);
+
+	// and back
+	CHECK(l.SetFloatDpi(window, 96));
+	CHECK(window->Root().Children()[1]->Size.Value == 200);
+}
+
+TEST(FloatDpi_TheMainWindowsDpiLeavesFloatsAlone) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	DockFloat* window = MakeTwoGroupFloat(l, p);
+	const double floatSize = window->Root().Children()[1]->Size.Value;
+	const double outputSize = p.Output->Group()->Size.Value;			// fixed size, in the main window
+	l.SetDpi(144);
+	CHECK(l.Dpi() == 144 && window->Dpi() == 96);
+	CHECK(window->Root().Children()[1]->Size.Value == floatSize);
+	CHECK(!p.Output->Group()->Size.IsStar() && p.Output->Group()->Size.Value == outputSize * 1.5);
+	CHECK_VALID(l);
+
+	// the minimum sizes are in the layout's DPI; the window's tree is at its own
+	l.Arrange(*window, { 0, 0, 1000, 600 });
+	CHECK(l.MinLength(window->Root(), Axis::Horizontal) >= 2 * ::MulDiv(l.Metrics().MinGroupSize.cx, 96, 144));
+}
+
+TEST(FloatDpi_ADockedGroupKeepsItsSizeAcrossMonitors) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.Float(p.Sol, { 100, 100, 900, 500 }));
+	DockFloat* window = l.Floats()[0].get();
+	l.Arrange(*window, { 0, 0, 600, 400 });						// the group is 600 wide, at 96 DPI
+	CHECK(l.SetFloatDpi(window, 192));							// the window moves to a monitor twice as sharp
+	CHECK(l.MoveGroupToEdge(p.Sol->Group(), DockSide::Left));
+	// docking it brings it to the main window, at the main window's DPI: 300 there is what 600 was here
+	CHECK(!l.Root().Children()[0]->Size.IsStar() && l.Root().Children()[0]->Size.Value == 300);
+	CHECK_VALID(l);
+}
+
+TEST(FloatDpi_ItIsSavedWithTheWindow) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	DockFloat* window = MakeTwoGroupFloat(l, p);
+	CHECK(l.SetFloatDpi(window, 192));
+	const std::string text = l.Save();
+	CHECK(text.find("\"dpi\": 192") != std::string::npos || text.find("\"dpi\":192") != std::string::npos);
+
+	DockLayout copy;
+	Register(copy);
+	copy.SetDpi(144);											// this session's main window is at another DPI
+	CHECK(copy.Load(text));
+	CHECK(copy.Floats().size() == 1 && copy.Floats()[0]->Dpi() == 192);
+	CHECK(copy.Floats()[0]->Root().Children()[1]->Size.Value == 400);	// as it was, at the DPI it was
+	CHECK_VALID(copy);
+	CHECK(copy.Save().find("192") != std::string::npos);
+}
+
+TEST(FloatDpi_OlderFilesHadTheirFloatsAtTheDpiOfTheFile) {
+	DockLayout copy;
+	Register(copy);
+	const char* text = R"({
+		"version": 1,
+		"dpi": 192,
+		"main": { "type": "split", "axis": "h", "children": [ { "type": "group", "kind": "document", "panes": ["a.cpp"] } ] },
+		"floats": [ { "rect": [1, 2, 801, 602], "root": { "type": "split", "axis": "h", "children": [
+			{ "type": "group", "kind": "tool", "panes": ["Sol"] },
+			{ "type": "group", "kind": "tool", "panes": ["Props"], "size": { "px": 400 } } ] } } ]
+	})";
+	CHECK(copy.Load(text));
+	CHECK(copy.Floats().size() == 1 && copy.Floats()[0]->Dpi() == copy.Dpi());
+	CHECK(copy.Floats()[0]->Root().Children()[1]->Size.Value == 200);		// 400 at 192 DPI, 200 at 96
+	CHECK_VALID(copy);
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -1683,7 +2073,7 @@ int wmain() {
 	Run_Load_DropsUnknownPanesAndHidesUnlistedOnes();
 	Run_Load_FactoryCreatesMissingPanes();
 	Run_Load_DropsPanesOfTheWrongKindAndDuplicates();
-	Run_Load_DocumentGroupsInFloatsAreDropped();
+	Run_Load_DocumentGroupsInAutoHideAreDropped();
 	Run_Load_RejectsBadInputAndLeavesTheLayoutAlone();
 	Run_Load_JsonEscapesAndUnicode();
 	Run_ChangeHandler_FiresOncePerOperation();
@@ -1723,6 +2113,23 @@ int wmain() {
 	Run_Files_AreWrittenWholeOrNotAtAll();
 	Run_Screen_ARectangleThatIsOutOfReachComesBack();
 
+	Run_Documents_FloatIntoAWindowOfTheirOwn();
+	Run_Documents_TheMainWindowKeepsADocumentGroup();
+	Run_Documents_TheLastGroupOfTheMainWindowCannotBeSplitOffIntoAFloat();
+	Run_Documents_DocumentGroupsAreListedInTreeOrder();
+	Run_Documents_ShowOpensThemInTheActiveGroup();
+	Run_Documents_AClosedFloatingDocumentComesBackAmongTheDocuments();
+	Run_Documents_FloatingGroupsCanBeMovedBack();
+	Run_Documents_SplitsAndFloatsSurviveSaveAndLoad();
+	Run_Navigator_ListsPlacedPanesMostRecentFirst();
+	Run_Navigator_StartsOnThePreviousDocument();
+	Run_Navigator_MovesWithinAndBetweenTheLists();
+	Run_Geometry_TheSwitcherLayoutScrollsLongLists();
+	Run_FloatDpi_TheSizesInAFloatFollowItsMonitor();
+	Run_FloatDpi_TheMainWindowsDpiLeavesFloatsAlone();
+	Run_FloatDpi_ADockedGroupKeepsItsSizeAcrossMonitors();
+	Run_FloatDpi_ItIsSavedWithTheWindow();
+	Run_FloatDpi_OlderFilesHadTheirFloatsAtTheDpiOfTheFile();
 	Run_Random_OperationsKeepTheInvariants();
 
 	RunUiTests();
