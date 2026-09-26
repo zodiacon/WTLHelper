@@ -60,12 +60,14 @@ public:
 	END_MSG_MAP()
 
 private:
+	enum class Button { None, Close, Pin, Menu };
+
 	struct Strip {
 		TabStrip Layout;
 		std::vector<TabSpec> Specs;
 	};
 	struct Hit {
-		enum class Kind { None, Caption, CaptionClose, Tab, TabClose, Overflow } Type{ Kind::None };
+		enum class Kind { None, Caption, CaptionClose, CaptionPin, CaptionMenu, Tab, TabClose, Overflow } Type{ Kind::None };
 		int Tab{ -1 };		// index among all tabs of the group
 	};
 
@@ -90,7 +92,14 @@ private:
 	Hit Locate(POINT pt);
 	DockPane* PaneAt(int tab) const;
 	bool CloseButtonVisible() const;
-	void DrawCloseGlyph(CDCHandle dc, const RECT& button, bool hot) const;
+	bool PinVisible() const;
+	bool MenuVisible() const;
+	CaptionButtons ButtonsFor(const GroupParts& parts) const;
+	static Button ButtonOf(Hit::Kind kind);
+	void RunButton(Button button);
+	void DrawCloseGlyph(CDCHandle dc, const RECT& button, bool hot, COLORREF idle) const;
+	void DrawPinGlyph(CDCHandle dc, const RECT& button, bool pinned, bool hot, COLORREF idle) const;
+	void DrawMenuGlyph(CDCHandle dc, const RECT& button, bool hot, COLORREF idle) const;
 	void Draw(HDC hdc, RECT clip);
 	void ShowOverflowMenu(const RECT& button, bool stripAtBottom);
 	void SetHot(int tab, bool close, bool overflow);
@@ -107,8 +116,8 @@ private:
 	int m_LastActive{ -1 };
 
 	// hover and press state
-	bool m_HotClose{};			// the caption's close button
-	bool m_PressClose{};
+	Button m_HotButton{};		// the caption button under the mouse
+	Button m_PressButton{};		// and the one that is pressed
 	int m_HotTab{ -1 };
 	bool m_HotTabClose{};
 	bool m_HotOverflow{};

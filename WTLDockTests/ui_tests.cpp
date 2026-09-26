@@ -49,6 +49,7 @@ struct Fixture {
 		RECT rc{ 0, 0, width, height };
 		Host.Create(Frame, rc, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
 		Host.SetKeepFloatsOnScreen(false);
+		Host.SetFlyoutTiming(0, 0, 100000);		// no slide, hover opens at once, nothing closes by itself
 		Pump();
 	}
 
@@ -162,10 +163,12 @@ void Verify(Fixture& f, int line) {
 	for (HWND frame : FramesOf(f))
 		Check(expectedFrames.contains(frame), "no stale frames", line);
 
+	DockPane* flyout = f.Host.FlyoutPane();
+	DockGroup* flyoutGroup = flyout ? flyout->Group() : nullptr;
 	layout.ForEachGroup([&](DockGroup& g) {
-		if (g.Location() == GroupLocation::AutoHide)
+		if (g.Location() == GroupLocation::AutoHide && &g != flyoutGroup)
 			return;
-		HWND surface = g.Location() == GroupLocation::Main ? f.Host.m_hWnd : f.Host.FloatWindow(g.Float()->Id());
+		HWND surface = g.Location() == GroupLocation::Float ? f.Host.FloatWindow(g.Float()->Id()) : f.Host.m_hWnd;
 		HWND w = f.Host.GroupWindow(&g);
 		Check(w != nullptr, "every shown group has a window", line);
 		if (!w || !surface)
@@ -174,8 +177,10 @@ void Verify(Fixture& f, int line) {
 		Check(::GetParent(w) == surface, "group windows are children of their surface", line);
 		Check(::IsWindowVisible(w) != FALSE, "group windows are visible", line);
 		const RECT actual = RectIn(w, surface);
-		Check(EqualRect(&actual, &g.Rect) != FALSE, "group window rectangle equals the model's", line);
+		const RECT expected = &g == flyoutGroup ? f.Host.FlyoutRect() : g.Rect;
+		Check(EqualRect(&actual, &expected) != FALSE, "group window rectangle equals the model's", line);
 	});
+	Check((flyout != nullptr) == (flyoutGroup != nullptr && f.Host.GroupWindow(flyoutGroup) != nullptr), "an open flyout has a window", line);
 
 	for (HWND c = ::GetWindow(f.Host, GW_CHILD); c; c = ::GetWindow(c, GW_HWNDNEXT)) {
 		if (ClassOf(c) == L"WTLDock_Group")
@@ -193,7 +198,7 @@ void Verify(Fixture& f, int line) {
 			continue;
 		Check(::IsWindow(p->hWnd) != FALSE, "content windows are never destroyed", line);
 		auto g = p->Group();
-		const bool shown = g && g->Location() != GroupLocation::AutoHide;
+		const bool shown = g && (g->Location() != GroupLocation::AutoHide || g == flyoutGroup);
 		if (!shown || g->ActivePane() != p.get()) {
 			Check(!::IsWindowVisible(p->hWnd), "content of a pane that is not on show is hidden", line);
 			continue;
@@ -1367,6 +1372,309 @@ TEST(Host_DragsBetweenFloatingAndMainWindows) {
 	CHECK(f.Props->State() == PaneState::Docked && f.Props->Group()->Side() == DockSide::Right && FramesOf(f).size() == 1);
 }
 
+// ---- auto-hide bars and the flyout ---------------------------------------------------------
+
+POINT HostToPoint(const RECT& r) {
+	return { (r.left + r.right) / 2, (r.top + r.bottom) / 2 };
+}
+
+// a click on the host window itself (bar items, splitters)
+void ClickHost(Fixture& f, POINT pt) {
+	::SendMessage(f.Host, WM_LBUTTONDOWN, MK_LBUTTON, Pt(pt.x, pt.y));
+	::SendMessage(f.Host, WM_LBUTTONUP, 0, Pt(pt.x, pt.y));
+}
+
+// a pumped wait for something that a timer does
+template<typename Condition>
+bool WaitFor(Condition done, int milliseconds = 1500) {
+	const ULONGLONG start = ::GetTickCount64();
+	while (!done()) {
+		Pump();
+		if (::GetTickCount64() - start > (ULONGLONG)milliseconds)
+			return done();
+		::Sleep(10);
+	}
+	return true;
+}
+
+// the caption buttons of a group window in the layout they have when all three are shown
+CaptionButtons ButtonsOf(Fixture& f, DockGroup* group) {
+	RECT client;
+	::GetClientRect(f.Host.GroupWindow(group), &client);
+	const RECT caption = ComputeGroupParts(*group, client, f.Host.Metrics()).Caption;
+	return ComputeCaptionButtons(caption, true, true, true, f.Host.Metrics());
+}
+
+TEST(Host_AutoHiddenPanesHaveBarItems) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	l.DockTo(f.Props, f.Sol->Group(), DockPosition::Tab);			// Sol, Props
+	CHECK(l.AutoHide(f.Sol->Group()));
+	CHECK(l.AutoHide(f.Output->Group()));
+	VERIFY(f);
+
+	RECT sol{}, props{}, output{};
+	CHECK(f.Host.GetBarItemRect(f.Sol, sol) && f.Host.GetBarItemRect(f.Props, props) && f.Host.GetBarItemRect(f.Output, output));
+	const RECT leftBar = l.AutoHideBarRect(DockSide::Left), bottomBar = l.AutoHideBarRect(DockSide::Bottom);
+	RECT inside;
+	CHECK(IntersectRect(&inside, &sol, &leftBar) && EqualRect(&inside, &sol));
+	CHECK(IntersectRect(&inside, &props, &leftBar) && EqualRect(&inside, &props));
+	CHECK(IntersectRect(&inside, &output, &bottomBar) && EqualRect(&inside, &output));
+	// vertical bar: the items follow each other from the top, without overlap
+	CHECK(sol.bottom <= props.top && Width(sol) == Width(leftBar));
+	RECT none;
+	CHECK(!f.Host.GetBarItemRect(f.A, none));						// not auto-hidden
+	CHECK(f.Host.FlyoutPane() == nullptr);
+}
+
+TEST(Host_ClickingABarItemSlidesTheFlyoutOut) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	const RECT documents = f.A->Group()->Rect;
+
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+	ClickHost(f, HostToPoint(item));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == f.Sol && f.Host.ActivePane() == f.Sol);
+	CHECK(f.Sol->State() == PaneState::AutoHide);
+
+	// it stands over the documents, next to the bar, as wide as the group was
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+	CHECK(window != nullptr && ::IsWindowVisible(window) && ::IsWindowVisible(f.Sol->hWnd));
+	const RECT out = f.Host.FlyoutRect();
+	const RECT area = l.Root().Rect;
+	CHECK(out.left == area.left && out.top == area.top && out.bottom == area.bottom && Width(out) == 250);
+	const RECT actual = RectIn(window, f.Host);
+	CHECK(EqualRect(&actual, &out) != FALSE);
+	// the documents did not move
+	const RECT docs = f.A->Group()->Rect;
+	CHECK(EqualRect(&docs, &documents) != FALSE);
+	CHECK(::GetWindow(window, GW_HWNDPREV) == nullptr);				// on top of its siblings
+
+	// the item of the flyout that is out again: closes it
+	ClickHost(f, HostToPoint(item));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == nullptr && f.Host.GroupWindow(f.Sol->Group()) == nullptr);
+	CHECK(!::IsWindowVisible(f.Sol->hWnd));
+	CHECK(f.Sol->State() == PaneState::AutoHide);
+}
+
+TEST(Host_AnotherItemSwitchesTheFlyout) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	l.DockTo(f.Props, f.Sol->Group(), DockPosition::Tab);
+	CHECK(l.AutoHide(f.Sol->Group()));
+	CHECK(l.AutoHide(f.Output->Group()));
+
+	RECT sol, props, output;
+	CHECK(f.Host.GetBarItemRect(f.Sol, sol) && f.Host.GetBarItemRect(f.Props, props) && f.Host.GetBarItemRect(f.Output, output));
+	ClickHost(f, HostToPoint(sol));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+
+	// the other tab of the same group: the same flyout, with the other pane in it
+	ClickHost(f, HostToPoint(props));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == f.Props && f.Props->Group()->ActivePane() == f.Props);
+	CHECK(::IsWindowVisible(f.Props->hWnd) && !::IsWindowVisible(f.Sol->hWnd));
+
+	// another group: the first goes away, the second comes out of the bottom
+	HWND before = f.Host.GroupWindow(f.Props->Group());
+	ClickHost(f, HostToPoint(output));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == f.Output && f.Host.GroupWindow(f.Props->Group()) == nullptr && !::IsWindow(before));
+	const RECT out = f.Host.FlyoutRect();
+	CHECK(out.bottom == l.Root().Rect.bottom && Height(out) == 150);
+}
+
+TEST(Host_ClickingElsewhereClosesTheFlyout) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+	ClickHost(f, HostToPoint(item));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+
+	// a splitter of the main tree
+	auto splitters = DockLayout::Splitters(l.Root());
+	CHECK(!splitters.empty());
+	ClickHost(f, HostToPoint(splitters[0].Rect));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == nullptr);
+}
+
+TEST(Host_ThePinDocksTheFlyoutAgainAndAutoHidesADockedGroup) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+
+	// docked: the pin sends the group to its bar
+	CaptionButtons buttons = ButtonsOf(f, f.Sol->Group());
+	HWND gw = f.Host.GroupWindow(f.Sol->Group());
+	::SendMessage(gw, WM_LBUTTONDOWN, MK_LBUTTON, Pt(HostToPoint(buttons.Pin).x, HostToPoint(buttons.Pin).y));
+	::SendMessage(gw, WM_LBUTTONUP, 0, Pt(HostToPoint(buttons.Pin).x, HostToPoint(buttons.Pin).y));
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::AutoHide);
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+
+	// out: the pin docks it again, at the edge it came from
+	ClickHost(f, HostToPoint(item));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	buttons = ButtonsOf(f, f.Sol->Group());
+	gw = f.Host.GroupWindow(f.Sol->Group());
+	::SendMessage(gw, WM_LBUTTONDOWN, MK_LBUTTON, Pt(HostToPoint(buttons.Pin).x, HostToPoint(buttons.Pin).y));
+	::SendMessage(gw, WM_LBUTTONUP, 0, Pt(HostToPoint(buttons.Pin).x, HostToPoint(buttons.Pin).y));
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::Docked && f.Sol->Group()->Side() == DockSide::Left);
+	CHECK(f.Host.FlyoutPane() == nullptr && IsRectEmpty(&l.AutoHideBarRect(DockSide::Left)));
+
+	// a pane that cannot be auto-hidden has no pin: pressing where it would be does nothing
+	f.Props->Caps = PaneCaps::None;
+	gw = f.Host.GroupWindow(f.Props->Group());
+	buttons = ButtonsOf(f, f.Props->Group());
+	::SendMessage(gw, WM_LBUTTONDOWN, MK_LBUTTON, Pt(HostToPoint(buttons.Pin).x, HostToPoint(buttons.Pin).y));
+	::SendMessage(gw, WM_LBUTTONUP, 0, Pt(HostToPoint(buttons.Pin).x, HostToPoint(buttons.Pin).y));
+	CHECK(f.Props->State() == PaneState::Docked);
+}
+
+TEST(Host_HoveringAnItemOpensAFlyoutThatClosesWhenTheMouseLeaves) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+
+	::SendMessage(f.Host, WM_MOUSEMOVE, 0, Pt(HostToPoint(item).x, HostToPoint(item).y));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	CHECK(f.Host.ActivePane() != f.Sol);				// hovering does not take the focus
+
+	// the (real) mouse is nowhere near: the flyout goes once the delay has passed
+	f.Host.SetFlyoutTiming(0, 0, 50);
+	CHECK(WaitFor([&] { return f.Host.FlyoutPane() == nullptr; }));
+	VERIFY(f);
+
+	// one that was clicked open does not go by itself
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+	ClickHost(f, HostToPoint(item));
+	CHECK(!WaitFor([&] { return f.Host.FlyoutPane() == nullptr; }, 400));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	f.Host.HideFlyout();
+	VERIFY(f);
+}
+
+TEST(Host_TheFlyoutSlidesInAndOut) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	f.Host.SetFlyoutTiming(200, 0, 100000);
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+
+	ClickHost(f, HostToPoint(item));
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+	CHECK(window != nullptr);
+	// it starts behind the bar...
+	const RECT start = RectIn(window, f.Host);
+	const RECT out = f.Host.FlyoutRect();
+	CHECK(start.left < out.left);
+	// ...and arrives
+	CHECK(WaitFor([&] { const RECT r = RectIn(window, f.Host); return r.left == out.left; }));
+	VERIFY(f);
+
+	// closing slides it back, then it is gone
+	f.Host.HideFlyout();
+	CHECK(f.Host.FlyoutPane() != nullptr);				// still there while it moves
+	CHECK(WaitFor([&] { return f.Host.FlyoutPane() == nullptr; }));
+	VERIFY(f);
+	CHECK(f.Host.GroupWindow(f.Sol->Group()) == nullptr);
+	f.Host.SetFlyoutTiming(0, 0, 100000);
+}
+
+TEST(Host_FocusMovingToAnotherPaneClosesTheFlyout) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+	ClickHost(f, HostToPoint(item));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+
+	// moving the focus into a pane of the main window is what clicking into it does
+	f.Host.ActivatePane(f.A);
+	::SetFocus(f.A->hWnd);
+	CHECK(WaitFor([&] { return f.Host.FlyoutPane() == nullptr; }, 1000));
+	VERIFY(f);
+	CHECK(f.Host.ActivePane() == f.A && f.Sol->State() == PaneState::AutoHide);
+
+	// a flyout that was hovered open (never focused) closes on the focus moving too
+	f.Host.SetFlyoutTiming(0, 0, 100000);
+	::SendMessage(f.Host, WM_MOUSEMOVE, 0, Pt(HostToPoint(item).x, HostToPoint(item).y));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	::SetFocus(f.B->hWnd);
+	f.Host.ActivatePane(f.B);
+	CHECK(WaitFor([&] { return f.Host.FlyoutPane() == nullptr; }, 1000));
+	VERIFY(f);
+}
+
+TEST(Host_TheFlyoutFollowsChangesToTheLayout) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+
+	// docking the group takes the flyout away
+	ClickHost(f, HostToPoint(item));
+	CHECK(l.Unhide(f.Sol->Group()));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == nullptr && f.Sol->State() == PaneState::Docked);
+
+	// so does hiding the pane, or removing it
+	CHECK(l.AutoHide(f.Sol->Group()));
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+	ClickHost(f, HostToPoint(item));
+	CHECK(l.Hide(f.Sol));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == nullptr);
+
+	CHECK(l.Show(f.Sol));											// comes back into the bar ("auto-hide" was its last state)
+	CHECK(f.Sol->State() == PaneState::AutoHide);
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));
+	ClickHost(f, HostToPoint(item));
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	const std::string text = l.Save();
+	CHECK(l.Load(text));											// nodes are all new; the flyout is found again by its pane
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == f.Sol);
+	CHECK(l.RemovePane(f.Sol));
+	VERIFY(f);
+	CHECK(f.Host.FlyoutPane() == nullptr);
+}
+
+TEST(Host_AutoHiddenPanesCanBeDockedFromTheirMenu) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.AutoHide(f.Sol->Group()));
+	CHECK(f.Host.CanExecute(DockCommand::Dock, f.Sol));
+	CHECK(!f.Host.CanExecute(DockCommand::AutoHide, f.Sol) && !f.Host.CanExecute(DockCommand::Float, f.Sol));
+	CHECK(f.Host.Execute(DockCommand::Dock, f.Sol));
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::Docked && f.Sol->Group()->Side() == DockSide::Left);
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -1393,7 +1701,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 		const RECT rc = OffScreen(20, 20, 300, 280);
 
 		bool ok = false;
-		switch (pick(20)) {
+		switch (pick(22)) {
 			case 0: ok = l.Show(anyPane()); break;
 			case 1: ok = l.Hide(anyPane()); break;
 			case 2: ok = l.DockTo(anyPane(), anyGroup(), (DockPosition)pick(5)); break;
@@ -1413,7 +1721,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 				break;
 			}
 			case 11: ok = f.Host.ClosePane(anyPane()); break;
-			case 12: ok = f.Host.Execute((DockCommand)pick(4), anyPane()); break;
+			case 12: ok = f.Host.Execute((DockCommand)pick(6), anyPane()); break;
 			case 13: ok = l.ReorderTab(anyPane(), (int)pick(4)); break;
 			case 14: f.Host.ActivatePane(anyPane()); break;
 			case 15: ok = f.Host.ToggleFloat(anyPane()); break;
@@ -1448,6 +1756,8 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 				}
 				break;
 			}
+			case 20: ok = f.Host.ShowFlyout(anyPane(), pick(2) != 0); break;
+			case 21: f.Host.HideFlyout(); break;
 			case 18:
 				if (!l.Floats().empty())
 					ok = l.SetFloatRect(l.Floats()[pick(l.Floats().size())].get(), OffScreen((int)pick(500), (int)pick(300), 250 + (int)pick(300), 250 + (int)pick(200)));
@@ -1522,6 +1832,16 @@ void RunUiTests() {
 	Run_Host_DraggingACaptionTakesTheWholeGroup();
 	Run_Host_LosingTheMouseCaptureCancelsTheDrag();
 	Run_Host_DragsBetweenFloatingAndMainWindows();
+	Run_Host_AutoHiddenPanesHaveBarItems();
+	Run_Host_ClickingABarItemSlidesTheFlyoutOut();
+	Run_Host_AnotherItemSwitchesTheFlyout();
+	Run_Host_ClickingElsewhereClosesTheFlyout();
+	Run_Host_ThePinDocksTheFlyoutAgainAndAutoHidesADockedGroup();
+	Run_Host_HoveringAnItemOpensAFlyoutThatClosesWhenTheMouseLeaves();
+	Run_Host_TheFlyoutSlidesInAndOut();
+	Run_Host_FocusMovingToAnotherPaneClosesTheFlyout();
+	Run_Host_TheFlyoutFollowsChangesToTheLayout();
+	Run_Host_AutoHiddenPanesCanBeDockedFromTheirMenu();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

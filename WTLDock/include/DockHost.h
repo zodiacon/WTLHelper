@@ -29,7 +29,7 @@ enum class DockCommand {
 	CloseAll,		// all panes of its group
 	AutoHide,		// its group
 	Float,			// the pane, into a window of its own
-	Dock,			// the group of a floating pane, back to where it was docked
+	Dock,			// the group of a floating or auto-hidden pane, docked (at its edge of the window)
 };
 
 // A snapshot of a group's tab strip.
@@ -147,7 +147,29 @@ public:
 	// the number of drop target markers on show
 	int VisibleGuides() const;
 
-	// the window of a group (in the main tree or a floating one), or null
+	//
+	// Auto-hide. A group in an auto-hide bar shows one item per pane; clicking an item (or resting the mouse on it)
+	// slides the group out over the documents as a flyout. It stays while it has the focus and goes when the focus
+	// moves to another pane, when something else is clicked, when the pin is pressed (that docks the group again) or,
+	// if it was only hovered, when the mouse has left it.
+	//
+	bool ShowFlyout(DockPane* pane, bool activate = true);
+	void HideFlyout();
+	// the pane whose group is out (the one shown), or null
+	DockPane* FlyoutPane() const;
+	// where the flyout stands once it is all the way out, in client coordinates of the host
+	RECT FlyoutRect() const;
+	// the item of a pane on its auto-hide bar, in client coordinates of the host
+	bool GetBarItemRect(const DockPane* pane, RECT& rect) const;
+	// milliseconds: the slide (0 for none), the wait before a hovered item opens (0 for at once), and the wait
+	// after the mouse has left a hovered flyout before it closes
+	void SetFlyoutTiming(int animationMs, int hoverDelayMs, int leaveDelayMs) {
+		m_AnimMs = animationMs;
+		m_HoverMs = hoverDelayMs;
+		m_LeaveMs = leaveDelayMs;
+	}
+
+	// the window of a group (in the main tree, a floating one or the flyout), or null
 	HWND GroupWindow(const DockGroup* group) const;
 	TabStripState GetTabState(const DockGroup* group) const;
 	// Brings the windows in line with the layout. Called automatically whenever the layout changes; call it
@@ -173,7 +195,10 @@ public:
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_RBUTTONUP, OnRButtonUp)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
@@ -187,6 +212,7 @@ private:
 
 	struct BarItem {
 		DockGroup* Group;
+		DockPane* Pane;
 		RECT Rect;
 	};
 
@@ -197,6 +223,9 @@ private:
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnRButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
@@ -229,6 +258,16 @@ private:
 	bool BeginFrameMove(int floatId);
 
 	std::vector<BarItem> BarItems(DockSide side, CDCHandle dc) const;
+	bool BarItemAt(POINT pt, BarItem& item) const;
+	void UpdateBarHover(POINT pt);
+	// the flyout
+	DockGroup* ResolveFlyout();
+	void ClearFlyout();
+	RECT FlyoutRectAt(const DockGroup& group, double progress) const;
+	void PositionFlyout();
+	void StartFlyoutAnimation(bool opening);
+	void FinishFlyoutClose();
+	void OnFlyoutFocus(HWND hWnd);
 	void DrawBars(CDCHandle dc);
 	void Draw(HDC hdc, RECT clip);
 
@@ -247,6 +286,20 @@ private:
 	HWINEVENTHOOK m_FocusHook{};
 	bool m_Syncing{};
 	bool m_KeepOnScreen{ true };
+
+	// the flyout of an auto-hidden group: identified by a pane of the group, since nodes come and go
+	std::wstring m_FlyoutId;
+	HWND m_FlyoutWindow{};			// its window, as of the last sync
+	bool m_FlyoutFocused{};			// the user has been in it: it does not close by itself
+	bool m_FlyoutClosing{};
+	double m_FlyoutProgress{ 1 };	// 0: all inside the bar, 1: all the way out
+	double m_AnimFrom{}, m_AnimTarget{};
+	ULONGLONG m_AnimStart{};
+	ULONGLONG m_LeaveSince{};
+	HWND m_ReturnFocus{};
+	std::wstring m_HoverId;			// the bar item the mouse rests on
+	bool m_TrackingMouse{};
+	int m_AnimMs{ 120 }, m_HoverMs{ 300 }, m_LeaveMs{ 500 };
 
 	std::unique_ptr<SplitterTracker> m_Splitters;
 	std::unique_ptr<DockDragSession> m_Drag;

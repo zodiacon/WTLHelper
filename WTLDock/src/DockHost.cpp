@@ -22,6 +22,8 @@ std::wstring GroupTitle(const DockGroup& group) {
 	return title;
 }
 
+constexpr UINT_PTR TimerAnimation = 1, TimerHover = 2, TimerLeave = 3;
+
 constexpr UINT CmdBase = 0xD000;
 constexpr UINT CmdRange = 0x100;
 
@@ -358,6 +360,13 @@ void CDockHost::Sync() {
 	if (m_Drag && m_Drag->Stale())
 		m_Drag.reset();		// its targets are gone
 
+	// a flyout that has the focus keeps it, even if its window is rebuilt below
+	bool flyoutHadFocus = false;
+	if (m_FlyoutWindow && m_FlyoutFocused && ::IsWindow(m_FlyoutWindow)) {
+		HWND focus = ::GetFocus();
+		flyoutHadFocus = focus && (focus == m_FlyoutWindow || ::IsChild(m_FlyoutWindow, focus));
+	}
+
 	// every group of every tree; floatId 0 is the main tree
 	struct Live {
 		DockGroup* Group;
@@ -374,6 +383,9 @@ void CDockHost::Sync() {
 		}
 	};
 	collect(m_Layout.Root(), 0);
+	DockGroup* flyoutGroup = ResolveFlyout();
+	if (flyoutGroup)
+		live.push_back({ flyoutGroup, -1 });
 	std::set<int> floatIds;
 	for (auto& f : m_Layout.Floats()) {
 		collect(f->Root(), f->Id());
@@ -434,7 +446,7 @@ void CDockHost::Sync() {
 	// windows for new groups, in the window of their tree
 	std::vector<Live> placed;
 	for (auto& l : live) {
-		HWND surface = l.FloatId == 0 ? m_hWnd : FloatWindow(l.FloatId);
+		HWND surface = l.FloatId <= 0 ? m_hWnd : FloatWindow(l.FloatId);
 		if (!surface)
 			continue;
 		auto& window = m_Groups[l.Group];
@@ -458,7 +470,7 @@ void CDockHost::Sync() {
 		if (!p->hWnd || !::IsWindow(p->hWnd))
 			continue;
 		auto g = p->Group();
-		if (g && (g->Location() == GroupLocation::Main || g->Location() == GroupLocation::Float))
+		if (g && (g->Location() == GroupLocation::Main || g->Location() == GroupLocation::Float || g == flyoutGroup))
 			continue;
 		Adopt(p->hWnd, m_hWnd);
 		::ShowWindow(p->hWnd, SW_HIDE);
@@ -500,8 +512,26 @@ void CDockHost::Sync() {
 		::EndDeferWindowPos(dwp);
 		windows.insert(windows.end(), batch.begin(), batch.end());
 	}
+	// the flyout stands over the documents, on top of the other windows
+	if (flyoutGroup) {
+		for (auto& l : placed) {
+			if (l.FloatId != -1)
+				continue;
+			auto window = m_Groups[l.Group];
+			window->Attach(l.Group);
+			windows.push_back(window);
+		}
+		PositionFlyout();
+	}
 	for (auto w : windows)
 		w->Relayout();
+	m_FlyoutWindow = flyoutGroup ? GroupWindow(flyoutGroup) : nullptr;
+	if (flyoutHadFocus && flyoutGroup) {
+		HWND window = m_FlyoutWindow, focus = ::GetFocus();
+		auto pane = flyoutGroup->ActivePane();
+		if (window && pane && pane->hWnd && ::IsWindowVisible(pane->hWnd) && !(focus && (focus == window || ::IsChild(window, focus))))
+			::SetFocus(pane->hWnd);
+	}
 
 	Invalidate(FALSE);
 	for (auto& f : m_Layout.Floats()) {
@@ -559,6 +589,7 @@ DockPane* CDockHost::PaneFromWindow(HWND hWnd) const {
 void CDockHost::OnFocusChanged(HWND hWnd) {
 	if (!hWnd)
 		return;
+	OnFlyoutFocus(hWnd);
 	if (auto pane = PaneFromWindow(hWnd))
 		SetActivePane(pane);
 }
@@ -635,6 +666,8 @@ LRESULT CDockHost::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CDockHost::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
 	m_Layout.SetChangeHandler({});
 	m_Drag.reset();
+	ClearFlyout();
+	KillTimer(TimerHover);
 	if (m_FocusHook) {
 		::UnhookWinEvent(m_FocusHook);
 		std::erase_if(Hooks(), [&](auto& e) { return e.first == m_FocusHook; });
@@ -684,13 +717,15 @@ std::vector<CDockHost::BarItem> CDockHost::BarItems(DockSide side, CDCHandle dc)
 	const int pad = m_Metrics.TabPadding;
 	int pos = (vertical ? bar.top : bar.left) + m_Metrics.TabGap * 4;
 	for (auto& g : m_Layout.AutoHideGroups(side)) {
-		auto title = GroupTitle(*g);
-		SIZE size{};
-		dc.GetTextExtent(title.c_str(), (int)title.size(), &size);
-		const int length = size.cx + 2 * pad;
-		RECT r = vertical ? RECT{ bar.left, pos, bar.right, pos + length } : RECT{ pos, bar.top, pos + length, bar.bottom };
-		items.push_back({ g.get(), r });
-		pos += length + m_Metrics.TabGap * 4;
+		for (auto pane : g->Panes()) {
+			SIZE size{};
+			dc.GetTextExtent(pane->Title.c_str(), (int)pane->Title.size(), &size);
+			const int length = size.cx + 2 * pad;
+			RECT r = vertical ? RECT{ bar.left, pos, bar.right, pos + length } : RECT{ pos, bar.top, pos + length, bar.bottom };
+			items.push_back({ g.get(), pane, r });
+			pos += length + m_Metrics.TabGap * 2;
+		}
+		pos += m_Metrics.TabGap * 6;		// a little more between groups
 	}
 	return items;
 }
@@ -706,9 +741,22 @@ void CDockHost::DrawBars(CDCHandle dc) {
 
 		dc.SelectFont(m_Font);
 		for (auto& item : BarItems(side, dc)) {
-			dc.FillSolidRect(&item.Rect, m_Theme.BarItemBack);
-			dc.SetTextColor(m_Theme.BarItemText);
-			auto title = GroupTitle(*item.Group);
+			const bool out = item.Pane == FlyoutPane();
+			dc.FillSolidRect(&item.Rect, out ? m_Theme.TabActiveBack : m_Theme.BarItemBack);
+			// the item of the flyout that is out has the accent line, on the side of the bar that faces the documents
+			if (out) {
+				const int line = std::max(2, m_Dpi * 2 / 96);
+				RECT accent = item.Rect;
+				switch (side) {
+					case DockSide::Left: accent.left = accent.right - line; break;
+					case DockSide::Right: accent.right = accent.left + line; break;
+					case DockSide::Top: accent.top = accent.bottom - line; break;
+					case DockSide::Bottom: accent.bottom = accent.top + line; break;
+				}
+				dc.FillSolidRect(&accent, m_Theme.TabActiveAccent);
+			}
+			dc.SetTextColor(out ? m_Theme.TabActiveText : m_Theme.BarItemText);
+			const std::wstring& title = item.Pane->Title;
 			if (vertical) {
 				TEXTMETRIC tm;
 				dc.SelectFont(m_VerticalFont);
@@ -756,26 +804,110 @@ void CDockHost::Draw(HDC hdc, RECT clip) {
 
 LRESULT CDockHost::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL&) {
 	const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-	if (m_Splitters->Begin(m_hWnd, m_Layout.Root(), pt))
-		return 0;
 
-	// an item on an auto-hide bar brings the group back (the slide-out flyout comes with phase 6)
-	CClientDC dc(m_hWnd);
-	HFONT old = dc.SelectFont(m_Font);
-	DockGroup* restore = nullptr;
-	for (int side = 0; side < SideCount && !restore; side++)
-		for (auto& item : BarItems((DockSide)side, dc.m_hDC))
-			if (PtInRect(&item.Rect, pt))
-				restore = item.Group;
-	dc.SelectFont(old);
-	if (restore)
-		m_Layout.Unhide(restore);
+	// an item on an auto-hide bar slides its group out (or, if that is the one that is out, back in)
+	BarItem item;
+	if (BarItemAt(pt, item)) {
+		if (FlyoutPane() == item.Pane && !m_FlyoutClosing)
+			HideFlyout();
+		else
+			ShowFlyout(item.Pane, true);
+		return 0;
+	}
+	HideFlyout();		// a click on anything else
+	m_Splitters->Begin(m_hWnd, m_Layout.Root(), pt);
 	return 0;
 }
 
-LRESULT CDockHost::OnMouseMove(UINT, WPARAM, LPARAM lp, BOOL&) {
-	m_Splitters->Move(m_Layout, m_Layout.Root(), { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) });
+LRESULT CDockHost::OnRButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
+	const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+	BarItem item;
+	if (BarItemAt(pt, item)) {
+		POINT screen = pt;
+		ClientToScreen(&screen);
+		ShowPaneMenu(item.Pane, screen);
+	}
 	return 0;
+}
+
+bool CDockHost::BarItemAt(POINT pt, BarItem& item) const {
+	bool any = false;
+	for (int side = 0; side < SideCount; side++)
+		any |= !m_Layout.AutoHideGroups((DockSide)side).empty();
+	if (!any)
+		return false;
+
+	CClientDC dc(m_hWnd);
+	HFONT old = dc.SelectFont(m_Font);
+	bool found = false;
+	for (int side = 0; side < SideCount && !found; side++) {
+		for (auto& candidate : BarItems((DockSide)side, dc.m_hDC)) {
+			if (PtInRect(&candidate.Rect, pt)) {
+				item = candidate;
+				found = true;
+				break;
+			}
+		}
+	}
+	dc.SelectFont(old);
+	return found;
+}
+
+bool CDockHost::GetBarItemRect(const DockPane* pane, RECT& rect) const {
+	CClientDC dc(m_hWnd);
+	HFONT old = dc.SelectFont(m_Font);
+	bool found = false;
+	for (int side = 0; side < SideCount && !found; side++) {
+		for (auto& item : BarItems((DockSide)side, dc.m_hDC)) {
+			if (item.Pane == pane) {
+				rect = item.Rect;
+				found = true;
+				break;
+			}
+		}
+	}
+	dc.SelectFont(old);
+	return found;
+}
+
+LRESULT CDockHost::OnMouseMove(UINT, WPARAM, LPARAM lp, BOOL&) {
+	const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+	m_Splitters->Move(m_Layout, m_Layout.Root(), pt);
+	if (!m_Splitters->Dragging())
+		UpdateBarHover(pt);
+	return 0;
+}
+
+LRESULT CDockHost::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
+	m_TrackingMouse = false;
+	m_HoverId.clear();
+	KillTimer(TimerHover);
+	return 0;
+}
+
+// resting the mouse on a bar item slides the flyout out after a moment
+void CDockHost::UpdateBarHover(POINT pt) {
+	BarItem item;
+	if (!BarItemAt(pt, item)) {
+		if (!m_HoverId.empty()) {
+			m_HoverId.clear();
+			KillTimer(TimerHover);
+		}
+		return;
+	}
+	if (!m_TrackingMouse) {
+		TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd, 0 };
+		m_TrackingMouse = ::TrackMouseEvent(&tme) != FALSE;
+	}
+	if (item.Pane->Id() == m_HoverId || (FlyoutPane() == item.Pane && !m_FlyoutClosing))
+		return;
+	m_HoverId = item.Pane->Id();
+	if (m_HoverMs <= 0) {
+		ShowFlyout(item.Pane, false);
+		return;
+	}
+	KillTimer(TimerHover);
+	SetTimer(TimerHover, (UINT)m_HoverMs);
 }
 
 LRESULT CDockHost::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
@@ -800,6 +932,244 @@ LRESULT CDockHost::OnSetCursor(UINT, WPARAM, LPARAM lp, BOOL& handled) {
 		handled = TRUE;
 		return TRUE;
 	}
+	return 0;
+}
+
+//
+// the flyout
+//
+
+DockPane* CDockHost::FlyoutPane() const {
+	if (m_FlyoutId.empty())
+		return nullptr;
+	auto pane = m_Layout.FindPane(m_FlyoutId);
+	return pane && pane->State() == PaneState::AutoHide && pane->Group() ? pane : nullptr;
+}
+
+RECT CDockHost::FlyoutRect() const {
+	auto pane = FlyoutPane();
+	return pane ? FlyoutRectAt(*pane->Group(), 1.0) : RECT{};
+}
+
+DockGroup* CDockHost::ResolveFlyout() {
+	if (m_FlyoutId.empty())
+		return nullptr;
+	auto pane = FlyoutPane();
+	if (!pane) {
+			ClearFlyout();
+		return nullptr;
+	}
+	auto group = pane->Group();
+	if (auto active = group->ActivePane())
+		m_FlyoutId = active->Id();		// switching tabs inside the flyout keeps it out
+	return group;
+}
+
+void CDockHost::ClearFlyout() {
+	m_FlyoutId.clear();
+	m_FlyoutWindow = nullptr;
+	m_FlyoutClosing = false;
+	m_FlyoutFocused = false;
+	m_FlyoutProgress = 1;
+	m_LeaveSince = 0;
+	if (m_hWnd) {
+		KillTimer(TimerAnimation);
+		KillTimer(TimerLeave);
+	}
+}
+
+// the area next to the bar, as long as the group likes to be (but not most of the window)
+RECT CDockHost::FlyoutRectAt(const DockGroup& group, double progress) const {
+	const RECT area = m_Layout.Root().Rect;
+	const DockSide side = group.Side().value_or(DockSide::Left);
+	const Axis axis = AxisOf(side);
+	const int minimum = Along(m_Metrics.MinGroupSize, axis);
+	int length = group.AutoHideLength > 0 ? group.AutoHideLength : 250;
+	length = std::clamp(length, minimum, std::max(minimum, Length(area, axis) * 8 / 10));
+
+	RECT r = area;
+	switch (side) {
+		case DockSide::Left: r.right = area.left + length; break;
+		case DockSide::Right: r.left = area.right - length; break;
+		case DockSide::Top: r.bottom = area.top + length; break;
+		case DockSide::Bottom: r.top = area.bottom - length; break;
+	}
+	// sliding: behind the bar it comes from
+	const int behind = (int)std::lround((1.0 - progress) * length);
+	switch (side) {
+		case DockSide::Left: OffsetRect(&r, -behind, 0); break;
+		case DockSide::Right: OffsetRect(&r, behind, 0); break;
+		case DockSide::Top: OffsetRect(&r, 0, -behind); break;
+		case DockSide::Bottom: OffsetRect(&r, 0, behind); break;
+	}
+	return r;
+}
+
+void CDockHost::PositionFlyout() {
+	auto pane = FlyoutPane();
+	if (!pane)
+		return;
+	auto group = pane->Group();
+	auto it = m_Groups.find(group);
+	if (it == m_Groups.end())
+		return;
+
+	HWND window = it->second->m_hWnd;
+	const RECT r = FlyoutRectAt(*group, m_FlyoutProgress);
+	::SetWindowPos(window, HWND_TOP, r.left, r.top, Width(r), Height(r), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	if (m_FlyoutProgress < 1.0) {
+		// the part that is still behind the bar is cut off
+		RECT visible;
+		const RECT area = m_Layout.Root().Rect;
+		IntersectRect(&visible, &r, &area);
+		OffsetRect(&visible, -r.left, -r.top);
+		::SetWindowRgn(window, ::CreateRectRgnIndirect(&visible), TRUE);
+	}
+	else {
+		::SetWindowRgn(window, nullptr, TRUE);
+	}
+}
+
+void CDockHost::StartFlyoutAnimation(bool opening) {
+	if (m_AnimMs <= 0) {
+		m_FlyoutProgress = opening ? 1 : 0;
+		return;
+	}
+	m_AnimFrom = m_FlyoutProgress;
+	m_AnimTarget = opening ? 1 : 0;
+	m_AnimStart = ::GetTickCount64();
+	SetTimer(TimerAnimation, 15);
+}
+
+bool CDockHost::ShowFlyout(DockPane* pane, bool activate) {
+	if (!pane || pane->State() != PaneState::AutoHide || !pane->Group())
+		return false;
+
+	auto out = FlyoutPane();
+	const bool sameGroup = out && out->Group() == pane->Group() && !m_FlyoutClosing;
+	if (activate && !sameGroup && !m_FlyoutFocused)
+		m_ReturnFocus = ::GetFocus();
+	m_FlyoutClosing = false;
+	m_FlyoutId = pane->Id();
+	if (!out)
+		m_FlyoutProgress = m_AnimMs > 0 ? 0 : 1;
+	m_HoverId.clear();
+	KillTimer(TimerHover);
+
+	m_Layout.Activate(pane);
+	Sync();		// (the activation above already did this, unless the pane was the active one)
+	if (m_FlyoutProgress < 1.0)
+		StartFlyoutAnimation(true);
+
+	m_LeaveSince = 0;
+	m_FlyoutFocused = activate;
+	SetTimer(TimerLeave, 50);
+	if (activate)
+		ActivatePane(pane);
+	return true;
+}
+
+void CDockHost::HideFlyout() {
+	if (m_FlyoutId.empty() || m_FlyoutClosing)
+		return;
+	if (!FlyoutPane()) {
+		ClearFlyout();
+		return;
+	}
+	if (m_AnimMs <= 0) {
+		FinishFlyoutClose();
+		return;
+	}
+	m_FlyoutClosing = true;
+	StartFlyoutAnimation(false);
+}
+
+void CDockHost::FinishFlyoutClose() {
+	const bool wasFocused = m_FlyoutFocused;
+	ClearFlyout();
+	Sync();
+	// the user was in there: back to where they were
+	if (wasFocused && m_ReturnFocus && ::IsWindow(m_ReturnFocus) && ::IsWindowVisible(m_ReturnFocus))
+		::SetFocus(m_ReturnFocus);
+	m_ReturnFocus = nullptr;
+}
+
+void CDockHost::OnFlyoutFocus(HWND hWnd) {
+	auto pane = FlyoutPane();
+	if (!pane || m_FlyoutClosing)
+		return;
+	// the event is on its way for a while; if the focus has moved on since, it is not news
+	if (::GetFocus() != hWnd)
+		return;
+	HWND window = GroupWindow(pane->Group());
+	if (window && (hWnd == window || ::IsChild(window, hWnd))) {
+		m_FlyoutFocused = true;
+		return;
+	}
+	// the focus went to another pane, or to another part of the window: the flyout has done its job
+	if (PaneFromWindow(hWnd) || ::IsChild(::GetAncestor(m_hWnd, GA_ROOT), hWnd))
+		HideFlyout();
+}
+
+LRESULT CDockHost::OnTimer(UINT, WPARAM id, LPARAM, BOOL& handled) {
+	switch (id) {
+		case TimerAnimation: {
+			const double t = std::min(1.0, (double)(::GetTickCount64() - m_AnimStart) / std::max(1, m_AnimMs));
+			const double eased = 1 - (1 - t) * (1 - t) * (1 - t);
+			m_FlyoutProgress = m_AnimFrom + (m_AnimTarget - m_AnimFrom) * eased;
+			if (t >= 1) {
+				KillTimer(TimerAnimation);
+				m_FlyoutProgress = m_AnimTarget;
+				if (m_FlyoutClosing) {
+					FinishFlyoutClose();
+					return 0;
+				}
+			}
+			PositionFlyout();
+			return 0;
+		}
+
+		case TimerHover: {
+			KillTimer(TimerHover);
+			POINT pt;
+			::GetCursorPos(&pt);
+			ScreenToClient(&pt);
+			BarItem item;
+			if (!m_HoverId.empty() && BarItemAt(pt, item) && item.Pane->Id() == m_HoverId)
+				ShowFlyout(item.Pane, false);
+			return 0;
+		}
+
+		case TimerLeave: {
+			auto pane = FlyoutPane();
+			if (!pane) {
+				KillTimer(TimerLeave);
+				return 0;
+			}
+			if (m_FlyoutClosing || m_FlyoutFocused) {
+				m_LeaveSince = 0;
+				return 0;
+			}
+			// a flyout that was only hovered goes when the mouse has left it and the bars
+			POINT pt;
+			::GetCursorPos(&pt);
+			ScreenToClient(&pt);
+			const RECT out = FlyoutRectAt(*pane->Group(), 1.0);
+			bool inside = PtInRect(&out, pt) != FALSE;
+			for (int side = 0; side < SideCount && !inside; side++) {
+				const RECT bar = m_Layout.AutoHideBarRect((DockSide)side);
+				inside = PtInRect(&bar, pt) != FALSE;
+			}
+			if (inside)
+				m_LeaveSince = 0;
+			else if (!m_LeaveSince)
+				m_LeaveSince = ::GetTickCount64();
+			else if (::GetTickCount64() - m_LeaveSince >= (ULONGLONG)m_LeaveMs)
+				HideFlyout();
+			return 0;
+		}
+	}
+	handled = FALSE;
 	return 0;
 }
 
@@ -851,7 +1221,7 @@ bool CDockHost::CanExecute(DockCommand command, const DockPane* pane) const {
 		case DockCommand::Float:
 			return pane->Kind() == PaneKind::Tool && pane->State() == PaneState::Docked && Has(pane->Caps, PaneCaps::CanFloat);
 		case DockCommand::Dock:
-			return pane->Kind() == PaneKind::Tool && pane->State() == PaneState::Floating;
+			return pane->Kind() == PaneKind::Tool && (pane->State() == PaneState::Floating || pane->State() == PaneState::AutoHide);
 	}
 	return false;
 }
@@ -868,7 +1238,7 @@ bool CDockHost::Execute(DockCommand command, DockPane* pane) {
 		case DockCommand::Float:
 			return FloatPane(pane);
 		case DockCommand::Dock:
-			return DockFloating(pane);
+			return pane->State() == PaneState::AutoHide ? m_Layout.Unhide(pane->Group()) : DockFloating(pane);
 		default:
 			break;
 	}

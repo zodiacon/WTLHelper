@@ -53,7 +53,8 @@ void CDockGroupWnd::Retire() {
 }
 
 void CDockGroupWnd::EndInteraction() {
-	m_HotClose = m_PressClose = m_HotTabClose = m_HotOverflow = false;
+	m_HotButton = m_PressButton = Button::None;
+	m_HotTabClose = m_HotOverflow = false;
 	m_HotTab = m_PressTabClose = m_MiddleTab = -1;
 	m_DragPane = nullptr;
 	m_Dragging = false;
@@ -215,6 +216,62 @@ bool CDockGroupWnd::CloseButtonVisible() const {
 	return pane && Has(pane->Caps, PaneCaps::CanClose);
 }
 
+// pinned: auto-hide it; while it is out of an auto-hide bar: dock it
+bool CDockGroupWnd::PinVisible() const {
+	if (!m_Group || m_Group->IsDocument())
+		return false;
+	if (m_Group->Location() == GroupLocation::AutoHide)
+		return true;
+	if (m_Group->Location() != GroupLocation::Main)
+		return false;
+	const auto& panes = m_Group->Panes();
+	return !panes.empty() && std::all_of(panes.begin(), panes.end(), [](auto p) { return Has(p->Caps, PaneCaps::CanAutoHide); });
+}
+
+// the drop-down menu is there if it has something to offer
+bool CDockGroupWnd::MenuVisible() const {
+	if (!m_Group || m_Group->IsDocument())
+		return false;
+	auto pane = m_Group->ActivePane();
+	if (!pane)
+		return false;
+	return m_Host.CanExecute(DockCommand::Close, pane) || m_Host.CanExecute(DockCommand::Float, pane) ||
+		m_Host.CanExecute(DockCommand::Dock, pane) || m_Host.CanExecute(DockCommand::AutoHide, pane);
+}
+
+CaptionButtons CDockGroupWnd::ButtonsFor(const GroupParts& parts) const {
+	return ComputeCaptionButtons(parts.Caption, CloseButtonVisible(), PinVisible(), MenuVisible(), m_Host.Metrics());
+}
+
+CDockGroupWnd::Button CDockGroupWnd::ButtonOf(Hit::Kind kind) {
+	switch (kind) {
+		case Hit::Kind::CaptionClose: return Button::Close;
+		case Hit::Kind::CaptionPin: return Button::Pin;
+		case Hit::Kind::CaptionMenu: return Button::Menu;
+		default: return Button::None;
+	}
+}
+
+void CDockGroupWnd::RunButton(Button button) {
+	if (!m_Group)
+		return;
+	DockPane* pane = m_Group->ActivePane();
+	if (!pane)
+		return;
+	if (button == Button::Pin) {
+		// (the window may be retired by this; touch nothing afterwards)
+		m_Host.Execute(m_Group->Location() == GroupLocation::AutoHide ? DockCommand::Dock : DockCommand::AutoHide, pane);
+	}
+	else if (button == Button::Menu) {
+		RECT rc;
+		GetClientRect(&rc);
+		const CaptionButtons b = ButtonsFor(ComputeGroupParts(*m_Group, rc, m_Host.Metrics()));
+		POINT screen{ b.Menu.left, b.Menu.bottom };
+		ClientToScreen(&screen);
+		m_Host.ShowPaneMenu(pane, screen);
+	}
+}
+
 CDockGroupWnd::Hit CDockGroupWnd::Locate(POINT pt) {
 	Hit hit;
 	if (!m_Group)
@@ -225,8 +282,10 @@ CDockGroupWnd::Hit CDockGroupWnd::Locate(POINT pt) {
 	const GroupParts parts = ComputeGroupParts(*m_Group, rc, metrics);
 
 	if (parts.HasCaption && PtInRect(&parts.Caption, pt)) {
-		const RECT button = CloseButtonRect(parts.Caption, metrics);
-		hit.Type = CloseButtonVisible() && PtInRect(&button, pt) ? Hit::Kind::CaptionClose : Hit::Kind::Caption;
+		const CaptionButtons b = ButtonsFor(parts);
+		hit.Type = b.HasClose && PtInRect(&b.Close, pt) ? Hit::Kind::CaptionClose :
+			b.HasPin && PtInRect(&b.Pin, pt) ? Hit::Kind::CaptionPin :
+			b.HasMenu && PtInRect(&b.Menu, pt) ? Hit::Kind::CaptionMenu : Hit::Kind::Caption;
 		return hit;
 	}
 	if (parts.HasTabs && PtInRect(&parts.Tabs, pt)) {
@@ -251,20 +310,68 @@ CDockGroupWnd::Hit CDockGroupWnd::Locate(POINT pt) {
 // painting
 //
 
-void CDockGroupWnd::DrawCloseGlyph(CDCHandle dc, const RECT& button, bool hot) const {
+void CDockGroupWnd::DrawCloseGlyph(CDCHandle dc, const RECT& button, bool hot, COLORREF idle) const {
 	const auto& theme = m_Host.Theme();
 	if (hot)
 		dc.FillSolidRect(&button, theme.ButtonHotBack);
 
 	const int inset = Width(button) / 4 + 1;
 	CPen pen;
-	pen.CreatePen(PS_SOLID, std::max(1, m_Host.Dpi() / 96), hot ? theme.ButtonGlyphHot : theme.ButtonGlyph);
+	pen.CreatePen(PS_SOLID, std::max(1, m_Host.Dpi() / 96), hot ? theme.ButtonGlyphHot : idle);
 	HPEN old = dc.SelectPen(pen);
 	dc.MoveTo(button.left + inset, button.top + inset);
 	dc.LineTo(button.right - inset, button.bottom - inset);
 	dc.MoveTo(button.right - inset - 1, button.top + inset);
 	dc.LineTo(button.left + inset - 1, button.bottom - inset);
 	dc.SelectPen(old);
+}
+
+void CDockGroupWnd::DrawPinGlyph(CDCHandle dc, const RECT& button, bool pinned, bool hot, COLORREF idle) const {
+	const auto& theme = m_Host.Theme();
+	if (hot)
+		dc.FillSolidRect(&button, theme.ButtonHotBack);
+
+	// a push pin: upright when the window is docked ("pinned"), lying on its side when it is out of an auto-hide bar
+	const int s = std::max(3, Width(button) / 2 - 3);
+	const int cx = (button.left + button.right) / 2, cy = (button.top + button.bottom) / 2;
+	CPen pen;
+	pen.CreatePen(PS_SOLID, std::max(1, m_Host.Dpi() / 96), hot ? theme.ButtonGlyphHot : idle);
+	HPEN old = dc.SelectPen(pen);
+	auto line = [&](int x0, int y0, int x1, int y1) {
+		if (pinned) {
+			dc.MoveTo(cx + x0, cy + y0);
+			dc.LineTo(cx + x1, cy + y1);
+		}
+		else {
+			// the same drawing turned by 90 degrees
+			dc.MoveTo(cx - y0, cy + x0);
+			dc.LineTo(cx - y1, cy + x1);
+		}
+	};
+	line(-s / 2, -s, s / 2, -s);				// the head
+	line(-s / 2, -s, -s / 2, 0);
+	line(s / 2, -s, s / 2, 0);
+	line(-s, 0, s, 0);							// the base
+	line(0, 0, 0, s);							// the needle
+	dc.SelectPen(old);
+}
+
+void CDockGroupWnd::DrawMenuGlyph(CDCHandle dc, const RECT& button, bool hot, COLORREF idle) const {
+	const auto& theme = m_Host.Theme();
+	if (hot)
+		dc.FillSolidRect(&button, theme.ButtonHotBack);
+	const COLORREF color = hot ? theme.ButtonGlyphHot : idle;
+	CPen pen;
+	pen.CreatePen(PS_SOLID, 1, color);
+	CBrush brush;
+	brush.CreateSolidBrush(color);
+	HPEN oldPen = dc.SelectPen(pen);
+	HBRUSH oldBrush = dc.SelectBrush(brush);
+	const int cx = (button.left + button.right) / 2, cy = (button.top + button.bottom) / 2, h = std::max(2, Width(button) / 6);
+	const POINT triangle[] = { { cx - h * 2, cy - h }, { cx + h * 2, cy - h }, { cx, cy + h } };
+	dc.Polygon(triangle, 3);
+	dc.SelectPen(oldPen);
+	dc.SelectBrush(oldBrush);
 }
 
 LRESULT CDockGroupWnd::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
@@ -306,11 +413,15 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 
 		RECT text = parts.Caption;
 		text.left += metrics.TextPadding;
-		if (CloseButtonVisible()) {
-			const RECT button = CloseButtonRect(parts.Caption, metrics);
-			text.right = button.left - metrics.ButtonMargin;
-			DrawCloseGlyph(dc.m_hDC, button, m_HotClose);
-		}
+		const CaptionButtons buttons = ButtonsFor(parts);
+		const COLORREF idle = activeGroup ? theme.CaptionActiveText : theme.CaptionInactiveText;
+		text.right = buttons.TextRight;
+		if (buttons.HasClose)
+			DrawCloseGlyph(dc.m_hDC, buttons.Close, m_HotButton == Button::Close, idle);
+		if (buttons.HasPin)
+			DrawPinGlyph(dc.m_hDC, buttons.Pin, m_Group->Location() != GroupLocation::AutoHide, m_HotButton == Button::Pin, idle);
+		if (buttons.HasMenu)
+			DrawMenuGlyph(dc.m_hDC, buttons.Menu, m_HotButton == Button::Menu, idle);
 		if (active)
 			dc.DrawText(active->Title.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
 	}
@@ -341,7 +452,7 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 
 			// the close button shows on the selected tab and on the one under the mouse
 			if (spec.Closable && !IsRectEmpty(&strip.Layout.Close[k]) && (selected || hot))
-				DrawCloseGlyph(dc.m_hDC, strip.Layout.Close[k], hot && m_HotTabClose);
+				DrawCloseGlyph(dc.m_hDC, strip.Layout.Close[k], hot && m_HotTabClose, theme.ButtonGlyph);
 			if (selected) {
 				RECT line{ tab.left, tab.top, tab.right, tab.top + accent };
 				dc.FillSolidRect(&line, theme.TabActiveAccent);
@@ -405,7 +516,9 @@ LRESULT CDockGroupWnd::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL&) {
 
 	switch (hit.Type) {
 		case Hit::Kind::CaptionClose:
-			m_PressClose = true;
+		case Hit::Kind::CaptionPin:
+		case Hit::Kind::CaptionMenu:
+			m_PressButton = ButtonOf(hit.Type);
 			SetCapture();
 			Invalidate(FALSE);
 			break;
@@ -466,17 +579,22 @@ LRESULT CDockGroupWnd::OnLButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 
 	// what was pressed and where the button went up decide whether it counts as a click
 	DockPane* toClose = nullptr;
-	if (m_PressClose && hit.Type == Hit::Kind::CaptionClose)
+	Button clicked = Button::None;
+	if (m_PressButton != Button::None && ButtonOf(hit.Type) == m_PressButton)
+		clicked = m_PressButton;
+	if (clicked == Button::Close)
 		toClose = m_Group->ActivePane();
 	else if (m_PressTabClose >= 0 && hit.Type == Hit::Kind::TabClose && hit.Tab == m_PressTabClose)
 		toClose = PaneAt(hit.Tab);
 
-	const bool captured = m_PressClose || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
+	const bool captured = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
 	EndInteraction();
 	if (captured)
 		ReleaseCapture();
 	if (toClose)
 		m_Host.ClosePane(toClose);		// the window may be retired by this; touch nothing afterwards
+	else if (clicked == Button::Pin || clicked == Button::Menu)
+		RunButton(clicked);
 	return 0;
 }
 
@@ -527,7 +645,7 @@ LRESULT CDockGroupWnd::OnRButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 	DockPane* pane = nullptr;
 	if (hit.Type == Hit::Kind::Tab || hit.Type == Hit::Kind::TabClose)
 		pane = PaneAt(hit.Tab);
-	else if (hit.Type == Hit::Kind::Caption || hit.Type == Hit::Kind::CaptionClose)
+	else if (hit.Type == Hit::Kind::Caption || ButtonOf(hit.Type) != Button::None)
 		pane = m_Group->ActivePane();
 	if (!pane)
 		return 0;
@@ -562,10 +680,9 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 		}
 		if (std::abs(pt.x - m_CaptionStart.x) >= ::GetSystemMetricsForDpi(SM_CXDRAG, m_Host.Dpi()) ||
 			std::abs(pt.y - m_CaptionStart.y) >= ::GetSystemMetricsForDpi(SM_CYDRAG, m_Host.Dpi())) {
-			if (DockPane* pane = m_Group->ActivePane())
-				BeginDockDrag(pane, true, pt);
-			else
-				m_CaptionPending = false;
+			DockPane* pane = m_Group->ActivePane();
+			if (!pane || !BeginDockDrag(pane, true, pt))
+				m_CaptionPending = false;		// nothing to drag (e.g. the group is in an auto-hide bar)
 		}
 		return 0;
 	}
@@ -615,9 +732,9 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 	const bool onTab = hit.Type == Hit::Kind::Tab || hit.Type == Hit::Kind::TabClose;
 	SetHot(onTab ? hit.Tab : -1, hit.Type == Hit::Kind::TabClose, hit.Type == Hit::Kind::Overflow);
 
-	const bool hotClose = hit.Type == Hit::Kind::CaptionClose;
-	if (hotClose != m_HotClose) {
-		m_HotClose = hotClose;
+	const Button hotButton = ButtonOf(hit.Type);
+	if (hotButton != m_HotButton) {
+		m_HotButton = hotButton;
 		Invalidate(FALSE);
 	}
 	if (!m_Tracking) {
@@ -630,8 +747,8 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 LRESULT CDockGroupWnd::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Tracking = false;
 	SetHot(-1, false, false);
-	if (m_HotClose) {
-		m_HotClose = false;
+	if (m_HotButton != Button::None) {
+		m_HotButton = Button::None;
 		Invalidate(FALSE);
 	}
 	return 0;
@@ -668,9 +785,9 @@ LRESULT CDockGroupWnd::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 		m_Host.EndDrag(false);
 		return 0;
 	}
-	const bool wasActive = m_PressClose || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
+	const bool wasActive = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
 	m_CaptionPending = false;
-	m_PressClose = false;
+	m_PressButton = Button::None;
 	m_PressTabClose = -1;
 	m_DragPane = nullptr;
 	m_Dragging = false;

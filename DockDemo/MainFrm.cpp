@@ -424,7 +424,8 @@ LRESULT CMainFrame::OnHelp(WORD, WORD, HWND, BOOL&) {
 	MessageBox(
 		L"Drag a splitter to resize the panes.\n"
 		L"Click a tab to switch panes; click the X in a caption (or on a document tab) to close a pane; drag tabs to reorder them.\n"
-		L"Click an item on an auto-hide bar to bring that group back (the slide-out flyout comes with a later phase).\n"
+		L"The pin in a tool window's caption auto-hides it; hover or click its item on the bar to slide it out, and press the pin in the flyout to dock it again.\n"
+		L"The arrow next to the pin is the window's menu (float, dock, auto hide, close).\n"
 		L"The Panes menu shows and hides panes; the Active pane menu moves the pane that has the focus.\n"
 		L"Double click a tool window's caption (or a tab) to float it, and the caption or title bar of the floating window to dock it again.\n"
 		L"Layout > Save / Load round-trips the arrangement as JSON, floating windows included.\n\n"

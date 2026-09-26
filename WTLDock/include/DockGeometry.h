@@ -21,6 +21,19 @@ struct GroupParts {
 // window has no caption either: the window's title bar takes its place.
 GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const DockMetrics& metrics);
 
+// The buttons on a tool group's caption, from the right end: close, pin (auto-hide / dock), menu. Those that a group
+// does not show are left out and the others move up, so the close button is always the rightmost one.
+struct CaptionButtons {
+	RECT Close{};
+	RECT Pin{};
+	RECT Menu{};
+	bool HasClose{};
+	bool HasPin{};
+	bool HasMenu{};
+	int TextRight{};		// the caption text has to end here
+};
+CaptionButtons ComputeCaptionButtons(const RECT& caption, bool close, bool pin, bool menu, const DockMetrics& metrics);
+
 RECT CloseButtonRect(const RECT& caption, const DockMetrics& metrics);
 
 //

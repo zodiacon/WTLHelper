@@ -149,6 +149,28 @@ GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const D
 	return parts;
 }
 
+CaptionButtons ComputeCaptionButtons(const RECT& caption, bool close, bool pin, bool menu, const DockMetrics& m) {
+	CaptionButtons b;
+	const int size = std::min(m.ButtonSize, Height(caption));
+	const int top = caption.top + (Height(caption) - size) / 2;
+	const int gap = m.TabGap * 2;
+	int right = caption.right - m.ButtonMargin;
+
+	auto place = [&](RECT& slot, bool& has) {
+		slot = { right - size, top, right, top + size };
+		has = true;
+		right -= size + gap;
+	};
+	if (close)
+		place(b.Close, b.HasClose);
+	if (pin)
+		place(b.Pin, b.HasPin);
+	if (menu)
+		place(b.Menu, b.HasMenu);
+	b.TextRight = (close || pin || menu) ? right + gap - m.ButtonMargin : caption.right - m.TextPadding;
+	return b;
+}
+
 RECT CloseButtonRect(const RECT& caption, const DockMetrics& m) {
 	const int size = std::min(m.ButtonSize, Height(caption));
 	const int top = caption.top + (Height(caption) - size) / 2;

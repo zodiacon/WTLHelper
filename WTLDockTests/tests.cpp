@@ -1044,6 +1044,32 @@ TEST(Geometry_CloseButtonSitsInTheCaption) {
 	CHECK(Height(small) == 10 && small.right == 246);
 }
 
+TEST(Geometry_CaptionButtonsSitInARowFromTheRight) {
+	const auto m = DockMetrics::ForDpi(96);
+	const RECT caption{ 0, 0, 250, 22 };
+
+	auto all = ComputeCaptionButtons(caption, true, true, true, m);
+	CHECK(all.HasClose && all.HasPin && all.HasMenu);
+	CHECK_RECT(all.Close, 230, 3, 246, 19);
+	CHECK_RECT(all.Pin, 212, 3, 228, 19);
+	CHECK_RECT(all.Menu, 194, 3, 210, 19);
+	CHECK(all.TextRight == 190);
+	const RECT closeSlot = CloseButtonRect(caption, m);
+	CHECK(EqualRect(&all.Close, &closeSlot) != FALSE);
+
+	// buttons that are not there make room: the close button stays on the right, the others move up
+	auto noClose = ComputeCaptionButtons(caption, false, true, true, m);
+	CHECK(!noClose.HasClose);
+	CHECK_RECT(noClose.Pin, 230, 3, 246, 19);
+	CHECK_RECT(noClose.Menu, 212, 3, 228, 19);
+	auto onlyMenu = ComputeCaptionButtons(caption, false, false, true, m);
+	CHECK_RECT(onlyMenu.Menu, 230, 3, 246, 19);
+
+	auto none = ComputeCaptionButtons(caption, false, false, false, m);
+	CHECK(!none.HasClose && !none.HasPin && !none.HasMenu && none.TextRight == 244);
+	CHECK(!ComputeCaptionButtons(caption, true, false, false, m).HasPin);
+}
+
 TEST(Metrics_ScaleWithTheDpi) {
 	const auto m = DockMetrics::ForDpi(192);
 	CHECK(m.CaptionHeight == 44 && m.TabHeight == 48 && m.SplitterThickness == 10);
@@ -1508,6 +1534,7 @@ int wmain() {
 	Run_TabStrip_TheActiveTabIsKeptInView();
 	Run_TabStrip_ATabWiderThanTheStripIsCutOff();
 	Run_Geometry_CloseButtonSitsInTheCaption();
+	Run_Geometry_CaptionButtonsSitInARowFromTheRight();
 	Run_Metrics_ScaleWithTheDpi();
 
 	Run_Drop_ATabOverAnotherToolGroupIsOfferedTheWholeCompassAndTheEdges();
