@@ -129,6 +129,9 @@ private:
 	HFONT Font() const {
 		return m_Host.FontFor(Dpi());
 	}
+	HFONT ItalicFont() const {
+		return m_Host.ItalicFontFor(Dpi());
+	}
 
 	// tooltips
 	void UpdateTip(const Hit& hit);
@@ -136,6 +139,8 @@ private:
 	static std::wstring CaptionText(const DockPane& pane);
 	void DrawModifiedDot(CDCHandle dc, const RECT& slot, COLORREF color) const;
 
+	std::vector<TabSpec> MeasureSpecs(CDCHandle dc) const;
+	GroupParts Parts(const RECT& client) const;
 	Strip LayoutStrip(const GroupParts& parts, CDCHandle dc);
 	Hit Locate(POINT pt);
 	DockPane* PaneAt(int tab) const;

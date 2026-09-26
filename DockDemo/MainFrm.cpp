@@ -104,6 +104,17 @@ LRESULT CMainFrame::OnSaveDocument(WORD, WORD, HWND, BOOL&) {
 	return 0;
 }
 
+LRESULT CMainFrame::OnMultiRow(WORD, WORD, HWND, BOOL&) {
+	m_Dock.SetMultiRowTabs(!m_Dock.MultiRowTabs());
+	::CheckMenuItem(GetMenu(), ID_MULTIROW, MF_BYCOMMAND | (m_Dock.MultiRowTabs() ? MF_CHECKED : MF_UNCHECKED));
+	return 0;
+}
+
+LRESULT CMainFrame::OnNewPreview(WORD, WORD, HWND, BOOL&) {
+	NewDocument(true);
+	return 0;
+}
+
 LRESULT CMainFrame::OnWindows(WORD, WORD, HWND, BOOL&) {
 	m_Dock.ShowWindowsDialog(m_hWnd);
 	return 0;
@@ -204,6 +215,10 @@ void CMainFrame::BuildLayout() {
 	program->Tooltip = L"C:/Dev/DockDemo/DockDemo.cpp";
 	frame->Tooltip = L"C:/Dev/DockDemo/MainFrm.h";
 	readme->Tooltip = L"C:/Dev/DockDemo/README.md";
+	// colours for the tabs (a project's, say)
+	program->TabColor = RGB(0, 122, 204);
+	frame->TabColor = RGB(0, 122, 204);
+	readme->TabColor = RGB(104, 33, 122);
 	solution->Tooltip = L"Browse the projects and files of the solution";
 
 	layout.Show(solution);
@@ -360,6 +375,7 @@ void CMainFrame::BuildMenu() {
 	window.CreatePopupMenu();
 	window.AppendMenu(MF_STRING, ID_NEW_DOC, L"&New document");
 	window.AppendMenu(MF_STRING, ID_NEW_MANY, L"New &10 documents");
+	window.AppendMenu(MF_STRING, ID_NEW_PREVIEW, L"New p&review document (replaces the previous one)");
 	window.AppendMenu(MF_SEPARATOR);
 	window.AppendMenu(MF_STRING, ID_CLOSE_ACTIVE, L"&Close active pane");
 	window.AppendMenu(MF_STRING, ID_CLOSE_OTHERS, L"Close &others in its group");
@@ -379,6 +395,7 @@ void CMainFrame::BuildMenu() {
 	CMenu options;
 	options.CreatePopupMenu();
 	options.AppendMenu(MF_STRING, ID_DARK, L"&Dark theme");
+	options.AppendMenu(MF_STRING, ID_MULTIROW, L"&Multi-row tabs");
 	menu.AppendMenu(MF_POPUP, (UINT_PTR)options.m_hMenu, L"&Options");
 	options.Detach();
 
@@ -621,7 +638,7 @@ CEdit* CMainFrame::EditOf(HWND content) {
 	return nullptr;
 }
 
-DockPane* CMainFrame::NewDocument() {
+DockPane* CMainFrame::NewDocument(bool preview) {
 	PaneDesc d;
 	d.Id = d.Title = std::format(L"Untitled{}", ++m_UntitledCount);
 	d.Kind = PaneKind::Document;
@@ -630,6 +647,10 @@ DockPane* CMainFrame::NewDocument() {
 
 	auto& layout = m_Dock.Layout();
 	auto pane = layout.AddPane(d);
+	if (preview) {
+		m_Dock.ShowPreview(pane);		// (a preview replaces the one that is open: it is closed and, being Untitled, gone)
+		return pane;
+	}
 	layout.Show(pane);
 	m_Dock.ActivatePane(pane);		// its editor is made by the content factory when the pane is first on show
 	return pane;

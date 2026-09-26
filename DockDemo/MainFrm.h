@@ -31,6 +31,8 @@ public:
 		COMMAND_ID_HANDLER(ID_SWITCHER, OnSwitcher)
 		COMMAND_ID_HANDLER(ID_SAVE_DOC, OnSaveDocument)
 		COMMAND_ID_HANDLER(ID_WINDOWS, OnWindows)
+		COMMAND_ID_HANDLER(ID_MULTIROW, OnMultiRow)
+		COMMAND_ID_HANDLER(ID_NEW_PREVIEW, OnNewPreview)
 		COMMAND_CODE_HANDLER(EN_CHANGE, OnEditChange)
 		COMMAND_ID_HANDLER(ID_PREV_DOC, OnNextDocument)
 		COMMAND_ID_HANDLER(ID_DUMP, OnDump)
@@ -58,7 +60,7 @@ public:
 private:
 	enum : UINT {
 		ID_RESET = 1001, ID_SAVE, ID_LOAD, ID_FORGET, ID_SAVE_NAMED, ID_DELETE_NAMED, ID_DUMP, ID_DARK, ID_HELP_USAGE, ID_EXIT,
-		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC, ID_SWITCHER, ID_SAVE_DOC, ID_WINDOWS,
+		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC, ID_SWITCHER, ID_SAVE_DOC, ID_WINDOWS, ID_MULTIROW, ID_NEW_PREVIEW,
 		ID_PANE_INFO = 3000,	// added to the tab context menu by OnBuildPaneMenu
 		ID_ACT_HIDE = 1100, ID_ACT_AUTOHIDE, ID_ACT_FLOAT,
 		ID_ACT_GROUP = 1105,	// + new horizontal group, new vertical group, move to next, move to previous
@@ -78,6 +80,8 @@ private:
 	LRESULT OnSwitcher(WORD, WORD, HWND, BOOL&);
 	LRESULT OnSaveDocument(WORD, WORD, HWND, BOOL&);
 	LRESULT OnWindows(WORD, WORD, HWND, BOOL&);
+	LRESULT OnMultiRow(WORD, WORD, HWND, BOOL&);
+	LRESULT OnNewPreview(WORD, WORD, HWND, BOOL&);
 	LRESULT OnEditChange(WORD, WORD, HWND, BOOL&);
 	LRESULT OnReset(WORD, WORD, HWND, BOOL&);
 	LRESULT OnSave(WORD, WORD, HWND, BOOL&);
@@ -101,7 +105,7 @@ private:
 	void BuildMenu();
 	void CreateContent();
 	void BuildLayout();
-	WTLDock::DockPane* NewDocument();
+	WTLDock::DockPane* NewDocument(bool preview = false);
 	void HookDock();
 	void ApplyTheme();
 	void ApplyFonts();

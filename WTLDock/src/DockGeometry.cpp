@@ -118,14 +118,15 @@ bool IsSoleGroupOfFloat(const DockGroup& group) {
 
 }
 
-GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const DockMetrics& m) {
+GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const DockMetrics& m, int tabRows) {
+	const int stripHeight = m.TabHeight * std::max(1, tabRows);
 	GroupParts parts;
 	const RECT rc = client;
 	parts.Caption = parts.Tabs = { rc.left, rc.top, rc.right, rc.top };
 
 	if (group.IsDocument()) {
 		parts.HasTabs = true;
-		parts.Tabs.bottom = std::min(rc.top + m.TabHeight, rc.bottom);
+		parts.Tabs.bottom = std::min(rc.top + stripHeight, rc.bottom);
 		parts.Content = { rc.left, parts.Tabs.bottom, rc.right, rc.bottom };
 		return parts;
 	}
@@ -137,11 +138,11 @@ GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const D
 	parts.HasTabs = group.Panes().size() > 1;
 	if (parts.HasTabs) {
 		if (group.TabsAtBottom) {
-			parts.Tabs = { rc.left, std::max(bottom - m.TabHeight, top), rc.right, bottom };
+			parts.Tabs = { rc.left, std::max(bottom - stripHeight, top), rc.right, bottom };
 			bottom = parts.Tabs.top;
 		}
 		else {
-			parts.Tabs = { rc.left, top, rc.right, std::min(top + m.TabHeight, bottom) };
+			parts.Tabs = { rc.left, top, rc.right, std::min(top + stripHeight, bottom) };
 			top = parts.Tabs.bottom;
 		}
 	}
@@ -210,6 +211,85 @@ RECT TabTextRect(const RECT& tab, const TabSpec& spec, const DockMetrics& m) {
 	if (r.right < r.left)
 		r.right = r.left;
 	return r;
+}
+
+int CountTabRows(const std::vector<TabSpec>& tabs, int width, const DockMetrics& m) {
+	int rows = 1, used = 0;
+	for (auto& tab : tabs) {
+		const int w = std::min(TabWidth(tab, m), std::max(1, width));
+		const int need = w + (used ? m.TabGap : 0);
+		if (used && used + need > width) {
+			rows++;
+			used = w;
+		}
+		else {
+			used += need;
+		}
+	}
+	return rows;
+}
+
+TabStrip LayoutTabRows(const std::vector<TabSpec>& tabs, const RECT& strip, const DockMetrics& m, int active, bool stripAtBottom) {
+	TabStrip result;
+	const int n = (int)tabs.size();
+	if (n == 0)
+		return result;
+
+	// pack: which row each tab is in, and where in it
+	std::vector<int> row(n), x(n), width(n);
+	int rows = 1, used = 0;
+	const int avail = std::max(1, Width(strip));
+	for (int i = 0; i < n; i++) {
+		width[i] = std::min(TabWidth(tabs[i], m), avail);
+		const int need = width[i] + (used ? m.TabGap : 0);
+		if (used && used + need > avail) {
+			rows++;
+			used = 0;
+		}
+		x[i] = strip.left + used + (used ? m.TabGap : 0);
+		used += used ? width[i] + m.TabGap : width[i];
+		row[i] = rows - 1;
+	}
+
+	// the row of the active tab is the one next to the content
+	std::vector<int> order(rows);					// the rows, top to bottom
+	for (int r = 0; r < rows; r++)
+		order[r] = r;
+	if (active >= 0 && active < n) {
+		const int activeRow = row[active];
+		order.erase(order.begin() + activeRow);
+		if (stripAtBottom)
+			order.insert(order.begin(), activeRow);
+		else
+			order.push_back(activeRow);
+	}
+	std::vector<int> position(rows);
+	for (int p = 0; p < rows; p++)
+		position[order[p]] = p;
+
+	result.First = 0;
+	for (int i = 0; i < n; i++) {
+		const int top = strip.top + position[row[i]] * m.TabHeight;
+		const RECT r{ x[i], top, x[i] + width[i], top + m.TabHeight };
+		result.Tabs.push_back(r);
+		RECT close{}, mark{};
+		if (tabs[i].Closable) {
+			const int t = r.top + (Height(r) - m.TabCloseSize) / 2;
+			close = { r.right - m.TabPadding / 2 - m.TabCloseSize, t, r.right - m.TabPadding / 2, t + m.TabCloseSize };
+			if (close.left < r.left)
+				close = {};
+		}
+		else if (tabs[i].Marked) {
+			const int size = MarkSize(m);
+			const int t = r.top + (Height(r) - size) / 2;
+			mark = { r.right - m.TabPadding - size, t, r.right - m.TabPadding, t + size };
+			if (mark.left < r.left)
+				mark = {};
+		}
+		result.Close.push_back(close);
+		result.Mark.push_back(mark);
+	}
+	return result;
 }
 
 TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, const DockMetrics& m, int first, int active) {

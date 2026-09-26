@@ -232,6 +232,8 @@ std::string DockSerializer::Save(const DockLayout& layout) {
 		const RECT& rc = p->m_LastFloatRect;
 		o.Add("lastFloat", MakeInts({ rc.left, rc.top, rc.right, rc.bottom }));
 		o.Add("preferred", MakeInts({ p->PreferredSize.cx, p->PreferredSize.cy }));
+		if (p->m_Pinned)
+			o.Add("pinned", Value::MakeBool(true));
 		panes.Push(std::move(o));
 	}
 	root.Add("panes", std::move(panes));
@@ -459,6 +461,10 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const LoadO
 				pane->m_LastState = state;
 			if (ParseSide(item.Find("lastSide"), side))
 				pane->m_LastSide = side;
+			if (pane->Kind() == PaneKind::Document) {
+				auto pinned = item.Find("pinned");
+				pane->m_Pinned = pinned && pinned->Kind == Value::Type::Bool && pinned->Bool;
+			}
 			if (ParseInts(item.Find("lastFloat"), rc, 4))
 				pane->m_LastFloatRect = { rc[0], rc[1], rc[2], rc[3] };
 			if (ParseInts(item.Find("preferred"), preferred, 2) && preferred[0] > 0 && preferred[1] > 0)

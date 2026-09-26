@@ -40,12 +40,15 @@ enum class DockCommand {
 	NewVerticalGroup,		// ... beside its group
 	MoveToNextGroup,		// the document goes to the next document group of the main window (the first after the last)
 	MoveToPreviousGroup,
+	PinTab,					// a document: its tab stays at the left of the group and is spared by the "close all" commands
+	UnpinTab,
 };
 
 // A snapshot of a group's tab strip.
 struct TabStripState {
 	int First;		// index of the first visible tab
-	int Visible;	// number of visible tabs
+	int Rows;		// rows of tabs (more than one only with multi-row tabs)
+	int Visible;	// number of visible tabs (all of them with multi-row tabs)
 	bool Overflow;	// not every tab fits (a drop-down button is shown)
 };
 
@@ -92,6 +95,10 @@ public:
 	HFONT BoldFont() const {
 		return m_BoldFont;
 	}
+	HFONT ItalicFont() const {
+		return m_ItalicFont;
+	}
+	HFONT ItalicFontFor(int dpi) const;
 	// Floating windows are at the DPI of their monitor, which can differ from the main window's: their groups use the
 	// metrics and fonts of that DPI (these are the host's own for the host's DPI).
 	const DockMetrics& MetricsFor(int dpi) const;
@@ -236,7 +243,14 @@ public:
 	int FillLayoutMenu(HMENU menu, UINT firstId) const;
 	bool HandleLayoutCommand(UINT id, UINT firstId);
 
-	// Documents. Closing honours PaneCaps::CanClose and OnPaneClosing; returns how many were closed.
+	// Preview documents (the single click of a file list): the document opens as a preview, in italics, and replaces the
+	// preview that is open in the same group (unless that has been edited or pinned, which makes it a normal one). Editing it (set
+	// DockPane::Modified and RefreshPane), pinning it, or a double click on its tab makes it a normal document. A
+	// document that is open already just comes to the front.
+	bool ShowPreview(DockPane* pane);
+	void PromotePreview(DockPane* pane);
+
+	// Documents. Closing honours PaneCaps::CanClose and OnPaneClosing; returns how many were closed (pinned tabs stay).
 	int CloseAllDocuments(bool exceptActive = false);
 	// the next (or previous) tab of the document group that has the focus, wrapping around
 	bool ActivateNextDocument(bool forward = true);
@@ -324,6 +338,13 @@ public:
 	void RequestTip(HWND owner, const RECT& targetScreen, const std::wstring& text, int dpi);
 	void CancelTip(HWND owner);
 	void HideTip();
+
+	// Tabs in as many rows as they need instead of one that scrolls (and has a tab list button). The row of the active
+	// tab is the one next to the content. Off by default.
+	void SetMultiRowTabs(bool multiRow);
+	bool MultiRowTabs() const {
+		return m_MultiRowTabs;
+	}
 
 	// Repaints a pane's tab and caption after its Title, Icon, Tooltip or Modified changed (also the title of the
 	// floating window and the switcher).
@@ -448,10 +469,10 @@ private:
 	DockTheme m_Theme;
 	DockMetrics m_Metrics;
 	int m_Dpi{ 96 };
-	CFont m_Font, m_BoldFont, m_VerticalFont;
+	CFont m_Font, m_BoldFont, m_VerticalFont, m_ItalicFont;
 	struct DpiResources {
 		DockMetrics Metrics;
-		CFont Font, BoldFont, VerticalFont;
+		CFont Font, BoldFont, VerticalFont, ItalicFont;
 	};
 	mutable std::map<int, std::unique_ptr<DpiResources>> m_DpiSets;		// for floating windows at other DPIs
 	const DpiResources& ResourcesFor(int dpi) const;
@@ -489,6 +510,7 @@ private:
 
 	// tooltips
 	void ShowTipNow();
+	bool m_MultiRowTabs{};
 	bool m_Tips{ true };
 	int m_TipShowMs{ 500 }, m_TipVisibleMs{ 6000 };
 	std::unique_ptr<CDockTipWnd> m_TipWnd;

@@ -109,7 +109,11 @@ public:
 	bool Hide(DockPane* pane);
 	// Makes the pane the active tab of its group.
 	bool Activate(DockPane* pane);
+	// Tabs cannot be moved across the boundary between the pinned and the unpinned ones: the pane goes as far as it can.
 	bool ReorderTab(DockPane* pane, int index);
+	// Pins a document (its tab goes to the end of the pinned tabs of its group) or unpins it (to the start of the
+	// others). Documents only; a pane that is not placed remembers it for when it is.
+	bool SetPinned(DockPane* pane, bool pinned);
 
 	// floating (rect is in screen coordinates). A document floats into a window with a document group of its own that
 	// other documents can be dropped on; a whole document group can float as long as another one stays in the main window.
@@ -207,6 +211,7 @@ private:
 	void NormalizeRoot(DockSplit& root, DockGroup* keep);
 	void NormalizeSplit(DockSplit& split, DockGroup* keep);
 	void Reindex();
+	static void NormalizePins(DockGroup& group);
 	static std::optional<DockSide> ComputeSide(const DockGroup& group, const DockGroup* primary);
 
 	void RecordPlacement(DockPane* pane);

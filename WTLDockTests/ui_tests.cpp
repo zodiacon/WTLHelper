@@ -96,16 +96,19 @@ TabStrip StripOf(Fixture& f, DockGroup* group) {
 	RECT client;
 	::GetClientRect(gw, &client);
 	const auto& metrics = f.Host.MetricsFor(f.Host.GroupDpi(group));
-	const auto parts = ComputeGroupParts(*group, client, metrics);
+	const auto parts = ComputeGroupParts(*group, client, metrics, f.Host.GetTabState(group).Rows);
 	CClientDC dc(gw);
 	dc.SelectFont(f.Host.FontFor(f.Host.GroupDpi(group)));
 	std::vector<TabSpec> specs;
 	for (auto p : group->Panes()) {
 		SIZE size{};
+		dc.SelectFont(p->Preview ? f.Host.ItalicFontFor(f.Host.GroupDpi(group)) : f.Host.FontFor(f.Host.GroupDpi(group)));
 		dc.GetTextExtent(p->Title.c_str(), (int)p->Title.size(), &size);
-		const bool closable = group->IsDocument() && Has(p->Caps, PaneCaps::CanClose);
+		const bool closable = group->IsDocument() && (Has(p->Caps, PaneCaps::CanClose) || p->Pinned());
 		specs.push_back({ size.cx, p->Icon != nullptr, closable, p->Modified && !closable });
 	}
+	if (f.Host.MultiRowTabs())
+		return LayoutTabRows(specs, parts.Tabs, metrics, group->ActiveIndex(), group->TabsAtBottom && !group->IsDocument());
 	return LayoutTabStrip(specs, parts.Tabs, metrics, f.Host.GetTabState(group).First, group->ActiveIndex());
 }
 
@@ -210,7 +213,7 @@ void Verify(Fixture& f, int line) {
 		Check(::GetParent(p->hWnd) == gw, "content is a child of its group window", line);
 		RECT client;
 		::GetClientRect(gw, &client);
-		const RECT expected = ComputeGroupParts(*g, client, f.Host.MetricsFor(f.Host.GroupDpi(g))).Content;
+		const RECT expected = ComputeGroupParts(*g, client, f.Host.MetricsFor(f.Host.GroupDpi(g)), f.Host.GetTabState(g).Rows).Content;
 		const RECT actual = RectIn(p->hWnd, gw);
 		Check(EqualRect(&actual, &expected) != FALSE, "content fills the content area of its group", line);
 	}
@@ -3587,6 +3590,341 @@ TEST(Host_DroppingAFloatOnAnEdgeOrBesideAGroupKeepsItsSize) {
 	CHECK(f.Sol->State() == PaneState::Docked && Width(f.Sol->Group()->Rect) == size.cx);
 }
 
+// ---- Pinned, preview and coloured tabs -----------------------------------------------------------
+
+COLORREF PixelAt(HWND window, int x, int y) {
+	RECT rc;
+	::GetClientRect(window, &rc);
+	CClientDC screen(nullptr);
+	CDC dc;
+	dc.CreateCompatibleDC(screen);
+	CBitmap bmp;
+	bmp.CreateCompatibleBitmap(screen, Width(rc), Height(rc));
+	HBITMAP old = dc.SelectBitmap(bmp);
+	::PrintWindow(window, dc, PW_CLIENTONLY);
+	const COLORREF c = dc.GetPixel(x, y);
+	dc.SelectBitmap(old);
+	return c;
+}
+
+TEST(Host_PinnedTabsMoveLeftAndSpareTheCloseAllCommands) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.ActivatePane(d.C);
+	CHECK(f.Host.CanExecute(DockCommand::PinTab, d.C) && !f.Host.CanExecute(DockCommand::UnpinTab, d.C));
+	CHECK(f.Host.Execute(DockCommand::PinTab, d.C));
+	CHECK(d.A->Group()->Panes()[0] == d.C);
+	VERIFY(f);
+	CHECK(!f.Host.CanExecute(DockCommand::PinTab, d.C) && f.Host.CanExecute(DockCommand::UnpinTab, d.C));
+
+	// "close all tabs" and "close all but this" leave it
+	CHECK(f.Host.Execute(DockCommand::CloseAll, d.A));
+	CHECK(d.A->State() == PaneState::Hidden && d.B->State() == PaneState::Hidden && d.C->State() == PaneState::Document);
+	auto e = f.Add(L"e.cpp", PaneKind::Document);
+	f.Host.Layout().Show(e);
+	f.Host.Layout().Show(d.A);
+	CHECK(f.Host.Execute(DockCommand::CloseOthers, e));
+	CHECK(d.A->State() == PaneState::Hidden && d.C->State() == PaneState::Document && e->State() == PaneState::Document);
+	f.Host.Layout().Show(d.A);
+	CHECK(f.Host.CloseAllDocuments() == 2 && d.C->State() == PaneState::Document);	// e.cpp and a.cpp: the pinned one stays
+	// but it can be closed by name
+	CHECK(f.Host.ClosePane(d.C));
+	VERIFY(f);
+}
+
+TEST(Host_ThePinButtonOfATabUnpinsIt) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.Execute(DockCommand::PinTab, d.B);
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	auto strip = StripOf(f, d.A->Group());
+	CHECK(strip.Tabs.size() == 3 && !IsRectEmpty(&strip.Close[0]));			// the pinned tab, first, has the button
+
+	// the tooltip and the accessible name say what it does
+	f.Host.SetTipTiming(0, 0);
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.Close[0]));
+	CHECK(f.Host.TipText() == L"Unpin");
+	f.Host.HideTip();
+	auto acc = AccessibleOfClient(window);
+	CHECK(acc && FindChild(ChildrenOf(acc), L"Unpin b.cpp") && FindChild(ChildrenOf(acc), L"Close a.cpp"));
+
+	// the pin glyph is drawn in the slot: something other than the tab's background
+	const RECT slot = strip.Close[0];
+	bool drawn = false;
+	for (int x = slot.left; x < slot.right && !drawn; x++)
+		for (int y = slot.top; y < slot.bottom && !drawn; y++)
+			drawn = PixelAt(window, x, y) != f.Host.Theme().TabInactiveBack && PixelAt(window, x, y) != f.Host.Theme().TabActiveBack &&
+				PixelAt(window, x, y) != f.Host.Theme().TabHotBack;
+	CHECK(drawn);
+
+	// a middle click does not close it; a click on the button unpins
+	Click(window, Center(strip.Tabs[0]), WM_MBUTTONDOWN, WM_MBUTTONUP);
+	CHECK(d.B->State() == PaneState::Document);
+	Click(window, Center(strip.Close[0]));
+	CHECK(!d.B->Pinned() && d.B->State() == PaneState::Document);
+	VERIFY(f);
+	strip = StripOf(f, d.A->Group());
+	CHECK(!IsRectEmpty(&strip.Close[0]));
+}
+
+TEST(Host_APreviewReplacesThePreviousPreview) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto p1 = f.Add(L"p1.cpp", PaneKind::Document);
+	auto p2 = f.Add(L"p2.cpp", PaneKind::Document);
+	auto p3 = f.Add(L"p3.cpp", PaneKind::Document);
+	std::vector<DockPane*> closed;
+	f.Host.OnPaneClosed = [&](DockPane* p) { closed.push_back(p); };
+
+	CHECK(f.Host.ShowPreview(p1));
+	CHECK(p1->Preview && p1->State() == PaneState::Document && f.Host.ActivePane() == p1);
+	CHECK(f.Host.ShowPreview(p2));
+	CHECK(p1->State() == PaneState::Hidden && p2->State() == PaneState::Document && closed.size() == 1 && closed[0] == p1);
+	CHECK(d.A->Group()->Panes().back() == p2);								// it is the last tab
+	VERIFY(f);
+
+	// a preview that has been edited is a document of its own and stays
+	p2->Modified = true;
+	f.Host.RefreshPane(p2);
+	CHECK(!p2->Preview);
+	CHECK(f.Host.ShowPreview(p3));
+	CHECK(p2->State() == PaneState::Document && p3->Preview);
+
+	// opening a document that is open already as a normal one only shows it
+	CHECK(f.Host.ShowPreview(d.A));
+	CHECK(!d.A->Preview && d.A->State() == PaneState::Document && f.Host.ActivePane() == d.A);
+
+	// a double click on the tab of a preview, and pinning it, promote it
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	const auto strip = StripOf(f, d.A->Group());
+	int index = 0;
+	for (int i = 0; i < (int)d.A->Group()->Panes().size(); i++)
+		if (d.A->Group()->Panes()[i] == p3)
+			index = i;
+	::SendMessage(window, WM_LBUTTONDBLCLK, MK_LBUTTON, Center(strip.Tabs[index]));
+	CHECK(!p3->Preview);
+	auto p4 = f.Add(L"p4.cpp", PaneKind::Document);
+	CHECK(f.Host.ShowPreview(p4));
+	CHECK(p3->State() == PaneState::Document);								// promoted, so not replaced
+	CHECK(f.Host.Execute(DockCommand::PinTab, p4));
+	CHECK(!p4->Preview && p4->Pinned());
+	CHECK(!f.Host.ShowPreview(nullptr) && !f.Host.ShowPreview(f.Add(L"tool", PaneKind::Tool)));
+	VERIFY(f);
+}
+
+TEST(Host_APreviewTabIsSetApartFromTheOthers) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto p = f.Add(L"preview.cpp", PaneKind::Document);
+	f.Host.ShowPreview(p);
+	auto acc = AccessibleOfClient(f.Host.GroupWindow(d.A->Group()));
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	const auto children = ChildrenOf(acc);
+	const AccChild* tab = FindChild(children, L"preview.cpp");
+	CHECK(tab != nullptr);
+	CComBSTR description;
+	if (tab)
+		CHECK(acc->get_accDescription(ChildId(tab->Id), &description) == S_OK && std::wstring(description) == L"Preview");
+	CHECK(DockWindowList::StateText(*p) == L"Open, preview");
+	f.Host.Execute(DockCommand::PinTab, d.A);
+	CHECK(DockWindowList::StateText(*d.A) == L"Open, pinned");
+}
+
+TEST(Host_ATabWithAColourHasAStripeInIt) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.ActivatePane(d.A);
+	Pump();
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	const RECT tab = StripOf(f, d.A->Group()).Tabs[1];					// b.cpp
+
+	const int x = (tab.left + tab.right) / 2, y = tab.bottom - 2;
+	CHECK(PixelAt(window, x, y) != RGB(200, 30, 60));
+	d.B->TabColor = RGB(200, 30, 60);
+	f.Host.RefreshPane(d.B);
+	Pump();
+	CHECK(PixelAt(window, x, y) == RGB(200, 30, 60));					// along the edge that faces the content
+	CHECK(PixelAt(window, x, tab.top + 1) != RGB(200, 30, 60));
+	d.B->TabColor = CLR_INVALID;
+	f.Host.RefreshPane(d.B);
+	Pump();
+	CHECK(PixelAt(window, x, y) != RGB(200, 30, 60));
+}
+
+// ---- Tabs in several rows ---------------------------------------------------------------------
+
+TEST(Host_TabsCanBeShownInSeveralRows) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 25; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.ActivatePane(docs[3]);
+	Pump();
+	auto group = docs[0]->Group();
+	CHECK(f.Host.GetTabState(group).Overflow && f.Host.GetTabState(group).Rows == 1);
+
+	f.Host.SetMultiRowTabs(true);
+	Pump();
+	auto state = f.Host.GetTabState(group);
+	CHECK(f.Host.MultiRowTabs() && !state.Overflow && state.Rows > 1 && state.Visible == 25);
+	VERIFY(f);
+
+	// every tab has a place inside the strip, which is as high as the rows need; the active tab's row is the lowest
+	const auto strip = StripOf(f, group);
+	const DockMetrics& m = f.Host.Metrics();
+	int lowest = 0, highest = 1 << 20;
+	for (auto& tab : strip.Tabs) {
+		lowest = std::max<int>(lowest, tab.top);
+		highest = std::min<int>(highest, tab.top);
+	}
+	CHECK(strip.Tabs.size() == 25 && (lowest - highest) / m.TabHeight == state.Rows - 1);
+	CHECK(strip.Tabs[3].top == lowest);
+	RECT client;
+	::GetClientRect(f.Host.GroupWindow(group), &client);
+	CHECK(RectIn(docs[3]->hWnd, f.Host.GroupWindow(group)).top == state.Rows * m.TabHeight);
+
+	// a click on a tab of another row activates it, and its row goes down next to the content
+	HWND window = f.Host.GroupWindow(group);
+	int other = -1;
+	for (int i = 0; i < 25 && other < 0; i++)
+		if (strip.Tabs[i].top == highest)
+			other = i;
+	CHECK(other >= 0);
+	Click(window, Center(strip.Tabs[other]));
+	CHECK(group->ActivePane() == docs[other]);
+	VERIFY(f);
+	CHECK(StripOf(f, group).Tabs[other].top == lowest);
+
+	// all the tabs are reachable for accessibility and none is out of view
+	auto acc = AccessibleOfClient(window);
+	int offscreen = 0, tabs = 0;
+	for (auto& c : ChildrenOf(acc)) {
+		if (c.Role == ROLE_SYSTEM_PAGETAB) {
+			tabs++;
+			offscreen += (c.State & STATE_SYSTEM_OFFSCREEN) != 0;
+		}
+	}
+	CHECK(tabs == 25 && offscreen == 0);
+
+	// and back to one scrolling row
+	f.Host.SetMultiRowTabs(false);
+	Pump();
+	CHECK(f.Host.GetTabState(group).Overflow && f.Host.GetTabState(group).Rows == 1);
+	VERIFY(f);
+}
+
+TEST(Host_TheRowsFollowTheTabsAndTheWindow) {
+	Fixture f(700, 400);
+	Docs d = AddDocs(f);
+	f.Host.SetMultiRowTabs(true);
+	Pump();
+	auto group = d.A->Group();
+	CHECK(f.Host.GetTabState(group).Rows == 1);
+
+	// more tabs than fit: another row; fewer again: back
+	std::vector<DockPane*> more;
+	for (int i = 0; i < 12; i++) {
+		more.push_back(f.Add((L"a-longer-document-name" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(more.back());
+	}
+	Pump();
+	const int rows = f.Host.GetTabState(group).Rows;
+	CHECK(rows > 1);
+	VERIFY(f);
+	::SetWindowPos(f.Host, nullptr, 0, 0, 1900, 500, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);		// wider: fewer rows
+	Pump();
+	CHECK(f.Host.GetTabState(group).Rows < rows);
+	VERIFY(f);
+
+	// a title that gets longer, and a mark that needs room, can add a row
+	::SetWindowPos(f.Host, nullptr, 0, 0, 700, 400, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	Pump();
+	const int before = f.Host.GetTabState(group).Rows;
+	for (auto p : more)
+		p->Title += L"-with-a-much-longer-title";
+	f.Host.RefreshPane(more[0]);
+	Pump();
+	CHECK(f.Host.GetTabState(group).Rows > before);
+	VERIFY(f);
+
+	// tool tabs at the bottom too: their row next to the content is the top one
+	auto tools = f.Add(L"Solution Explorer", PaneKind::Tool, DockSide::Left, 260);
+	f.Host.Layout().Show(tools);
+	for (int i = 0; i < 8; i++) {
+		auto t = f.Add((L"A tool window number " + std::to_wstring(i)).c_str(), PaneKind::Tool, DockSide::Left, 260);
+		f.Host.Layout().DockTo(t, tools->Group(), DockPosition::Tab);
+	}
+	Pump();
+	CHECK(f.Host.GetTabState(tools->Group()).Rows > 1);
+	VERIFY(f);
+}
+
+TEST(Host_ATabDraggedToAnotherRowChangesPlace) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 20; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.SetMultiRowTabs(true);
+	f.Host.ActivatePane(docs[0]);
+	Pump();
+	auto group = docs[0]->Group();
+	HWND window = f.Host.GroupWindow(group);
+	const auto strip = StripOf(f, group);
+
+	// pick a tab in the top row and one in another row
+	int from = -1, to = -1;
+	int highest = 1 << 20;
+	for (auto& t : strip.Tabs)
+		highest = std::min<int>(highest, t.top);
+	for (int i = 0; i < 20; i++) {
+		if (strip.Tabs[i].top == highest && from < 0)
+			from = i;
+		if (strip.Tabs[i].top != highest && to < 0 && i > from && from >= 0)
+			to = i;
+	}
+	CHECK(from >= 0 && to > from);
+	if (from < 0 || to < 0)
+		return;
+	DockPane* moved = docs[from];
+	const RECT dest = strip.Tabs[to];
+	::SendMessage(window, WM_LBUTTONDOWN, MK_LBUTTON, Center(strip.Tabs[from]));
+	::SendMessage(window, WM_MOUSEMOVE, MK_LBUTTON, Pt(Center(strip.Tabs[from]) & 0xFFFF, (LONG)(short)(dest.top + 3)));
+	::SendMessage(window, WM_MOUSEMOVE, MK_LBUTTON, Pt(dest.right - 6, (dest.top + dest.bottom) / 2));
+	::SendMessage(window, WM_LBUTTONUP, 0, Pt(dest.right - 6, (dest.top + dest.bottom) / 2));
+	int index = 0;
+	for (int i = 0; i < (int)group->Panes().size(); i++)
+		if (group->Panes()[i] == moved)
+			index = i;
+	CHECK(index > from);
+	VERIFY(f);
+}
+
+TEST(Host_TheKeyboardVisitsTabsInTheirOrderWhateverTheRow) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 20; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.SetMultiRowTabs(true);
+	f.Host.ActivatePane(docs[0]);
+	Pump();
+	HWND window = f.Host.GroupWindow(docs[0]->Group());
+	CHECK(f.Host.FocusChrome(docs[0]));
+	for (int i = 0; i < 6; i++)
+		Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"document3.cpp");				// (each tab and its close button)
+	Key(window, VK_RETURN);
+	CHECK(f.Host.ActivePane() == docs[3]);
+	VERIFY(f);
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -3613,7 +3951,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 		const RECT rc = OffScreen(20, 20, 300, 280);
 
 		bool ok = false;
-		switch (pick(28)) {
+		switch (pick(30)) {
 			case 0: ok = l.Show(anyPane()); break;
 			case 1: ok = l.Hide(anyPane()); break;
 			case 2: ok = l.DockTo(anyPane(), anyGroup(), (DockPosition)pick(5)); break;
@@ -3633,7 +3971,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 				break;
 			}
 			case 11: ok = f.Host.ClosePane(anyPane()); break;
-			case 12: ok = f.Host.Execute((DockCommand)pick(10), anyPane()); break;
+			case 12: ok = f.Host.Execute((DockCommand)pick(12), anyPane()); break;
 			case 13: ok = l.ReorderTab(anyPane(), (int)pick(4)); break;
 			case 14: f.Host.ActivatePane(anyPane()); break;
 			case 15: ok = f.Host.ToggleFloat(anyPane()); break;
@@ -3690,16 +4028,27 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 				break;
 			case 24: ok = f.Host.HandleShortcut(pick(2) ? VK_F6 : VK_F4, true, pick(2) != 0, pick(2) != 0, pick(2) != 0); break;
 			case 26: ok = f.Host.FocusChrome(anyPane()); break;
+			case 28: f.Host.SetMultiRowTabs(pick(2) != 0); break;
+			case 29: ok = f.Host.ShowPreview(anyPane()); break;
 			case 27:
 				// keys in the chrome
 				if (f.Host.IsChromeFocused() && f.Host.ActivePane() && f.Host.ActivePane()->Group()) {
 					const UINT keys[] = { VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_RETURN, VK_DELETE, VK_ESCAPE, VK_TAB };
 					if (HWND w = f.Host.GroupWindow(f.Host.ActivePane()->Group()))
-						::SendMessage(w, WM_KEYDOWN, keys[pick(8)], 0);
+{
+						const UINT key = keys[pick(8)];
+						if (key == VK_RETURN)
+							::SetTimer(nullptr, 0, 40, EndMenuTimer);		// (Enter on the menu button opens a menu)
+						::SendMessage(w, WM_KEYDOWN, key, 0);
+					}
 				}
 				break;
 			case 25: {
 				// saving the state and loading it again changes nothing
+				// (a window that was moved to a simulated DPI is put back on the real one first: a loaded window takes that of its monitor)
+				for (int i = 0; i < (int)l.Floats().size(); i++)
+					if (HWND w = f.Host.FloatWindow(l.Floats()[i]->Id()))
+						f.Host.SetFloatDpi(l.Floats()[i]->Id(), (int)::GetDpiForWindow(w));
 				const std::wstring before = l.Dump();
 				const std::string state = f.Host.SaveState(false);
 				ok = f.Host.LoadState(state, {}, nullptr, false);
@@ -3852,6 +4201,15 @@ void RunUiTests() {
 	Run_Host_ShiftF10OpensTheMenuOfTheTab();
 	Run_Host_ADockedFloatHasTheWidthOrHeightItHadFloating();
 	Run_Host_DroppingAFloatOnAnEdgeOrBesideAGroupKeepsItsSize();
+	Run_Host_PinnedTabsMoveLeftAndSpareTheCloseAllCommands();
+	Run_Host_ThePinButtonOfATabUnpinsIt();
+	Run_Host_APreviewReplacesThePreviousPreview();
+	Run_Host_APreviewTabIsSetApartFromTheOthers();
+	Run_Host_ATabWithAColourHasAStripeInIt();
+	Run_Host_TabsCanBeShownInSeveralRows();
+	Run_Host_TheRowsFollowTheTabsAndTheWindow();
+	Run_Host_ATabDraggedToAnotherRowChangesPlace();
+	Run_Host_TheKeyboardVisitsTabsInTheirOrderWhateverTheRow();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

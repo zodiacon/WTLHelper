@@ -636,8 +636,8 @@ void CALLBACK CDockHost::FocusEventProc(HWINEVENTHOOK hook, DWORD, HWND hWnd, LO
 
 namespace {
 
-void MakeFonts(int dpi, CFont& normal, CFont& bold, CFont& vertical) {
-	for (auto font : { &normal, &bold, &vertical })
+void MakeFonts(int dpi, CFont& normal, CFont& bold, CFont& vertical, CFont& italic) {
+	for (auto font : { &normal, &bold, &vertical, &italic })
 		if (!font->IsNull())
 			font->DeleteObject();
 
@@ -650,12 +650,15 @@ void MakeFonts(int dpi, CFont& normal, CFont& bold, CFont& vertical) {
 	LOGFONT verticalFont = ncm.lfMessageFont;
 	verticalFont.lfEscapement = verticalFont.lfOrientation = 900;
 	vertical.CreateFontIndirect(&verticalFont);
+	LOGFONT italicFont = ncm.lfMessageFont;
+	italicFont.lfItalic = TRUE;
+	italic.CreateFontIndirect(&italicFont);
 }
 
 }
 
 void CDockHost::CreateFonts() {
-	MakeFonts(m_Dpi, m_Font, m_BoldFont, m_VerticalFont);
+	MakeFonts(m_Dpi, m_Font, m_BoldFont, m_VerticalFont, m_ItalicFont);
 }
 
 const CDockHost::DpiResources& CDockHost::ResourcesFor(int dpi) const {
@@ -663,13 +666,17 @@ const CDockHost::DpiResources& CDockHost::ResourcesFor(int dpi) const {
 	if (!slot) {
 		slot = std::make_unique<DpiResources>();
 		slot->Metrics = DockMetrics::ForDpi(dpi);
-		MakeFonts(dpi, slot->Font, slot->BoldFont, slot->VerticalFont);
+		MakeFonts(dpi, slot->Font, slot->BoldFont, slot->VerticalFont, slot->ItalicFont);
 	}
 	return *slot;
 }
 
 const DockMetrics& CDockHost::MetricsFor(int dpi) const {
 	return dpi == m_Dpi ? m_Metrics : ResourcesFor(dpi).Metrics;
+}
+
+HFONT CDockHost::ItalicFontFor(int dpi) const {
+	return dpi == m_Dpi ? m_ItalicFont.m_hFont : ResourcesFor(dpi).ItalicFont.m_hFont;
 }
 
 HFONT CDockHost::FontFor(int dpi) const {
@@ -1319,14 +1326,16 @@ bool CDockHost::CanExecute(DockCommand command, const DockPane* pane) const {
 		return false;
 	const auto& panes = pane->Group()->Panes();
 	auto closable = [](const DockPane* p) { return Has(p->Caps, PaneCaps::CanClose); };
+	// (the "close all" commands spare the pinned tabs)
+	auto closableInBulk = [&](const DockPane* p) { return closable(p) && !p->Pinned(); };
 
 	switch (command) {
 		case DockCommand::Close:
 			return closable(pane);
 		case DockCommand::CloseOthers:
-			return std::any_of(panes.begin(), panes.end(), [&](auto p) { return p != pane && closable(p); });
+			return std::any_of(panes.begin(), panes.end(), [&](auto p) { return p != pane && closableInBulk(p); });
 		case DockCommand::CloseAll:
-			return std::any_of(panes.begin(), panes.end(), closable);
+			return std::any_of(panes.begin(), panes.end(), closableInBulk);
 		case DockCommand::AutoHide:
 			return pane->State() == PaneState::Docked &&
 				std::all_of(panes.begin(), panes.end(), [](auto p) { return Has(p->Caps, PaneCaps::CanAutoHide); });
@@ -1341,6 +1350,10 @@ bool CDockHost::CanExecute(DockCommand command, const DockPane* pane) const {
 		case DockCommand::MoveToNextGroup:
 		case DockCommand::MoveToPreviousGroup:
 			return pane->State() == PaneState::Document && m_Layout.DocumentGroups().size() > 1;
+		case DockCommand::PinTab:
+			return pane->Kind() == PaneKind::Document && !pane->Pinned();
+		case DockCommand::UnpinTab:
+			return pane->Kind() == PaneKind::Document && pane->Pinned();
 	}
 	return false;
 }
@@ -1358,6 +1371,11 @@ bool CDockHost::Execute(DockCommand command, DockPane* pane) {
 			return FloatPane(pane);
 		case DockCommand::Dock:
 			return pane->State() == PaneState::AutoHide ? m_Layout.Unhide(pane->Group()) : DockFloating(pane);
+		case DockCommand::PinTab:
+			PromotePreview(pane);
+			return m_Layout.SetPinned(pane, true);
+		case DockCommand::UnpinTab:
+			return m_Layout.SetPinned(pane, false);
 		case DockCommand::NewHorizontalGroup:
 			return m_Layout.DockTo(pane, pane->Group(), DockPosition::Bottom);
 		case DockCommand::NewVerticalGroup:
@@ -1377,7 +1395,7 @@ bool CDockHost::Execute(DockCommand command, DockPane* pane) {
 	const std::vector<DockPane*> panes = pane->Group()->Panes();
 	bool any = false;
 	for (auto p : panes)
-		if (command == DockCommand::CloseAll || p != pane)
+		if ((command == DockCommand::CloseAll || p != pane) && !p->Pinned())
 			any |= ClosePane(p);
 	return any;
 }
@@ -1404,8 +1422,12 @@ void CDockHost::ShowPaneMenu(DockPane* pane, POINT screen) {
 	if (pane->Kind() == PaneKind::Tool) {
 		add(DockCommand::AutoHide, L"&Auto Hide");
 	}
-	else if (pane->State() == PaneState::Document) {
+	else if (pane->State() == PaneState::Document || pane->State() == PaneState::Floating) {
 		menu.AppendMenu(MF_SEPARATOR);
+		if (pane->Pinned())
+			add(DockCommand::UnpinTab, L"Un&pin Tab");
+		else
+			add(DockCommand::PinTab, L"&Pin Tab");
 		add(DockCommand::NewHorizontalGroup, L"New &Horizontal Tab Group");
 		add(DockCommand::NewVerticalGroup, L"New &Vertical Tab Group");
 		add(DockCommand::MoveToNextGroup, L"Move to &Next Tab Group");
@@ -1628,7 +1650,7 @@ int CDockHost::CloseAllDocuments(bool exceptActive) {
 	}
 	std::vector<DockPane*> documents;
 	for (auto& p : m_Layout.Panes())
-		if (p->Kind() == PaneKind::Document && p->Group() && p.get() != keep)
+		if (p->Kind() == PaneKind::Document && p->Group() && p.get() != keep && !p->Pinned())
 			documents.push_back(p.get());
 
 	int closed = 0;
@@ -1967,12 +1989,24 @@ void CDockHost::HideTip() {
 		m_TipWnd->Hide();
 }
 
+void CDockHost::SetMultiRowTabs(bool multiRow) {
+	if (m_MultiRowTabs == multiRow)
+		return;
+	m_MultiRowTabs = multiRow;
+	HideTip();
+	for (auto& [group, window] : m_Groups)
+		if (window->m_hWnd)
+			window->Relayout();
+}
+
 void CDockHost::RefreshPane(DockPane* pane) {
 	if (!pane || !pane->Group())
 		return;
+	if (pane->Preview && pane->Modified)
+		pane->Preview = false;		// an edited preview is a document like any other
 	HideTip();
 	if (auto it = m_Groups.find(pane->Group()); it != m_Groups.end() && it->second->m_hWnd)
-		it->second->Invalidate(FALSE);
+		it->second->Relayout();
 	for (auto& f : m_Layout.Floats())
 		if (auto it = m_Frames.find(f->Id()); it != m_Frames.end() && it->second)
 			it->second->SetTitle(FloatTitle(*f));
@@ -2024,6 +2058,34 @@ std::wstring CDockHost::ChromeFocusName() const {
 		if (window->HasChromeFocus())
 			return window->FocusName();
 	return {};
+}
+
+bool CDockHost::ShowPreview(DockPane* pane) {
+	if (!pane || pane->Kind() != PaneKind::Document)
+		return false;
+	// open already as a normal document: it only comes to the front
+	if (pane->Group() && !pane->Preview)
+		return ShowPane(pane);
+
+	// the preview that is open in the group where it goes is replaced
+	if (auto group = m_Layout.ActiveDocumentGroup(); group && !pane->Group()) {
+		const std::vector<DockPane*> panes = group->Panes();
+		for (auto other : panes)
+			if (other != pane && other->Preview && !other->Modified && !other->Pinned())
+				ClosePane(other);
+	}
+	pane->Preview = true;
+	const bool shown = ShowPane(pane);
+	if (auto it = m_Groups.find(pane->Group()); it != m_Groups.end() && it->second->m_hWnd)
+		it->second->Relayout();
+	return shown;
+}
+
+void CDockHost::PromotePreview(DockPane* pane) {
+	if (!pane || !pane->Preview)
+		return;
+	pane->Preview = false;
+	RefreshPane(pane);
 }
 
 }

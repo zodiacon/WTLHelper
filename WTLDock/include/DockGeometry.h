@@ -19,7 +19,8 @@ struct GroupParts {
 // Tool groups have a caption; their tab strip (only with two or more panes) is at the bottom or below the caption.
 // Document groups have no caption and always show their tab strip at the top. The only group of a floating
 // window has no caption either: the window's title bar takes its place.
-GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const DockMetrics& metrics);
+// 'tabRows': how many rows the tab strip has (more than one with multi-row tabs; see LayoutTabRows)
+GroupParts ComputeGroupParts(const DockGroup& group, const RECT& client, const DockMetrics& metrics, int tabRows = 1);
 
 // The buttons on a tool group's caption, from the right end: close, pin (auto-hide / dock), menu. Those that a group
 // does not show are left out and the others move up, so the close button is always the rightmost one.
@@ -61,6 +62,13 @@ struct TabStrip {
 // strip and only a run of whole tabs is shown, starting at 'first' but moved as far as needed to keep the
 // 'active' tab (pass -1 for none) in view, and back so that no room is wasted at the end.
 TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, const DockMetrics& metrics, int first, int active);
+
+// Tabs in several rows instead of a scrolling row: the tabs are packed left to right, a new row starts when the next tab
+// does not fit, and the row of the active tab is the one next to the content (the last for a strip above it, the first
+// for one below it), as Visual Studio does. 'strip' is the whole strip; the result has a rectangle for every tab
+// (First 0, no overflow button).
+int CountTabRows(const std::vector<TabSpec>& tabs, int width, const DockMetrics& metrics);
+TabStrip LayoutTabRows(const std::vector<TabSpec>& tabs, const RECT& strip, const DockMetrics& metrics, int active, bool stripAtBottom);
 
 int TabWidth(const TabSpec& tab, const DockMetrics& metrics);
 // the size of the modified dot

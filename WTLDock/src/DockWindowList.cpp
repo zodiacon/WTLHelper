@@ -12,7 +12,7 @@ std::wstring DockWindowList::StateText(const DockPane& pane) {
 	auto group = pane.Group();
 	switch (pane.State()) {
 		case PaneState::Document:
-			return L"Open";
+			return pane.Pinned() ? L"Open, pinned" : pane.Preview ? L"Open, preview" : L"Open";
 		case PaneState::Docked:
 			return group && group->Side() ? std::wstring(L"Docked ") + sides[(int)*group->Side()] : L"Docked";
 		case PaneState::AutoHide:

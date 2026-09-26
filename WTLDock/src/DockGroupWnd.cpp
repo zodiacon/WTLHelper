@@ -19,7 +19,7 @@ void CDockGroupWnd::Relayout() {
 	if (m_Group) {
 		RECT rc;
 		GetClientRect(&rc);
-		const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+		const GroupParts parts = Parts(rc);
 		const RECT& c = parts.Content;
 		const auto active = m_Group->ActivePane();
 		m_Host.EnsureContent(active);
@@ -124,7 +124,7 @@ void CDockGroupWnd::DropInfo(std::vector<RECT>& zones, std::vector<RECT>& tabs, 
 		return r;
 	};
 
-	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	const GroupParts parts = Parts(rc);
 	if (parts.HasCaption)
 		zones.push_back(toScreen(parts.Caption));
 	if (parts.HasTabs) {
@@ -168,25 +168,49 @@ LRESULT CDockGroupWnd::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 // tab strip
 //
 
+std::vector<TabSpec> CDockGroupWnd::MeasureSpecs(CDCHandle dc) const {
+	std::vector<TabSpec> specs;
+	if (!m_Group)
+		return specs;
+	HFONT old = dc.SelectFont(Font());
+	for (auto pane : m_Group->Panes()) {
+		SIZE size{};
+		dc.SelectFont(pane->Preview ? ItalicFont() : Font());
+		dc.GetTextExtent(pane->Title.c_str(), (int)pane->Title.size(), &size);
+		// (a pinned tab has the button too: it lets go of the pin)
+		const bool closable = m_Group->IsDocument() && (Has(pane->Caps, PaneCaps::CanClose) || pane->Pinned());
+		specs.push_back({ size.cx, pane->Icon != nullptr, closable, pane->Modified && !closable });
+	}
+	dc.SelectFont(old);
+	return specs;
+}
+
+// the parts of the group: with the tab strip as many rows high as the tabs need, if that is what the host wants
+GroupParts CDockGroupWnd::Parts(const RECT& rc) const {
+	int rows = 1;
+	if (m_Host.MultiRowTabs() && m_Group && m_hWnd && (m_Group->IsDocument() || m_Group->Panes().size() > 1)) {
+		CClientDC dc(m_hWnd);
+		rows = CountTabRows(MeasureSpecs(dc.m_hDC), Width(rc), Metrics());
+	}
+	return ComputeGroupParts(*m_Group, rc, Metrics(), rows);
+}
+
 CDockGroupWnd::Strip CDockGroupWnd::LayoutStrip(const GroupParts& parts, CDCHandle dc) {
 	Strip strip;
 	if (!m_Group || !parts.HasTabs)
 		return strip;
-
-	HFONT old = dc.SelectFont(Font());
-	for (auto pane : m_Group->Panes()) {
-		SIZE size{};
-		dc.GetTextExtent(pane->Title.c_str(), (int)pane->Title.size(), &size);
-		const bool closable = m_Group->IsDocument() && Has(pane->Caps, PaneCaps::CanClose);
-		strip.Specs.push_back({ size.cx, pane->Icon != nullptr, closable, pane->Modified && !closable });
-	}
-	dc.SelectFont(old);
+	strip.Specs = MeasureSpecs(dc);
 
 	// a new active tab takes the scrolling back from the user
 	const int active = m_Group->ActiveIndex();
 	if (active != m_LastActive) {
 		m_LastActive = active;
 		m_ScrollLocked = false;
+	}
+	if (m_Host.MultiRowTabs()) {
+		strip.Layout = LayoutTabRows(strip.Specs, parts.Tabs, Metrics(), active, m_Group->TabsAtBottom && !m_Group->IsDocument());
+		m_First = 0;
+		return strip;
 	}
 	strip.Layout = LayoutTabStrip(strip.Specs, parts.Tabs, Metrics(), m_First, m_ScrollLocked ? -1 : active);
 	m_First = strip.Layout.First;
@@ -200,10 +224,11 @@ TabStripState CDockGroupWnd::State() {
 	RECT rc;
 	GetClientRect(&rc);
 	CClientDC dc(m_hWnd);
-	const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, Metrics()), dc.m_hDC);
+	const auto strip = LayoutStrip(Parts(rc), dc.m_hDC);
 	state.First = strip.Layout.First;
 	state.Visible = (int)strip.Layout.Tabs.size();
 	state.Overflow = strip.Layout.Overflow;
+	state.Rows = m_Host.MultiRowTabs() && !strip.Layout.Tabs.empty() ? CountTabRows(strip.Specs, Width(rc), Metrics()) : 1;
 	return state;
 }
 
@@ -269,7 +294,7 @@ void CDockGroupWnd::RunButton(Button button) {
 	else if (button == Button::Menu) {
 		RECT rc;
 		GetClientRect(&rc);
-		const CaptionButtons b = ButtonsFor(ComputeGroupParts(*m_Group, rc, Metrics()));
+		const CaptionButtons b = ButtonsFor(Parts(rc));
 		POINT screen{ b.Menu.left, b.Menu.bottom };
 		ClientToScreen(&screen);
 		m_Host.ShowPaneMenu(pane, screen);
@@ -454,7 +479,11 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 			}
 			dc.SetTextColor(selected ? theme.TabActiveText : theme.TabInactiveText);
 			RECT text = TabTextRect(tab, spec, metrics);
+			if (pane->Preview)
+				dc.SelectFont(ItalicFont());
 			dc.DrawText(pane->Title.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+			if (pane->Preview)
+				dc.SelectFont(Font());
 
 			// the close button shows on the selected tab and on the one under the mouse; a modified document shows a dot
 			// instead, which turns into the button when the mouse is on it
@@ -462,6 +491,8 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 				const bool overButton = hot && m_HotTabClose;
 				if (pane->Modified && !overButton)
 					DrawModifiedDot(dc.m_hDC, strip.Layout.Close[k], selected ? theme.TabActiveText : theme.ButtonGlyph);
+				else if (pane->Pinned())
+					DrawPinGlyph(dc.m_hDC, strip.Layout.Close[k], true, overButton, selected ? theme.TabActiveText : theme.ButtonGlyph);
 				else if (selected || hot)
 					DrawCloseGlyph(dc.m_hDC, strip.Layout.Close[k], overButton, theme.ButtonGlyph);
 			}
@@ -471,6 +502,15 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 			if (selected) {
 				RECT line{ tab.left, tab.top, tab.right, tab.top + accent };
 				dc.FillSolidRect(&line, theme.TabActiveAccent);
+			}
+			// a stripe in the colour of the tab, on the edge that faces the content
+			if (pane->TabColor != CLR_INVALID) {
+				RECT stripe = tab;
+				if (stripAtBottom)
+					stripe.bottom = stripe.top + accent + 1;
+				else
+					stripe.top = stripe.bottom - accent - 1;
+				dc.FillSolidRect(&stripe, pane->TabColor);
 			}
 		}
 
@@ -527,7 +567,7 @@ void CDockGroupWnd::SetHot(int tab, bool close, bool overflow) {
 	if (m_Group) {
 		RECT rc;
 		GetClientRect(&rc);
-		const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+		const GroupParts parts = Parts(rc);
 		InvalidateRect(&parts.Tabs, FALSE);
 	}
 }
@@ -579,7 +619,7 @@ LRESULT CDockGroupWnd::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL&) {
 		case Hit::Kind::Overflow: {
 			RECT rc;
 			GetClientRect(&rc);
-			const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+			const GroupParts parts = Parts(rc);
 			CClientDC dc(m_hWnd);
 			const auto strip = LayoutStrip(parts, dc.m_hDC);
 			ShowOverflowMenu(strip.Layout.OverflowButton, m_Group->TabsAtBottom && !m_Group->IsDocument());
@@ -611,12 +651,20 @@ LRESULT CDockGroupWnd::OnLButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 		toClose = m_Group->ActivePane();
 	else if (m_PressTabClose >= 0 && hit.Type == Hit::Kind::TabClose && hit.Tab == m_PressTabClose)
 		toClose = PaneAt(hit.Tab);
+	// the button of a pinned tab lets go of the pin instead
+	DockPane* toUnpin = nullptr;
+	if (toClose && toClose->Pinned() && hit.Type == Hit::Kind::TabClose) {
+		toUnpin = toClose;
+		toClose = nullptr;
+	}
 
 	const bool captured = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
 	EndInteraction();
 	if (captured)
 		ReleaseCapture();
-	if (toClose)
+	if (toUnpin)
+		m_Host.Execute(DockCommand::UnpinTab, toUnpin);
+	else if (toClose)
 		m_Host.ClosePane(toClose);		// the window may be retired by this; touch nothing afterwards
 	else if (clicked == Button::Pin || clicked == Button::Menu)
 		RunButton(clicked);
@@ -634,7 +682,9 @@ LRESULT CDockGroupWnd::OnLButtonDblClk(UINT, WPARAM, LPARAM lp, BOOL&) {
 		pane = m_Group->ActivePane();
 	else if (hit.Type == Hit::Kind::Tab)
 		pane = PaneAt(hit.Tab);
-	if (pane && pane->Kind() == PaneKind::Tool)
+	if (pane && pane->Preview)
+		m_Host.PromotePreview(pane);
+	else if (pane && pane->Kind() == PaneKind::Tool)
 		m_Host.ToggleFloat(pane);		// the window may be retired by this; touch nothing afterwards
 	return 0;
 }
@@ -654,8 +704,8 @@ LRESULT CDockGroupWnd::OnMButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 		RECT rc;
 		GetClientRect(&rc);
 		CClientDC dc(m_hWnd);
-		const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, Metrics()), dc.m_hDC);
-		if (pressed < (int)strip.Specs.size() && strip.Specs[pressed].Closable)
+		const auto strip = LayoutStrip(Parts(rc), dc.m_hDC);
+		if (pressed < (int)strip.Specs.size() && strip.Specs[pressed].Closable && !PaneAt(pressed)->Pinned())
 			m_Host.ClosePane(PaneAt(pressed));
 	}
 	return 0;
@@ -722,7 +772,7 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 		// away from the tab strip the drag is no longer about the order of the tabs but about where the pane goes
 		RECT bounds;
 		GetClientRect(&bounds);
-		const GroupParts parts = ComputeGroupParts(*m_Group, bounds, Metrics());
+		const GroupParts parts = Parts(bounds);
 		const int band = std::max(::GetSystemMetricsForDpi(SM_CYDRAG, Dpi()), Metrics().TabHeight / 2);
 		if (pt.y < parts.Tabs.top - band || pt.y >= parts.Tabs.bottom + band || pt.x < bounds.left - band || pt.x >= bounds.right + band) {
 			if (BeginDockDrag(m_DragPane, false, pt))
@@ -738,18 +788,20 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 			RECT rc;
 			GetClientRect(&rc);
 			CClientDC dc(m_hWnd);
-			const auto strip = LayoutStrip(ComputeGroupParts(*m_Group, rc, Metrics()), dc.m_hDC);
+			const auto strip = LayoutStrip(Parts(rc), dc.m_hDC);
 			const auto& panes = m_Group->Panes();
 			const int index = (int)(std::find(panes.begin(), panes.end(), m_DragPane) - panes.begin());
-			auto center = [&](int tab) {
-				const int k = tab - strip.Layout.First;
-				return k >= 0 && k < (int)strip.Layout.Tabs.size() ? (strip.Layout.Tabs[k].left + strip.Layout.Tabs[k].right) / 2 : -1;
-			};
-			const int next = center(index + 1), previous = center(index - 1);
-			if (next >= 0 && pt.x > next)
-				m_Host.Layout().ReorderTab(m_DragPane, index + 1);
-			else if (previous >= 0 && pt.x < previous)
-				m_Host.Layout().ReorderTab(m_DragPane, index - 1);
+			// the tab under the mouse (in whatever row): the dragged one goes there when the mouse passes its centre
+			for (size_t k = 0; k < strip.Layout.Tabs.size(); k++) {
+				const int tab = strip.Layout.First + (int)k;
+				const RECT& r = strip.Layout.Tabs[k];
+				if (tab == index || !PtInRect(&r, pt))
+					continue;
+				const int centre = (r.left + r.right) / 2;
+				if ((tab > index && pt.x > centre) || (tab < index && pt.x < centre))
+					m_Host.Layout().ReorderTab(m_DragPane, tab);
+				break;
+			}
 		}
 		return 0;
 	}
@@ -790,7 +842,7 @@ LRESULT CDockGroupWnd::OnMouseWheel(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
 	ScreenToClient(&pt);
 	RECT rc;
 	GetClientRect(&rc);
-	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	const GroupParts parts = Parts(rc);
 	if (!parts.HasTabs || !PtInRect(&parts.Tabs, pt))
 		return 0;
 
@@ -907,7 +959,7 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 		OffsetRect(&r, origin.x, origin.y);
 		return r;
 	};
-	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	const GroupParts parts = Parts(rc);
 	DockPane* active = m_Group->ActivePane();
 
 	auto button = [&](const wchar_t* name, LONG role, const RECT& where, const wchar_t* action, Button which) {
@@ -953,6 +1005,10 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 			AccElement tab;
 			tab.Name = pane->Title;
 			tab.Description = pane->Modified ? (pane->Tooltip.empty() ? std::wstring(L"Modified") : pane->Tooltip + L" (modified)") : pane->Tooltip;
+			if (pane->Pinned())
+				tab.Description += tab.Description.empty() ? L"Pinned" : L" (pinned)";
+			if (pane->Preview)
+				tab.Description += tab.Description.empty() ? L"Preview" : L" (preview)";
 			tab.Role = ROLE_SYSTEM_PAGETAB;
 			tab.State = STATE_SYSTEM_SELECTABLE | STATE_SYSTEM_FOCUSABLE;
 			if (pane == active)
@@ -970,14 +1026,17 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 
 			if (strip.Specs[i].Closable) {
 				AccElement close;
-				close.Name = L"Close " + pane->Title;
+				close.Name = (pane->Pinned() ? L"Unpin " : L"Close ") + pane->Title;
 				close.Role = ROLE_SYSTEM_PUSHBUTTON;
 				if (shown)
 					close.Screen = toScreen(strip.Layout.Close[i - first]);
 				else
 					close.State = STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
 				close.Action = L"Press";
-				close.Invoke = [host, pane] { host->ClosePane(pane); };
+				if (pane->Pinned())
+					close.Invoke = [host, pane] { host->Execute(DockCommand::UnpinTab, pane); };
+				else
+					close.Invoke = [host, pane] { host->ClosePane(pane); };
 				close.Key = L"close:" + pane->Id();
 				list.push_back(std::move(close));
 			}
@@ -1042,7 +1101,7 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 		return false;
 	RECT rc;
 	GetClientRect(&rc);
-	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	const GroupParts parts = Parts(rc);
 	POINT origin{ 0, 0 };
 	ClientToScreen(&origin);
 	auto toScreen = [&](RECT r) {
@@ -1106,7 +1165,7 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 				return false;
 			if (hit.Type == Hit::Kind::TabClose) {
 				target = toScreen(strip.Layout.Close[k]);
-				text = L"Close";
+				text = pane->Pinned() ? L"Unpin" : L"Close";
 				return true;
 			}
 			text = pane->Tooltip;
@@ -1210,7 +1269,7 @@ void CDockGroupWnd::EnsureFocusVisible() {
 	RECT rc;
 	GetClientRect(&rc);
 	CClientDC dc(m_hWnd);
-	const auto parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	const auto parts = Parts(rc);
 	const auto strip = LayoutStrip(parts, dc.m_hDC);
 	if (index < strip.Layout.First || index >= strip.Layout.First + (int)strip.Layout.Tabs.size()) {
 		m_First = index;

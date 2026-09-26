@@ -5,6 +5,7 @@
 
 #include <random>
 
+#include <crtdbg.h>
 #include "Harness.h"
 
 using namespace WTLDock;
@@ -2058,6 +2059,130 @@ TEST(FloatSize_TheDpiOfTheWindowIsAccountedFor) {
 	CHECK(l.LengthWhenDocked(*p.Sol->Group(), DockSide::Left) == 300);	// 600 of its pixels are 300 of the main window's
 }
 
+// ---- Pinned tabs ---------------------------------------------------------------------------------
+
+TEST(Pinned_TabsStayAtTheLeftOfTheirGroup) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	CHECK_DUMP(l, L"main: V(H(T[Sol]@250 D[a.cpp,b.cpp,>c.cpp] T[Props]@200) T[Output]@150)\nhidden: Ext Pinned");
+
+	CHECK(l.SetPinned(p.C, true));
+	CHECK(p.C->Pinned() && p.C->Group()->Panes()[0] == p.C && p.C->Group()->ActivePane() == p.C);
+	CHECK(l.SetPinned(p.B, true));
+	CHECK(p.C->Group()->Panes()[0] == p.C && p.C->Group()->Panes()[1] == p.B && p.C->Group()->Panes()[2] == p.A);
+	CHECK_VALID(l);
+
+	// a tab cannot be dragged across the boundary
+	CHECK(l.ReorderTab(p.A, 0));
+	CHECK(p.A->Group()->Panes()[2] == p.A);
+	CHECK(l.ReorderTab(p.C, 2));
+	CHECK(p.A->Group()->Panes()[0] == p.B && p.A->Group()->Panes()[1] == p.C && p.A->Group()->Panes()[2] == p.A);
+	CHECK_VALID(l);
+
+	// unpinned: it goes to where the others start
+	CHECK(l.SetPinned(p.C, false));
+	CHECK(!p.C->Pinned() && p.A->Group()->Panes()[0] == p.B && p.A->Group()->Panes()[1] == p.C && p.A->Group()->Panes()[2] == p.A);
+	CHECK(l.SetPinned(p.C, false) && l.SetPinned(p.B, true));						// nothing to do is no failure
+	CHECK_VALID(l);
+}
+
+TEST(Pinned_OnlyDocumentsPinAndNewTabsGoAfterThePinnedOnes) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(!l.SetPinned(p.Sol, true) && !p.Sol->Pinned());
+	CHECK(!l.SetPinned(nullptr, true));
+
+	// a pane that is not placed remembers it, and comes back in front
+	CHECK(l.SetPinned(p.C, true) && p.C->Pinned() && p.C->State() == PaneState::Hidden);
+	l.Show(p.B);
+	l.Show(p.C);
+	CHECK(p.A->Group()->Panes()[0] == p.C);
+	l.Hide(p.C);
+	l.Show(p.C);
+	CHECK(p.A->Group()->Panes()[0] == p.C);
+	CHECK_VALID(l);
+
+	// merging groups keeps the pinned tabs in front
+	CHECK(l.DockTo(p.B, p.A->Group(), DockPosition::Right));						// A, C | B
+	CHECK(l.SetPinned(p.B, true));
+	CHECK(l.MoveGroupTo(p.B->Group(), p.A->Group(), DockPosition::Tab));
+	CHECK(p.A->Group()->Panes()[0] == p.C && p.A->Group()->Panes()[1] == p.B && p.A->Group()->Panes()[2] == p.A);
+	CHECK_VALID(l);
+}
+
+TEST(Pinned_ItIsSavedWithTheLayout) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	l.SetPinned(p.C, true);
+	l.SetPinned(p.A, true);
+	const auto dump = l.Dump();
+	const auto text = l.Save();
+
+	DockLayout copy;
+	Register(copy);
+	CHECK(copy.Load(text));
+	CHECK_STR(copy.Dump(), dump);
+	CHECK(copy.FindPane(L"c.cpp")->Pinned() && copy.FindPane(L"a.cpp")->Pinned() && !copy.FindPane(L"b.cpp")->Pinned());
+	CHECK(copy.Save() == text);
+
+	// a file whose pinned tab is behind an unpinned one is put right
+	DockLayout odd;
+	Register(odd);
+	const char* file = R"({"version": 1, "main": {"type": "split", "axis": "h", "children": [
+		{"type": "group", "kind": "document", "panes": ["a.cpp", "b.cpp"]}]},
+		"panes": [{"id": "b.cpp", "lastState": "document", "lastSide": "left", "lastFloat": [0,0,0,0], "preferred": [100,100], "pinned": true}]})";
+	CHECK(odd.Load(file));
+	CHECK(odd.FindPane(L"b.cpp")->Pinned() && odd.FindPane(L"b.cpp")->Group()->Panes()[0] == odd.FindPane(L"b.cpp"));
+	CHECK_VALID(odd);
+}
+
+// ---- Tabs in several rows ---------------------------------------------------------------------
+
+TEST(Geometry_TabsPackIntoRowsAndTheActiveRowIsNextToTheContent) {
+	const DockMetrics m = DockMetrics::ForDpi(96);
+	const TabSpec spec{ 60, false, true, false };
+	const int w = TabWidth(spec, m);
+	const std::vector<TabSpec> specs(8, spec);
+	const int width = 3 * w + 2 * m.TabGap + 1;							// three fit in a row, not four
+
+	CHECK(CountTabRows(specs, width, m) == 3);
+	CHECK(CountTabRows(specs, 8 * (w + m.TabGap), m) == 1);
+	CHECK(CountTabRows({}, width, m) == 1);
+	CHECK(CountTabRows(specs, 10, m) == 8);							// a tab that does not fit anywhere gets a row of its own
+
+	const RECT strip{ 0, 100, width, 100 + 3 * m.TabHeight };
+	auto rows = LayoutTabRows(specs, strip, m, 0, false);
+	CHECK(rows.Tabs.size() == 8 && rows.Close.size() == 8 && rows.Mark.size() == 8 && rows.First == 0 && !rows.Overflow);
+	for (int i = 0; i < 8; i++)
+		CHECK(rows.Tabs[i].left >= strip.left && rows.Tabs[i].right <= strip.right && rows.Tabs[i].top >= strip.top && rows.Tabs[i].bottom <= strip.bottom);
+	CHECK(rows.Tabs[0].top == rows.Tabs[1].top && rows.Tabs[1].top == rows.Tabs[2].top && rows.Tabs[3].top != rows.Tabs[0].top);
+	CHECK(rows.Tabs[1].left == rows.Tabs[0].right + m.TabGap);
+	// tab 0 is active: its row is the one at the bottom, next to the content below the strip
+	CHECK(rows.Tabs[0].bottom == strip.bottom);
+	CHECK(rows.Tabs[3].top == strip.top);								// the others keep their order above it
+	CHECK(!IsRectEmpty(&rows.Close[0]) && rows.Close[0].right <= rows.Tabs[0].right);
+
+	// active in the middle row: that one moves to the bottom, the last one moves up
+	rows = LayoutTabRows(specs, strip, m, 4, false);
+	CHECK(rows.Tabs[4].bottom == strip.bottom && rows.Tabs[0].top == strip.top && rows.Tabs[6].top == strip.top + m.TabHeight);
+
+	// a strip below the content has the active row on top
+	rows = LayoutTabRows(specs, strip, m, 7, true);
+	CHECK(rows.Tabs[7].top == strip.top && rows.Tabs[0].top == strip.top + m.TabHeight);
+
+	// a group's parts follow the number of rows
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	const RECT client{ 0, 0, 500, 400 };
+	const auto one = ComputeGroupParts(*p.A->Group(), client, m);
+	const auto three = ComputeGroupParts(*p.A->Group(), client, m, 3);
+	CHECK(Height(three.Tabs) == 3 * m.TabHeight && three.Content.top == one.Content.top + 2 * m.TabHeight);
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -2179,6 +2304,11 @@ TEST(Random_OperationsKeepTheInvariants) {
 }
 
 int wmain() {
+#ifdef _DEBUG
+	// a failed assertion says so on stderr instead of waiting for someone to click a dialog
+	_CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+	_CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
 	wprintf(L"WTLDock layout model tests\n\n");
 
 	Run_New_LayoutHasAnEmptyDocumentArea();
@@ -2303,6 +2433,10 @@ int wmain() {
 	Run_FloatSize_DockedGroupsKeepTheirLengthAtTheEdges();
 	Run_FloatSize_BesideAGroupItKeepsItsSizeUpToWhatTheTargetCanSpare();
 	Run_FloatSize_TheDpiOfTheWindowIsAccountedFor();
+	Run_Pinned_TabsStayAtTheLeftOfTheirGroup();
+	Run_Pinned_OnlyDocumentsPinAndNewTabsGoAfterThePinnedOnes();
+	Run_Pinned_ItIsSavedWithTheLayout();
+	Run_Geometry_TabsPackIntoRowsAndTheActiveRowIsNextToTheContent();
 	Run_Random_OperationsKeepTheInvariants();
 
 	RunUiTests();

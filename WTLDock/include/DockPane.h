@@ -41,11 +41,22 @@ public:
 	// Unsaved changes: the tab shows a dot (in place of the close button), the caption and the window switcher a mark
 	// after the title. Set it and call CDockHost::RefreshPane (nothing else in the layout changes).
 	bool Modified{};
+	// A preview document: its tab is drawn in italics and the next one that is opened as a preview replaces it
+	// (CDockHost::ShowPreview); editing it, pinning it or double clicking its tab makes it a normal one. Not saved.
+	bool Preview{};
+	// A stripe in this colour under the tab (a project's colour, say); CLR_INVALID: none.
+	COLORREF TabColor{ CLR_INVALID };
 	HWND hWnd{};
 	HICON Icon{};
 	PaneCaps Caps{ PaneCaps::All };
 	SIZE PreferredSize{ 250, 250 };
 	SIZE MinSize{ 80, 60 };
+
+	// A pinned document keeps its tab at the left of its group, before all the unpinned ones (DockLayout::SetPinned).
+	// Saved with the layout.
+	bool Pinned() const {
+		return m_Pinned;
+	}
 
 	// placement, maintained by DockLayout
 	PaneState State() const {
@@ -79,6 +90,7 @@ private:
 
 	std::wstring m_Id;
 	PaneKind m_Kind;
+	bool m_Pinned{};
 	PaneState m_State{ PaneState::Hidden };
 	DockGroup* m_Group{};
 	DockSide m_LastSide;

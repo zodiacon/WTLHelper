@@ -186,6 +186,33 @@ void DockLayout::Commit() {
 		m_OnChanged();
 }
 
+void DockLayout::NormalizePins(DockGroup& g) {
+	if (std::none_of(g.m_Panes.begin(), g.m_Panes.end(), [](auto p) { return p->m_Pinned; }))
+		return;
+	DockPane* active = g.ActivePane();
+	std::stable_partition(g.m_Panes.begin(), g.m_Panes.end(), [](auto p) { return p->m_Pinned; });
+	if (active)
+		g.m_Active = (int)(std::find(g.m_Panes.begin(), g.m_Panes.end(), active) - g.m_Panes.begin());
+}
+
+bool DockLayout::SetPinned(DockPane* pane, bool pinned) {
+	if (!Owns(pane) || pane->Kind() != PaneKind::Document)
+		return false;
+	if (pane->m_Pinned == pinned)
+		return true;
+	pane->m_Pinned = pinned;
+	if (auto g = pane->m_Group) {
+		// the pane goes to the boundary between the pinned tabs and the others
+		auto it = std::find(g->m_Panes.begin(), g->m_Panes.end(), pane);
+		g->m_Panes.erase(it);
+		const int pinnedOthers = (int)std::count_if(g->m_Panes.begin(), g->m_Panes.end(), [](auto p) { return p->m_Pinned; });
+		g->m_Panes.insert(g->m_Panes.begin() + pinnedOthers, pane);
+		g->m_Active = pinnedOthers;
+	}
+	Commit();
+	return true;
+}
+
 void DockLayout::Normalize() {
 	NormalizeRoot(*m_Root, PrimaryDocumentGroup());
 	for (auto& bar : m_AutoHide)
@@ -193,6 +220,7 @@ void DockLayout::Normalize() {
 	for (auto& f : m_Floats)
 		NormalizeRoot(*f->m_Root, nullptr);
 	std::erase_if(m_Floats, [](auto& f) { return f->m_Root->m_Children.empty(); });
+	ForEachGroup([](DockGroup& g) { NormalizePins(g); });
 }
 
 void DockLayout::NormalizeRoot(DockSplit& root, DockGroup* keep) {
@@ -845,7 +873,11 @@ bool DockLayout::Validate(std::wstring* error) const {
 			return fail(L"empty group");
 		if (g.m_Active < 0 || (g.m_Active > 0 && g.m_Active >= (int)g.m_Panes.size()))
 			return fail(L"active index out of range");
+		bool unpinnedSeen = false;
 		for (auto p : g.m_Panes) {
+			if (p->m_Pinned && unpinnedSeen)
+				return fail(L"a pinned tab after an unpinned one: " + p->m_Id);
+			unpinnedSeen |= !p->m_Pinned;
 			if (!Owns(p))
 				return fail(L"unregistered pane in a group");
 			if (!seen.insert(p).second)
