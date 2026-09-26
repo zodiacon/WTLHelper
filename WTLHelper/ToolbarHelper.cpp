@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ToolbarHelper.h"
+#include "IconHelper.h"
 
 HWND ToolbarHelper::CreateAndInitToolBar(HWND hWnd, const ToolBarButtonInfo* buttons, int count, int size) {
 	CToolBarCtrl tb;
@@ -15,7 +16,7 @@ HWND ToolbarHelper::CreateAndInitToolBar(HWND hWnd, const ToolBarButtonInfo* but
 		if (b.id == 0)
 			tb.AddSeparator(0);
 		else {
-			int image = b.image == 0 ? I_IMAGENONE : tbImages.AddIcon(AtlLoadIconImage(b.image, 0, size, size));
+			int image = b.image == 0 ? I_IMAGENONE : tbImages.AddIcon(IconHelper::Load(b.image, size));
 			tb.AddButton(b.id, b.style | (b.text ? BTNS_SHOWTEXT : 0), TBSTATE_ENABLED, image, b.text, 0);
 		}
 	}

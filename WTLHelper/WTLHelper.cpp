@@ -10,6 +10,7 @@
 #include "CustomHeader2.h"
 #include "CustomDateTimePicker.h"
 #include "CustomMonthCalendar.h"
+#include "IconHelper.h"
 #include "CustomCheckAclUI.h"
 
 static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
@@ -204,7 +205,7 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count)
 	CRect rc(0, 0, 16, 16);
 	for (int i = 0; i < count; i++) {
 		auto& cmd = items[i];
-		auto hIcon = cmd.hIcon ? cmd.hIcon : AtlLoadIconImage(cmd.icon, 0, 16, 16);
+		auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::Load(cmd.icon, 16);
 		ATLASSERT(hIcon);
 		CBitmap bmp;
 		bmp.CreateCompatibleBitmap(dc, 16, 16);
@@ -218,7 +219,7 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count)
 }
 
 bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const& cmd) {
-	auto hIcon = cmd.hIcon ? cmd.hIcon : AtlLoadIconImage(cmd.icon, 0, 16, 16);
+	auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::Load(cmd.icon, 16);
 	ATLASSERT(hIcon);
 	CBitmap bmp;
 	CDC mdc;

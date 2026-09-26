@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "OwnerDrawnMenu.h"
+#include "IconHelper.h"
 
 void COwnerDrawnMenuBase::SetTextColor(COLORREF color) {
 	m_TextColor = color;
@@ -41,7 +42,7 @@ void COwnerDrawnMenuBase::AddCommand(UINT id, HICON hIcon) {
 }
 
 void COwnerDrawnMenuBase::AddCommand(UINT id, UINT iconId) {
-	auto hIcon = AtlLoadIconImage(iconId, 64, 16, 16);
+	auto hIcon = IconHelper::Load(iconId, 16);
 	ATLASSERT(hIcon);
 	AddCommand(id, hIcon);
 }
@@ -125,5 +126,5 @@ void COwnerDrawnMenuBase::SetCheckIcon(HICON hIcon, HICON hRadioIcon) {
 }
 
 void COwnerDrawnMenuBase::SetCheckIcon(UINT iconId, UINT radioId) {
-	SetCheckIcon(AtlLoadIconImage(iconId, 0, 16, 16), radioId ? AtlLoadIconImage(radioId, 0, 16, 16) : nullptr);
+	SetCheckIcon(IconHelper::Load(iconId, 16), radioId ? IconHelper::Load(radioId, 16) : nullptr);
 }

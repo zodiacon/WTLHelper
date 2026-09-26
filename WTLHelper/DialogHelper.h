@@ -1,5 +1,7 @@
 #pragma once
 
+#include "IconHelper.h"
+
 template<typename T>
 class CDialogHelper {
 public:
@@ -31,13 +33,13 @@ public:
 			CString text;
 			ok.GetWindowText(text);
 			ok.SetWindowText(L"  " + text);
-			ok.SetIcon(AtlLoadIconImage(okId, 0, 16, 16));
+			ok.SetIcon(IconHelper::Load(okId, 16));
 		}
 
 		CButton cancel(dlg->GetDlgItem(IDCANCEL));
 		if (cancel) {
 			cancel.SetWindowText(L"  Cancel");
-			cancel.SetIcon(AtlLoadIconImage(cancelId, 0, 16, 16));
+			cancel.SetIcon(IconHelper::Load(cancelId, 16));
 		}
 	}
 
@@ -45,7 +47,7 @@ public:
 		auto dlg = static_cast<T*>(this);
 		CButton button(dlg->GetDlgItem(id));
 		if (button) {
-			button.SetIcon(AtlLoadIconImage(icon, 0, size, size));
+			button.SetIcon(IconHelper::Load(icon, size));
 			CString text;
 			button.GetWindowText(text);
 			button.SetWindowText(L"  " + text);
@@ -55,8 +57,8 @@ public:
 
 	void SetDialogIcon(UINT icon) {
 		auto dlg = static_cast<T*>(this);
-		dlg->SetIcon(AtlLoadIconImage(icon, 0, 16, 16), FALSE);
-		dlg->SetIcon(AtlLoadIconImage(icon, 0, 32, 32), TRUE);
+		dlg->SetIcon(IconHelper::Load(icon, 16), FALSE);
+		dlg->SetIcon(IconHelper::Load(icon, 32), TRUE);
 	}
 	void SetDialogIcon(HICON icon) {
 		auto dlg = static_cast<T*>(this);
