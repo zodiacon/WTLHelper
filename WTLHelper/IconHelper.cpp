@@ -12,6 +12,10 @@ CComPtr<IImageList2> IconHelper::CreateImageList() {
 	return spImages;
 }
 
+HICON IconHelper::Load(ATL::_U_STRINGorID id, int size) {
+	return AtlLoadIconImage(id, 0, size, size);
+}
+
 HICON IconHelper::GetStockIcon(SHSTOCKICONID id, bool big) {
 	SHSTOCKICONINFO ssii = { sizeof(ssii) };
 	if (FAILED(::SHGetStockIconInfo(id, (big ? SHGSI_LARGEICON : SHGSI_SMALLICON) | SHGSI_ICON, &ssii)))
