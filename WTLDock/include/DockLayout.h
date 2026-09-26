@@ -143,7 +143,11 @@ public:
 
 	// auto-hide
 	bool AutoHide(DockGroup* group);
+	// Docks an auto-hidden group again where it was (see DockAnchor), else at the edge of its side.
 	bool Unhide(DockGroup* group);
+	// The same for a floating group: it goes back to its old tab group or its old place among the others, else to the
+	// edge of the side it was last docked on.
+	bool RedockGroup(DockGroup* group);
 
 	// Moves the splitter between children[index] and children[index + 1] by delta pixels.
 	// Uses the rectangles of the last Arrange, and clamps to the children's minimum sizes.
@@ -210,11 +214,18 @@ private:
 	void Normalize();
 	void NormalizeRoot(DockSplit& root, DockGroup* keep);
 	void NormalizeSplit(DockSplit& split, DockGroup* keep);
+	void MergeIntoParent(DockSplit& parent, size_t index);
 	void Reindex();
 	static void NormalizePins(DockGroup& group);
 	static std::optional<DockSide> ComputeSide(const DockGroup& group, const DockGroup* primary);
 
-	void RecordPlacement(DockPane* pane);
+	void RecordPlacement(DockPane* pane, bool wholeGroup = false);
+	void RecordAnchor(DockPane* pane, bool wholeGroup);
+	// what an anchor names: a group to join as a tab, or a part of the main layout to go beside (null: nothing usable)
+	DockNode* ResolveAnchor(const DockAnchor& anchor, const DockGroup* exclude, DockGroup*& tabTarget) const;
+	int CapBeside(const DockNode& target, DockPosition pos, int length) const;
+	bool RestoreDocked(DockPane* pane);
+	bool UnhideAtEdge(DockGroup* group);
 	void DetachPane(DockPane* pane);
 	std::unique_ptr<DockGroup> NewGroup(DockPane* pane) const;
 	std::unique_ptr<DockGroup> ReleaseGroup(DockGroup* group);

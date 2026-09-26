@@ -2,6 +2,7 @@
 
 #include "DockTypes.h"
 #include <string>
+#include <vector>
 
 namespace WTLDock {
 
@@ -9,6 +10,16 @@ class DockGroup;
 class DockFloat;
 class DockLayout;
 struct DockSerializer;
+
+// Where a tool pane was docked when it last left the main window's layout (hidden, floated, auto-hidden), so that it
+// can go back there: as a tab of one of the panes it shared a group with, or beside the neighbouring part of the
+// layout (the panes of that part, and the document area if it held it). Kept by DockLayout.
+struct DockAnchor {
+	bool Valid{};
+	DockPosition Position{ DockPosition::Tab };		// where the pane goes in relation to what is named
+	std::vector<std::wstring> Panes;				// Tab: one pane; else the tool panes of the neighbouring part
+	bool DocumentArea{};							// the neighbouring part held the documents
+};
 
 struct PaneDesc {
 	std::wstring Id;		// stable and unique; used to persist the layout
@@ -67,6 +78,9 @@ public:
 	}
 
 	// where the pane goes on Show() after it has been hidden
+	const DockAnchor& Anchor() const {
+		return m_Anchor;
+	}
 	PaneState LastState() const {
 		return m_LastState;
 	}
@@ -90,6 +104,7 @@ private:
 
 	std::wstring m_Id;
 	PaneKind m_Kind;
+	DockAnchor m_Anchor;
 	bool m_Pinned{};
 	PaneState m_State{ PaneState::Hidden };
 	DockGroup* m_Group{};

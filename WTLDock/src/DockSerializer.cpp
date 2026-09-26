@@ -234,6 +234,18 @@ std::string DockSerializer::Save(const DockLayout& layout) {
 		o.Add("preferred", MakeInts({ p->PreferredSize.cx, p->PreferredSize.cy }));
 		if (p->m_Pinned)
 			o.Add("pinned", Value::MakeBool(true));
+		if (p->m_Anchor.Valid) {
+			static const char* const positions[] = { "left", "right", "top", "bottom", "tab" };
+			Value anchor = Value::MakeObject();
+			anchor.Add("pos", Value::MakeString(positions[(int)p->m_Anchor.Position]));
+			if (p->m_Anchor.DocumentArea)
+				anchor.Add("docs", Value::MakeBool(true));
+			Value ids = Value::MakeArray();
+			for (auto& id : p->m_Anchor.Panes)
+				ids.Push(Value::MakeString(ToUtf8(id)));
+			anchor.Add("panes", std::move(ids));
+			o.Add("anchor", std::move(anchor));
+		}
 		panes.Push(std::move(o));
 	}
 	root.Add("panes", std::move(panes));
@@ -461,6 +473,27 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const LoadO
 				pane->m_LastState = state;
 			if (ParseSide(item.Find("lastSide"), side))
 				pane->m_LastSide = side;
+			pane->m_Anchor = {};
+			if (auto anchor = item.Find("anchor"); anchor && anchor->IsObject() && pane->Kind() == PaneKind::Tool) {
+				static const char* const positions[] = { "left", "right", "top", "bottom", "tab" };
+				auto pos = anchor->Find("pos");
+				auto ids = anchor->Find("panes");
+				auto docs = anchor->Find("docs");
+				if (pos && pos->IsString() && ids && ids->IsArray()) {
+					for (int i = 0; i < 5; i++) {
+						if (pos->String == positions[i]) {
+							pane->m_Anchor.Position = (DockPosition)i;
+							pane->m_Anchor.Valid = true;
+						}
+					}
+					pane->m_Anchor.DocumentArea = docs && docs->Kind == Value::Type::Bool && docs->Bool;
+					for (auto& entry : ids->Items)
+						if (entry.IsString())
+							pane->m_Anchor.Panes.push_back(FromUtf8(entry.String));
+					if (pane->m_Anchor.Panes.empty() && !pane->m_Anchor.DocumentArea)
+						pane->m_Anchor.Valid = false;
+				}
+			}
 			if (pane->Kind() == PaneKind::Document) {
 				auto pinned = item.Find("pinned");
 				pane->m_Pinned = pinned && pinned->Kind == Value::Type::Bool && pinned->Bool;

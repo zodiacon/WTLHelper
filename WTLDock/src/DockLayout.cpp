@@ -237,6 +237,45 @@ void DockLayout::NormalizeRoot(DockSplit& root, DockGroup* keep) {
 	}
 }
 
+// Replaces the child at 'index' (a split with the same axis as its parent) by its own children. What the child had
+// (a share of the parent's stars or a fixed length) is handed on to them, so that nothing moves much: star children
+// keep their proportions among themselves and together weigh what the child weighed; when the child had a fixed length
+// its star children take what its fixed ones leave.
+void DockLayout::MergeIntoParent(DockSplit& parent, size_t index) {
+	auto node = std::move(parent.m_Children[index]);
+	auto* inner = node->AsSplit();
+	std::vector<std::unique_ptr<DockNode>> kids = std::move(inner->m_Children);
+	const SizeSpec own = node->Size;
+
+	double starWeight = 0, fixed = 0;
+	for (auto& k : kids) {
+		if (k->Size.IsStar())
+			starWeight += std::max(k->Size.Value, 1e-6);
+		else
+			fixed += k->Size.Value;
+	}
+	if (starWeight > 0) {
+		if (own.IsStar()) {
+			const double scale = own.Value / starWeight;
+			for (auto& k : kids)
+				if (k->Size.IsStar())
+					k->Size = SizeSpec::Star(std::max(k->Size.Value * scale, 1e-6));
+		}
+		else {
+			const double remaining = std::max(1.0, own.Value - fixed - m_Metrics.SplitterThickness * ((int)kids.size() - 1));
+			for (auto& k : kids)
+				if (k->Size.IsStar())
+					k->Size = SizeSpec::Px(std::max(1.0, std::round(remaining * std::max(k->Size.Value, 1e-6) / starWeight)));
+		}
+	}
+
+	parent.m_Children.erase(parent.m_Children.begin() + index);
+	for (size_t j = 0; j < kids.size(); j++) {
+		kids[j]->m_Parent = &parent;
+		parent.m_Children.insert(parent.m_Children.begin() + index + j, std::move(kids[j]));
+	}
+}
+
 void DockLayout::NormalizeSplit(DockSplit& split, DockGroup* keep) {
 	auto& kids = split.m_Children;
 	for (size_t i = 0; i < kids.size();) {
@@ -252,6 +291,13 @@ void DockLayout::NormalizeSplit(DockSplit& split, DockGroup* keep) {
 				only->Size = inner->Size;
 				only->m_Parent = &split;
 				kids[i] = std::move(only);
+			}
+			// a split along the same axis as the one it is in adds nothing: its children join the parent's
+			if (auto same = kids[i]->AsSplit(); same && same->m_Axis == split.m_Axis) {
+				const size_t count = same->m_Children.size();
+				MergeIntoParent(split, i);
+				i += count;
+				continue;
 			}
 		}
 		else if (kids[i]->AsGroup()->m_Panes.empty() && kids[i].get() != keep) {
@@ -348,7 +394,7 @@ void DockLayout::Reindex() {
 // placement helpers
 //
 
-void DockLayout::RecordPlacement(DockPane* pane) {
+void DockLayout::RecordPlacement(DockPane* pane, bool wholeGroup) {
 	auto g = pane->m_Group;
 	if (!g)
 		return;
@@ -357,6 +403,7 @@ void DockLayout::RecordPlacement(DockPane* pane) {
 			pane->m_LastState = PaneState::Document;
 			break;
 		case PaneState::Docked:
+			RecordAnchor(pane, wholeGroup);
 			pane->m_LastState = PaneState::Docked;
 			if (g->m_Side)
 				pane->m_LastSide = *g->m_Side;
@@ -382,6 +429,121 @@ void DockLayout::RecordPlacement(DockPane* pane) {
 		default:
 			break;
 	}
+}
+
+void DockLayout::RecordAnchor(DockPane* pane, bool wholeGroup) {
+	auto g = pane->m_Group;
+	if (!g || g->m_Where != GroupLocation::Main || g->IsDocument())
+		return;
+
+	DockAnchor a;
+	if (!wholeGroup && g->m_Panes.size() > 1) {
+		// one of a group of tabs: it goes back among them
+		DockPane* mate = g->ActivePane() != pane ? g->ActivePane() : nullptr;
+		for (auto p : g->m_Panes)
+			if (!mate && p != pane)
+				mate = p;
+		a.Valid = true;
+		a.Position = DockPosition::Tab;
+		a.Panes.push_back(mate->m_Id);
+		pane->m_Anchor = std::move(a);
+		return;
+	}
+
+	// alone in its place (or leaving with its group): it goes back beside the neighbour, the next one if there is one
+	auto parent = g->m_Parent;
+	if (!parent)
+		return;
+	const int index = parent->IndexOf(g);
+	const bool horizontal = parent->m_Axis == Axis::Horizontal;
+	struct Candidate {
+		int Index;
+		DockPosition Position;
+	};
+	const Candidate candidates[] = { { index + 1, horizontal ? DockPosition::Left : DockPosition::Top },
+		{ index - 1, horizontal ? DockPosition::Right : DockPosition::Bottom } };
+	for (auto& c : candidates) {
+		if (c.Index < 0 || c.Index >= (int)parent->m_Children.size())
+			continue;
+		DockAnchor found;
+		found.Position = c.Position;
+		VisitGroups(*parent->m_Children[c.Index], [&](DockGroup& sibling) {
+			if (sibling.IsDocument()) {
+				found.DocumentArea = true;
+				return;
+			}
+			for (auto p : sibling.m_Panes)
+				found.Panes.push_back(p->m_Id);
+			});
+		if (found.Panes.empty() && !found.DocumentArea)
+			continue;
+		found.Valid = true;
+		pane->m_Anchor = std::move(found);
+		return;
+	}
+}
+
+// The part of the main layout an anchor names, or the group to become a tab of. The panes that are still where the
+// anchor left them decide: the smallest part that holds all of them (never the whole layout: that is what the edges are).
+DockNode* DockLayout::ResolveAnchor(const DockAnchor& anchor, const DockGroup* exclude, DockGroup*& tabTarget) const {
+	tabTarget = nullptr;
+	if (!anchor.Valid)
+		return nullptr;
+	auto usable = [&](const DockGroup* g) { return g && g != exclude && g->m_Where == GroupLocation::Main; };
+
+	if (anchor.Position == DockPosition::Tab) {
+		auto mate = anchor.Panes.empty() ? nullptr : FindPane(anchor.Panes[0]);
+		if (mate && usable(mate->m_Group) && !mate->m_Group->IsDocument())
+			tabTarget = mate->m_Group;
+		return nullptr;
+	}
+
+	std::vector<DockNode*> targets;
+	for (auto& id : anchor.Panes) {
+		auto p = FindPane(id);
+		if (p && usable(p->m_Group) && std::find(targets.begin(), targets.end(), p->m_Group) == targets.end())
+			targets.push_back(p->m_Group);
+	}
+	if (anchor.DocumentArea)
+		if (auto docs = PrimaryDocumentGroup(); docs && std::find(targets.begin(), targets.end(), docs) == targets.end())
+			targets.push_back(docs);
+	if (targets.empty())
+		return nullptr;
+
+	DockNode* node = targets[0];
+	while (node && !std::all_of(targets.begin(), targets.end(), [&](DockNode* t) { return IsAncestor(node, t); }))
+		node = node->m_Parent;
+	if (!node || node == m_Root.get() || !node->m_Parent)
+		return nullptr;
+	return node;
+}
+
+// how much of the target a pane may take beside it: what it asks for, but the target keeps its minimum
+int DockLayout::CapBeside(const DockNode& target, DockPosition pos, int length) const {
+	const Axis axis = AxisOf(ToSide(pos));
+	if (length <= 0)
+		length = DefaultToolLength;
+	const int room = Length(target.Rect, axis);
+	if (room > 0) {
+		const int dpi = NodeDpi(target);
+		const int keep = MinLengthAt(target, axis, dpi) + ScaleTo(m_Metrics.SplitterThickness, dpi);
+		length = std::min(length, std::max(1, room - keep));
+	}
+	return std::max(1, length);
+}
+
+bool DockLayout::RestoreDocked(DockPane* pane) {
+	DockGroup* tab = nullptr;
+	DockNode* node = ResolveAnchor(pane->m_Anchor, nullptr, tab);
+	if (tab)
+		return DockTo(pane, tab, DockPosition::Tab);
+	if (!node)
+		return false;
+	const DockPosition pos = pane->m_Anchor.Position;
+	const int length = CapBeside(*node, pos, Along(pane->PreferredSize, AxisOf(ToSide(pos))));
+	InsertBeside(node, NewGroup(pane), pos, length);
+	Commit();
+	return true;
 }
 
 void DockLayout::DetachPane(DockPane* pane) {
@@ -578,6 +740,9 @@ bool DockLayout::Show(DockPane* pane) {
 		default:
 			break;
 	}
+	// back to where it was, if that is still there, else to the edge of its side
+	if (RestoreDocked(pane))
+		return true;
 	return DockToEdge(pane, pane->m_LastSide);
 }
 
@@ -649,7 +814,7 @@ bool DockLayout::FloatGroup(DockGroup* group, const RECT& rect) {
 		return true;
 	}
 	for (auto p : group->m_Panes)
-		RecordPlacement(p);
+		RecordPlacement(p, true);
 	AddFloat(ReleaseGroup(group), rect);
 	Commit();
 	return true;
@@ -746,7 +911,7 @@ bool DockLayout::MoveGroupTo(DockGroup* group, DockGroup* target, DockPosition p
 		return false;
 
 	for (auto p : group->m_Panes)
-		RecordPlacement(p);
+		RecordPlacement(p, true);
 	if (group->IsDocument() && group->ActivePane())
 		m_ActiveDocument = group->ActivePane();
 
@@ -773,7 +938,7 @@ bool DockLayout::MoveGroupToEdge(DockGroup* group, DockSide side, DockFloat* win
 		return false;
 
 	for (auto p : group->m_Panes)
-		RecordPlacement(p);
+		RecordPlacement(p, true);
 	int length = DefaultLength(*group, side);
 	auto node = ReleaseGroup(group);
 	InsertAtEdge(window ? *window->m_Root : *m_Root, std::move(node), side, length);
@@ -789,7 +954,7 @@ bool DockLayout::AutoHide(DockGroup* group) {
 
 	const DockSide side = *group->m_Side;
 	for (auto p : group->m_Panes)
-		RecordPlacement(p);
+		RecordPlacement(p, true);
 	int length = DefaultLength(*group, side);
 	auto node = ReleaseGroup(group);
 	node->AutoHideLength = length;
@@ -801,12 +966,66 @@ bool DockLayout::AutoHide(DockGroup* group) {
 bool DockLayout::Unhide(DockGroup* group) {
 	if (!group || group->m_Where != GroupLocation::AutoHide)
 		return false;
+	return RedockGroup(group);
+}
+
+bool DockLayout::UnhideAtEdge(DockGroup* group) {
 	const DockSide side = *group->m_Side;
 	for (auto p : group->m_Panes)
-		RecordPlacement(p);
+		RecordPlacement(p, true);
 	int length = group->AutoHideLength > 0 ? group->AutoHideLength : DefaultLength(*group, side);
 	auto node = ReleaseGroup(group);
 	InsertAtEdge(*m_Root, std::move(node), side, length);
+	Commit();
+	return true;
+}
+
+bool DockLayout::RedockGroup(DockGroup* group) {
+	if (!group || group->IsDocument() || group->m_Panes.empty() || group->m_Where == GroupLocation::Main)
+		return false;
+	if (group->m_Where != GroupLocation::AutoHide && group->m_Where != GroupLocation::Float)
+		return false;
+
+	// the anchor of the pane that shows (else of the first that has a usable one)
+	DockGroup* tab = nullptr;
+	DockNode* node = nullptr;
+	DockPane* source = nullptr;
+	std::vector<DockPane*> order{ group->m_Panes.begin(), group->m_Panes.end() };
+	if (auto active = group->ActivePane())
+		std::stable_partition(order.begin(), order.end(), [&](auto p) { return p == active; });
+	for (auto p : order) {
+		node = ResolveAnchor(p->m_Anchor, group, tab);
+		if (node || tab) {
+			source = p;
+			break;
+		}
+	}
+
+	if (tab && CanMoveGroupTo(group, tab, DockPosition::Tab))
+		return MoveGroupTo(group, tab, DockPosition::Tab);
+	if (!node || !source) {
+		if (group->m_Where == GroupLocation::AutoHide)
+			return UnhideAtEdge(group);
+		return MoveGroupToEdge(group, group->ActivePane()->m_LastSide);
+	}
+
+	// beside the neighbour, as long as it was there: a floating group has the size it had floating, an auto-hidden one
+	// the length it slid out to, else what the pane remembers
+	const DockPosition pos = source->m_Anchor.Position;
+	const DockSide side = ToSide(pos);
+	int length = 0;
+	if (group->m_Where == GroupLocation::Float)
+		length = LengthWhenDocked(*group, side);
+	else if (group->AutoHideLength > 0 && AxisOf(side) == AxisOf(*group->m_Side))
+		length = group->AutoHideLength;
+	if (length <= 0)
+		length = Along(source->PreferredSize, AxisOf(side));
+	length = CapBeside(*node, pos, length);
+
+	for (auto p : group->m_Panes)
+		RecordPlacement(p, true);
+	auto released = ReleaseGroup(group);
+	InsertBeside(node, std::move(released), pos, length);
 	Commit();
 	return true;
 }
@@ -901,6 +1120,8 @@ bool DockLayout::Validate(std::wstring* error) const {
 			return fail(L"single-child split below the root");
 		bool star = false;
 		for (auto& c : s.m_Children) {
+			if (auto inner = c->AsSplit(); inner && inner->m_Axis == s.m_Axis)
+				return fail(L"nested splits along the same axis");
 			if (c->m_Parent != &s)
 				return fail(L"parent pointer mismatch");
 			if (!(c->Size.Value > 0))

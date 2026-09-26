@@ -4042,6 +4042,71 @@ TEST(Host_TheArrowsShowWhereThereIsMoreAndSayWhatTheyDo) {
 	CHECK(!plain.Overflow && IsRectEmpty(&plain.ScrollLeft));
 }
 
+TEST(Host_MergedSplitsHaveTheirWindowsAndSplittersInOrder) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.Float(f.Sol, OffScreen(50, 50, 500, 500)));
+	auto ext = f.Add(L"Ext", PaneKind::Tool);
+	CHECK(l.DockTo(f.Props, f.Sol->Group(), DockPosition::Bottom));
+	CHECK(l.DockTo(ext, f.Props->Group(), DockPosition::Right));
+	CHECK(l.DockTo(f.Output, ext->Group(), DockPosition::Bottom));
+	VERIFY(f);
+	CHECK(l.Hide(f.Props));													// leaves a vertical split inside a vertical one
+	VERIFY(f);
+	auto& root = f.Sol->Group()->Float()->Root();
+	CHECK(root.Children().size() == 3 && root.Children()[0]->IsGroup() && root.Children()[1]->IsGroup() && root.Children()[2]->IsGroup());
+
+	// the splitters between the three groups can be moved, and nothing else changes
+	auto hits = DockLayout::Splitters(root);
+	CHECK(hits.size() == 2);
+	if (hits.size() == 2) {
+		const int before = Height(f.Sol->Group()->Rect);
+		CHECK(l.ResizeSplitter(hits[0].Split, 0, 40));
+		VERIFY(f);
+		CHECK(Height(f.Sol->Group()->Rect) == before + 40);
+	}
+}
+
+TEST(Host_AClosedToolWindowReopensWhereItWas) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	auto ext = f.Add(L"Ext", PaneKind::Tool, DockSide::Right, 200);
+	CHECK(l.Show(ext));
+	CHECK(l.DockTo(ext, f.Props->Group(), DockPosition::Bottom));
+	VERIFY(f);
+
+	CHECK(f.Host.ClosePane(ext));
+	CHECK(f.Host.ShowPane(ext));											// what the Panes menu does
+	VERIFY(f);
+	CHECK(ext->Group()->Parent() == f.Props->Group()->Parent() && ext->Group()->Parent() != &l.Root());
+
+	// a pin press and a Dock command lead back as well
+	CHECK(f.Host.Execute(DockCommand::AutoHide, ext));
+	CHECK(f.Host.Execute(DockCommand::Dock, ext));
+	VERIFY(f);
+	CHECK(ext->Group()->Parent() == f.Props->Group()->Parent() && ext->State() == PaneState::Docked);
+
+	CHECK(f.Host.Execute(DockCommand::Float, ext));
+	CHECK(f.Host.Execute(DockCommand::Dock, ext));
+	VERIFY(f);
+	CHECK(ext->Group()->Parent() == f.Props->Group()->Parent() && ext->State() == PaneState::Docked);
+}
+
+TEST(Host_ATabThatWasFloatedComesBackToItsGroup) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.DockTo(f.Output, f.Sol->Group(), DockPosition::Tab));
+	CHECK(f.Host.Execute(DockCommand::Float, f.Output));
+	VERIFY(f);
+	CHECK(f.Output->Group() != f.Sol->Group());
+	CHECK(f.Host.ToggleFloat(f.Output));									// double click on its caption
+	VERIFY(f);
+	CHECK(f.Output->Group() == f.Sol->Group());
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -4330,6 +4395,9 @@ void RunUiTests() {
 	Run_Host_TheArrowsScrollAStripThatIsTooFullByOneTab();
 	Run_Host_AHeldArrowKeepsScrolling();
 	Run_Host_TheArrowsShowWhereThereIsMoreAndSayWhatTheyDo();
+	Run_Host_MergedSplitsHaveTheirWindowsAndSplittersInOrder();
+	Run_Host_AClosedToolWindowReopensWhereItWas();
+	Run_Host_ATabThatWasFloatedComesBackToItsGroup();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

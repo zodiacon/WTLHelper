@@ -420,8 +420,8 @@ TEST(Show_RestoresTheLastPositionAndSize) {
 
 	CHECK(l.Hide(p.Sol));
 	CHECK(l.DockToEdge(p.Ext, DockSide::Left));
-	CHECK(l.Show(p.Sol));	// last seen at the left: back to the left edge, 310 wide
-	CHECK_DUMP(l, L"main: H(T[Sol]@310 T[Ext]@180 V(H(D[a.cpp] T[Props]@200) T[Output]@150))\nhidden: Pinned b.cpp c.cpp");
+	CHECK(l.Show(p.Sol));	// back where it was, beside the documents (not at the edge, where Ext has moved in), 310 wide
+	CHECK_DUMP(l, L"main: H(T[Ext]@180 V(H(T[Sol]@310 D[a.cpp] T[Props]@200) T[Output]@150))\nhidden: Pinned b.cpp c.cpp");
 }
 
 TEST(Show_RestoresDocumentsAndFloatsAndAutoHide) {
@@ -603,13 +603,13 @@ TEST(AutoHide_CollapsesAGroupIntoTheBar) {
 	CHECK_VALID(l);
 }
 
-TEST(AutoHide_Unhide_DocksAtTheEdgeOfTheSameSide) {
+TEST(AutoHide_Unhide_ReturnsToItsPlace) {
 	DockLayout l;
 	Panes p = BuildStandard(l);
 	l.Arrange(Client);
 	l.AutoHide(p.Sol->Group());
 	CHECK(l.Unhide(p.Sol->Group()));
-	CHECK_DUMP(l, L"main: H(T[Sol]@250 V(H(D[a.cpp] T[Props]@200) T[Output]@150))\nhidden: Ext Pinned b.cpp c.cpp");
+	CHECK_DUMP(l, L"main: V(H(T[Sol]@250 D[a.cpp] T[Props]@200) T[Output]@150)\nhidden: Ext Pinned b.cpp c.cpp");
 	CHECK(p.Sol->State() == PaneState::Docked);
 	CHECK(p.Sol->Group()->Side() == DockSide::Left);
 	CHECK(!l.Unhide(p.Sol->Group()));	// not in a bar any more
@@ -2192,6 +2192,221 @@ TEST(Geometry_TabsPackIntoRowsAndTheActiveRowIsNextToTheContent) {
 	CHECK(Height(three.Tabs) == 3 * m.TabHeight && three.Content.top == one.Content.top + 2 * m.TabHeight);
 }
 
+// ---- Splits along the same axis are merged -----------------------------------------------------
+
+TEST(Nested_ASplitInsideASplitOfTheSameAxisJoinsIt) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.Float(p.Sol, { 0, 0, 600, 500 }));
+	CHECK(l.DockTo(p.Props, p.Sol->Group(), DockPosition::Bottom));				// V(Sol, Props)
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Right));				// V(Sol, H(Props, Ext))
+	CHECK(l.DockTo(p.Output, p.Ext->Group(), DockPosition::Bottom));			// V(Sol, H(Props, V(Ext, Output)))
+	CHECK(l.Dump().find(L"float: (0,0,600,500) V(T[Sol] H(T[Props] V(T[Ext] T[Output])))") != std::wstring::npos);
+	CHECK_VALID(l);
+
+	// without Props the horizontal split has one child, which is a vertical split in a vertical one: they become one
+	// (Sol keeps half of the window, Ext and Output a quarter each, as before)
+	CHECK(l.Hide(p.Props));
+	CHECK(l.Dump().find(L"float: (0,0,600,500) V(T[Sol] T[Ext]*0.5 T[Output]*0.5)") != std::wstring::npos);
+	CHECK_VALID(l);
+
+	// the same in the main window
+	DockLayout m;
+	Panes q = BuildStandard(m);
+	CHECK(m.DockTo(q.Ext, q.Props->Group(), DockPosition::Bottom));				// H(Sol, Docs, V(Props, Ext))
+	CHECK(m.DockTo(q.Pinned, q.Ext->Group(), DockPosition::Right));				// ... V(Props, H(Ext, Pinned))
+	CHECK(m.DockTo(q.Sol, q.Pinned->Group(), DockPosition::Bottom));			// ... V(Props, H(Ext, V(Pinned, Sol)))
+	CHECK_VALID(m);
+	CHECK(m.Hide(q.Ext));														// H(Pinned...) collapses into the vertical one
+	CHECK_VALID(m);
+	CHECK(q.Pinned->Group()->Parent() == q.Props->Group()->Parent() && q.Sol->Group()->Parent() == q.Props->Group()->Parent());	// one split holds all three
+}
+
+TEST(Nested_TheSizesOfAMergedSplitAreHandedOn) {
+	// star weights: the inner split weighed 2, its children 1 and 3: they now weigh 0.5 and 1.5 next to the outer's 1
+	DockLayout star;
+	Panes p = Register(star);
+	const char* starText = R"({"version": 1,
+		"main": {"type": "split", "axis": "h", "children": [
+			{"type": "group", "kind": "document", "panes": ["a.cpp"], "size": {"star": 1}},
+			{"type": "split", "axis": "h", "size": {"star": 2}, "children": [
+				{"type": "group", "kind": "tool", "panes": ["Sol"], "size": {"star": 1}},
+				{"type": "group", "kind": "tool", "panes": ["Props"], "size": {"star": 3}}]}]}})";
+	CHECK(star.Load(starText));
+	CHECK(star.Dump().rfind(L"main: H(D[a.cpp] T[Sol]*0.5 T[Props]*1.5)", 0) == 0);
+	CHECK_VALID(star);
+
+	// a fixed length: its star child takes what the fixed one leaves, less the splitter
+	DockLayout fixed;
+	Register(fixed);
+	const char* fixedText = R"({"version": 1,
+		"main": {"type": "split", "axis": "h", "children": [
+			{"type": "group", "kind": "document", "panes": ["a.cpp"]},
+			{"type": "split", "axis": "h", "size": {"px": 300}, "children": [
+				{"type": "group", "kind": "tool", "panes": ["Sol"]},
+				{"type": "group", "kind": "tool", "panes": ["Props"], "size": {"px": 100}}]}]}})";
+	CHECK(fixed.Load(fixedText));
+	CHECK(fixed.Dump().rfind(L"main: H(D[a.cpp] T[Sol]@194 T[Props]@100)", 0) == 0);
+	CHECK_VALID(fixed);
+	fixed.Arrange({ 0, 0, 1000, 600 });
+	CHECK(Width(fixed.FindPane(L"Sol")->Group()->Rect) == 194 && Width(fixed.FindPane(L"Props")->Group()->Rect) == 100);
+
+	// several levels at once, in the middle of a list
+	DockLayout deep;
+	Register(deep);
+	const char* deepText = R"({"version": 1,
+		"main": {"type": "split", "axis": "v", "children": [
+			{"type": "split", "axis": "v", "children": [
+				{"type": "split", "axis": "v", "children": [
+					{"type": "group", "kind": "document", "panes": ["a.cpp"]},
+					{"type": "group", "kind": "tool", "panes": ["Sol"]}]},
+				{"type": "group", "kind": "tool", "panes": ["Props"]}]},
+			{"type": "group", "kind": "tool", "panes": ["Output"]}]}})";
+	CHECK(deep.Load(deepText));
+	CHECK(deep.Dump().rfind(L"main: V(D[a.cpp]*0.25 T[Sol]*0.25 T[Props]*0.5 T[Output])", 0) == 0);
+	CHECK_VALID(deep);
+}
+
+TEST(Nested_ASavedLayoutIsTheMergedOne) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Float(p.Sol, { 0, 0, 600, 500 });
+	l.DockTo(p.Props, p.Sol->Group(), DockPosition::Bottom);
+	l.DockTo(p.Ext, p.Props->Group(), DockPosition::Right);
+	l.DockTo(p.Output, p.Ext->Group(), DockPosition::Bottom);
+	l.Hide(p.Props);
+	const auto text = l.Save();
+	DockLayout copy;
+	Register(copy);
+	CHECK(copy.Load(text));
+	CHECK_STR(copy.Dump(), l.Dump());
+	CHECK(copy.Save() == text);
+}
+
+// ---- A pane goes back to where it was ----------------------------------------------------------
+
+TEST(Anchor_AHiddenPaneComesBackBesideItsOldNeighbour) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Bottom));					// H(Sol, Docs, V(Props, Ext))
+	CHECK(p.Ext->Group()->Parent() == p.Props->Group()->Parent() && p.Ext->Group()->Parent() != &l.Root());
+	CHECK(l.Hide(p.Ext));
+	CHECK(p.Ext->Anchor().Valid && p.Ext->Anchor().Position == DockPosition::Bottom);
+	CHECK(l.Show(p.Ext));
+	CHECK(p.Ext->Group()->Parent() == p.Props->Group()->Parent());					// under Props again, not at the bottom edge
+	CHECK(p.Ext->Group()->Parent() != &l.Root());
+	CHECK_VALID(l);
+
+	// with Props gone too, the anchor has nothing left to name: the edge of its side
+	CHECK(l.Hide(p.Ext) && l.Hide(p.Props));
+	CHECK(l.Show(p.Ext));
+	CHECK(p.Ext->State() == PaneState::Docked);
+	CHECK_VALID(l);
+}
+
+TEST(Anchor_APaneThatWasATabGoesBackAsATab) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Tab));
+	CHECK(l.Hide(p.Ext));
+	CHECK(p.Ext->Anchor().Position == DockPosition::Tab && p.Ext->Anchor().Panes[0] == L"Props");
+	CHECK(l.Show(p.Ext));
+	CHECK(p.Ext->Group() == p.Props->Group());
+
+	// floated alone out of the tab group and docked again: back among the tabs, not at the edge
+	CHECK(l.Float(p.Ext, { 0, 0, 300, 300 }));
+	CHECK(p.Ext->Group() != p.Props->Group());
+	CHECK(l.RedockGroup(p.Ext->Group()));
+	CHECK(p.Ext->Group() == p.Props->Group() && p.Ext->State() == PaneState::Docked);
+	CHECK_VALID(l);
+}
+
+TEST(Anchor_ABeforeOrAfterTheNeighbourAndAboveOrBelowIt) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Arrange(Client);
+	// Sol is left of the documents, Props right of them, Output under all of it
+	CHECK(l.Hide(p.Sol) && p.Sol->Anchor().Position == DockPosition::Left);
+	CHECK(l.Hide(p.Props) && p.Props->Anchor().Position == DockPosition::Right);
+	CHECK(l.Hide(p.Output) && p.Output->Anchor().Position == DockPosition::Bottom && !p.Output->Anchor().DocumentArea == false);
+	CHECK(l.Show(p.Output) && l.Show(p.Props) && l.Show(p.Sol));
+	CHECK_DUMP(l, L"main: V(H(T[Sol]@250 D[a.cpp] T[Props]@200) T[Output]@150)\nhidden: Ext Pinned b.cpp c.cpp");
+	CHECK_VALID(l);
+
+	// the same when the documents are not there to name: the document area is still the neighbour
+	CHECK(l.Hide(p.A));
+	CHECK(l.Hide(p.Sol) && l.Show(p.Sol));
+	CHECK_DUMP(l, L"main: V(H(T[Sol]@250 D[] T[Props]@200) T[Output]@150)\nhidden: Ext Pinned a.cpp b.cpp c.cpp");
+}
+
+TEST(Anchor_AnAutoHiddenGroupAndAFloatingGroupGoBackToo) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Bottom));
+	l.Arrange(Client);
+	const int height = Height(p.Ext->Group()->Rect);
+
+	CHECK(l.AutoHide(p.Ext->Group()));
+	CHECK(l.Unhide(p.Ext->Group()));
+	CHECK(p.Ext->Group()->Parent() == p.Props->Group()->Parent() && p.Ext->Group()->Parent() != &l.Root());	// under Props
+	CHECK_VALID(l);
+
+	// a float keeps the size it had there
+	l.Arrange(Client);
+	CHECK(l.Float(p.Ext, { 0, 0, 500, 320 }));
+	l.Arrange(Client);														// (Props has all the height now)
+	l.Arrange(*l.Floats()[0], { 0, 0, 480, 290 });
+	CHECK(l.RedockGroup(p.Ext->Group()));
+	CHECK(p.Ext->Group()->Parent() == p.Props->Group()->Parent());
+	l.Arrange(Client);
+	CHECK(Height(p.Ext->Group()->Rect) == 290);
+	(void)height;
+	CHECK_VALID(l);
+
+	// nothing to go back to: the edge, as before
+	CHECK(!l.RedockGroup(p.Sol->Group()));											// docked already
+	CHECK(l.Float(p.Sol, { 0, 0, 300, 300 }));
+	CHECK(l.Hide(p.Props) == true);
+	CHECK(l.RedockGroup(p.Sol->Group()));
+	CHECK(p.Sol->State() == PaneState::Docked);
+	CHECK_VALID(l);
+}
+
+TEST(Anchor_ItIsSavedWithTheLayout) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Bottom));
+	CHECK(l.Hide(p.Ext));
+	CHECK(l.DockTo(p.Pinned, p.Sol->Group(), DockPosition::Tab));
+	CHECK(l.Hide(p.Pinned));
+	const auto text = l.Save();
+
+	DockLayout copy;
+	Register(copy);
+	CHECK(copy.Load(text));
+	auto ext = copy.FindPane(L"Ext");
+	auto pinned = copy.FindPane(L"Pinned");
+	CHECK(ext->Anchor().Valid && ext->Anchor().Position == DockPosition::Bottom && ext->Anchor().Panes[0] == L"Props");
+	CHECK(pinned->Anchor().Position == DockPosition::Tab && pinned->Anchor().Panes[0] == L"Sol");
+	CHECK(copy.Save() == text);
+
+	// and used
+	CHECK(copy.Show(ext));
+	CHECK(ext->Group()->Parent() == copy.FindPane(L"Props")->Group()->Parent() && ext->Group()->Parent() != &copy.Root());
+	CHECK_VALID(copy);
+
+	// a file that says nonsense about it is not held against the pane
+	DockLayout odd;
+	Register(odd);
+	const char* file = R"({"version": 1, "main": {"type": "split", "axis": "h", "children": [
+		{"type": "group", "kind": "document", "panes": []}]},
+		"panes": [{"id": "Sol", "anchor": {"pos": "sideways", "panes": ["a"]}}, {"id": "Props", "anchor": {"pos": "left", "panes": []}},
+		{"id": "Output", "anchor": 5}]})";
+	CHECK(odd.Load(file));
+	CHECK(odd.Show(odd.FindPane(L"Sol")) && odd.Show(odd.FindPane(L"Props")) && odd.Show(odd.FindPane(L"Output")));
+	CHECK_VALID(odd);
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -2369,7 +2584,7 @@ int wmain() {
 	Run_MoveGroupToEdge_KeepsTabsAndLength();
 
 	Run_AutoHide_CollapsesAGroupIntoTheBar();
-	Run_AutoHide_Unhide_DocksAtTheEdgeOfTheSameSide();
+	Run_AutoHide_Unhide_ReturnsToItsPlace();
 	Run_AutoHide_Rules();
 	Run_AutoHide_APaneCanBeDockedBackIntoAGroup();
 
@@ -2446,6 +2661,14 @@ int wmain() {
 	Run_Pinned_OnlyDocumentsPinAndNewTabsGoAfterThePinnedOnes();
 	Run_Pinned_ItIsSavedWithTheLayout();
 	Run_Geometry_TabsPackIntoRowsAndTheActiveRowIsNextToTheContent();
+	Run_Nested_ASplitInsideASplitOfTheSameAxisJoinsIt();
+	Run_Nested_TheSizesOfAMergedSplitAreHandedOn();
+	Run_Nested_ASavedLayoutIsTheMergedOne();
+	Run_Anchor_AHiddenPaneComesBackBesideItsOldNeighbour();
+	Run_Anchor_APaneThatWasATabGoesBackAsATab();
+	Run_Anchor_ABeforeOrAfterTheNeighbourAndAboveOrBelowIt();
+	Run_Anchor_AnAutoHiddenGroupAndAFloatingGroupGoBackToo();
+	Run_Anchor_ItIsSavedWithTheLayout();
 	Run_Random_OperationsKeepTheInvariants();
 
 	RunUiTests();

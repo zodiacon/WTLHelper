@@ -212,7 +212,7 @@ bool CDockHost::DockFloating(DockPane* pane) {
 		auto target = m_Layout.PrimaryDocumentGroup();
 		return target && m_Layout.MoveGroupTo(pane->Group(), target, DockPosition::Tab);
 	}
-	return m_Layout.MoveGroupToEdge(pane->Group(), pane->LastSide());
+	return m_Layout.RedockGroup(pane->Group());
 }
 
 bool CDockHost::ToggleFloat(DockPane* pane) {
