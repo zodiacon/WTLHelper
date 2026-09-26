@@ -156,7 +156,8 @@ LRESULT CDockGroupWnd::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 	if (m_Group) {
 		if (auto pane = m_Group->ActivePane()) {
 			m_Host.SetActivePane(pane);
-			if (pane->hWnd && ::IsWindowVisible(pane->hWnd))
+			// (the chrome takes the focus itself only when asked to; otherwise it belongs to the content)
+			if (!m_ChromeFocusWanted && pane->hWnd && ::IsWindowVisible(pane->hWnd))
 				::SetFocus(pane->hWnd);
 		}
 	}
@@ -176,7 +177,8 @@ CDockGroupWnd::Strip CDockGroupWnd::LayoutStrip(const GroupParts& parts, CDCHand
 	for (auto pane : m_Group->Panes()) {
 		SIZE size{};
 		dc.GetTextExtent(pane->Title.c_str(), (int)pane->Title.size(), &size);
-		strip.Specs.push_back({ size.cx, pane->Icon != nullptr, m_Group->IsDocument() && Has(pane->Caps, PaneCaps::CanClose) });
+		const bool closable = m_Group->IsDocument() && Has(pane->Caps, PaneCaps::CanClose);
+		strip.Specs.push_back({ size.cx, pane->Icon != nullptr, closable, pane->Modified && !closable });
 	}
 	dc.SelectFont(old);
 
@@ -424,8 +426,10 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 			DrawPinGlyph(dc.m_hDC, buttons.Pin, m_Group->Location() != GroupLocation::AutoHide, m_HotButton == Button::Pin, idle);
 		if (buttons.HasMenu)
 			DrawMenuGlyph(dc.m_hDC, buttons.Menu, m_HotButton == Button::Menu, idle);
-		if (active)
-			dc.DrawText(active->Title.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+		if (active) {
+			const std::wstring title = CaptionText(*active);
+			dc.DrawText(title.c_str(), (int)title.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+		}
 	}
 
 	if (parts.HasTabs) {
@@ -452,9 +456,18 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 			RECT text = TabTextRect(tab, spec, metrics);
 			dc.DrawText(pane->Title.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-			// the close button shows on the selected tab and on the one under the mouse
-			if (spec.Closable && !IsRectEmpty(&strip.Layout.Close[k]) && (selected || hot))
-				DrawCloseGlyph(dc.m_hDC, strip.Layout.Close[k], hot && m_HotTabClose, theme.ButtonGlyph);
+			// the close button shows on the selected tab and on the one under the mouse; a modified document shows a dot
+			// instead, which turns into the button when the mouse is on it
+			if (spec.Closable && !IsRectEmpty(&strip.Layout.Close[k])) {
+				const bool overButton = hot && m_HotTabClose;
+				if (pane->Modified && !overButton)
+					DrawModifiedDot(dc.m_hDC, strip.Layout.Close[k], selected ? theme.TabActiveText : theme.ButtonGlyph);
+				else if (selected || hot)
+					DrawCloseGlyph(dc.m_hDC, strip.Layout.Close[k], overButton, theme.ButtonGlyph);
+			}
+			else if (spec.Marked && !IsRectEmpty(&strip.Layout.Mark[k])) {
+				DrawModifiedDot(dc.m_hDC, strip.Layout.Mark[k], selected ? theme.TabActiveText : theme.ButtonGlyph);
+			}
 			if (selected) {
 				RECT line{ tab.left, tab.top, tab.right, tab.top + accent };
 				dc.FillSolidRect(&line, theme.TabActiveAccent);
@@ -490,6 +503,15 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 			edge.top = edge.bottom - 1;
 		dc.FillSolidRect(&edge, theme.Border);
 	}
+
+	// where the keyboard is
+	if (HasChromeFocus()) {
+		RECT focus = FocusRect();
+		if (!IsRectEmpty(&focus)) {
+			InflateRect(&focus, -2, -2);
+			::DrawFocusRect(dc, &focus);
+		}
+	}
 }
 
 //
@@ -511,6 +533,7 @@ void CDockGroupWnd::SetHot(int tab, bool close, bool overflow) {
 }
 
 LRESULT CDockGroupWnd::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL&) {
+	m_Host.HideTip();
 	if (!m_Group)
 		return 0;
 	const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -639,6 +662,7 @@ LRESULT CDockGroupWnd::OnMButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 }
 
 LRESULT CDockGroupWnd::OnRButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
+	m_Host.HideTip();
 	if (!m_Group)
 		return 0;
 	const POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -733,6 +757,7 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 	Hit hit = Locate(pt);
 	const bool onTab = hit.Type == Hit::Kind::Tab || hit.Type == Hit::Kind::TabClose;
 	SetHot(onTab ? hit.Tab : -1, hit.Type == Hit::Kind::TabClose, hit.Type == Hit::Kind::Overflow);
+	UpdateTip(hit);
 
 	const Button hotButton = ButtonOf(hit.Type);
 	if (hotButton != m_HotButton) {
@@ -748,6 +773,7 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 
 LRESULT CDockGroupWnd::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Tracking = false;
+	m_Host.CancelTip(m_hWnd);
 	SetHot(-1, false, false);
 	if (m_HotButton != Button::None) {
 		m_HotButton = Button::None;
@@ -891,12 +917,15 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 		e.Screen = toScreen(where);
 		e.Action = action;
 		e.Invoke = [self, which] { self->RunButton(which); };
+		e.Key = which == Button::Menu ? L"btn:menu" : which == Button::Pin ? L"btn:pin" : L"btn:close";
 		list.push_back(std::move(e));
 	};
 
 	if (parts.HasCaption) {
 		AccElement caption;
 		caption.Name = active ? active->Title : std::wstring();
+		if (active)
+			caption.Description = active->Modified ? L"Modified" : L"";
 		caption.Role = ROLE_SYSTEM_TITLEBAR;
 		caption.Screen = toScreen(parts.Caption);
 		list.push_back(std::move(caption));
@@ -923,6 +952,7 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 
 			AccElement tab;
 			tab.Name = pane->Title;
+			tab.Description = pane->Modified ? (pane->Tooltip.empty() ? std::wstring(L"Modified") : pane->Tooltip + L" (modified)") : pane->Tooltip;
 			tab.Role = ROLE_SYSTEM_PAGETAB;
 			tab.State = STATE_SYSTEM_SELECTABLE | STATE_SYSTEM_FOCUSABLE;
 			if (pane == active)
@@ -935,6 +965,7 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 				tab.State |= STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
 			tab.Action = L"Switch";
 			tab.Invoke = tab.Select = [host, pane] { host->ActivatePane(pane); };
+			tab.Key = L"tab:" + pane->Id();
 			list.push_back(std::move(tab));
 
 			if (strip.Specs[i].Closable) {
@@ -947,6 +978,7 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 					close.State = STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
 				close.Action = L"Press";
 				close.Invoke = [host, pane] { host->ClosePane(pane); };
+				close.Key = L"close:" + pane->Id();
 				list.push_back(std::move(close));
 			}
 		}
@@ -959,6 +991,7 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 			const RECT where = strip.Layout.OverflowButton;
 			const bool bottom = m_Group->TabsAtBottom && !m_Group->IsDocument();
 			more.Invoke = [self, where, bottom] { self->ShowOverflowMenu(where, bottom); };
+			more.Key = L"overflow";
 			list.push_back(std::move(more));
 		}
 	}
@@ -978,6 +1011,330 @@ void CDockGroupWnd::NotifyStructure() {
 		if (!first)
 			::NotifyWinEvent(EVENT_OBJECT_REORDER, m_hWnd, OBJID_CLIENT, CHILDID_SELF);
 	}
+}
+
+//
+// modified marks and tooltips
+//
+
+std::wstring CDockGroupWnd::CaptionText(const DockPane& pane) {
+	return pane.Modified ? pane.Title + L" \u25CF" : pane.Title;
+}
+
+void CDockGroupWnd::DrawModifiedDot(CDCHandle dc, const RECT& slot, COLORREF color) const {
+	const int size = MarkSize(Metrics());
+	const int cx = (slot.left + slot.right) / 2, cy = (slot.top + slot.bottom) / 2;
+	CBrush brush;
+	brush.CreateSolidBrush(color);
+	CPen pen;
+	pen.CreatePen(PS_SOLID, 1, color);
+	HBRUSH oldBrush = dc.SelectBrush(brush);
+	HPEN oldPen = dc.SelectPen(pen);
+	dc.Ellipse(cx - size / 2, cy - size / 2, cx - size / 2 + size, cy - size / 2 + size);
+	dc.SelectPen(oldPen);
+	dc.SelectBrush(oldBrush);
+}
+
+// What the mouse rests on, in words: what a button does, the full title of what is cut off, what the application says
+// about a tab.
+bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
+	if (!m_Group || !m_hWnd)
+		return false;
+	RECT rc;
+	GetClientRect(&rc);
+	const GroupParts parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	POINT origin{ 0, 0 };
+	ClientToScreen(&origin);
+	auto toScreen = [&](RECT r) {
+		OffsetRect(&r, origin.x, origin.y);
+		return r;
+	};
+
+	switch (hit.Type) {
+		case Hit::Kind::CaptionClose:
+		case Hit::Kind::CaptionPin:
+		case Hit::Kind::CaptionMenu: {
+			const CaptionButtons b = ButtonsFor(parts);
+			if (hit.Type == Hit::Kind::CaptionClose) {
+				target = toScreen(b.Close);
+				text = L"Close";
+			}
+			else if (hit.Type == Hit::Kind::CaptionPin) {
+				target = toScreen(b.Pin);
+				text = m_Group->Location() == GroupLocation::AutoHide ? L"Dock" : L"Auto Hide";
+			}
+			else {
+				target = toScreen(b.Menu);
+				text = L"Window Position";
+			}
+			return true;
+		}
+
+		case Hit::Kind::Caption: {
+			DockPane* pane = m_Group->ActivePane();
+			if (!pane)
+				return false;
+			text = pane->Tooltip;
+			if (text.empty()) {
+				// the title, if the caption has no room for all of it
+				CClientDC dc(m_hWnd);
+				HFONT old = dc.SelectFont(Font());
+				const std::wstring title = CaptionText(*pane);
+				SIZE size{};
+				dc.GetTextExtent(title.c_str(), (int)title.size(), &size);
+				dc.SelectFont(old);
+				const CaptionButtons b = ButtonsFor(parts);
+				if (size.cx <= b.TextRight - (parts.Caption.left + Metrics().TextPadding))
+					return false;
+				text = pane->Title;
+			}
+			RECT area = parts.Caption;
+			area.right = ButtonsFor(parts).TextRight;
+			target = toScreen(area);
+			return true;
+		}
+
+		case Hit::Kind::Tab:
+		case Hit::Kind::TabClose: {
+			DockPane* pane = PaneAt(hit.Tab);
+			if (!pane)
+				return false;
+			CClientDC dc(m_hWnd);
+			const Strip strip = LayoutStrip(parts, dc.m_hDC);
+			const int k = hit.Tab - strip.Layout.First;
+			if (k < 0 || k >= (int)strip.Layout.Tabs.size())
+				return false;
+			if (hit.Type == Hit::Kind::TabClose) {
+				target = toScreen(strip.Layout.Close[k]);
+				text = L"Close";
+				return true;
+			}
+			text = pane->Tooltip;
+			if (text.empty()) {
+				// a tab that is cut off (the last one that fits) shows its title
+				const RECT room = TabTextRect(strip.Layout.Tabs[k], strip.Specs[hit.Tab], Metrics());
+				if (strip.Specs[hit.Tab].TextWidth <= Width(room))
+					return false;
+				text = pane->Title;
+			}
+			target = toScreen(strip.Layout.Tabs[k]);
+			return true;
+		}
+
+		case Hit::Kind::Overflow: {
+			CClientDC dc(m_hWnd);
+			const Strip strip = LayoutStrip(parts, dc.m_hDC);
+			target = toScreen(strip.Layout.OverflowButton);
+			text = L"Show open tabs";
+			return true;
+		}
+
+		default:
+			return false;
+	}
+}
+
+void CDockGroupWnd::UpdateTip(const Hit& hit) {
+	RECT target{};
+	std::wstring text;
+	if (TipFor(hit, target, text))
+		m_Host.RequestTip(m_hWnd, target, text, Dpi());
+	else
+		m_Host.CancelTip(m_hWnd);
+}
+
+//
+// keyboard focus in the chrome
+//
+
+// The items the keyboard visits, in the order of the elements: caption buttons, then tabs (each followed by its close
+// button) and the tab list button.
+std::vector<AccElement> CDockGroupWnd::FocusItems() const {
+	std::vector<AccElement> items;
+	for (auto& e : AccElements())
+		if (!e.Key.empty())
+			items.push_back(std::move(e));
+	return items;
+}
+
+bool CDockGroupWnd::FocusChrome(DockPane* pane) {
+	if (!m_hWnd || !m_Group || m_Group->Panes().empty())
+		return false;
+	if (!pane || pane->Group() != m_Group)
+		pane = m_Group->ActivePane();
+	if (!pane)
+		return false;
+	m_ChromeFocusWanted = true;
+	m_FocusKey = L"tab:" + pane->Id();
+	// a group with a single pane and no tab strip has the caption's buttons only: start on the first of them
+	const auto items = FocusItems();
+	if (std::none_of(items.begin(), items.end(), [&](auto& e) { return e.Key == m_FocusKey; }))
+		m_FocusKey = items.empty() ? std::wstring() : items.front().Key;
+	if (m_FocusKey.empty()) {
+		m_ChromeFocusWanted = false;
+		return false;
+	}
+	::SetFocus(m_hWnd);
+	m_ChromeFocusWanted = false;
+	m_ChromeFocus = ::GetFocus() == m_hWnd;
+	EnsureFocusVisible();
+	Invalidate(FALSE);
+	return m_ChromeFocus;
+}
+
+bool CDockGroupWnd::HasChromeFocus() const {
+	return m_ChromeFocus && m_hWnd && ::GetFocus() == m_hWnd;
+}
+
+std::wstring CDockGroupWnd::FocusName() const {
+	if (!HasChromeFocus())
+		return {};
+	for (auto& e : FocusItems())
+		if (e.Key == m_FocusKey)
+			return e.Name;
+	return {};
+}
+
+// a tab that is scrolled out of the strip is scrolled in
+void CDockGroupWnd::EnsureFocusVisible() {
+	if (!m_Group || (m_FocusKey.rfind(L"tab:", 0) != 0 && m_FocusKey.rfind(L"close:", 0) != 0))
+		return;
+	const std::wstring id = m_FocusKey.substr(m_FocusKey.find(L':') + 1);
+	const auto& panes = m_Group->Panes();
+	int index = -1;
+	for (int i = 0; i < (int)panes.size(); i++)
+		if (panes[i]->Id() == id)
+			index = i;
+	if (index < 0)
+		return;
+	RECT rc;
+	GetClientRect(&rc);
+	CClientDC dc(m_hWnd);
+	const auto parts = ComputeGroupParts(*m_Group, rc, Metrics());
+	const auto strip = LayoutStrip(parts, dc.m_hDC);
+	if (index < strip.Layout.First || index >= strip.Layout.First + (int)strip.Layout.Tabs.size()) {
+		m_First = index;
+		m_ScrollLocked = true;
+	}
+}
+
+void CDockGroupWnd::MoveFocus(int step) {
+	const auto items = FocusItems();
+	if (items.empty())
+		return;
+	int at = -1;
+	for (int i = 0; i < (int)items.size(); i++)
+		if (items[i].Key == m_FocusKey)
+			at = i;
+	at = at < 0 ? 0 : std::clamp(at + step, 0, (int)items.size() - 1);
+	m_FocusKey = items[at].Key;
+	EnsureFocusVisible();
+	Invalidate(FALSE);
+	if (m_Host.IsTipVisible())
+		m_Host.HideTip();
+	::NotifyWinEvent(EVENT_OBJECT_FOCUS, m_hWnd, OBJID_CLIENT, at + 1);
+}
+
+RECT CDockGroupWnd::FocusRect() const {
+	for (auto& e : FocusItems()) {
+		if (e.Key == m_FocusKey && !IsRectEmpty(&e.Screen)) {
+			RECT rc = e.Screen;
+			::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<POINT*>(&rc), 2);
+			return rc;
+		}
+	}
+	return {};
+}
+
+LRESULT CDockGroupWnd::OnKillFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_ChromeFocus) {
+		m_ChromeFocus = false;
+		Invalidate(FALSE);
+	}
+	return 0;
+}
+
+LRESULT CDockGroupWnd::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL& handled) {
+	if (!HasChromeFocus()) {
+		handled = FALSE;
+		return 0;
+	}
+	return DLGC_WANTARROWS | DLGC_WANTTAB | DLGC_WANTCHARS;
+}
+
+LRESULT CDockGroupWnd::OnKeyDown(UINT, WPARAM wp, LPARAM, BOOL& handled) {
+	if (!HasChromeFocus() || !m_Group) {
+		handled = FALSE;
+		return 0;
+	}
+	const bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+	const auto items = FocusItems();
+	const AccElement* current = nullptr;
+	for (auto& e : items)
+		if (e.Key == m_FocusKey)
+			current = &e;
+
+	// what a key press does to a tab or button that has the focus (the window may go away with it)
+	auto paneOfFocus = [&]() -> DockPane* {
+		if (m_FocusKey.rfind(L"tab:", 0) != 0 && m_FocusKey.rfind(L"close:", 0) != 0)
+			return m_Group->ActivePane();
+		return m_Host.Layout().FindPane(m_FocusKey.substr(m_FocusKey.find(L':') + 1));
+	};
+
+	switch (wp) {
+		case VK_LEFT: case VK_UP:
+			MoveFocus(-1);
+			return 0;
+		case VK_RIGHT: case VK_DOWN:
+			MoveFocus(1);
+			return 0;
+		case VK_HOME:
+			MoveFocus(-(int)items.size());
+			return 0;
+		case VK_END:
+			MoveFocus((int)items.size());
+			return 0;
+
+		case VK_RETURN: case VK_SPACE:
+			if (current && current->Invoke) {
+				auto invoke = current->Invoke;
+				invoke();		// this can end the window; touch nothing afterwards
+			}
+			return 0;
+
+		case VK_DELETE:
+			// (closes the tab that is on; the buttons have nothing to delete)
+			if (m_FocusKey.rfind(L"tab:", 0) != 0 && m_FocusKey.rfind(L"close:", 0) != 0)
+				return 0;
+			if (auto pane = paneOfFocus()) {
+				DockPane* target = pane;
+				m_Host.ClosePane(target);
+			}
+			return 0;
+
+		case VK_ESCAPE:
+			// back to the content
+			if (auto pane = m_Group->ActivePane())
+				m_Host.ActivatePane(pane);
+			return 0;
+
+		case VK_TAB:
+			m_Host.FocusNextChrome(m_Group->ActivePane(), !shift);
+			return 0;
+
+		case VK_APPS: case VK_F10:
+			if (wp == VK_F10 && !shift)
+				break;
+			if (auto pane = paneOfFocus()) {
+				RECT where = FocusRect();
+				POINT screen{ where.left, where.bottom };
+				ClientToScreen(&screen);
+				m_Host.ShowPaneMenu(pane, screen);
+			}
+			return 0;
+	}
+	handled = FALSE;
+	return 0;
 }
 
 }

@@ -14,3 +14,4 @@
 #include "DockDrop.h"
 #include "DockStore.h"
 #include "DockNavigator.h"
+#include "DockWindowList.h"

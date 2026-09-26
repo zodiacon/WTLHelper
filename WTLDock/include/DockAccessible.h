@@ -17,6 +17,8 @@ struct AccElement {
 	LONG State{};				// STATE_SYSTEM_*
 	RECT Screen{};				// empty: not visible (a tab scrolled out of the strip)
 	std::wstring Action;		// what the default action is called; empty: there is none
+	std::wstring Description;	// more than the name says (a tab's tooltip, "Modified")
+	std::wstring Key;			// non-empty for what the keyboard can visit; identifies it across layouts
 	std::function<void()> Invoke;	// the default action
 	std::function<void()> Select;	// accSelect: making a tab the active one
 };

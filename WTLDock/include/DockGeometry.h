@@ -45,11 +45,13 @@ struct TabSpec {
 	int TextWidth{};
 	bool HasIcon{};
 	bool Closable{};		// has a close button
+	bool Marked{};			// shows a modified mark of its own (a tab with a close button shows it in the button's place)
 };
 
 struct TabStrip {
 	std::vector<RECT> Tabs;			// the visible tabs, in order
 	std::vector<RECT> Close;		// their close buttons (empty rectangle for tabs that have none)
+	std::vector<RECT> Mark;			// the modified mark of those tabs that have one and no close button
 	int First{};					// index of Tabs[0] among all tabs
 	bool Overflow{};				// not all tabs fit: the first ones may be scrolled out and there is a drop-down button
 	RECT OverflowButton{};
@@ -61,6 +63,8 @@ struct TabStrip {
 TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, const DockMetrics& metrics, int first, int active);
 
 int TabWidth(const TabSpec& tab, const DockMetrics& metrics);
+// the size of the modified dot
+int MarkSize(const DockMetrics& metrics);
 RECT TabIconRect(const RECT& tab, const DockMetrics& metrics);
 RECT TabTextRect(const RECT& tab, const TabSpec& spec, const DockMetrics& metrics);
 

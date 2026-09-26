@@ -9,13 +9,16 @@ RECT CenteredSquare(POINT center, int size) {
 	return { center.x - size / 2, center.y - size / 2, center.x - size / 2 + size, center.y - size / 2 + size };
 }
 
-RECT SidePreview(const RECT& r, DockPosition pos) {
+// 'length' is what the new group is to get along the axis; 0: half of the target
+RECT SidePreview(const RECT& r, DockPosition pos, int length = 0) {
 	RECT p = r;
+	const int w = length > 0 ? std::clamp(length, 1, Width(r) - 1) : Width(r) / 2;
+	const int h = length > 0 ? std::clamp(length, 1, Height(r) - 1) : Height(r) / 2;
 	switch (pos) {
-		case DockPosition::Left: p.right = r.left + Width(r) / 2; break;
-		case DockPosition::Right: p.left = r.right - Width(r) / 2; break;
-		case DockPosition::Top: p.bottom = r.top + Height(r) / 2; break;
-		case DockPosition::Bottom: p.top = r.bottom - Height(r) / 2; break;
+		case DockPosition::Left: p.right = r.left + w; break;
+		case DockPosition::Right: p.left = r.right - w; break;
+		case DockPosition::Top: p.bottom = r.top + h; break;
+		case DockPosition::Bottom: p.top = r.bottom - h; break;
 		default: break;
 	}
 	return p;
@@ -55,6 +58,10 @@ bool CanEdge(const DropContext& c) {
 }
 
 int PreferredLength(const DropContext& c, DockSide side) {
+	// what a floating group had is what it gets (the drop does the same)
+	if (auto source = SourceGroup(c))
+		if (const int floated = c.Layout->LengthWhenDocked(*source, side); floated > 0)
+			return floated;
 	const int length = Along(c.Pane->PreferredSize, AxisOf(side));
 	return length > 0 ? length : 250;
 }
@@ -114,7 +121,10 @@ std::vector<Guide> BuildGuides(const DropContext& c) {
 			g.Target.Type = DropTarget::Kind::Side;
 			g.Target.Group = c.Hover;
 			g.Target.Position = arm.Pos;
-			g.Target.Preview = SidePreview(c.HoverRect, arm.Pos);
+			int length = 0;
+			if (auto source = SourceGroup(c); source && c.Hover)
+				length = c.Layout->LengthBeside(*source, *c.Hover, arm.Pos);
+			g.Target.Preview = SidePreview(c.HoverRect, arm.Pos, length);
 			g.Rect = CenteredSquare({ center.x + arm.Dx, center.y + arm.Dy }, size);
 			guides.push_back(g);
 		}

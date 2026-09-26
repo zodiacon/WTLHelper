@@ -1892,6 +1892,172 @@ TEST(FloatDpi_OlderFilesHadTheirFloatsAtTheDpiOfTheFile) {
 	CHECK_VALID(copy);
 }
 
+TEST(Geometry_AModifiedTabHasAMarkOrItsCloseButtonStandsIn) {
+	const DockMetrics m = DockMetrics::ForDpi(96);
+	const TabSpec plain{ 60, false, false, false };
+	const TabSpec marked{ 60, false, false, true };
+	const TabSpec closable{ 60, false, true, false };
+	const TabSpec closableMarked{ 60, false, true, true };
+	CHECK(TabWidth(marked, m) == TabWidth(plain, m) + m.TabIconGap + MarkSize(m));
+	CHECK(TabWidth(closableMarked, m) == TabWidth(closable, m));		// the dot takes the place of the button
+
+	const RECT strip{ 0, 0, 800, m.TabHeight };
+	const auto laid = LayoutTabStrip({ plain, marked, closable, closableMarked }, strip, m, 0, 0);
+	CHECK(laid.Tabs.size() == 4 && laid.Mark.size() == 4 && laid.Close.size() == 4);
+	CHECK(IsRectEmpty(&laid.Mark[0]) && !IsRectEmpty(&laid.Mark[1]) && IsRectEmpty(&laid.Mark[2]) && IsRectEmpty(&laid.Mark[3]));
+	CHECK(Width(laid.Mark[1]) == MarkSize(m) && Height(laid.Mark[1]) == MarkSize(m));
+	CHECK(laid.Mark[1].right <= laid.Tabs[1].right && laid.Mark[1].left >= laid.Tabs[1].left);
+	// the text has the room the mark leaves
+	const RECT text = TabTextRect(laid.Tabs[1], marked, m);
+	CHECK(text.right <= laid.Mark[1].left);
+	CHECK(!IsRectEmpty(&laid.Close[3]) && !IsRectEmpty(&laid.Close[2]));
+	CHECK(MarkSize(DockMetrics::ForDpi(192)) > MarkSize(m));
+}
+
+TEST(Panes_HaveATooltipAndAModifiedFlag) {
+	DockLayout l;
+	PaneDesc d;
+	d.Id = d.Title = L"x";
+	d.Tooltip = L"C:/docs/x";
+	auto pane = l.AddPane(d);
+	CHECK(pane && pane->Tooltip == L"C:/docs/x" && !pane->Modified);
+	pane->Modified = true;
+	CHECK(l.Show(pane) && pane->Modified);						// nothing in the layout touches it
+	CHECK(l.Save().find("Modified") == std::string::npos);		// and it is not saved: it is what the application knows now
+}
+
+// ---- The Windows dialog's list --------------------------------------------------------------
+
+TEST(WindowList_ListsPlacedPanesWithTheirStates) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	l.Float(p.Props, { 0, 0, 300, 200 });
+	l.AutoHide(p.Output->Group());
+	p.B->Modified = true;
+
+	DockWindowList list;
+	list.Build(l, false);
+	CHECK(list.Rows().size() == 3);								// a.cpp, b.cpp, c.cpp
+	CHECK(list.Rows()[0].Name == L"a.cpp" && list.Rows()[0].Type == L"Document" && list.Rows()[0].State == L"Open");
+	CHECK(list.Rows()[1].Modified && !list.Rows()[0].Modified);
+
+	list.Build(l, true);
+	CHECK(list.Rows().size() == 6);
+	CHECK(list.IndexOf(p.Sol) >= 0 && list.IndexOf(p.Ext) == -1 && list.IndexOf(nullptr) == -1);		// Ext is not placed
+	auto row = [&](DockPane* pane) -> const DockWindowList::Row& { return list.Rows()[list.IndexOf(pane)]; };
+	CHECK(row(p.Sol).Type == L"Tool window" && row(p.Sol).State == L"Docked left");
+	CHECK(row(p.Props).State == L"Floating");
+	CHECK(row(p.Output).State == L"Auto-hidden bottom");
+	CHECK(DockWindowList::StateText(*p.Ext) == L"Hidden");
+}
+
+TEST(WindowList_SortsByAnyColumnAndKeepsTiesInOrder) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	l.Show(p.C);
+	p.C->Title = L"Alpha.cpp";
+	p.B->Title = L"zeta.cpp";
+	p.B->Modified = true;
+
+	DockWindowList list;
+	list.Build(l, true);
+	list.Sort(DockWindowList::Column::Name);
+	CHECK(list.Rows()[0].Name == L"a.cpp" && list.Rows()[1].Name == L"Alpha.cpp");			// case does not matter
+	CHECK(list.Rows().back().Name == L"zeta.cpp");
+	list.Sort(DockWindowList::Column::Name, false);
+	CHECK(list.Rows()[0].Name == L"zeta.cpp" && list.Rows().back().Name == L"a.cpp");
+
+	// numbers count as numbers
+	p.A->Title = L"Untitled10";
+	p.C->Title = L"Untitled2";
+	list.Build(l, false);
+	list.Sort(DockWindowList::Column::Name);
+	CHECK(list.Rows()[0].Name == L"Untitled2" && list.Rows()[1].Name == L"Untitled10");
+	p.A->Title = L"a.cpp";
+	p.C->Title = L"Alpha.cpp";
+
+	list.Build(l, true);
+	list.Sort(DockWindowList::Column::Type);
+	CHECK(list.Rows()[0].Type == L"Document" && list.Rows().back().Type == L"Tool window");
+	CHECK(list.Rows()[0].Pane == p.A && list.Rows()[1].Pane == p.B);						// ties: as they were
+
+	list.Sort(DockWindowList::Column::Modified);
+	CHECK(list.Rows()[0].Pane == p.B && !list.Rows()[1].Modified);
+	list.Sort(DockWindowList::Column::State);
+	for (size_t i = 1; i < list.Rows().size(); i++)
+		CHECK(_wcsicmp(list.Rows()[i - 1].State.c_str(), list.Rows()[i].State.c_str()) <= 0);
+}
+
+// ---- Docking keeps the size a floating window had ----------------------------------------------
+
+TEST(FloatSize_DockedGroupsKeepTheirLengthAtTheEdges) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.Float(p.Sol, { 0, 0, 700, 500 }));
+	l.Arrange(*l.Floats()[0], { 0, 0, 600, 400 });
+	CHECK(l.LengthWhenDocked(*p.Sol->Group(), DockSide::Left) == 600 && l.LengthWhenDocked(*p.Sol->Group(), DockSide::Top) == 400);
+	CHECK(l.LengthWhenDocked(*p.Output->Group(), DockSide::Left) == 0);				// only groups that float
+
+	CHECK(l.MoveGroupToEdge(p.Sol->Group(), DockSide::Left));
+	CHECK(!l.Root().Children()[0]->Size.IsStar() && l.Root().Children()[0]->Size.Value == 600);
+
+	CHECK(l.Float(p.Output, { 0, 0, 700, 500 }));
+	l.Arrange(*l.Floats()[0], { 0, 0, 600, 333 });
+	CHECK(l.MoveGroupToEdge(p.Output->Group(), DockSide::Bottom));
+	CHECK(l.Root().Children().back()->Size.Value == 333);
+
+	// a pane taken out of the window alone: the window's size, not the pane's remembered one
+	CHECK(l.Float(p.Props, { 0, 0, 640, 500 }));
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Tab));
+	l.Arrange(*l.Floats()[0], { 0, 0, 640, 480 });
+	CHECK(l.DockToEdge(p.Ext, DockSide::Right));
+	CHECK(l.Root().Children().back()->Size.Value == 640);
+	CHECK_VALID(l);
+}
+
+TEST(FloatSize_BesideAGroupItKeepsItsSizeUpToWhatTheTargetCanSpare) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Arrange({ 0, 0, 1000, 800 });
+	CHECK(l.Float(p.Props, { 0, 0, 700, 500 }));
+	l.Arrange(*l.Floats()[0], { 0, 0, 260, 400 });
+
+	// beside the documents: 260 wide
+	DockGroup* docs = p.A->Group();
+	CHECK(l.LengthBeside(*p.Props->Group(), *docs, DockPosition::Right) == 260);
+	CHECK(l.LengthBeside(*p.Props->Group(), *docs, DockPosition::Bottom) == 400);
+	CHECK(l.LengthBeside(*p.Props->Group(), *docs, DockPosition::Tab) == 0);
+	CHECK(l.DockTo(p.Props, docs, DockPosition::Right));
+	CHECK(!p.Props->Group()->Size.IsStar() && p.Props->Group()->Size.Value == 260);
+	l.Arrange({ 0, 0, 1000, 800 });
+	CHECK(Width(p.Props->Group()->Rect) == 260);
+	CHECK_VALID(l);
+
+	// a window that was wider than the target can spare takes what leaves the target its minimum
+	CHECK(l.Float(p.Props, { 0, 0, 900, 500 }));
+	l.Arrange(*l.Floats()[0], { 0, 0, 3000, 400 });
+	docs = p.A->Group();
+	const int room = Width(docs->Rect);
+	const int expected = room - (l.MinLength(*docs, Axis::Horizontal) + l.Metrics().SplitterThickness);
+	CHECK(l.LengthBeside(*p.Props->Group(), *docs, DockPosition::Right) == expected && expected < 3000 && expected > 0);
+	CHECK(l.DockTo(p.Props, docs, DockPosition::Right));
+	l.Arrange({ 0, 0, 1000, 800 });
+	CHECK(Width(p.A->Group()->Rect) >= l.MinLength(*p.A->Group(), Axis::Horizontal));
+	CHECK_VALID(l);
+}
+
+TEST(FloatSize_TheDpiOfTheWindowIsAccountedFor) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.Float(p.Sol, { 0, 0, 700, 500 }));
+	l.Arrange(*l.Floats()[0], { 0, 0, 600, 400 });
+	CHECK(l.SetFloatDpi(l.Floats()[0].get(), 192));					// the window is on a monitor twice as sharp
+	CHECK(l.LengthWhenDocked(*p.Sol->Group(), DockSide::Left) == 300);	// 600 of its pixels are 300 of the main window's
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -2130,6 +2296,13 @@ int wmain() {
 	Run_FloatDpi_ADockedGroupKeepsItsSizeAcrossMonitors();
 	Run_FloatDpi_ItIsSavedWithTheWindow();
 	Run_FloatDpi_OlderFilesHadTheirFloatsAtTheDpiOfTheFile();
+	Run_Geometry_AModifiedTabHasAMarkOrItsCloseButtonStandsIn();
+	Run_Panes_HaveATooltipAndAModifiedFlag();
+	Run_WindowList_ListsPlacedPanesWithTheirStates();
+	Run_WindowList_SortsByAnyColumnAndKeepsTiesInOrder();
+	Run_FloatSize_DockedGroupsKeepTheirLengthAtTheEdges();
+	Run_FloatSize_BesideAGroupItKeepsItsSizeUpToWhatTheTargetCanSpare();
+	Run_FloatSize_TheDpiOfTheWindowIsAccountedFor();
 	Run_Random_OperationsKeepTheInvariants();
 
 	RunUiTests();

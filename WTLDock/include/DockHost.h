@@ -22,6 +22,7 @@ namespace WTLDock {
 class CDockGroupWnd;
 class CDockFloatFrame;
 class CDockNavigatorWnd;
+class CDockTipWnd;
 class SplitterTracker;
 class DockDragSession;
 struct DropTarget;
@@ -240,6 +241,13 @@ public:
 	// the next (or previous) tab of the document group that has the focus, wrapping around
 	bool ActivateNextDocument(bool forward = true);
 
+	// Window > Windows...: a modal dialog that lists the open documents (and, if ticked, tool windows) with their type,
+	// state and modified mark; sortable by column. It activates the chosen one, closes the selected ones (honouring
+	// OnPaneClosing) and, if OnPaneSave is set, saves the modified ones. True if a pane was activated.
+	bool ShowWindowsDialog(HWND parent = nullptr);
+	// saves a pane's document; return true when it is saved (the host then clears Modified)
+	std::function<bool(DockPane*)> OnPaneSave;
+
 	//
 	// Keyboard. PreTranslateMessage takes the shortcuts below for key messages that go to the docking area, its
 	// floating windows or the window switcher: call it from the message loop (CMessageFilter) or from the frame's
@@ -251,6 +259,7 @@ public:
 	//   Alt+F6, Shift+Alt+F6       the next / previous group (documents and tool windows) in the order of the layout
 	//   Shift+Esc                  closes the active tool window
 	//   Alt+-                      the menu of the active pane (as on its tab or caption)
+	//   Ctrl+Alt+F6                the keyboard goes to the tabs and buttons of the active pane's group (FocusChrome)
 	//
 	bool PreTranslateMessage(MSG* msg);
 	// The same for a key that the caller has already decoded (also used by the tests).
@@ -258,6 +267,22 @@ public:
 	void SetShortcutsEnabled(bool enabled) {
 		m_Shortcuts = enabled;
 	}
+	// Keyboard focus in the chrome (Ctrl+Alt+F6): the tab strip and caption of a group take the focus, and then
+	//   Left/Right (Up/Down)  the next / previous item: caption buttons, tabs, tab close buttons, the tab list button
+	//   Home / End            the first / last item
+	//   Enter, Space          does what the item does (a tab activates its pane and the focus goes into it)
+	//   Delete                closes the tab
+	//   Apps, Shift+F10       the menu of the tab
+	//   Tab, Shift+Tab        the chrome of the next / previous group
+	//   Esc                   back to the content of the active pane
+	// A focus ring shows where the keyboard is.
+	bool FocusChrome(DockPane* pane = nullptr);
+	// The chrome of the next (or previous) group after the one of 'from'; false if there is no other one.
+	bool FocusNextChrome(DockPane* from, bool forward = true);
+	// True while the keyboard is on the chrome of a group; ChromeFocusName is the item it is on.
+	bool IsChromeFocused() const;
+	std::wstring ChromeFocusName() const;
+
 	// the next (or previous) group's active pane, wrapping around; false if there is no other one
 	bool ActivateNextPane(bool forward = true);
 	bool ShowActivePaneMenu();
@@ -277,6 +302,32 @@ public:
 	// goes to the selected pane and closes the switcher
 	bool CommitNavigator();
 	void CancelNavigator();
+
+	//
+	// Tooltips. A tab or a caption that has DockPane::Tooltip shows it when the mouse rests there (a caption also
+	// shows its title if that is cut off), the caption buttons say what they do. The tip is drawn in the theme and never
+	// takes the mouse. It goes when the mouse leaves, on a click and when the layout changes.
+	//
+	void SetTipsEnabled(bool enabled);
+	// milliseconds the mouse rests before a tip shows (0: at once; one that is up moves on to the next target at once)
+	// and how long a tip stays (0: until the mouse leaves)
+	void SetTipTiming(int showDelayMs, int visibleMs);
+	bool IsTipVisible() const {
+		return TipWindow() != nullptr;
+	}
+	const std::wstring& TipText() const {
+		return m_TipText;
+	}
+	HWND TipWindow() const;
+	RECT TipRect() const;
+	// The windows of the chrome ask for tips with these; an application can for chrome of its own (screen coordinates).
+	void RequestTip(HWND owner, const RECT& targetScreen, const std::wstring& text, int dpi);
+	void CancelTip(HWND owner);
+	void HideTip();
+
+	// Repaints a pane's tab and caption after its Title, Icon, Tooltip or Modified changed (also the title of the
+	// floating window and the switcher).
+	void RefreshPane(DockPane* pane);
 
 	// the window of a group (in the main tree, a floating one or the flyout), or null
 	HWND GroupWindow(const DockGroup* group) const;
@@ -435,6 +486,18 @@ private:
 	int m_AnimMs{ 120 }, m_HoverMs{ 300 }, m_LeaveMs{ 500 };
 
 	DockAccessible* m_Acc{};
+
+	// tooltips
+	void ShowTipNow();
+	bool m_Tips{ true };
+	int m_TipShowMs{ 500 }, m_TipVisibleMs{ 6000 };
+	std::unique_ptr<CDockTipWnd> m_TipWnd;
+	HWND m_TipOwner{};
+	RECT m_TipTarget{};
+	std::wstring m_TipText;
+	int m_TipDpi{ 96 };
+	bool m_TipPending{};
+	uint64_t m_TipVersion{};
 
 	// keyboard
 	bool IsDockWindow(HWND hWnd) const;

@@ -124,6 +124,12 @@ public:
 	bool DockTo(DockPane* pane, DockGroup* target, DockPosition pos, int tabIndex = -1);
 	// docks at the outer edge of the main window, or of a floating window
 	bool DockToEdge(DockPane* pane, DockSide side, DockFloat* window = nullptr);
+	// How much room a group that floats takes when it is docked at a side of the main window or beside 'target': as
+	// much as it had in its window (in the main window's pixels: a width for left and right, a height for top and
+	// bottom), but never so much that 'target' is left below its minimum. 0 if the group is not in a floating window
+	// (docking then shares the space as it always did).
+	int LengthWhenDocked(const DockGroup& group, DockSide side) const;
+	int LengthBeside(const DockGroup& moving, const DockGroup& target, DockPosition pos) const;
 	// the same for a whole group (all its tabs move together)
 	bool CanDockToEdge(const DockPane* pane) const;
 	bool CanMoveGroupTo(const DockGroup* group, const DockGroup* target, DockPosition pos) const;
@@ -207,7 +213,7 @@ private:
 	void DetachPane(DockPane* pane);
 	std::unique_ptr<DockGroup> NewGroup(DockPane* pane) const;
 	std::unique_ptr<DockGroup> ReleaseGroup(DockGroup* group);
-	void InsertBeside(DockNode* target, std::unique_ptr<DockNode> node, DockPosition pos);
+	void InsertBeside(DockNode* target, std::unique_ptr<DockNode> node, DockPosition pos, int length = 0);
 	void InsertAtEdge(DockSplit& root, std::unique_ptr<DockNode> node, DockSide side, int length);
 	void AddFloat(std::unique_ptr<DockGroup> group, const RECT& rect);
 	int DefaultLength(const DockGroup& group, DockSide side) const;

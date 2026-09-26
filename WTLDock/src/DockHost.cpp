@@ -4,6 +4,7 @@
 #include "SplitterTracker.h"
 #include "DockDragSession.h"
 #include "DockNavigatorWnd.h"
+#include "DockTipWnd.h"
 #include "Json.h"
 #include "Utf8.h"
 #include <algorithm>
@@ -25,7 +26,7 @@ std::wstring GroupTitle(const DockGroup& group) {
 	return title;
 }
 
-constexpr UINT_PTR TimerAnimation = 1, TimerHover = 2, TimerLeave = 3;
+constexpr UINT_PTR TimerAnimation = 1, TimerHover = 2, TimerLeave = 3, TimerTipShow = 4, TimerTipHide = 5;
 
 constexpr UINT CmdBase = 0xD000;
 constexpr UINT CmdRange = 0x100;
@@ -192,7 +193,9 @@ std::wstring CDockHost::FloatTitle(const DockFloat& window) const {
 		}
 	};
 	visit(window.Root());
-	return title ? title->Title : std::wstring();
+	if (!title)
+		return {};
+	return title->Modified ? title->Title + L" \u25CF" : title->Title;
 }
 
 bool CDockHost::FloatPane(DockPane* pane, const RECT* screenRect) {
@@ -272,7 +275,7 @@ const DockGroup* CDockHost::GroupAtScreen(POINT pt, HWND ignore) const {
 			continue;
 		wchar_t cls[32]{};
 		::GetClassNameW(w, cls, _countof(cls));
-		if (wcscmp(cls, L"WTLDock_Guide") == 0)
+		if (wcscmp(cls, L"WTLDock_Guide") == 0 || wcscmp(cls, L"WTLDock_Tip") == 0)
 			continue;
 		RECT rc;
 		::GetWindowRect(w, &rc);
@@ -556,6 +559,8 @@ void CDockHost::Sync() {
 		}
 	}
 	m_Syncing = false;
+	if (m_TipOwner && m_TipVersion != m_Layout.Version())
+		HideTip();
 	// the switcher's lists are stale
 	if (m_NavOpen && m_NavVersion != m_Layout.Version())
 		CancelNavigator();
@@ -750,6 +755,10 @@ LRESULT CDockHost::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CDockHost::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
 	m_Layout.SetChangeHandler({});
 	m_Drag.reset();
+	HideTip();
+	if (m_TipWnd && m_TipWnd->IsWindow())
+		m_TipWnd->DestroyWindow();
+	m_TipWnd.reset();
 	if (m_Acc) {
 		m_Acc->Detach();
 		m_Acc->Release();
@@ -1221,6 +1230,16 @@ LRESULT CDockHost::OnTimer(UINT, WPARAM id, LPARAM, BOOL& handled) {
 			PositionFlyout();
 			return 0;
 		}
+
+		case TimerTipShow:
+			KillTimer(TimerTipShow);
+			if (m_TipPending)
+				ShowTipNow();
+			return 0;
+
+		case TimerTipHide:
+			HideTip();
+			return 0;
 
 		case TimerHover: {
 			KillTimer(TimerHover);
@@ -1694,6 +1713,9 @@ bool CDockHost::HandleShortcut(UINT vk, bool down, bool ctrl, bool shift, bool a
 				return false;
 		}
 	}
+	else if (ctrl && alt && vk == VK_F6) {
+		return FocusChrome();
+	}
 	else if (alt && !ctrl) {
 		if (vk == VK_F6)
 			return ActivateNextPane(!shift);
@@ -1865,6 +1887,143 @@ std::vector<AccElement> CDockHost::AccElements() const {
 	}
 	dc.SelectFont(old);
 	return list;
+}
+
+//
+// tooltips and pane refresh
+//
+
+void CDockHost::SetTipTiming(int showDelayMs, int visibleMs) {
+	m_TipShowMs = showDelayMs;
+	m_TipVisibleMs = visibleMs;
+}
+
+void CDockHost::SetTipsEnabled(bool enabled) {
+	m_Tips = enabled;
+	if (!enabled)
+		HideTip();
+}
+
+HWND CDockHost::TipWindow() const {
+	return m_TipWnd && m_TipWnd->IsShown() ? m_TipWnd->m_hWnd : nullptr;
+}
+
+RECT CDockHost::TipRect() const {
+	return m_TipWnd && m_TipWnd->IsShown() ? m_TipWnd->Rect() : RECT{};
+}
+
+void CDockHost::RequestTip(HWND owner, const RECT& targetScreen, const std::wstring& text, int dpi) {
+	if (!m_hWnd)
+		return;
+	if (!m_Tips || text.empty() || IsRectEmpty(&targetScreen)) {
+		CancelTip(owner);
+		return;
+	}
+	const bool showing = m_TipWnd && m_TipWnd->IsShown();
+	if (m_TipOwner == owner && (showing || m_TipPending) && text == m_TipText && EqualRect(&targetScreen, &m_TipTarget))
+		return;
+
+	// the target changed: a tip that is up moves on at once, otherwise the mouse has to rest first
+	KillTimer(TimerTipShow);
+	KillTimer(TimerTipHide);
+	m_TipOwner = owner;
+	m_TipTarget = targetScreen;
+	m_TipText = text;
+	m_TipDpi = dpi;
+	m_TipVersion = m_Layout.Version();
+	if (showing || m_TipShowMs <= 0) {
+		m_TipPending = false;
+		ShowTipNow();
+	}
+	else {
+		m_TipPending = true;
+		SetTimer(TimerTipShow, (UINT)m_TipShowMs);
+	}
+}
+
+void CDockHost::ShowTipNow() {
+	if (!m_TipWnd)
+		m_TipWnd = std::make_unique<CDockTipWnd>(*this);
+	m_TipPending = false;
+	m_TipWnd->Show(::GetAncestor(m_hWnd, GA_ROOT), m_TipText, m_TipTarget, m_TipDpi);
+	if (m_TipVisibleMs > 0)
+		SetTimer(TimerTipHide, (UINT)m_TipVisibleMs);
+}
+
+void CDockHost::CancelTip(HWND owner) {
+	if (m_TipOwner == owner)
+		HideTip();
+}
+
+void CDockHost::HideTip() {
+	if (m_hWnd) {
+		KillTimer(TimerTipShow);
+		KillTimer(TimerTipHide);
+	}
+	m_TipPending = false;
+	m_TipOwner = nullptr;
+	m_TipText.clear();
+	if (m_TipWnd)
+		m_TipWnd->Hide();
+}
+
+void CDockHost::RefreshPane(DockPane* pane) {
+	if (!pane || !pane->Group())
+		return;
+	HideTip();
+	if (auto it = m_Groups.find(pane->Group()); it != m_Groups.end() && it->second->m_hWnd)
+		it->second->Invalidate(FALSE);
+	for (auto& f : m_Layout.Floats())
+		if (auto it = m_Frames.find(f->Id()); it != m_Frames.end() && it->second)
+			it->second->SetTitle(FloatTitle(*f));
+	if (m_NavOpen && m_NavWnd)
+		m_NavWnd->Refresh();
+}
+
+bool CDockHost::FocusChrome(DockPane* pane) {
+	if (!pane)
+		pane = ActivePane();
+	if (!pane || !pane->Group())
+		return false;
+	if (pane->Group()->Location() == GroupLocation::AutoHide) {
+		// an auto-hidden group is out only as a flyout
+		if (!ShowFlyout(pane, false))
+			return false;
+	}
+	auto it = m_Groups.find(pane->Group());
+	if (it == m_Groups.end() || !it->second->m_hWnd)
+		return false;
+	HideTip();
+	return it->second->FocusChrome(pane);
+}
+
+bool CDockHost::FocusNextChrome(DockPane* from, bool forward) {
+	std::vector<DockGroup*> groups;
+	m_Layout.ForEachGroup([&](DockGroup& g) {
+		if (g.Location() != GroupLocation::AutoHide && g.ActivePane())
+			groups.push_back(&g);
+		});
+	const int n = (int)groups.size();
+	if (n < 2 || !from || !from->Group())
+		return false;
+	const int at = (int)(std::find(groups.begin(), groups.end(), from->Group()) - groups.begin());
+	if (at >= n)
+		return false;
+	return FocusChrome(groups[(at + (forward ? 1 : n - 1)) % n]->ActivePane());
+}
+
+bool CDockHost::IsChromeFocused() const {
+	for (auto& [group, window] : m_Groups)
+		if (window->HasChromeFocus())
+			return true;
+	return false;
+}
+
+std::wstring CDockHost::ChromeFocusName() const {
+	for (auto& [group, window] : m_Groups)
+		if (window->HasChromeFocus())
+			return window->FocusName();
+	return {};
 }
 
 }

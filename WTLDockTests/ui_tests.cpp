@@ -8,6 +8,7 @@ CAppModule _Module;
 
 #include <atlwin.h>
 #include <atlgdi.h>
+#include <commctrl.h>
 
 #include <map>
 #include <random>
@@ -102,7 +103,8 @@ TabStrip StripOf(Fixture& f, DockGroup* group) {
 	for (auto p : group->Panes()) {
 		SIZE size{};
 		dc.GetTextExtent(p->Title.c_str(), (int)p->Title.size(), &size);
-		specs.push_back({ size.cx, p->Icon != nullptr, group->IsDocument() && Has(p->Caps, PaneCaps::CanClose) });
+		const bool closable = group->IsDocument() && Has(p->Caps, PaneCaps::CanClose);
+		specs.push_back({ size.cx, p->Icon != nullptr, closable, p->Modified && !closable });
 	}
 	return LayoutTabStrip(specs, parts.Tabs, metrics, f.Host.GetTabState(group).First, group->ActiveIndex());
 }
@@ -2833,6 +2835,758 @@ TEST(Host_MovingAFloatingWindowByItsTitleBarKeepsTheGuides) {
 	CHECK(!f.Host.IsDragging());
 }
 
+// ---- Tooltips and modified marks ------------------------------------------------------
+
+RECT ToScreen(HWND window, RECT rc) {
+	::MapWindowPoints(window, nullptr, reinterpret_cast<POINT*>(&rc), 2);
+	return rc;
+}
+
+TEST(Host_TabsShowTheirTooltips) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.SetTipTiming(0, 0);
+	d.A->Tooltip = L"C:\\Projects\\Demo\\a.cpp";
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	const auto strip = StripOf(f, d.A->Group());
+
+	CHECK(!f.Host.IsTipVisible());
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.Tabs[0]));
+	CHECK(f.Host.IsTipVisible() && f.Host.TipText() == L"C:\\Projects\\Demo\\a.cpp");
+	const RECT tab = ToScreen(window, strip.Tabs[0]);
+	const RECT tip = f.Host.TipRect();
+	CHECK(tip.top >= tab.bottom && tip.left >= tab.left - 1 && Width(tip) > 40 && Height(tip) > 10);
+
+	// a tab without one (and not cut off) has none
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.Tabs[1]));
+	CHECK(!f.Host.IsTipVisible());
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.Tabs[0]));
+	CHECK(f.Host.IsTipVisible());
+
+	// it goes with the mouse, with a click and with a change to the layout
+	::SendMessage(window, WM_MOUSELEAVE, 0, 0);
+	CHECK(!f.Host.IsTipVisible());
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.Tabs[0]));
+	CHECK(f.Host.IsTipVisible());
+	::SendMessage(window, WM_LBUTTONDOWN, MK_LBUTTON, Center(strip.Tabs[0]));
+	::SendMessage(window, WM_LBUTTONUP, 0, Center(strip.Tabs[0]));
+	CHECK(!f.Host.IsTipVisible());
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.Tabs[0]));
+	CHECK(f.Host.IsTipVisible());
+	CHECK(f.Host.Layout().Hide(d.C));
+	CHECK(!f.Host.IsTipVisible());
+
+	// and nothing shows when they are off
+	f.Host.SetTipsEnabled(false);
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(StripOf(f, d.A->Group()).Tabs[0]));
+	CHECK(!f.Host.IsTipVisible());
+}
+
+TEST(Host_TheCaptionButtonsSayWhatTheyDo) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.SetTipTiming(0, 0);
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+	RECT client;
+	::GetClientRect(window, &client);
+	const auto buttons = ComputeCaptionButtons(ComputeGroupParts(*f.Sol->Group(), client, f.Host.Metrics()).Caption, true, true, true, f.Host.Metrics());
+
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(buttons.Close));
+	CHECK(f.Host.IsTipVisible() && f.Host.TipText() == L"Close");
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(buttons.Pin));
+	CHECK(f.Host.TipText() == L"Auto Hide");
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(buttons.Menu));
+	CHECK(f.Host.TipText() == L"Window Position");
+	// the caption itself has nothing to say when its title fits
+	::SendMessage(window, WM_MOUSEMOVE, 0, Pt(buttons.Menu.left - 60, buttons.Menu.top + 2));
+	CHECK(!f.Host.IsTipVisible());
+
+	// a tab of a document group has a close button, and the strip of many tabs a list button
+	HWND docs = f.Host.GroupWindow(f.A->Group());
+	const auto strip = StripOf(f, f.A->Group());
+	::SendMessage(docs, WM_MOUSEMOVE, 0, Center(strip.Close[0]));
+	CHECK(f.Host.TipText() == L"Close");
+	::SendMessage(docs, WM_MOUSELEAVE, 0, 0);
+}
+
+TEST(Host_ATitleThatIsCutOffShowsInFull) {
+	Fixture f(600, 400);
+	f.AddStandard();
+	f.Host.SetTipTiming(0, 0);
+	f.Sol->Title = L"A solution explorer with a title much too long for its caption";
+	f.Host.Sync();
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+	RECT client;
+	::GetClientRect(window, &client);
+	const auto parts = ComputeGroupParts(*f.Sol->Group(), client, f.Host.Metrics());
+	const auto buttons = ComputeCaptionButtons(parts.Caption, true, true, true, f.Host.Metrics());
+	::SendMessage(window, WM_MOUSEMOVE, 0, Pt(parts.Caption.left + 10, parts.Caption.top + 4));
+	CHECK(f.Host.IsTipVisible() && f.Host.TipText() == f.Sol->Title);
+	(void)buttons;
+
+	// the application's own text wins, and comes even when the title fits
+	f.Sol->Title = L"Sol";
+	f.Sol->Tooltip = L"The tool window of solutions";
+	f.Host.Sync();
+	::SendMessage(window, WM_MOUSEMOVE, 0, Pt(parts.Caption.left + 12, parts.Caption.top + 5));
+	CHECK(f.Host.IsTipVisible() && f.Host.TipText() == L"The tool window of solutions");
+}
+
+TEST(Host_ATipWaitsForTheMouseToRest) {
+	// (asked for directly: the mouse messages of a test are followed by a leave, since the real mouse is elsewhere)
+	Fixture f;
+	f.Host.SetTipTiming(60, 0);
+	const RECT first{ 100, 100, 160, 120 }, second{ 170, 100, 230, 120 };
+	const int dpi = f.Host.Dpi();
+
+	f.Host.RequestTip(f.Host, first, L"first", dpi);
+	CHECK(!f.Host.IsTipVisible());
+	::Sleep(120);
+	Pump();
+	CHECK(f.Host.IsTipVisible() && f.Host.TipText() == L"first");
+	// the next target while one is up: at once
+	f.Host.RequestTip(f.Host, second, L"second", dpi);
+	CHECK(f.Host.IsTipVisible() && f.Host.TipText() == L"second");
+	// asking again for what is showing changes nothing, and someone else cannot cancel it
+	f.Host.RequestTip(f.Host, second, L"second", dpi);
+	f.Host.CancelTip(nullptr);
+	CHECK(f.Host.IsTipVisible());
+
+	// leaving before it comes cancels it
+	f.Host.CancelTip(f.Host);
+	CHECK(!f.Host.IsTipVisible());
+	f.Host.RequestTip(f.Host, first, L"first", dpi);
+	f.Host.CancelTip(f.Host);
+	::Sleep(120);
+	Pump();
+	CHECK(!f.Host.IsTipVisible());
+
+	// a tip goes by itself after its time
+	f.Host.SetTipTiming(0, 60);
+	f.Host.RequestTip(f.Host, first, L"first", dpi);
+	CHECK(f.Host.IsTipVisible());
+	::Sleep(150);
+	Pump();
+	CHECK(!f.Host.IsTipVisible());
+}
+
+TEST(Host_TheTipIsDrawnInTheThemeAndLetsTheMouseThrough) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	d.A->Tooltip = L"C:\\Projects\\Demo\\a.cpp";
+	f.Host.SetTipTiming(0, 0);
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(StripOf(f, d.A->Group()).Tabs[0]));
+	HWND tip = f.Host.TipWindow();
+	CHECK(tip != nullptr);
+	if (!tip)
+		return;
+	CHECK(::SendMessage(tip, WM_NCHITTEST, 0, 0) == HTTRANSPARENT);
+	CHECK(::SendMessage(tip, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE);
+	CHECK((::GetWindowLong(tip, GWL_EXSTYLE) & WS_EX_NOACTIVATE) != 0);
+
+	auto corner = [&] {
+		RECT rc;
+		::GetClientRect(tip, &rc);
+		CClientDC screen(nullptr);
+		CDC dc;
+		dc.CreateCompatibleDC(screen);
+		CBitmap bmp;
+		bmp.CreateCompatibleBitmap(screen, Width(rc), Height(rc));
+		HBITMAP old = dc.SelectBitmap(bmp);
+		::PrintWindow(tip, dc, PW_CLIENTONLY);
+		const COLORREF border = dc.GetPixel(0, 0), inside = dc.GetPixel(3, 3);
+		dc.SelectBitmap(old);
+		return std::make_pair(border, inside);
+	};
+	auto light = corner();
+	CHECK(light.first == f.Host.Theme().GuideBorder && light.second == f.Host.Theme().GuideBack);
+	f.Host.SetTheme(DockTheme::Dark());
+	auto dark = corner();
+	CHECK(dark.first == DockTheme::Dark().GuideBorder && dark.second == DockTheme::Dark().GuideBack);
+	f.Host.HideTip();
+}
+
+TEST(Host_ATipStaysOnTheMonitor) {
+	// near the bottom of the screen it goes above what it describes
+	Fixture f;
+	Docs d = AddDocs(f);
+	d.A->Tooltip = L"tooltip";
+	f.Host.SetTipTiming(0, 0);
+	MONITORINFO mi{ sizeof(mi) };
+	::GetMonitorInfo(::MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi);
+	RECT target{ mi.rcWork.right - 30, mi.rcWork.bottom - 20, mi.rcWork.right - 5, mi.rcWork.bottom - 2 };
+	f.Host.RequestTip(f.Host, target, L"a tip at the corner of the screen", f.Host.Dpi());
+	CHECK(f.Host.IsTipVisible());
+	const RECT tip = f.Host.TipRect();
+	CHECK(tip.right <= mi.rcWork.right && tip.bottom <= mi.rcWork.bottom && tip.left >= mi.rcWork.left);
+	CHECK(tip.bottom <= target.top);
+	f.Host.CancelTip(f.Host);
+	CHECK(!f.Host.IsTipVisible());
+}
+
+TEST(Host_AModifiedDocumentShowsADotInPlaceOfItsCloseButton) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.ActivatePane(d.A);
+	Pump();
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	const DockTheme theme = f.Host.Theme();
+
+	auto sample = [&](RECT slot, int dx) {
+		RECT rc;
+		::GetClientRect(window, &rc);
+		CClientDC screen(nullptr);
+		CDC dc;
+		dc.CreateCompatibleDC(screen);
+		CBitmap bmp;
+		bmp.CreateCompatibleBitmap(screen, Width(rc), Height(rc));
+		HBITMAP old = dc.SelectBitmap(bmp);
+		::PrintWindow(window, dc, PW_CLIENTONLY);
+		const COLORREF c = dc.GetPixel((slot.left + slot.right) / 2 + dx, (slot.top + slot.bottom) / 2);
+		dc.SelectBitmap(old);
+		return c;
+	};
+
+	const auto before = StripOf(f, d.A->Group());
+	const RECT closeB = before.Close[1];					// b.cpp: a tab that is neither selected nor under the mouse
+	const int off = MarkSize(f.Host.Metrics()) / 2 - 1;
+	CHECK(sample(closeB, off) == theme.TabInactiveBack);	// nothing drawn there
+
+	d.B->Modified = true;
+	f.Host.RefreshPane(d.B);
+	Pump();
+	const auto after = StripOf(f, d.A->Group());
+	CHECK(EqualRect(&after.Tabs[1], &before.Tabs[1]) != FALSE);	// the tab does not change its size
+	CHECK(sample(closeB, off) == theme.ButtonGlyph);		// the dot
+
+	d.B->Modified = false;
+	f.Host.RefreshPane(d.B);
+	Pump();
+	CHECK(sample(closeB, off) == theme.TabInactiveBack);
+}
+
+TEST(Host_AModifiedTabWithoutACloseButtonMakesRoomForItsMark) {
+	Fixture f;
+	f.AddStandard();
+	CHECK(f.Host.Layout().DockTo(f.Output, f.Sol->Group(), DockPosition::Tab));		// tool tabs have no close button
+	Pump();
+	const auto before = StripOf(f, f.Sol->Group());
+	CHECK(before.Tabs.size() == 2 && IsRectEmpty(&before.Close[1]) && IsRectEmpty(&before.Mark[1]));
+
+	f.Output->Modified = true;
+	f.Host.RefreshPane(f.Output);
+	Pump();
+	const auto after = StripOf(f, f.Sol->Group());
+	const int index = f.Sol->Group()->Panes()[0] == f.Output ? 0 : 1;
+	CHECK(Width(after.Tabs[index]) == Width(before.Tabs[index]) + f.Host.Metrics().TabIconGap + MarkSize(f.Host.Metrics()));
+	CHECK(!IsRectEmpty(&after.Mark[index]) && IsRectEmpty(&after.Mark[1 - index]));
+	CHECK(after.Mark[index].left >= after.Tabs[index].left && after.Mark[index].right <= after.Tabs[index].right);
+
+	// the caption and the floating window's title carry it too
+	f.Host.ActivatePane(f.Output);
+	CHECK(f.Host.Layout().Float(f.Output, OffScreen(50, 50, 300, 250)));
+	Pump();
+	wchar_t title[128]{};
+	::GetWindowTextW(f.Host.FloatWindow(f.Output->Group()->Float()->Id()), title, _countof(title));
+	CHECK(std::wstring(title) == L"Output \u25CF");
+	f.Output->Modified = false;
+	f.Host.RefreshPane(f.Output);
+	::GetWindowTextW(f.Host.FloatWindow(f.Output->Group()->Float()->Id()), title, _countof(title));
+	CHECK(std::wstring(title) == L"Output");
+	f.Host.RefreshPane(nullptr);							// nothing to refresh is no harm
+	VERIFY(f);
+}
+
+TEST(Accessibility_ModifiedAndTooltipReachScreenReaders) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	d.A->Tooltip = L"C:\\Projects\\a.cpp";
+	d.B->Modified = true;
+	auto acc = AccessibleOfClient(f.Host.GroupWindow(d.A->Group()));
+	CHECK(acc != nullptr);
+	if (!acc)
+		return;
+	const auto children = ChildrenOf(acc);
+	const AccChild* a = FindChild(children, L"a.cpp");
+	const AccChild* b = FindChild(children, L"b.cpp");
+	const AccChild* c = FindChild(children, L"c.cpp");
+	CHECK(a && b && c);
+	if (!a || !b || !c)
+		return;
+	auto describe = [&](LONG id) {
+		CComBSTR text;
+		return acc->get_accDescription(ChildId(id), &text) == S_OK && text ? std::wstring(text) : std::wstring();
+	};
+	CHECK(describe(a->Id) == L"C:\\Projects\\a.cpp" && describe(b->Id) == L"Modified" && describe(c->Id).empty());
+}
+
+// ---- The Windows dialog ---------------------------------------------------------------------
+
+// Runs 'step' inside the message loop of the modal dialog, as soon as it is on screen (a timer on the thread).
+struct DialogDriver {
+	static inline std::function<void(HWND)> Step;
+	static inline UINT_PTR Timer = 0;
+	static inline int Tries = 0;
+
+	static void CALLBACK Tick(HWND, UINT, UINT_PTR, DWORD) {
+		HWND dialog = ::FindWindowW(L"#32770", L"Windows");
+		if ((!dialog || !::IsWindowVisible(dialog)) && ++Tries < 100)
+			return;		// (not there yet, or not shown yet)
+		if (dialog && !::IsWindowVisible(dialog))
+			dialog = nullptr;
+		::KillTimer(nullptr, Timer);
+		Timer = 0;
+		auto step = std::move(Step);
+		Step = nullptr;
+		if (dialog && step)
+			step(dialog);
+		if (dialog && ::IsWindow(dialog))
+			::SendMessage(dialog, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);		// whatever the step did, do not hang
+	}
+
+	static void Start(std::function<void(HWND)> step) {
+		Step = std::move(step);
+		Tries = 0;
+		Timer = ::SetTimer(nullptr, 0, 30, Tick);
+	}
+};
+
+HWND Dlg(HWND dialog, int id) {
+	return ::GetDlgItem(dialog, id);
+}
+
+void Press(HWND dialog, int id) {
+	::SendMessage(dialog, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), (LPARAM)Dlg(dialog, id));
+}
+
+int RowOf(HWND list, const wchar_t* name) {
+	for (int i = 0, n = ListView_GetItemCount(list); i < n; i++) {
+		wchar_t text[128]{};
+		ListView_GetItemText(list, i, 0, text, _countof(text));
+		if (wcscmp(text, name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+std::wstring CellOf(HWND list, int row, int column) {
+	wchar_t text[128]{};
+	ListView_GetItemText(list, row, column, text, _countof(text));
+	return text;
+}
+
+void SelectOnly(HWND list, std::initializer_list<int> rows) {
+	ListView_SetItemState(list, -1, 0, LVIS_SELECTED);
+	for (int row : rows)
+		ListView_SetItemState(list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+}
+
+TEST(Windows_TheListShowsTheDocumentsAndCanIncludeToolWindows) {
+	Fixture f;
+	f.AddStandard();
+	auto c = f.Add(L"c.cpp", PaneKind::Document);
+	f.Host.Layout().Show(c);
+	f.Host.Layout().Float(f.Output, OffScreen(50, 50, 300, 200));
+	f.B->Modified = true;
+	f.Host.ActivatePane(f.A);
+
+	int documents = -1, all = -1;
+	std::wstring type, state, modified, floating;
+	bool saveHidden = false;
+	DialogDriver::Start([&](HWND dialog) {
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		documents = ListView_GetItemCount(list);
+		const int row = RowOf(list, L"b.cpp");
+		type = CellOf(list, row, 1);
+		state = CellOf(list, row, 2);
+		modified = CellOf(list, row, 3);
+		saveHidden = !::IsWindowVisible(Dlg(dialog, WindowsDialogIds::Save));
+		::SendMessage(Dlg(dialog, WindowsDialogIds::IncludeTools), BM_CLICK, 0, 0);
+		all = ListView_GetItemCount(list);
+		floating = CellOf(list, RowOf(list, L"Output"), 2);
+	});
+	CHECK(!f.Host.ShowWindowsDialog());
+	CHECK(documents == 3 && all == 6);
+	CHECK(type == L"Document" && state == L"Open" && modified == L"Yes");
+	CHECK(floating == L"Floating");
+	CHECK(saveHidden);												// there is no way to save unless the application gives one
+	CHECK(f.Host.ActivePane() == f.A);								// closing the dialog changes nothing
+}
+
+TEST(Windows_ActivateGoesToTheSelectedWindow) {
+	Fixture f;
+	f.AddStandard();
+	f.Host.Layout().AutoHide(f.Output->Group());
+	f.Host.ActivatePane(f.A);
+
+	DialogDriver::Start([&](HWND dialog) {
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		SelectOnly(list, { RowOf(list, L"b.cpp") });
+		Press(dialog, WindowsDialogIds::Activate);
+	});
+	CHECK(f.Host.ShowWindowsDialog());
+	CHECK(f.Host.ActivePane() == f.B && f.A->Group()->ActivePane() == f.B);
+
+	// an auto-hidden tool window slides out
+	DialogDriver::Start([&](HWND dialog) {
+		::SendMessage(Dlg(dialog, WindowsDialogIds::IncludeTools), BM_CLICK, 0, 0);
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		SelectOnly(list, { RowOf(list, L"Output") });
+		Press(dialog, WindowsDialogIds::Activate);
+	});
+	CHECK(f.Host.ShowWindowsDialog());
+	CHECK(f.Host.FlyoutPane() == f.Output);
+	f.Host.HideFlyout();
+}
+
+TEST(Windows_CloseWindowsClosesTheSelectedOnesAndHonoursAVeto) {
+	Fixture f;
+	f.AddStandard();
+	auto c = f.Add(L"c.cpp", PaneKind::Document);
+	f.Host.Layout().Show(c);
+	f.Host.OnPaneClosing = [&](DockPane* p) { return p != f.B; };
+
+	int before = 0, after = 0;
+	DialogDriver::Start([&](HWND dialog) {
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		before = ListView_GetItemCount(list);
+		SelectOnly(list, { RowOf(list, L"a.cpp"), RowOf(list, L"b.cpp") });
+		Press(dialog, WindowsDialogIds::CloseWindows);
+		after = ListView_GetItemCount(list);
+	});
+	CHECK(!f.Host.ShowWindowsDialog());
+	CHECK(before == 3 && after == 2);
+	CHECK(f.A->State() == PaneState::Hidden && f.B->State() == PaneState::Document && c->State() == PaneState::Document);
+	VERIFY(f);
+}
+
+TEST(Windows_SaveIsForTheApplicationToDo) {
+	Fixture f;
+	f.AddStandard();
+	f.A->Modified = true;
+	f.B->Modified = true;
+	std::vector<std::wstring> saved;
+	f.Host.OnPaneSave = [&](DockPane* p) {
+		saved.push_back(p->Title);
+		return p != f.B;				// b.cpp cannot be saved
+	};
+
+	bool visible = false, enabledWithModified = false, enabledWithout = true;
+	int stillModified = 0;
+	DialogDriver::Start([&](HWND dialog) {
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		visible = ::IsWindowVisible(Dlg(dialog, WindowsDialogIds::Save)) != FALSE;
+		SelectOnly(list, { RowOf(list, L"a.cpp") });
+		enabledWithModified = ::IsWindowEnabled(Dlg(dialog, WindowsDialogIds::Save)) != FALSE;
+		ListView_SetItemState(list, -1, LVIS_SELECTED, LVIS_SELECTED);	// both
+		Press(dialog, WindowsDialogIds::Save);
+		for (int i = 0, n = ListView_GetItemCount(list); i < n; i++)
+			stillModified += CellOf(list, i, 3) == L"Yes";
+		SelectOnly(list, { RowOf(list, L"a.cpp") });
+		enabledWithout = ::IsWindowEnabled(Dlg(dialog, WindowsDialogIds::Save)) != FALSE;
+	});
+	f.Host.ShowWindowsDialog();
+	CHECK(visible && enabledWithModified);
+	CHECK(saved.size() == 2 && !f.A->Modified && f.B->Modified);
+	CHECK(stillModified == 1);
+	CHECK(!enabledWithout);												// a.cpp is saved now: nothing to save
+}
+
+TEST(Windows_ClickingAColumnSortsAndClickingAgainReverses) {
+	Fixture f;
+	f.AddStandard();
+	auto c = f.Add(L"c.cpp", PaneKind::Document);
+	f.Host.Layout().Show(c);
+	f.B->Title = L"zeta.cpp";
+	f.Host.Sync();
+
+	std::wstring firstAscending, firstDescending;
+	DialogDriver::Start([&](HWND dialog) {
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		auto click = [&](int column) {
+			NMLISTVIEW nm{};
+			nm.hdr = { list, (UINT_PTR)WindowsDialogIds::List, LVN_COLUMNCLICK };
+			nm.iSubItem = column;
+			::SendMessage(dialog, WM_NOTIFY, WindowsDialogIds::List, (LPARAM)&nm);
+		};
+		click(0);														// the dialog starts sorted by name, so this reverses it
+		firstDescending = CellOf(list, 0, 0);
+		click(0);
+		firstAscending = CellOf(list, 0, 0);
+	});
+	f.Host.ShowWindowsDialog();
+	CHECK(firstDescending == L"zeta.cpp" && firstAscending == L"a.cpp");
+}
+
+TEST(Windows_TheDialogCanBeDrivenWithNoWindowsAtAll) {
+	Fixture f;
+	int count = -1;
+	bool activateEnabled = true;
+	DialogDriver::Start([&](HWND dialog) {
+		count = ListView_GetItemCount(Dlg(dialog, WindowsDialogIds::List));
+		activateEnabled = ::IsWindowEnabled(Dlg(dialog, WindowsDialogIds::Activate)) != FALSE;
+	});
+	CHECK(!f.Host.ShowWindowsDialog());
+	CHECK(count == 0 && !activateEnabled);
+}
+
+// ---- Keyboard focus in the chrome ------------------------------------------------------------
+
+void Key(HWND window, UINT vk) {
+	::SendMessage(window, WM_KEYDOWN, vk, 0);
+}
+
+TEST(Host_TheKeyboardCanVisitTheTabsOfAGroup) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	f.Host.ActivatePane(d.B);
+	Pump();
+
+	CHECK(!f.Host.IsChromeFocused());
+	CHECK(f.Host.FocusChrome());
+	CHECK(f.Host.IsChromeFocused() && ::GetFocus() == window);
+	CHECK(f.Host.ChromeFocusName() == L"b.cpp");						// the tab of the active pane
+
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"Close b.cpp");					// its close button
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"c.cpp");
+	Key(window, VK_LEFT);
+	Key(window, VK_LEFT);
+	CHECK(f.Host.ChromeFocusName() == L"b.cpp");
+	Key(window, VK_HOME);
+	CHECK(f.Host.ChromeFocusName() == L"a.cpp");
+	Key(window, VK_LEFT);
+	CHECK(f.Host.ChromeFocusName() == L"a.cpp");						// it stops at the ends
+	Key(window, VK_END);
+	CHECK(f.Host.ChromeFocusName() == L"Close c.cpp");
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"Close c.cpp");
+
+	// the keyboard moving over tabs does not switch them; Enter does, and the focus goes into the content
+	CHECK(d.A->Group()->ActivePane() == d.B);
+	Key(window, VK_LEFT);
+	CHECK(f.Host.ChromeFocusName() == L"c.cpp");
+	Key(window, VK_RETURN);
+	CHECK(d.A->Group()->ActivePane() == d.C && f.Host.ActivePane() == d.C);
+	CHECK(!f.Host.IsChromeFocused());
+	VERIFY(f);
+}
+
+TEST(Host_KeysDoWhatTheFocusedItemDoes) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	f.Host.ActivatePane(d.A);
+
+	// a close button closes its tab
+	CHECK(f.Host.FocusChrome(d.B));
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"Close b.cpp");
+	Key(window, VK_SPACE);
+	CHECK(d.B->State() == PaneState::Hidden);
+	VERIFY(f);
+
+	// Delete closes the tab that is on, and the ring stays on the group
+	CHECK(f.Host.FocusChrome(d.C));
+	window = f.Host.GroupWindow(d.A->Group());
+	CHECK(f.Host.IsChromeFocused());
+	Key(window, VK_DELETE);
+	CHECK(d.C->State() == PaneState::Hidden);
+	VERIFY(f);
+
+	// Escape goes back to the content
+	CHECK(f.Host.FocusChrome(d.A));
+	window = f.Host.GroupWindow(d.A->Group());
+	Key(window, VK_ESCAPE);
+	CHECK(!f.Host.IsChromeFocused() && f.Host.ActivePane() == d.A);
+}
+
+TEST(Host_TheCaptionButtonsAreReachableFromTheKeyboard) {
+	Fixture f;
+	f.AddStandard();
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+
+	CHECK(f.Host.FocusChrome(f.Sol));
+	CHECK(f.Host.ChromeFocusName() == L"Window Position");			// a lone tool window has no tabs: the buttons are all there is
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"Auto Hide");
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"Close");
+	Key(window, VK_LEFT);
+	Key(window, VK_RETURN);											// Auto Hide
+	CHECK(f.Sol->State() == PaneState::AutoHide);
+	VERIFY(f);
+}
+
+TEST(Host_TabMovesTheChromeFocusToTheNextGroup) {
+	Fixture f;
+	f.AddStandard();
+	CHECK(f.Host.FocusChrome(f.Sol));
+	HWND window = f.Host.GroupWindow(f.Sol->Group());
+	Key(window, VK_TAB);
+	CHECK(f.Host.IsChromeFocused() && ::GetFocus() == f.Host.GroupWindow(f.A->Group()));	// the documents follow the left tool window
+	CHECK(f.Host.ChromeFocusName() == L"b.cpp");
+	window = f.Host.GroupWindow(f.A->Group());
+	Key(window, VK_TAB);
+	CHECK(::GetFocus() == f.Host.GroupWindow(f.Props->Group()));
+	CHECK(f.Host.FocusNextChrome(f.Props, false));					// and back
+	CHECK(::GetFocus() == f.Host.GroupWindow(f.A->Group()));
+	// with one group there is nowhere to go
+	Fixture single;
+	auto only = single.Add(L"only.cpp", PaneKind::Document);
+	single.Host.Layout().Show(only);
+	CHECK(single.Host.FocusChrome(only));
+	CHECK(!single.Host.FocusNextChrome(only));
+}
+
+TEST(Host_TheShortcutTakesTheKeyboardToTheChrome) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.ActivatePane(d.C);
+	CHECK(f.Host.HandleShortcut(VK_F6, true, true, false, true));
+	CHECK(f.Host.IsChromeFocused() && f.Host.ChromeFocusName() == L"c.cpp");
+	f.Host.SetShortcutsEnabled(false);
+	CHECK(f.Host.FocusChrome(d.A));
+	f.Host.ActivatePane(d.A);
+	CHECK(!f.Host.HandleShortcut(VK_F6, true, true, false, true));
+}
+
+TEST(Host_ATabOutOfViewIsScrolledInWhenTheKeyboardGoesThere) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 25; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.ActivatePane(docs[24]);
+	Pump();
+	auto group = docs[0]->Group();
+	CHECK(f.Host.GetTabState(group).First > 0);
+
+	CHECK(f.Host.FocusChrome(docs[0]));
+	Pump();
+	CHECK(f.Host.GetTabState(group).First == 0);
+	HWND window = f.Host.GroupWindow(group);
+	Key(window, VK_END);
+	CHECK(f.Host.ChromeFocusName() == L"Tab list");						// the last item is the list button
+	Key(window, VK_LEFT);
+	Pump();
+	const auto state = f.Host.GetTabState(group);
+	CHECK(f.Host.ChromeFocusName() == L"Close document24.cpp");
+	CHECK(state.First + state.Visible == 25);							// the last tab is in view
+}
+
+TEST(Host_TheFocusRingIsDrawnOnTheItemAndGoesWithTheFocus) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	f.Host.ActivatePane(d.A);
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	Pump();
+
+	auto capture = [&](const RECT& tab) {
+		RECT rc;
+		::GetClientRect(window, &rc);
+		CClientDC screen(nullptr);
+		CDC dc;
+		dc.CreateCompatibleDC(screen);
+		CBitmap bmp;
+		bmp.CreateCompatibleBitmap(screen, Width(rc), Height(rc));
+		HBITMAP old = dc.SelectBitmap(bmp);
+		::PrintWindow(window, dc, PW_CLIENTONLY);
+		std::vector<COLORREF> row;
+		for (int x = tab.left + 4; x < tab.right - 4; x++)
+			row.push_back(dc.GetPixel(x, tab.top + 2));		// the top edge of the ring
+		dc.SelectBitmap(old);
+		return row;
+	};
+
+	const RECT tab = StripOf(f, d.A->Group()).Tabs[1];		// b.cpp: not selected
+	const auto plain = capture(tab);
+	CHECK(f.Host.FocusChrome(d.B));
+	Key(window, VK_LEFT);
+	Key(window, VK_RIGHT);
+	CHECK(f.Host.ChromeFocusName() == L"b.cpp");
+	Pump();
+	const auto ringed = capture(tab);
+	CHECK(plain != ringed);
+	::SetFocus(d.A->hWnd);									// the focus goes to the content: the ring goes
+	Pump();
+	CHECK(!f.Host.IsChromeFocused());
+	CHECK(capture(tab) == plain);
+}
+
+TEST(Host_ShiftF10OpensTheMenuOfTheTab) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	DockPane* menuPane = nullptr;
+	f.Host.OnBuildPaneMenu = [&](DockPane* pane, HMENU) { menuPane = pane; };
+	CHECK(f.Host.FocusChrome(d.B));
+	HWND window = f.Host.GroupWindow(d.A->Group());
+	::SetTimer(nullptr, 0, 80, EndMenuTimer);
+	Key(window, VK_APPS);
+	CHECK(menuPane == d.B);
+	f.Host.OnBuildPaneMenu = nullptr;
+	Pump();
+}
+
+// ---- A floating window keeps its size when it is docked ----------------------------------------
+
+SIZE FloatClient(Fixture& f, DockPane* pane) {
+	RECT rc;
+	::GetClientRect(f.Host.FloatWindow(pane->Group()->Float()->Id()), &rc);
+	return { Width(rc), Height(rc) };
+}
+
+TEST(Host_ADockedFloatHasTheWidthOrHeightItHadFloating) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+
+	// the window was made wider than the tool window was, and docks back at its left
+	CHECK(l.Float(f.Sol, OffScreen(100, 100, 560, 420)));
+	SIZE size = FloatClient(f, f.Sol);
+	CHECK(f.Host.Execute(DockCommand::Dock, f.Sol));
+	VERIFY(f);
+	CHECK(f.Sol->Group()->Side() == DockSide::Left && Width(f.Sol->Group()->Rect) == size.cx);
+
+	// the one at the bottom keeps its height
+	CHECK(l.Float(f.Output, OffScreen(100, 100, 700, 330)));
+	size = FloatClient(f, f.Output);
+	CHECK(f.Host.ToggleFloat(f.Output));
+	VERIFY(f);
+	CHECK(f.Output->Group()->Side() == DockSide::Bottom && Height(f.Output->Group()->Rect) == size.cy);
+}
+
+TEST(Host_DroppingAFloatOnAnEdgeOrBesideAGroupKeepsItsSize) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	CHECK(l.Float(f.Sol, OffScreen(100, 100, 360, 420)));
+	CHECK(l.DockTo(f.Props, f.Sol->Group(), DockPosition::Tab));					// two tabs: a pane can be dragged out alone
+	SIZE size = FloatClient(f, f.Sol);
+
+	// a tab dragged to the right edge: the preview and the result are as wide as the window was
+	CHECK(f.Host.BeginDrag(f.Props, false, ScreenCenterOf(f, f.Sol->Group())));
+	f.Host.UpdateDrag(EdgeGuide(f, DockSide::Right));
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Edge);
+	CHECK(Width(f.Host.CurrentDropTarget().Preview) == size.cx);
+	CHECK(f.Host.EndDrag(true));
+	VERIFY(f);
+	CHECK(f.Props->Group()->Side() == DockSide::Right && Width(f.Props->Group()->Rect) == size.cx);
+
+	// the whole window dropped beside the documents (on the compass): the same
+	size = FloatClient(f, f.Sol);
+	CHECK(f.Host.BeginDrag(f.Sol, true, ScreenCenterOf(f, f.Sol->Group())));
+	f.Host.UpdateDrag(ArmOf(f, f.Output->Group(), DockPosition::Left));
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Side);
+	CHECK(f.Host.EndDrag(true));
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::Docked && Width(f.Sol->Group()->Rect) == size.cx);
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -2859,7 +3613,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 		const RECT rc = OffScreen(20, 20, 300, 280);
 
 		bool ok = false;
-		switch (pick(26)) {
+		switch (pick(28)) {
 			case 0: ok = l.Show(anyPane()); break;
 			case 1: ok = l.Hide(anyPane()); break;
 			case 2: ok = l.DockTo(anyPane(), anyGroup(), (DockPosition)pick(5)); break;
@@ -2935,6 +3689,15 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 				}
 				break;
 			case 24: ok = f.Host.HandleShortcut(pick(2) ? VK_F6 : VK_F4, true, pick(2) != 0, pick(2) != 0, pick(2) != 0); break;
+			case 26: ok = f.Host.FocusChrome(anyPane()); break;
+			case 27:
+				// keys in the chrome
+				if (f.Host.IsChromeFocused() && f.Host.ActivePane() && f.Host.ActivePane()->Group()) {
+					const UINT keys[] = { VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_RETURN, VK_DELETE, VK_ESCAPE, VK_TAB };
+					if (HWND w = f.Host.GroupWindow(f.Host.ActivePane()->Group()))
+						::SendMessage(w, WM_KEYDOWN, keys[pick(8)], 0);
+				}
+				break;
 			case 25: {
 				// saving the state and loading it again changes nothing
 				const std::wstring before = l.Dump();
@@ -3064,6 +3827,31 @@ void RunUiTests() {
 	Run_Host_ANewFloatTakesTheDpiOfItsMonitor();
 	Run_Host_SavedFloatsKeepTheirDpi();
 	Run_Host_MovingAFloatingWindowByItsTitleBarKeepsTheGuides();
+	Run_Host_TabsShowTheirTooltips();
+	Run_Host_TheCaptionButtonsSayWhatTheyDo();
+	Run_Host_ATitleThatIsCutOffShowsInFull();
+	Run_Host_ATipWaitsForTheMouseToRest();
+	Run_Host_TheTipIsDrawnInTheThemeAndLetsTheMouseThrough();
+	Run_Host_ATipStaysOnTheMonitor();
+	Run_Host_AModifiedDocumentShowsADotInPlaceOfItsCloseButton();
+	Run_Host_AModifiedTabWithoutACloseButtonMakesRoomForItsMark();
+	Run_Accessibility_ModifiedAndTooltipReachScreenReaders();
+	Run_Windows_TheListShowsTheDocumentsAndCanIncludeToolWindows();
+	Run_Windows_ActivateGoesToTheSelectedWindow();
+	Run_Windows_CloseWindowsClosesTheSelectedOnesAndHonoursAVeto();
+	Run_Windows_SaveIsForTheApplicationToDo();
+	Run_Windows_ClickingAColumnSortsAndClickingAgainReverses();
+	Run_Windows_TheDialogCanBeDrivenWithNoWindowsAtAll();
+	Run_Host_TheKeyboardCanVisitTheTabsOfAGroup();
+	Run_Host_KeysDoWhatTheFocusedItemDoes();
+	Run_Host_TheCaptionButtonsAreReachableFromTheKeyboard();
+	Run_Host_TabMovesTheChromeFocusToTheNextGroup();
+	Run_Host_TheShortcutTakesTheKeyboardToTheChrome();
+	Run_Host_ATabOutOfViewIsScrolledInWhenTheKeyboardGoesThere();
+	Run_Host_TheFocusRingIsDrawnOnTheItemAndGoesWithTheFocus();
+	Run_Host_ShiftF10OpensTheMenuOfTheTab();
+	Run_Host_ADockedFloatHasTheWidthOrHeightItHadFloating();
+	Run_Host_DroppingAFloatOnAnEdgeOrBesideAGroupKeepsItsSize();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

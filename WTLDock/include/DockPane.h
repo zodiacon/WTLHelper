@@ -13,6 +13,7 @@ struct DockSerializer;
 struct PaneDesc {
 	std::wstring Id;		// stable and unique; used to persist the layout
 	std::wstring Title;
+	std::wstring Tooltip;	// shown when the mouse rests on its tab or caption (a document's full path, say); empty: none
 	HWND hWnd{};			// content window (not owned)
 	HICON Icon{};			// not owned
 	PaneKind Kind{ PaneKind::Tool };
@@ -36,6 +37,10 @@ public:
 	}
 
 	std::wstring Title;
+	std::wstring Tooltip;
+	// Unsaved changes: the tab shows a dot (in place of the close button), the caption and the window switcher a mark
+	// after the title. Set it and call CDockHost::RefreshPane (nothing else in the layout changes).
+	bool Modified{};
 	HWND hWnd{};
 	HICON Icon{};
 	PaneCaps Caps{ PaneCaps::All };
@@ -66,7 +71,7 @@ private:
 	friend struct DockSerializer;
 
 	explicit DockPane(const PaneDesc& desc) :
-		Title(desc.Title), hWnd(desc.hWnd), Icon(desc.Icon), Caps(desc.Caps),
+		Title(desc.Title), Tooltip(desc.Tooltip), hWnd(desc.hWnd), Icon(desc.Icon), Caps(desc.Caps),
 		PreferredSize(desc.PreferredSize), MinSize(desc.MinSize),
 		m_Id(desc.Id), m_Kind(desc.Kind), m_LastSide(desc.DefaultSide),
 		m_LastState(desc.Kind == PaneKind::Document ? PaneState::Document : PaneState::Docked) {

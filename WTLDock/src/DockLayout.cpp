@@ -398,7 +398,34 @@ int DockLayout::DefaultLength(const DockGroup& group, DockSide side) const {
 	return length > 0 ? length : DefaultToolLength;
 }
 
-void DockLayout::InsertBeside(DockNode* target, std::unique_ptr<DockNode> node, DockPosition pos) {
+int DockLayout::LengthWhenDocked(const DockGroup& group, DockSide side) const {
+	if (group.m_Where != GroupLocation::Float || group.m_Panes.empty())
+		return 0;
+	return DefaultLength(group, side);
+}
+
+int DockLayout::LengthBeside(const DockGroup& moving, const DockGroup& target, DockPosition pos) const {
+	if (pos == DockPosition::Tab || target.m_Where == GroupLocation::AutoHide)
+		return 0;
+	// (moving within one floating window is no coming from elsewhere)
+	if (moving.m_Where == GroupLocation::Float && target.m_Where == GroupLocation::Float && moving.m_Float == target.m_Float)
+		return 0;
+	const DockSide side = ToSide(pos);
+	int length = LengthWhenDocked(moving, side);
+	if (length <= 0)
+		return 0;
+	// the target keeps at least its minimum
+	const Axis axis = AxisOf(side);
+	const int room = Length(target.Rect, axis);
+	if (room > 0) {
+		const int dpi = NodeDpi(target);
+		const int keep = MinLengthAt(target, axis, dpi) + ScaleTo(m_Metrics.SplitterThickness, dpi);
+		length = std::min(length, std::max(1, room - keep));
+	}
+	return std::max(1, length);
+}
+
+void DockLayout::InsertBeside(DockNode* target, std::unique_ptr<DockNode> node, DockPosition pos, int length) {
 	const DockSide side = ToSide(pos);
 	const Axis axis = AxisOf(side);
 	auto parent = target->m_Parent;
@@ -406,7 +433,15 @@ void DockLayout::InsertBeside(DockNode* target, std::unique_ptr<DockNode> node, 
 
 	if (parent->m_Axis == axis) {
 		// share the target's space with the new node
-		if (target->Size.IsStar()) {
+		if (length > 0) {
+			// the node comes with the size it had; the target gives it up
+			node->Size = SizeSpec::Px(length);
+			if (!target->Size.IsStar()) {
+				const double current = Length(target->Rect, axis) > 0 ? Length(target->Rect, axis) : target->Size.Value;
+				target->Size = SizeSpec::Px(std::max(1.0, current - m_Metrics.SplitterThickness - length));
+			}
+		}
+		else if (target->Size.IsStar()) {
 			double weight = target->Size.Value / 2;
 			target->Size = node->Size = SizeSpec::Star(weight);
 		}
@@ -427,6 +462,8 @@ void DockLayout::InsertBeside(DockNode* target, std::unique_ptr<DockNode> node, 
 	wrapper->m_Parent = parent;
 	auto targetOwner = std::move(parent->m_Children[index]);
 	targetOwner->Size = node->Size = SizeSpec::Star();
+	if (length > 0)
+		node->Size = SizeSpec::Px(length);
 	targetOwner->m_Parent = node->m_Parent = wrapper.get();
 	if (IsBefore(side)) {
 		wrapper->m_Children.push_back(std::move(node));
@@ -620,12 +657,14 @@ bool DockLayout::DockTo(DockPane* pane, DockGroup* target, DockPosition pos, int
 	if (pane->m_Group == target && pos == DockPosition::Tab)
 		return ReorderTab(pane, tabIndex < 0 ? (int)target->m_Panes.size() - 1 : tabIndex);
 
+	// a pane that comes out of a floating window takes the size of that window
+	const int length = pane->m_Group && pos != DockPosition::Tab ? LengthBeside(*pane->m_Group, *target, pos) : 0;
 	if (pane->m_Group)
 		DetachPane(pane);
 	if (pos == DockPosition::Tab)
 		target->AddPane(pane, tabIndex);
 	else
-		InsertBeside(target, NewGroup(pane), pos);
+		InsertBeside(target, NewGroup(pane), pos, length);
 	if (pane->Kind() == PaneKind::Document)
 		m_ActiveDocument = pane;
 	Commit();
@@ -639,8 +678,12 @@ bool DockLayout::DockToEdge(DockPane* pane, DockSide side, DockFloat* window) {
 		return false;
 
 	int length = Along(pane->PreferredSize, AxisOf(side));
-	if (pane->m_Group)
+	if (pane->m_Group) {
+		// a pane that comes out of a floating window takes the size of that window
+		if (const int floated = LengthWhenDocked(*pane->m_Group, side); floated > 0)
+			length = floated;
 		DetachPane(pane);
+	}
 	InsertAtEdge(window ? *window->m_Root : *m_Root, NewGroup(pane), side, length > 0 ? length : DefaultToolLength);
 	Commit();
 	return true;
@@ -688,7 +731,8 @@ bool DockLayout::MoveGroupTo(DockGroup* group, DockGroup* target, DockPosition p
 		target->m_Active = (int)target->m_Panes.size() - (int)panes.size() + active;
 	}
 	else {
-		InsertBeside(target, ReleaseGroup(group), pos);
+		const int length = LengthBeside(*group, *target, pos);
+		InsertBeside(target, ReleaseGroup(group), pos, length);
 	}
 	Commit();
 	return true;

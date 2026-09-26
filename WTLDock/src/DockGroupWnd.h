@@ -24,6 +24,12 @@ public:
 	}
 	// Positions the content windows and repaints.
 	void Relayout();
+	// Takes the keyboard focus into the chrome (the tab of 'pane', else of the active pane): arrow keys then visit tabs
+	// and buttons. False if there is nothing to visit.
+	bool FocusChrome(DockPane* pane);
+	bool HasChromeFocus() const;
+	// the name of the item the keyboard is on ("" without chrome focus)
+	std::wstring FocusName() const;
 	// Detaches the window from its group and moves its content windows out; it is destroyed later.
 	void Retire();
 	TabStripState State();
@@ -52,6 +58,9 @@ public:
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		// what content windows say to their parent goes to the frame
 		MESSAGE_HANDLER(WM_COMMAND, OnForward)
 		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
@@ -91,6 +100,14 @@ private:
 	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKillFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+
+	std::vector<AccElement> FocusItems() const;
+	void EnsureFocusVisible();
+	void MoveFocus(int step);
+	RECT FocusRect() const;
 
 	// IDockAccessibleOwner
 	HWND AccWindow() const override {
@@ -112,6 +129,12 @@ private:
 	HFONT Font() const {
 		return m_Host.FontFor(Dpi());
 	}
+
+	// tooltips
+	void UpdateTip(const Hit& hit);
+	bool TipFor(const Hit& hit, RECT& targetScreen, std::wstring& text);
+	static std::wstring CaptionText(const DockPane& pane);
+	void DrawModifiedDot(CDCHandle dc, const RECT& slot, COLORREF color) const;
 
 	Strip LayoutStrip(const GroupParts& parts, CDCHandle dc);
 	Hit Locate(POINT pt);
@@ -136,6 +159,9 @@ private:
 	DockGroup* m_Group{};
 	DockAccessible* m_Acc{};
 	std::wstring m_AccSignature;
+	bool m_ChromeFocus{};			// the keyboard is on the tabs and buttons, not in the content
+	bool m_ChromeFocusWanted{};		// set while we take the focus ourselves (WM_SETFOCUS must not pass it on)
+	std::wstring m_FocusKey;		// the item that has it (AccElement::Key)
 
 	// tab strip state
 	int m_First{};				// first visible tab

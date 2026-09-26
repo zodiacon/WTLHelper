@@ -100,6 +100,7 @@
     <ClInclude Include="include\DockPane.h" />
     <ClInclude Include="include\DockStore.h" />
     <ClInclude Include="include\DockTheme.h" />
+    <ClInclude Include="include\DockWindowList.h" />
     <ClInclude Include="include\DockTypes.h" />
     <ClInclude Include="include\WTLDock.h" />
     <ClInclude Include="include\WTLDockUI.h" />
@@ -127,6 +128,9 @@
     <ClCompile Include="src\DockAccessible.cpp" />
     <ClCompile Include="src\DockNavigator.cpp" />
     <ClCompile Include="src\DockNavigatorWnd.cpp" />
+    <ClCompile Include="src\DockTipWnd.cpp" />
+    <ClCompile Include="src\DockWindowList.cpp" />
+    <ClCompile Include="src\DockWindowsDlg.cpp" />
     <ClCompile Include="src\Json.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

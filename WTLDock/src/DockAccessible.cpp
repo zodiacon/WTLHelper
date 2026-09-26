@@ -240,9 +240,16 @@ STDMETHODIMP DockAccessible::get_accValue(VARIANT, BSTR* value) {
 	return S_FALSE;
 }
 
-STDMETHODIMP DockAccessible::get_accDescription(VARIANT, BSTR* description) {
-	if (description)
-		*description = nullptr;
+STDMETHODIMP DockAccessible::get_accDescription(VARIANT child, BSTR* description) {
+	if (!description)
+		return E_POINTER;
+	*description = nullptr;
+	if (!Alive())
+		return E_FAIL;
+	const Snapshot s = Take();
+	size_t index = 0;
+	if (Resolve(child, s, index) == Kind::Element)
+		return ReturnString(s.Elements[index].Description, description);
 	return S_FALSE;
 }
 

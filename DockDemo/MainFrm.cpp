@@ -47,6 +47,8 @@ LRESULT CMainFrame::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 		d.Icon = ::LoadIcon(nullptr, IDI_APPLICATION);
 		return layout.AddPane(d);		// no window: the content factory makes it when the pane is first on show
 	});
+	// the Windows dialog's Save button: the demo has nothing to write, so saving just succeeds
+	m_Dock.OnPaneSave = [](DockPane*) { return true; };
 	m_Dock.SetContentFactory([this](DockPane&, HWND parent) -> HWND {
 		return *CreateEditor(parent);
 	});
@@ -77,6 +79,33 @@ LRESULT CMainFrame::OnDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
 	if (auto loop = _Module.GetMessageLoop())
 		loop->RemoveMessageFilter(this);
 	handled = FALSE;
+	return 0;
+}
+
+// typing in a document marks it as modified (its tab shows a dot); "Save" clears that
+LRESULT CMainFrame::OnEditChange(WORD, WORD, HWND control, BOOL& handled) {
+	handled = FALSE;
+	if (!control || ::GetFocus() != control)
+		return 0;
+	for (auto& p : m_Dock.Layout().Panes()) {
+		if (p->hWnd == control && p->Kind() == PaneKind::Document && !p->Modified) {
+			p->Modified = true;
+			m_Dock.RefreshPane(p.get());
+		}
+	}
+	return 0;
+}
+
+LRESULT CMainFrame::OnSaveDocument(WORD, WORD, HWND, BOOL&) {
+	if (auto pane = m_Dock.ActivePane(); pane && pane->Modified) {
+		pane->Modified = false;
+		m_Dock.RefreshPane(pane);
+	}
+	return 0;
+}
+
+LRESULT CMainFrame::OnWindows(WORD, WORD, HWND, BOOL&) {
+	m_Dock.ShowWindowsDialog(m_hWnd);
 	return 0;
 }
 
@@ -171,6 +200,11 @@ void CMainFrame::BuildLayout() {
 	auto readme = add(L"README.md", m_Documents[2], PaneKind::Document);
 	for (auto document : { program, frame, readme })
 		document->Icon = ::LoadIcon(nullptr, IDI_APPLICATION);
+	// what a tab says when the mouse rests on it (the path, as in an editor)
+	program->Tooltip = L"C:/Dev/DockDemo/DockDemo.cpp";
+	frame->Tooltip = L"C:/Dev/DockDemo/MainFrm.h";
+	readme->Tooltip = L"C:/Dev/DockDemo/README.md";
+	solution->Tooltip = L"Browse the projects and files of the solution";
 
 	layout.Show(solution);
 	layout.Show(properties);
@@ -336,6 +370,9 @@ void CMainFrame::BuildMenu() {
 	window.AppendMenu(MF_STRING, ID_NEXT_DOC, L"Ne&xt document	Ctrl+F6");
 	window.AppendMenu(MF_STRING, ID_PREV_DOC, L"&Previous document	Ctrl+Shift+F6");
 	window.AppendMenu(MF_STRING, ID_SWITCHER, L"&Window switcher	Ctrl+Tab");
+	window.AppendMenu(MF_SEPARATOR);
+	window.AppendMenu(MF_STRING, ID_WINDOWS, L"W&indows...");
+	window.AppendMenu(MF_STRING, ID_SAVE_DOC, L"&Save active document (clears its modified mark)");
 	menu.AppendMenu(MF_POPUP, (UINT_PTR)window.m_hMenu, L"&Window");
 	window.Detach();
 
@@ -539,7 +576,9 @@ LRESULT CMainFrame::OnHelp(WORD, WORD, HWND, BOOL&) {
 		L"Drag a floating window by its title bar over the markers to dock it.\n\n"
 		L"Documents float and split as well: drop a tab on the side of another document group for a new tab group, or use the Active pane menu.\n"
 		L"Keyboard: Ctrl+Tab window switcher (hold Ctrl, Tab or arrows to choose), Ctrl+F6 next document, Ctrl+F4 close document, "
-		L"Alt+F6 next pane, Shift+Esc close tool window, Alt+- window menu.",
+		L"Alt+F6 next pane, Shift+Esc close tool window, Alt+- window menu.\n"
+		L"Ctrl+Alt+F6 puts the keyboard on the tabs and buttons of the active pane: arrows move, Enter activates or presses, Delete closes a tab, "
+		L"Shift+F10 opens its menu, Tab goes to the next group, Esc back to the content.",
 		L"DockDemo", MB_ICONINFORMATION);
 	return 0;
 }
@@ -587,6 +626,7 @@ DockPane* CMainFrame::NewDocument() {
 	d.Id = d.Title = std::format(L"Untitled{}", ++m_UntitledCount);
 	d.Kind = PaneKind::Document;
 	d.Icon = ::LoadIcon(nullptr, IDI_APPLICATION);
+	d.Tooltip = L"Not saved yet";
 
 	auto& layout = m_Dock.Layout();
 	auto pane = layout.AddPane(d);

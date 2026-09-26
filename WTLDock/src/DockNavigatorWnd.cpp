@@ -126,7 +126,7 @@ LRESULT CDockNavigatorWnd::OnTimer(UINT, WPARAM id, LPARAM, BOOL& handled) {
 
 std::wstring CDockNavigatorWnd::Describe(const DockPane& pane) {
 	static const wchar_t* const sides[] = { L"left", L"right", L"top", L"bottom" };
-	std::wstring text = pane.Title + L" - ";
+	std::wstring text = pane.Title + (pane.Modified ? L" (modified) - " : L" - ");
 	auto group = pane.Group();
 	switch (pane.State()) {
 		case PaneState::Docked:
@@ -204,7 +204,8 @@ void CDockNavigatorWnd::Draw(HDC hdc) {
 				text.left += metrics.IconSize + metrics.TabIconGap;
 			}
 			dc.SetTextColor(selected ? theme.CaptionActiveText : theme.TabActiveText);
-			dc.DrawText(pane->Title.c_str(), (int)pane->Title.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+			const std::wstring title = pane->Modified ? pane->Title + L" \u25CF" : pane->Title;
+			dc.DrawText(title.c_str(), (int)title.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 		}
 	}
 

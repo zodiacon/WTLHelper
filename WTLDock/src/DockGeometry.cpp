@@ -181,9 +181,21 @@ RECT CloseButtonRect(const RECT& caption, const DockMetrics& m) {
 // tab strip
 //
 
+int MarkSize(const DockMetrics& m) {
+	return std::max(4, m.TabCloseSize / 2);
+}
+
+// what the tab needs to the right of its text
+static int TabTail(const TabSpec& tab, const DockMetrics& m) {
+	if (tab.Closable)
+		return m.TabIconGap + m.TabCloseSize + m.TabPadding / 2;
+	if (tab.Marked)
+		return m.TabIconGap + MarkSize(m) + m.TabPadding;
+	return m.TabPadding;
+}
+
 int TabWidth(const TabSpec& tab, const DockMetrics& m) {
-	return m.TabPadding + (tab.HasIcon ? m.IconSize + m.TabIconGap : 0) + tab.TextWidth +
-		(tab.Closable ? m.TabIconGap + m.TabCloseSize + m.TabPadding / 2 : m.TabPadding);
+	return m.TabPadding + (tab.HasIcon ? m.IconSize + m.TabIconGap : 0) + tab.TextWidth + TabTail(tab, m);
 }
 
 RECT TabIconRect(const RECT& tab, const DockMetrics& m) {
@@ -194,7 +206,7 @@ RECT TabIconRect(const RECT& tab, const DockMetrics& m) {
 RECT TabTextRect(const RECT& tab, const TabSpec& spec, const DockMetrics& m) {
 	RECT r = tab;
 	r.left += m.TabPadding + (spec.HasIcon ? m.IconSize + m.TabIconGap : 0);
-	r.right -= spec.Closable ? m.TabIconGap + m.TabCloseSize + m.TabPadding / 2 : m.TabPadding;
+	r.right -= TabTail(spec, m);
 	if (r.right < r.left)
 		r.right = r.left;
 	return r;
@@ -260,6 +272,15 @@ TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, con
 				close = {};		// cut off
 		}
 		result.Close.push_back(close);
+		RECT mark{};
+		if (tabs[i].Marked && !tabs[i].Closable) {
+			const int size = MarkSize(m);
+			const int top = r.top + (Height(r) - size) / 2;
+			mark = { x + widths[i] - m.TabPadding - size, top, x + widths[i] - m.TabPadding, top + size };
+			if (mark.right > r.right)
+				mark = {};		// cut off
+		}
+		result.Mark.push_back(mark);
 		x += widths[i] + m.TabGap;
 	}
 	return result;
