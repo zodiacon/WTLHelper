@@ -1005,16 +1005,25 @@ TEST(TabStrip_IconsAndCloseButtonsMakeTabsWider) {
 
 TEST(TabStrip_OverflowShowsAWholeRunAndAButton) {
 	const auto m = DockMetrics::ForDpi(96);
-	const RECT area{ 0, 0, 250, 24 };
-	const auto strip = LayoutTabStrip(Specs(5), area, m, 0, 0);		// 5 * 70 + 4 = 354 > 250
+	const RECT area{ 0, 0, 290, 24 };
+	const auto strip = LayoutTabStrip(Specs(5), area, m, 0, 0);		// 5 * 70 + 4 = 354 > 290
 	CHECK(strip.Overflow && strip.First == 0 && strip.Tabs.size() == 3);
-	CHECK_RECT(strip.OverflowButton, 226, 0, 250, 24);
-	CHECK(strip.Tabs.back().right <= strip.OverflowButton.left);
+	// at the right end: the arrows, then the tab list
+	CHECK_RECT(strip.ScrollLeft, 218, 0, 242, 24);
+	CHECK_RECT(strip.ScrollRight, 242, 0, 266, 24);
+	CHECK_RECT(strip.OverflowButton, 266, 0, 290, 24);
+	CHECK(strip.Tabs.back().right <= strip.ScrollLeft.left);
+	CHECK(!strip.CanScrollLeft && strip.CanScrollRight);				// tabs are hidden to the right only
+	const auto end = LayoutTabStrip(Specs(5), area, m, 4, -1);
+	CHECK(end.CanScrollLeft && !end.CanScrollRight);
+	const auto middle = LayoutTabStrip(Specs(5), area, m, 1, -1);
+	CHECK(middle.CanScrollLeft && middle.CanScrollRight);
+	CHECK(!LayoutTabStrip(Specs(2), area, m, 0, 0).CanScrollLeft && !LayoutTabStrip(Specs(2), area, m, 0, 0).Overflow);
 }
 
 TEST(TabStrip_TheActiveTabIsKeptInView) {
 	const auto m = DockMetrics::ForDpi(96);
-	const RECT area{ 0, 0, 250, 24 };
+	const RECT area{ 0, 0, 290, 24 };
 
 	auto strip = LayoutTabStrip(Specs(5), area, m, 0, 4);
 	CHECK(strip.First == 2 && strip.Tabs.size() == 3);		// 2, 3, 4
@@ -1033,7 +1042,7 @@ TEST(TabStrip_ATabWiderThanTheStripIsCutOff) {
 	const auto m = DockMetrics::ForDpi(96);
 	const auto strip = LayoutTabStrip(Specs(1, 400, false, true), { 0, 0, 100, 24 }, m, 0, 0);
 	CHECK(strip.Overflow && strip.Tabs.size() == 1);
-	CHECK_RECT(strip.Tabs[0], 0, 0, 76, 24);
+	CHECK_RECT(strip.Tabs[0], 0, 0, 28, 24);				// what is left of the strip after the three buttons
 	CHECK(IsRectEmpty(&strip.Close[0]));
 }
 

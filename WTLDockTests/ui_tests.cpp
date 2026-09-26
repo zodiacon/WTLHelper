@@ -109,7 +109,12 @@ TabStrip StripOf(Fixture& f, DockGroup* group) {
 	}
 	if (f.Host.MultiRowTabs())
 		return LayoutTabRows(specs, parts.Tabs, metrics, group->ActiveIndex(), group->TabsAtBottom && !group->IsDocument());
-	return LayoutTabStrip(specs, parts.Tabs, metrics, f.Host.GetTabState(group).First, group->ActiveIndex());
+	// (a tab that has been scrolled out of view is not forced back in: the user did that)
+	const auto state = f.Host.GetTabState(group);
+	int active = group->ActiveIndex();
+	if (active < state.First || active >= state.First + state.Visible)
+		active = -1;
+	return LayoutTabStrip(specs, parts.Tabs, metrics, state.First, active);
 }
 
 LPARAM Pt(int x, int y) {
@@ -3476,6 +3481,10 @@ TEST(Host_ATabOutOfViewIsScrolledInWhenTheKeyboardGoesThere) {
 	Key(window, VK_END);
 	CHECK(f.Host.ChromeFocusName() == L"Tab list");						// the last item is the list button
 	Key(window, VK_LEFT);
+	CHECK(f.Host.ChromeFocusName() == L"Scroll tabs right");			// the arrows come between the tabs and the list button
+	Key(window, VK_LEFT);
+	CHECK(f.Host.ChromeFocusName() == L"Scroll tabs left");
+	Key(window, VK_LEFT);
 	Pump();
 	const auto state = f.Host.GetTabState(group);
 	CHECK(f.Host.ChromeFocusName() == L"Close document24.cpp");
@@ -3925,6 +3934,114 @@ TEST(Host_TheKeyboardVisitsTabsInTheirOrderWhateverTheRow) {
 	VERIFY(f);
 }
 
+// ---- Scroll arrows on a tab strip ---------------------------------------------------------------
+
+TEST(Host_TheArrowsScrollAStripThatIsTooFullByOneTab) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 25; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.ActivatePane(docs[0]);
+	Pump();
+	auto group = docs[0]->Group();
+	HWND window = f.Host.GroupWindow(group);
+	CHECK(f.Host.GetTabState(group).First == 0);
+
+	auto strip = StripOf(f, group);
+	CHECK(strip.Overflow && !strip.CanScrollLeft && strip.CanScrollRight);
+	CHECK(strip.ScrollLeft.right == strip.ScrollRight.left && strip.ScrollRight.right == strip.OverflowButton.left);
+
+	// the left arrow has nowhere to go; the right one moves on a tab at a time (the active tab may scroll out of view)
+	Click(window, Center(strip.ScrollLeft));
+	CHECK(f.Host.GetTabState(group).First == 0);
+	Click(window, Center(strip.ScrollRight));
+	CHECK(f.Host.GetTabState(group).First == 1);
+	Click(window, Center(StripOf(f, group).ScrollRight));
+	CHECK(f.Host.GetTabState(group).First == 2);
+	Click(window, Center(StripOf(f, group).ScrollLeft));
+	CHECK(f.Host.GetTabState(group).First == 1);
+	CHECK(group->ActivePane() == docs[0]);								// scrolling activates nothing
+
+	// all the way to the end, where the right arrow is dead and every tab has been in view
+	for (int i = 0; i < 40 && StripOf(f, group).CanScrollRight; i++)
+		Click(window, Center(StripOf(f, group).ScrollRight));
+	strip = StripOf(f, group);
+	CHECK(!strip.CanScrollRight && strip.CanScrollLeft);
+	CHECK(strip.First + (int)strip.Tabs.size() == 25);
+	const int last = f.Host.GetTabState(group).First;
+	Click(window, Center(strip.ScrollRight));
+	CHECK(f.Host.GetTabState(group).First == last);
+	VERIFY(f);
+}
+
+TEST(Host_AHeldArrowKeepsScrolling) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 25; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.ActivatePane(docs[0]);
+	Pump();
+	HWND window = f.Host.GroupWindow(docs[0]->Group());
+	const auto strip = StripOf(f, docs[0]->Group());
+
+	::SendMessage(window, WM_LBUTTONDOWN, MK_LBUTTON, Center(strip.ScrollRight));
+	CHECK(f.Host.GetTabState(docs[0]->Group()).First == 1);
+	::SendMessage(window, WM_TIMER, 2, 0);								// the repeat
+	::SendMessage(window, WM_TIMER, 2, 0);
+	CHECK(f.Host.GetTabState(docs[0]->Group()).First == 3);
+	::SendMessage(window, WM_LBUTTONUP, 0, Center(strip.ScrollRight));
+	::SendMessage(window, WM_TIMER, 2, 0);								// let go: no more
+	CHECK(f.Host.GetTabState(docs[0]->Group()).First == 3);
+}
+
+TEST(Host_TheArrowsShowWhereThereIsMoreAndSayWhatTheyDo) {
+	Fixture f(500, 400);
+	std::vector<DockPane*> docs;
+	for (int i = 0; i < 25; i++) {
+		docs.push_back(f.Add((L"document" + std::to_wstring(i) + L".cpp").c_str(), PaneKind::Document));
+		f.Host.Layout().Show(docs.back());
+	}
+	f.Host.ActivatePane(docs[0]);
+	Pump();
+	auto group = docs[0]->Group();
+	HWND window = f.Host.GroupWindow(group);
+	const auto strip = StripOf(f, group);
+
+	// an arrow with nothing beyond it is dimmed
+	const POINT left{ (strip.ScrollLeft.left + strip.ScrollLeft.right) / 2, (strip.ScrollLeft.top + strip.ScrollLeft.bottom) / 2 };
+	const POINT right{ (strip.ScrollRight.left + strip.ScrollRight.right) / 2, (strip.ScrollRight.top + strip.ScrollRight.bottom) / 2 };
+	const COLORREF dim = PixelAt(window, left.x, left.y), lit = PixelAt(window, right.x, right.y);
+	CHECK(dim != lit && lit == f.Host.Theme().ButtonGlyph);
+
+	// tooltips
+	f.Host.SetTipTiming(0, 0);
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.ScrollRight));
+	CHECK(f.Host.TipText() == L"Scroll tabs right");
+	::SendMessage(window, WM_MOUSEMOVE, 0, Center(strip.ScrollLeft));
+	CHECK(f.Host.TipText() == L"Scroll tabs left");
+	f.Host.HideTip();
+
+	// accessibility: two buttons, one of them unavailable, that do the scrolling
+	auto acc = AccessibleOfClient(window);
+	const auto children = ChildrenOf(acc);
+	const AccChild* l = FindChild(children, L"Scroll tabs left");
+	const AccChild* r = FindChild(children, L"Scroll tabs right");
+	CHECK(l && r && (l->State & STATE_SYSTEM_UNAVAILABLE) && !(r->State & STATE_SYSTEM_UNAVAILABLE));
+	if (r)
+		CHECK(acc->accDoDefaultAction(ChildId(r->Id)) == S_OK && f.Host.GetTabState(group).First == 1);
+	CHECK(FindChild(ChildrenOf(acc), L"Scroll tabs left") && !(FindChild(ChildrenOf(acc), L"Scroll tabs left")->State & STATE_SYSTEM_UNAVAILABLE));
+
+	// with room for every tab there are no arrows
+	Fixture wide(1800, 400);
+	Docs d = AddDocs(wide);
+	auto plain = StripOf(wide, d.A->Group());
+	CHECK(!plain.Overflow && IsRectEmpty(&plain.ScrollLeft));
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -4210,6 +4327,9 @@ void RunUiTests() {
 	Run_Host_TheRowsFollowTheTabsAndTheWindow();
 	Run_Host_ATabDraggedToAnotherRowChangesPlace();
 	Run_Host_TheKeyboardVisitsTabsInTheirOrderWhateverTheRow();
+	Run_Host_TheArrowsScrollAStripThatIsTooFullByOneTab();
+	Run_Host_AHeldArrowKeepsScrolling();
+	Run_Host_TheArrowsShowWhereThereIsMoreAndSayWhatTheyDo();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

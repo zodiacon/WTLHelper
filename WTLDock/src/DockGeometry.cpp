@@ -310,8 +310,10 @@ TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, con
 	if (total > avail) {
 		result.Overflow = true;
 		const int buttonWidth = m.ButtonSize + 2 * m.ButtonMargin;
-		avail = std::max(0, avail - buttonWidth);
+		avail = std::max(0, avail - 3 * buttonWidth);
 		result.OverflowButton = { strip.right - buttonWidth, strip.top, strip.right, strip.bottom };
+		result.ScrollRight = { strip.right - 2 * buttonWidth, strip.top, strip.right - buttonWidth, strip.bottom };
+		result.ScrollLeft = { strip.right - 3 * buttonWidth, strip.top, strip.right - 2 * buttonWidth, strip.bottom };
 
 		// how many whole tabs fit when starting at f (at least one, even if it has to be cut off)
 		auto fits = [&](int f) {
@@ -336,10 +338,12 @@ TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, con
 		while (firstIndex > 0 && firstIndex - 1 + fits(firstIndex - 1) - 1 >= n - 1)
 			firstIndex--;
 		count = std::min(fits(firstIndex), n - firstIndex);
+		result.CanScrollLeft = firstIndex > 0;
+		result.CanScrollRight = firstIndex + count < n;
 	}
 
 	result.First = firstIndex;
-	const int limit = result.Overflow ? strip.right - (m.ButtonSize + 2 * m.ButtonMargin) : strip.right;
+	const int limit = result.Overflow ? strip.right - 3 * (m.ButtonSize + 2 * m.ButtonMargin) : strip.right;
 	int x = strip.left;
 	for (int i = firstIndex; i < firstIndex + count; i++) {
 		RECT r{ x, strip.top, std::min(x + widths[i], (int)limit), strip.bottom };

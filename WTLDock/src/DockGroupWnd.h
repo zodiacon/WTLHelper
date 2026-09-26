@@ -79,7 +79,7 @@ private:
 		std::vector<TabSpec> Specs;
 	};
 	struct Hit {
-		enum class Kind { None, Caption, CaptionClose, CaptionPin, CaptionMenu, Tab, TabClose, Overflow } Type{ Kind::None };
+		enum class Kind { None, Caption, CaptionClose, CaptionPin, CaptionMenu, Tab, TabClose, Overflow, ScrollLeft, ScrollRight } Type{ Kind::None };
 		int Tab{ -1 };		// index among all tabs of the group
 	};
 
@@ -155,6 +155,9 @@ private:
 	void DrawMenuGlyph(CDCHandle dc, const RECT& button, bool hot, COLORREF idle) const;
 	void Draw(HDC hdc, RECT clip);
 	void ShowOverflowMenu(const RECT& button, bool stripAtBottom);
+	// Scrolls the tab strip by whole tabs (the tabs stay where the user put them until another tab becomes active).
+	bool ScrollTabs(int step);
+	void DrawScrollArrow(CDCHandle dc, const RECT& area, bool left, bool enabled, bool hot, bool pressed) const;
 	void SetHot(int tab, bool close, bool overflow);
 	void EndInteraction();
 	bool BeginDockDrag(DockPane* pane, bool wholeGroup, POINT client);
@@ -179,6 +182,8 @@ private:
 	int m_HotTab{ -1 };
 	bool m_HotTabClose{};
 	bool m_HotOverflow{};
+	int m_HotScroll{};				// -1 / 1: the mouse is on the scroll left / right arrow
+	int m_ScrollDir{};				// the arrow that is held down (it repeats)
 	bool m_Tracking{};
 	int m_PressTabClose{ -1 };
 	int m_MiddleTab{ -1 };

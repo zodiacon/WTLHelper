@@ -54,8 +54,11 @@ struct TabStrip {
 	std::vector<RECT> Close;		// their close buttons (empty rectangle for tabs that have none)
 	std::vector<RECT> Mark;			// the modified mark of those tabs that have one and no close button
 	int First{};					// index of Tabs[0] among all tabs
-	bool Overflow{};				// not all tabs fit: the first ones may be scrolled out and there is a drop-down button
-	RECT OverflowButton{};
+	bool Overflow{};				// not all tabs fit: the first ones may be scrolled out; there are scroll arrows and a drop-down button
+	RECT OverflowButton{};			// (the buttons sit at the right end: scroll left, scroll right, tab list)
+	RECT ScrollLeft{}, ScrollRight{};
+	bool CanScrollLeft{};			// tabs are hidden to the left / to the right
+	bool CanScrollRight{};
 };
 
 // Lays the tabs out from left to right. When they do not fit, the drop-down button takes the right end of the

@@ -5,7 +5,7 @@ namespace WTLDock {
 
 namespace {
 
-constexpr UINT_PTR SessionTimer = 1;
+constexpr UINT_PTR SessionTimer = 1, ScrollTimer = 2;
 
 }
 
@@ -57,6 +57,10 @@ void CDockGroupWnd::Retire() {
 void CDockGroupWnd::EndInteraction() {
 	m_HotButton = m_PressButton = Button::None;
 	m_HotTabClose = m_HotOverflow = false;
+	m_HotScroll = 0;
+	if (m_ScrollDir && m_hWnd)
+		KillTimer(ScrollTimer);
+	m_ScrollDir = 0;
 	m_HotTab = m_PressTabClose = m_MiddleTab = -1;
 	m_DragPane = nullptr;
 	m_Dragging = false;
@@ -94,6 +98,17 @@ void CDockGroupWnd::EndDockDrag(bool commit) {
 }
 
 LRESULT CDockGroupWnd::OnTimer(UINT, WPARAM id, LPARAM, BOOL& handled) {
+	if (id == ScrollTimer) {
+		// a held arrow goes on scrolling, faster than it started
+		if (!m_ScrollDir || !ScrollTabs(m_ScrollDir)) {
+			KillTimer(ScrollTimer);
+			m_ScrollDir = 0;
+		}
+		else {
+			SetTimer(ScrollTimer, 70);
+		}
+		return 0;
+	}
 	if (id != SessionTimer) {
 		handled = FALSE;
 		return 0;
@@ -324,6 +339,14 @@ CDockGroupWnd::Hit CDockGroupWnd::Locate(POINT pt) {
 			hit.Type = Hit::Kind::Overflow;
 			return hit;
 		}
+		if (strip.Layout.Overflow && PtInRect(&strip.Layout.ScrollLeft, pt)) {
+			hit.Type = Hit::Kind::ScrollLeft;
+			return hit;
+		}
+		if (strip.Layout.Overflow && PtInRect(&strip.Layout.ScrollRight, pt)) {
+			hit.Type = Hit::Kind::ScrollRight;
+			return hit;
+		}
 		for (size_t k = 0; k < strip.Layout.Tabs.size(); k++) {
 			if (PtInRect(&strip.Layout.Tabs[k], pt)) {
 				hit.Tab = strip.Layout.First + (int)k;
@@ -515,6 +538,8 @@ void CDockGroupWnd::Draw(HDC hdc, RECT clip) {
 		}
 
 		if (strip.Layout.Overflow) {
+			DrawScrollArrow(dc.m_hDC, strip.Layout.ScrollLeft, true, strip.Layout.CanScrollLeft, m_HotScroll < 0, m_ScrollDir < 0);
+			DrawScrollArrow(dc.m_hDC, strip.Layout.ScrollRight, false, strip.Layout.CanScrollRight, m_HotScroll > 0, m_ScrollDir > 0);
 			const RECT& area = strip.Layout.OverflowButton;
 			const int size = std::min(metrics.ButtonSize, Height(area));
 			const RECT button{ area.left + (Width(area) - size) / 2, area.top + (Height(area) - size) / 2,
@@ -616,6 +641,23 @@ LRESULT CDockGroupWnd::OnLButtonDown(UINT, WPARAM, LPARAM lp, BOOL&) {
 			break;
 		}
 
+		case Hit::Kind::ScrollLeft:
+		case Hit::Kind::ScrollRight:
+			{
+				const int dir = hit.Type == Hit::Kind::ScrollLeft ? -1 : 1;
+				SetCapture();		// (taking the capture ends any interaction that was on, including a scroll)
+				if (ScrollTabs(dir)) {
+					m_ScrollDir = dir;
+					SetTimer(ScrollTimer, 400);
+				}
+				else {
+					m_ScrollDir = 0;
+					ReleaseCapture();
+				}
+			}
+			Invalidate(FALSE);
+			break;
+
 		case Hit::Kind::Overflow: {
 			RECT rc;
 			GetClientRect(&rc);
@@ -658,7 +700,7 @@ LRESULT CDockGroupWnd::OnLButtonUp(UINT, WPARAM, LPARAM lp, BOOL&) {
 		toClose = nullptr;
 	}
 
-	const bool captured = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
+	const bool captured = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending || m_ScrollDir;
 	EndInteraction();
 	if (captured)
 		ReleaseCapture();
@@ -809,6 +851,11 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 	Hit hit = Locate(pt);
 	const bool onTab = hit.Type == Hit::Kind::Tab || hit.Type == Hit::Kind::TabClose;
 	SetHot(onTab ? hit.Tab : -1, hit.Type == Hit::Kind::TabClose, hit.Type == Hit::Kind::Overflow);
+	const int hotScroll = hit.Type == Hit::Kind::ScrollLeft ? -1 : hit.Type == Hit::Kind::ScrollRight ? 1 : 0;
+	if (hotScroll != m_HotScroll) {
+		m_HotScroll = hotScroll;
+		Invalidate(FALSE);
+	}
 	UpdateTip(hit);
 
 	const Button hotButton = ButtonOf(hit.Type);
@@ -826,6 +873,10 @@ LRESULT CDockGroupWnd::OnMouseMove(UINT, WPARAM wp, LPARAM lp, BOOL&) {
 LRESULT CDockGroupWnd::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Tracking = false;
 	m_Host.CancelTip(m_hWnd);
+	if (m_HotScroll) {
+		m_HotScroll = 0;
+		Invalidate(FALSE);
+	}
 	SetHot(-1, false, false);
 	if (m_HotButton != Button::None) {
 		m_HotButton = Button::None;
@@ -865,7 +916,11 @@ LRESULT CDockGroupWnd::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 		m_Host.EndDrag(false);
 		return 0;
 	}
-	const bool wasActive = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending;
+	const bool wasActive = m_PressButton != Button::None || m_PressTabClose >= 0 || m_DragPane || m_CaptionPending || m_ScrollDir;
+	if (m_ScrollDir) {
+		KillTimer(ScrollTimer);
+		m_ScrollDir = 0;
+	}
 	m_CaptionPending = false;
 	m_PressButton = Button::None;
 	m_PressTabClose = -1;
@@ -1051,6 +1106,19 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 			const bool bottom = m_Group->TabsAtBottom && !m_Group->IsDocument();
 			more.Invoke = [self, where, bottom] { self->ShowOverflowMenu(where, bottom); };
 			more.Key = L"overflow";
+			for (bool left : { true, false }) {
+				AccElement arrow;
+				arrow.Name = left ? L"Scroll tabs left" : L"Scroll tabs right";
+				arrow.Role = ROLE_SYSTEM_PUSHBUTTON;
+				const bool can = left ? strip.Layout.CanScrollLeft : strip.Layout.CanScrollRight;
+				arrow.State = can ? 0 : STATE_SYSTEM_UNAVAILABLE;
+				arrow.Screen = toScreen(left ? strip.Layout.ScrollLeft : strip.Layout.ScrollRight);
+				arrow.Action = L"Press";
+				const int step = left ? -1 : 1;
+				arrow.Invoke = [self, step] { self->ScrollTabs(step); };
+				arrow.Key = left ? L"scroll:left" : L"scroll:right";
+				list.push_back(std::move(arrow));
+			}
 			list.push_back(std::move(more));
 		}
 	}
@@ -1185,6 +1253,16 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 			const Strip strip = LayoutStrip(parts, dc.m_hDC);
 			target = toScreen(strip.Layout.OverflowButton);
 			text = L"Show open tabs";
+			return true;
+		}
+
+		case Hit::Kind::ScrollLeft:
+		case Hit::Kind::ScrollRight: {
+			CClientDC dc(m_hWnd);
+			const Strip strip = LayoutStrip(parts, dc.m_hDC);
+			const bool left = hit.Type == Hit::Kind::ScrollLeft;
+			target = toScreen(left ? strip.Layout.ScrollLeft : strip.Layout.ScrollRight);
+			text = left ? L"Scroll tabs left" : L"Scroll tabs right";
 			return true;
 		}
 
@@ -1394,6 +1472,51 @@ LRESULT CDockGroupWnd::OnKeyDown(UINT, WPARAM wp, LPARAM, BOOL& handled) {
 	}
 	handled = FALSE;
 	return 0;
+}
+
+// One tab to the left or right; false if there is nothing more that way.
+bool CDockGroupWnd::ScrollTabs(int step) {
+	if (!m_Group || !m_hWnd || step == 0)
+		return false;
+	RECT rc;
+	GetClientRect(&rc);
+	CClientDC dc(m_hWnd);
+	const GroupParts parts = Parts(rc);
+	const auto strip = LayoutStrip(parts, dc.m_hDC);
+	if (!strip.Layout.Overflow || (step < 0 && !strip.Layout.CanScrollLeft) || (step > 0 && !strip.Layout.CanScrollRight))
+		return false;
+	m_First = std::clamp(strip.Layout.First + (step < 0 ? -1 : 1), 0, (int)strip.Specs.size() - 1);
+	m_ScrollLocked = true;
+	InvalidateRect(&parts.Tabs, FALSE);
+	::NotifyWinEvent(EVENT_OBJECT_REORDER, m_hWnd, OBJID_CLIENT, CHILDID_SELF);
+	return true;
+}
+
+void CDockGroupWnd::DrawScrollArrow(CDCHandle dc, const RECT& area, bool left, bool enabled, bool hot, bool pressed) const {
+	const DockTheme& theme = m_Host.Theme();
+	const int size = std::min(Metrics().ButtonSize, Height(area));
+	const RECT button{ area.left + (Width(area) - size) / 2, area.top + (Height(area) - size) / 2,
+		area.left + (Width(area) - size) / 2 + size, area.top + (Height(area) - size) / 2 + size };
+	if (enabled && (hot || pressed))
+		dc.FillSolidRect(&button, theme.ButtonHotBack);
+	// a disabled arrow is a dimmed one: the glyph colour halfway to the strip's background
+	COLORREF glyph = enabled ? (hot || pressed ? theme.ButtonGlyphHot : theme.ButtonGlyph) : theme.ButtonGlyph;
+	if (!enabled) {
+		const COLORREF back = theme.TabStripBack;
+		glyph = RGB((GetRValue(glyph) + GetRValue(back) * 2) / 3, (GetGValue(glyph) + GetGValue(back) * 2) / 3, (GetBValue(glyph) + GetBValue(back) * 2) / 3);
+	}
+	CPen pen;
+	pen.CreatePen(PS_SOLID, 1, glyph);
+	CBrush brush;
+	brush.CreateSolidBrush(glyph);
+	HPEN oldPen = dc.SelectPen(pen);
+	HBRUSH oldBrush = dc.SelectBrush(brush);
+	const int cx = (button.left + button.right) / 2, cy = (button.top + button.bottom) / 2, h = std::max(2, size / 5);
+	// (the base on the side it comes from, the tip on the side it points to)
+	const POINT triangle[] = { { cx + (left ? h : -h), cy - h * 2 }, { cx + (left ? h : -h), cy + h * 2 }, { cx + (left ? -h : h), cy } };
+	dc.Polygon(triangle, 3);
+	dc.SelectPen(oldPen);
+	dc.SelectBrush(oldBrush);
 }
 
 }
