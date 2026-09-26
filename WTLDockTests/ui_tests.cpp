@@ -1675,6 +1675,280 @@ TEST(Host_AutoHiddenPanesCanBeDockedFromTheirMenu) {
 	CHECK(f.Sol->State() == PaneState::Docked && f.Sol->Group()->Side() == DockSide::Left);
 }
 
+// ---- Persistence, menus, factories ---------------------------------------------------
+
+std::wstring TempPath(const wchar_t* name) {
+	wchar_t dir[MAX_PATH];
+	::GetTempPathW(_countof(dir), dir);
+	return std::wstring(dir) + L"WTLDockUiTests." + std::to_wstring(::GetCurrentProcessId()) + L"." + name;
+}
+
+TEST(Host_StateRoundTripsWithTheActivePaneAndTheWindowPlacement) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	l.AutoHide(f.Props->Group());
+	f.Host.ActivatePane(f.B);
+	Pump();
+	const auto dump = l.Dump();
+
+	const std::string text = f.Host.SaveState();
+	CHECK(text.find("\"activePane\"") != std::string::npos && text.find("\"window\"") != std::string::npos);
+	CHECK(text.find("\"maximized\"") != std::string::npos && text.find("\"normal\"") != std::string::npos);
+	CHECK(f.Host.SaveState(false).find("\"window\"") == std::string::npos);
+
+	// the layout reads the state too: the additions are ignored by it
+	DockLayout plain;
+	for (auto& p : l.Panes()) {
+		PaneDesc d;
+		d.Id = p->Id();
+		d.Kind = p->Kind();
+		plain.AddPane(d);
+	}
+	CHECK(plain.Load(text));
+
+	// scramble, then load: the arrangement and the active pane come back
+	l.Show(f.Sol);
+	l.Hide(f.Sol);
+	l.Float(f.Output, OffScreen(100, 100, 300, 200));
+	f.Host.ActivatePane(f.A);
+	CHECK(f.Host.LoadState(text, {}, nullptr, false));
+	VERIFY(f);
+	CHECK_STR(l.Dump(), dump);
+	CHECK(f.Host.ActivePane() == f.B);
+	CHECK_VALID(l);
+}
+
+TEST(Host_StateGoesThroughAFile) {
+	Fixture f;
+	f.AddStandard();
+	const auto path = TempPath(L"state.json");
+	const auto dump = f.Host.Layout().Dump();
+	CHECK(f.Host.SaveStateToFile(path, false));
+	f.Host.Layout().Hide(f.Props);
+	f.Host.Layout().Hide(f.Sol);
+	CHECK(f.Host.LoadStateFromFile(path, {}, nullptr, false));
+	CHECK_STR(f.Host.Layout().Dump(), dump);
+	VERIFY(f);
+
+	std::wstring error;
+	CHECK(!f.Host.LoadStateFromFile(TempPath(L"missing.json"), {}, &error, false) && !error.empty());
+	CHECK(!f.Host.LoadState("this is not json", {}, &error, false) && !error.empty());
+	CHECK_STR(f.Host.Layout().Dump(), dump);				// failed loads change nothing
+	::DeleteFileW(path.c_str());
+}
+
+TEST(Host_TheWindowPlacementComesBackOnAScreen) {
+	Fixture f;
+	f.AddStandard();
+	// where the fixture window is: nowhere near a screen, and that is what is saved
+	const std::string text = f.Host.SaveState();
+
+	// loading without placement leaves the window alone
+	RECT before, after;
+	::GetWindowRect(f.Frame, &before);
+	CHECK(f.Host.LoadState(text, {}, nullptr, false));
+	::GetWindowRect(f.Frame, &after);
+	CHECK(EqualRect(&before, &after) != FALSE);
+
+	// with it, the window was saved out of reach, so it is moved onto a monitor (and sized as it was)
+	CHECK(f.Host.LoadState(text));
+	::GetWindowRect(f.Frame, &after);
+	const RECT strip{ after.left, after.top, after.right, after.top + 40 };
+	CHECK(::MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) != nullptr);
+	CHECK(Width(after) == Width(before) && Height(after) == Height(before));
+	::SetWindowPos(f.Frame, nullptr, -12000, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+	Pump();
+}
+
+TEST(Host_ThePaneFactoryMakesPanesTheFileMentions) {
+	// a session with two documents that the next session has not registered
+	std::string text;
+	{
+		Fixture f;
+		f.AddStandard();
+		text = f.Host.SaveState(false);
+	}
+
+	Fixture g;
+	g.Sol = g.Add(L"Sol", PaneKind::Tool, DockSide::Left, 250);
+	std::vector<std::wstring> asked;
+	g.Host.SetPaneFactory([&](DockLayout& layout, const std::wstring& id) -> DockPane* {
+		asked.push_back(id);
+		if (id.find(L".cpp") == std::wstring::npos)
+			return nullptr;
+		PaneDesc d;
+		d.Id = d.Title = id;
+		d.Kind = PaneKind::Document;
+		return layout.AddPane(d);
+	});
+	int created = 0;
+	g.Host.SetContentFactory([&](DockPane& pane, HWND parent) -> HWND {
+		created++;
+		return ::CreateWindowExW(0, L"STATIC", pane.Title.c_str(), WS_CHILD, 0, 0, 10, 10, parent, nullptr, nullptr, nullptr);
+	});
+	CHECK(g.Host.LoadState(text, {}, nullptr, false));
+	Pump();
+	auto a = g.Host.Layout().FindPane(L"a.cpp");
+	auto b = g.Host.Layout().FindPane(L"b.cpp");
+	CHECK(a && b && a->State() == PaneState::Document && b->State() == PaneState::Document);
+	CHECK(g.Host.Layout().FindPane(L"Props") == nullptr);	// the factory declined: the pane is dropped
+	CHECK(!asked.empty());
+	CHECK_VALID(g.Host.Layout());
+
+	// content is made when a pane is first on show, and only then
+	CHECK(created == 1);									// the active tab
+	DockPane* shown = a->Group()->ActivePane();
+	DockPane* other = shown == a ? b : a;
+	CHECK(shown->hWnd != nullptr && other->hWnd == nullptr);
+	g.Host.ActivatePane(other);
+	CHECK(other->hWnd != nullptr && ::IsWindowVisible(other->hWnd) && created == 2);
+	g.Host.ActivatePane(shown);
+	g.Host.ActivatePane(other);
+	CHECK(created == 2);									// not made twice
+	VERIFY(g);
+}
+
+TEST(Host_TheDefaultLayoutCanBeRestored) {
+	Fixture f;
+	f.AddStandard();
+	std::wstring error;
+	CHECK(!f.Host.HasDefaultLayout() && !f.Host.ResetLayout(&error) && !error.empty());
+	f.Host.CaptureDefaultLayout();
+	CHECK(f.Host.HasDefaultLayout());
+	const auto original = f.Host.Layout().Dump();
+
+	auto& l = f.Host.Layout();
+	l.AutoHide(f.Sol->Group());
+	l.Float(f.Output, OffScreen(50, 50, 300, 200));
+	l.Hide(f.Props);
+	CHECK(l.Dump() != original);
+	CHECK(f.Host.ResetLayout());
+	CHECK_STR(l.Dump(), original);
+	VERIFY(f);
+	CHECK(FramesOf(f).empty());
+}
+
+TEST(Host_NamedLayoutsAreSavedAndApplied) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	const auto standard = l.Dump();
+	CHECK(f.Host.SaveLayoutAs(L"Standard"));
+	CHECK(!f.Host.SaveLayoutAs(L""));
+
+	l.AutoHide(f.Output->Group());
+	l.Hide(f.Props);
+	const auto debug = l.Dump();
+	CHECK(f.Host.SaveLayoutAs(L"Debug"));
+	CHECK(f.Host.Layouts().Count() == 2);
+
+	std::wstring error;
+	CHECK(f.Host.ApplyLayout(L"Standard"));
+	CHECK_STR(l.Dump(), standard);
+	VERIFY(f);
+	CHECK(f.Host.ApplyLayout(L"Debug"));
+	CHECK_STR(l.Dump(), debug);
+	VERIFY(f);
+	CHECK(!f.Host.ApplyLayout(L"Nope", &error) && !error.empty());
+	CHECK_STR(l.Dump(), debug);
+
+	// the menu of them
+	HMENU menu = ::CreatePopupMenu();
+	CHECK(f.Host.FillLayoutMenu(menu, 5000) == 2);
+	wchar_t text[64]{};
+	::GetMenuStringW(menu, 1, text, _countof(text), MF_BYPOSITION);
+	CHECK(std::wstring(text) == L"Debug" && ::GetMenuItemID(menu, 0) == 5000 && ::GetMenuItemID(menu, 1) == 5001);
+	::DestroyMenu(menu);
+	CHECK(f.Host.HandleLayoutCommand(5000, 5000));
+	CHECK_STR(l.Dump(), standard);
+	CHECK(!f.Host.HandleLayoutCommand(5002, 5000) && !f.Host.HandleLayoutCommand(4999, 5000));
+
+	// and they survive a trip through a file
+	const auto path = TempPath(L"layouts.json");
+	CHECK(f.Host.Layouts().SaveToFile(path));
+	f.Host.Layouts().Clear();
+	CHECK(f.Host.Layouts().LoadFromFile(path) && f.Host.Layouts().Count() == 2);
+	CHECK(f.Host.ApplyLayout(L"Debug"));
+	CHECK_STR(l.Dump(), debug);
+	::DeleteFileW(path.c_str());
+}
+
+TEST(Host_ThePaneMenuListsPanesAndShowsThem) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+	l.Hide(f.Props);
+	l.AutoHide(f.Output->Group());
+
+	HMENU menu = ::CreatePopupMenu();
+	CHECK(f.Host.FillPaneMenu(menu, 100) == 3);				// tools only
+	CHECK(::GetMenuItemCount(menu) == 3);
+	auto checked = [&](int position) { return (::GetMenuState(menu, position, MF_BYPOSITION) & MF_CHECKED) != 0; };
+	CHECK(checked(0) && !checked(1) && checked(2));			// Sol showing, Props hidden, Output auto-hidden (still there)
+	CHECK(::GetMenuItemID(menu, 0) == 100 && ::GetMenuItemID(menu, 1) == 101 && ::GetMenuItemID(menu, 2) == 102);
+	::DestroyMenu(menu);
+
+	HMENU documents = ::CreatePopupMenu();
+	CHECK(f.Host.FillPaneMenu(documents, 200, PaneKind::Document) == 2 && ::GetMenuItemID(documents, 0) == 203);
+	::DestroyMenu(documents);
+
+	// a hidden pane is shown and active
+	CHECK(f.Host.HandlePaneCommand(101, 100));
+	CHECK(f.Props->State() == PaneState::Docked && f.Host.ActivePane() == f.Props);
+	VERIFY(f);
+	// an auto-hidden pane slides out
+	CHECK(f.Host.HandlePaneCommand(102, 100));
+	CHECK(f.Host.FlyoutPane() == f.Output);
+	f.Host.HideFlyout();
+	// a docked one is activated
+	CHECK(f.Host.HandlePaneCommand(100, 100) && f.Host.ActivePane() == f.Sol);
+	CHECK(!f.Host.HandlePaneCommand(99, 100) && !f.Host.HandlePaneCommand(500, 100));
+	VERIFY(f);
+}
+
+TEST(Host_AllDocumentsCanBeClosedAtOnce) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto sol = f.Add(L"Sol", PaneKind::Tool);
+	f.Host.Layout().Show(sol);
+	f.Host.ActivatePane(d.B);
+	Pump();
+
+	// the active one is kept, and a veto keeps one more
+	f.Host.OnPaneClosing = [&](DockPane* p) { return p != d.C; };
+	CHECK(f.Host.CloseAllDocuments(true) == 1);
+	CHECK(d.B->State() == PaneState::Document && d.C->State() == PaneState::Document);
+	CHECK(d.A->State() == PaneState::Hidden);
+	VERIFY(f);
+
+	f.Host.OnPaneClosing = nullptr;
+	CHECK(f.Host.CloseAllDocuments() == 2);
+	CHECK(d.B->State() == PaneState::Hidden && d.C->State() == PaneState::Hidden);
+	CHECK(sol->State() == PaneState::Docked);				// tools are none of its business
+	CHECK(f.Host.CloseAllDocuments() == 0);
+	VERIFY(f);
+}
+
+TEST(Host_TheNextDocumentWrapsAround) {
+	Fixture f;
+	Docs d = AddDocs(f);
+	auto group = d.A->Group();
+	CHECK(group->Panes().size() == 3);
+	f.Host.ActivatePane(d.A);
+	CHECK(f.Host.ActivateNextDocument() && group->ActivePane() == d.B);
+	CHECK(f.Host.ActivateNextDocument() && group->ActivePane() == d.C);
+	CHECK(f.Host.ActivateNextDocument() && group->ActivePane() == d.A);			// wrapped
+	CHECK(f.Host.ActivateNextDocument(false) && group->ActivePane() == d.C);	// backwards wraps too
+	CHECK(f.Host.ActivateNextDocument(false) && group->ActivePane() == d.B);
+	VERIFY(f);
+
+	f.Host.ClosePane(d.A);
+	f.Host.ClosePane(d.C);
+	CHECK(!f.Host.ActivateNextDocument());					// one tab: nothing to go to
+	CHECK(group->ActivePane() == d.B);
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -1842,6 +2116,15 @@ void RunUiTests() {
 	Run_Host_FocusMovingToAnotherPaneClosesTheFlyout();
 	Run_Host_TheFlyoutFollowsChangesToTheLayout();
 	Run_Host_AutoHiddenPanesCanBeDockedFromTheirMenu();
+	Run_Host_StateRoundTripsWithTheActivePaneAndTheWindowPlacement();
+	Run_Host_StateGoesThroughAFile();
+	Run_Host_TheWindowPlacementComesBackOnAScreen();
+	Run_Host_ThePaneFactoryMakesPanesTheFileMentions();
+	Run_Host_TheDefaultLayoutCanBeRestored();
+	Run_Host_NamedLayoutsAreSavedAndApplied();
+	Run_Host_ThePaneMenuListsPanesAndShowsThem();
+	Run_Host_AllDocumentsCanBeClosedAtOnce();
+	Run_Host_TheNextDocumentWrapsAround();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

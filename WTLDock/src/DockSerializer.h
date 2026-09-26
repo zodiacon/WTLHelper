@@ -9,7 +9,7 @@ namespace WTLDock {
 // Layout persistence and the text dump. A friend of the model classes so that it can build trees directly.
 struct DockSerializer {
 	static std::string Save(const DockLayout& layout);
-	static bool Load(DockLayout& layout, std::string_view text, const PaneFactory& factory, std::wstring* error);
+	static bool Load(DockLayout& layout, std::string_view text, const LoadOptions& options, std::wstring* error);
 	static std::wstring Dump(const DockLayout& layout);
 
 private:

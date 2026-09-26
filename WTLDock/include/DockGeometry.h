@@ -64,4 +64,8 @@ int TabWidth(const TabSpec& tab, const DockMetrics& metrics);
 RECT TabIconRect(const RECT& tab, const DockMetrics& metrics);
 RECT TabTextRect(const RECT& tab, const TabSpec& spec, const DockMetrics& metrics);
 
+// If the top of the rectangle (its title bar) is out of reach on every monitor, moves it onto the nearest one, keeping
+// its size if it fits. Returns whether it moved the rectangle.
+bool KeepRectOnScreen(RECT& rect, int reachable = 40);
+
 }

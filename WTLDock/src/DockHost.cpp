@@ -3,6 +3,8 @@
 #include "DockFloatFrame.h"
 #include "SplitterTracker.h"
 #include "DockDragSession.h"
+#include "Json.h"
+#include "Utf8.h"
 #include <algorithm>
 #include <set>
 
@@ -138,20 +140,7 @@ RECT CDockHost::OuterRectForClient(const RECT& client, int dpi) const {
 }
 
 void CDockHost::EnsureOnScreen(RECT& rect) const {
-	// reachable if the title bar touches a monitor
-	const RECT strip{ rect.left, rect.top, rect.right, rect.top + 40 };
-	if (::MonitorFromRect(&strip, MONITOR_DEFAULTTONULL))
-		return;
-
-	MONITORINFO mi{ sizeof(mi) };
-	::GetMonitorInfo(::MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST), &mi);
-	const RECT& work = mi.rcWork;
-	const int w = std::min(Width(rect), Width(work)), h = std::min(Height(rect), Height(work));
-	rect = { work.left + 40, work.top + 40, work.left + 40 + w, work.top + 40 + h };
-	if (rect.right > work.right)
-		OffsetRect(&rect, work.right - rect.right, 0);
-	if (rect.bottom > work.bottom)
-		OffsetRect(&rect, 0, work.bottom - rect.bottom);
+	KeepRectOnScreen(rect);
 }
 
 RECT CDockHost::DefaultFloatRect(const DockPane* pane) const {
@@ -1292,6 +1281,226 @@ void CDockHost::ShowPaneMenu(DockPane* pane, POINT screen) {
 TabStripState CDockHost::GetTabState(const DockGroup* group) const {
 	auto it = m_Groups.find(group);
 	return it != m_Groups.end() ? it->second->State() : TabStripState{};
+}
+
+//
+// persistence
+//
+
+void CDockHost::EnsureContent(DockPane* pane) {
+	if (m_ContentFactory && pane && !pane->hWnd) {
+		if (HWND content = m_ContentFactory(*pane, m_hWnd))
+			pane->hWnd = content;
+	}
+}
+
+std::string CDockHost::SaveState(bool includeWindowPlacement) const {
+	Json::Value state;
+	std::string parseError;
+	// the layout is a JSON object, and readers of it ignore what they do not know: the rest goes beside it
+	if (!Json::Parse(m_Layout.Save(), state, &parseError) || !state.IsObject())
+		return m_Layout.Save();
+
+	if (auto active = ActivePane(); active && active->Group())
+		state.Add("activePane", Json::Value::MakeString(Utf8FromWide(active->Id())));
+
+	HWND top = ::GetAncestor(m_hWnd, GA_ROOT);
+	WINDOWPLACEMENT wp{ sizeof(wp) };
+	if (includeWindowPlacement && top && ::GetWindowPlacement(top, &wp)) {
+		Json::Value window = Json::Value::MakeObject();
+		window.Add("maximized", Json::Value::MakeBool(wp.showCmd == SW_SHOWMAXIMIZED));
+		Json::Value normal = Json::Value::MakeArray();
+		for (LONG v : { wp.rcNormalPosition.left, wp.rcNormalPosition.top, wp.rcNormalPosition.right, wp.rcNormalPosition.bottom })
+			normal.Push(Json::Value::MakeNumber(v));
+		window.Add("normal", std::move(normal));
+		window.Add("dpi", Json::Value::MakeNumber((int)::GetDpiForWindow(top)));
+		state.Add("window", std::move(window));
+	}
+	return Json::Write(state) + "\n";
+}
+
+bool CDockHost::LoadState(std::string_view text, const LoadOptions& options, std::wstring* error, bool restoreWindowPlacement) {
+	LoadOptions effective = options;
+	if (!effective.Factory)
+		effective.Factory = m_PaneFactory;
+	if (!m_Layout.Load(text, effective, error))
+		return false;
+
+	Json::Value state;
+	if (!Json::Parse(text, state, nullptr))
+		return true;
+
+	if (restoreWindowPlacement) {
+		HWND top = ::GetAncestor(m_hWnd, GA_ROOT);
+		auto window = state.Find("window");
+		auto normal = window ? window->Find("normal") : nullptr;
+		WINDOWPLACEMENT wp{ sizeof(wp) };
+		if (top && normal && normal->IsArray() && normal->Items.size() == 4 && ::GetWindowPlacement(top, &wp)) {
+			RECT rc{};
+			LONG* fields[] = { &rc.left, &rc.top, &rc.right, &rc.bottom };
+			bool valid = true;
+			for (int i = 0; i < 4; i++) {
+				valid &= normal->Items[i].IsNumber() && std::abs(normal->Items[i].Number) < 1e6;
+				*fields[i] = valid ? (LONG)normal->Items[i].Number : 0;
+			}
+			if (valid && Width(rc) > 0 && Height(rc) > 0) {
+				// a window that was set up at another DPI has to be sized for this one
+				if (auto dpi = window->Find("dpi"); dpi && dpi->IsNumber() && dpi->Number >= 48 && dpi->Number <= 960) {
+					const int now = (int)::GetDpiForWindow(top);
+					if (now > 0 && now != (int)dpi->Number) {
+						rc.right = rc.left + ::MulDiv(Width(rc), now, (int)dpi->Number);
+						rc.bottom = rc.top + ::MulDiv(Height(rc), now, (int)dpi->Number);
+					}
+				}
+				KeepRectOnScreen(rc);
+				wp.rcNormalPosition = rc;
+				wp.flags = 0;
+				auto maximized = window->Find("maximized");
+				wp.showCmd = maximized && maximized->Kind == Json::Value::Type::Bool && maximized->Bool ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+				::SetWindowPlacement(top, &wp);
+			}
+		}
+	}
+
+	if (auto active = state.Find("activePane"); active && active->IsString()) {
+		if (auto pane = m_Layout.FindPane(WideFromUtf8(active->String)); pane && pane->Group())
+			ActivatePane(pane);
+	}
+	return true;
+}
+
+bool CDockHost::SaveStateToFile(const std::wstring& path, bool includeWindowPlacement) const {
+	return WriteTextFile(path, SaveState(includeWindowPlacement));
+}
+
+bool CDockHost::LoadStateFromFile(const std::wstring& path, const LoadOptions& options, std::wstring* error, bool restoreWindowPlacement) {
+	std::string text;
+	if (!ReadTextFile(path, text)) {
+		if (error)
+			*error = L"the state file cannot be read";
+		return false;
+	}
+	return LoadState(text, options, error, restoreWindowPlacement);
+}
+
+void CDockHost::CaptureDefaultLayout() {
+	m_DefaultLayout = m_Layout.Save();
+}
+
+bool CDockHost::ResetLayout(std::wstring* error) {
+	if (m_DefaultLayout.empty()) {
+		if (error)
+			*error = L"no default layout has been captured";
+		return false;
+	}
+	LoadOptions options;
+	options.Factory = m_PaneFactory;
+	return m_Layout.Load(m_DefaultLayout, options, error);
+}
+
+bool CDockHost::SaveLayoutAs(const std::wstring& name) {
+	return m_Store.Set(name, m_Layout.Save());
+}
+
+bool CDockHost::ApplyLayout(const std::wstring& name, std::wstring* error) {
+	auto text = m_Store.Find(name);
+	if (!text) {
+		if (error)
+			*error = L"there is no layout with that name";
+		return false;
+	}
+	LoadOptions options;
+	options.Factory = m_PaneFactory;
+	return m_Layout.Load(*text, options, error);
+}
+
+//
+// menus and documents
+//
+
+int CDockHost::FillPaneMenu(HMENU menu, UINT firstId, PaneKind kind) const {
+	int count = 0;
+	UINT id = firstId;
+	for (auto& p : m_Layout.Panes()) {
+		if (p->Kind() == kind) {
+			::AppendMenuW(menu, MF_STRING | (p->State() != PaneState::Hidden ? MF_CHECKED : 0), id, p->Title.c_str());
+			count++;
+		}
+		id++;
+	}
+	return count;
+}
+
+bool CDockHost::ShowPane(DockPane* pane) {
+	if (!pane)
+		return false;
+	switch (pane->State()) {
+		case PaneState::Hidden:
+			if (!m_Layout.Show(pane))
+				return false;
+			ActivatePane(pane);
+			return true;
+		case PaneState::AutoHide:
+			return ShowFlyout(pane, true);
+		default:
+			ActivatePane(pane);
+			return true;
+	}
+}
+
+bool CDockHost::HandlePaneCommand(UINT id, UINT firstId) {
+	if (id < firstId || id - firstId >= m_Layout.Panes().size())
+		return false;
+	return ShowPane(m_Layout.Panes()[id - firstId].get());
+}
+
+int CDockHost::FillLayoutMenu(HMENU menu, UINT firstId) const {
+	UINT id = firstId;
+	for (auto& name : m_Store.Names())
+		::AppendMenuW(menu, MF_STRING, id++, name.c_str());
+	return (int)m_Store.Count();
+}
+
+bool CDockHost::HandleLayoutCommand(UINT id, UINT firstId) {
+	auto names = m_Store.Names();
+	if (id < firstId || id - firstId >= names.size())
+		return false;
+	return ApplyLayout(names[id - firstId]);
+}
+
+int CDockHost::CloseAllDocuments(bool exceptActive) {
+	DockPane* keep = nullptr;
+	if (exceptActive) {
+		keep = ActivePane();
+		if (!keep || keep->Kind() != PaneKind::Document) {
+			auto primary = m_Layout.PrimaryDocumentGroup();
+			keep = primary ? primary->ActivePane() : nullptr;
+		}
+	}
+	std::vector<DockPane*> documents;
+	for (auto& p : m_Layout.Panes())
+		if (p->Kind() == PaneKind::Document && p->Group() && p.get() != keep)
+			documents.push_back(p.get());
+
+	int closed = 0;
+	for (auto p : documents)
+		closed += ClosePane(p);
+	return closed;
+}
+
+bool CDockHost::ActivateNextDocument(bool forward) {
+	DockGroup* group = nullptr;
+	if (auto active = ActivePane(); active && active->Kind() == PaneKind::Document)
+		group = active->Group();
+	if (!group)
+		group = m_Layout.PrimaryDocumentGroup();
+	if (!group || group->Panes().size() < 2)
+		return false;
+
+	const int n = (int)group->Panes().size();
+	DockPane* next = group->Panes()[(group->ActiveIndex() + (forward ? 1 : n - 1)) % n];
+	ActivatePane(next);
+	return true;
 }
 
 }

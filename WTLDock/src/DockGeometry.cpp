@@ -265,4 +265,21 @@ TabStrip LayoutTabStrip(const std::vector<TabSpec>& tabs, const RECT& strip, con
 	return result;
 }
 
+bool KeepRectOnScreen(RECT& rect, int reachable) {
+	const RECT strip{ rect.left, rect.top, rect.right, rect.top + reachable };
+	if (::MonitorFromRect(&strip, MONITOR_DEFAULTTONULL))
+		return false;
+
+	MONITORINFO mi{ sizeof(mi) };
+	::GetMonitorInfo(::MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mi);
+	const RECT& work = mi.rcWork;
+	const int w = std::min(Width(rect), Width(work)), h = std::min(Height(rect), Height(work));
+	rect = { work.left + 40, work.top + 40, work.left + 40 + w, work.top + 40 + h };
+	if (rect.right > work.right)
+		OffsetRect(&rect, work.right - rect.right, 0);
+	if (rect.bottom > work.bottom)
+		OffsetRect(&rect, 0, work.bottom - rect.bottom);
+	return true;
+}
+
 }

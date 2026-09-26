@@ -198,6 +198,7 @@ std::string DockSerializer::Save(const DockLayout& layout) {
 	Value root = Value::MakeObject();
 	root.Add("version", Value::MakeNumber(FormatVersion));
 	root.Add("dpi", Value::MakeNumber(layout.m_Dpi));
+	root.Add("appVersion", Value::MakeNumber(layout.m_AppVersion));
 	root.Add("main", SaveNode(*layout.m_Root));
 
 	Value bars = Value::MakeObject();
@@ -340,8 +341,8 @@ std::unique_ptr<DockNode> DockSerializer::LoadNode(Context& ctx, const Value& v,
 	return node;
 }
 
-bool DockSerializer::Load(DockLayout& layout, std::string_view text, const PaneFactory& factory, std::wstring* error) {
-	Context ctx{ layout, factory, {}, {} };
+bool DockSerializer::Load(DockLayout& layout, std::string_view text, const LoadOptions& options, std::wstring* error) {
+	Context ctx{ layout, options.Factory, {}, {} };
 	auto fail = [&](const std::wstring& message) {
 		if (error)
 			*error = message;
@@ -357,6 +358,11 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const PaneF
 	int version = 0;
 	if (!ParseInt(root.Find("version"), version) || version != FormatVersion)
 		return fail(L"unsupported layout version");
+
+	int fileAppVersion = 0;
+	ParseInt(root.Find("appVersion"), fileAppVersion);
+	if (fileAppVersion < options.MinAppVersion)
+		return fail(L"the layout was saved by an older version of the application");
 
 	int fileDpi = 96;
 	if (auto dpi = root.Find("dpi")) {
@@ -428,9 +434,12 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const PaneF
 	layout.m_Floats = std::move(floats);
 	layout.m_NextFloatId = (int)layout.m_Floats.size();
 
+	std::set<std::wstring> known;		// the panes the file has heard of
 	if (auto panesValue = root.Find("panes"); panesValue && panesValue->IsArray()) {
 		for (auto& item : panesValue->Items) {
 			auto id = item.Find("id");
+			if (id && id->IsString())
+				known.insert(FromUtf8(id->String));
 			auto pane = id && id->IsString() ? layout.FindPane(FromUtf8(id->String)) : nullptr;
 			if (!pane)
 				continue;
@@ -449,6 +458,15 @@ bool DockSerializer::Load(DockLayout& layout, std::string_view text, const PaneF
 	}
 
 	layout.Commit();
+
+	if (options.ShowNewPanes) {
+		std::vector<DockPane*> fresh;
+		for (auto& p : layout.m_Panes)
+			if (!p->m_Group && !known.contains(p->Id()))
+				fresh.push_back(p.get());
+		for (auto p : fresh)
+			layout.Show(p);
+	}
 	return true;
 }
 
@@ -489,8 +507,8 @@ std::string DockLayout::Save() const {
 	return DockSerializer::Save(*this);
 }
 
-bool DockLayout::Load(std::string_view text, const PaneFactory& factory, std::wstring* error) {
-	return DockSerializer::Load(*this, text, factory, error);
+bool DockLayout::Load(std::string_view text, const LoadOptions& options, std::wstring* error) {
+	return DockSerializer::Load(*this, text, options, error);
 }
 
 std::wstring DockLayout::Dump() const {

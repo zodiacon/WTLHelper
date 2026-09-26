@@ -19,6 +19,16 @@ struct SplitterHit {
 // (DockLayout::AddPane) and return it, or return null to drop the pane from the layout.
 using PaneFactory = std::function<DockPane*(DockLayout&, const std::wstring& id)>;
 
+struct LoadOptions {
+	// makes the panes that the file mentions and that are not registered
+	PaneFactory Factory;
+	// panes that are registered but that the file does not know at all (they are new since it was saved) are shown
+	// at their default place instead of staying hidden
+	bool ShowNewPanes{ false };
+	// a file saved with an older DockLayout::AppVersion than this is refused (0: any is fine)
+	int MinAppVersion{ 0 };
+};
+
 //
 // The docking layout model. Pure data: it owns panes and the layout tree, knows nothing about windows.
 //
@@ -142,9 +152,18 @@ public:
 	//
 	std::string Save() const;
 	// Replaces the layout with the saved one. Panes are matched by id; ids that are not registered (and not created
-	// by the factory) are dropped, registered panes missing from the text become hidden. On failure the layout is
-	// left unchanged (except for panes the factory registered).
-	bool Load(std::string_view text, const PaneFactory& factory = {}, std::wstring* error = nullptr);
+	// by the factory) are dropped, registered panes missing from the text become hidden (or, with ShowNewPanes, are
+	// shown if they are new). On failure the layout is left unchanged (except for panes the factory registered).
+	bool Load(std::string_view text, const LoadOptions& options = {}, std::wstring* error = nullptr);
+
+	// An application's own version of its pane arrangement: saved with the layout, so that a newer application can
+	// refuse (LoadOptions::MinAppVersion) layouts that its panes no longer fit.
+	int AppVersion() const {
+		return m_AppVersion;
+	}
+	void SetAppVersion(int version) {
+		m_AppVersion = version;
+	}
 
 	// A one-line-per-area description of the layout, e.g. "main: H(T[Tools]@250 D[a.cpp,b.cpp] T[Output]@200)".
 	std::wstring Dump() const;
@@ -188,6 +207,7 @@ private:
 	uint64_t m_Version{};
 	int m_NextFloatId{};
 	int m_Dpi{ 96 };
+	int m_AppVersion{};
 	std::function<void()> m_OnChanged;
 };
 

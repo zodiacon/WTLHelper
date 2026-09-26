@@ -9,10 +9,18 @@ public:
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
 		MESSAGE_HANDLER(WM_INITMENUPOPUP, OnInitMenuPopup)
+		MESSAGE_HANDLER(WM_CLOSE, OnClose)
 		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnCtlColor)
 		COMMAND_ID_HANDLER(ID_RESET, OnReset)
 		COMMAND_ID_HANDLER(ID_SAVE, OnSave)
 		COMMAND_ID_HANDLER(ID_LOAD, OnLoad)
+		COMMAND_ID_HANDLER(ID_FORGET, OnForget)
+		COMMAND_ID_HANDLER(ID_SAVE_NAMED, OnSaveNamed)
+		COMMAND_ID_HANDLER(ID_DELETE_NAMED, OnDeleteNamed)
+		COMMAND_ID_HANDLER(ID_CLOSE_DOCS, OnCloseDocuments)
+		COMMAND_ID_HANDLER(ID_CLOSE_DOCS_BUT, OnCloseDocuments)
+		COMMAND_ID_HANDLER(ID_NEXT_DOC, OnNextDocument)
+		COMMAND_ID_HANDLER(ID_PREV_DOC, OnNextDocument)
 		COMMAND_ID_HANDLER(ID_DUMP, OnDump)
 		COMMAND_ID_HANDLER(ID_DARK, OnDark)
 		COMMAND_ID_HANDLER(ID_NEW_DOC, OnNewDocument)
@@ -29,29 +37,38 @@ public:
 		COMMAND_RANGE_HANDLER(ID_ACT_EDGE, ID_ACT_EDGE + 3, OnActiveCommand)
 		COMMAND_RANGE_HANDLER(ID_ACT_BESIDE, ID_ACT_BESIDE + 3, OnActiveCommand)
 		COMMAND_RANGE_HANDLER(ID_ACT_TAB, ID_ACT_TAB + 49, OnActiveCommand)
-		COMMAND_RANGE_HANDLER(ID_PANE_FIRST, ID_PANE_FIRST + 99, OnTogglePane)
+		COMMAND_RANGE_HANDLER(ID_PANE_FIRST, ID_PANE_FIRST + 999, OnShowPane)
+		COMMAND_RANGE_HANDLER(ID_LAYOUT_FIRST, ID_LAYOUT_FIRST + 49, OnApplyLayout)
 		CHAIN_MSG_MAP(CFrameWindowImpl<CMainFrame>)
 	END_MSG_MAP()
 
 private:
 	enum : UINT {
-		ID_RESET = 1001, ID_SAVE, ID_LOAD, ID_DUMP, ID_DARK, ID_HELP_USAGE, ID_EXIT,
-		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP,
+		ID_RESET = 1001, ID_SAVE, ID_LOAD, ID_FORGET, ID_SAVE_NAMED, ID_DELETE_NAMED, ID_DUMP, ID_DARK, ID_HELP_USAGE, ID_EXIT,
+		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC,
 		ID_PANE_INFO = 3000,	// added to the tab context menu by OnBuildPaneMenu
 		ID_ACT_HIDE = 1100, ID_ACT_AUTOHIDE, ID_ACT_FLOAT,
 		ID_ACT_EDGE = 1110,		// + Left, Right, Top, Bottom
 		ID_ACT_BESIDE = 1120,	// the same relative to the document area
 		ID_ACT_TAB = 1200,		// + index in the list of tool panes
-		ID_PANE_FIRST = 2000,
+		ID_PANE_FIRST = 2000,	// + index in the layout's list of panes (see FillPaneMenu)
+		ID_LAYOUT_FIRST = 4000,	// + index in the named layouts
 	};
 
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnInitMenuPopup(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnReset(WORD, WORD, HWND, BOOL&);
 	LRESULT OnSave(WORD, WORD, HWND, BOOL&);
 	LRESULT OnLoad(WORD, WORD, HWND, BOOL&);
+	LRESULT OnForget(WORD, WORD, HWND, BOOL&);
+	LRESULT OnSaveNamed(WORD, WORD, HWND, BOOL&);
+	LRESULT OnDeleteNamed(WORD, WORD, HWND, BOOL&);
+	LRESULT OnApplyLayout(WORD, WORD, HWND, BOOL&);
+	LRESULT OnCloseDocuments(WORD, WORD, HWND, BOOL&);
+	LRESULT OnNextDocument(WORD, WORD, HWND, BOOL&);
 	LRESULT OnDump(WORD, WORD, HWND, BOOL&);
 	LRESULT OnDark(WORD, WORD, HWND, BOOL&);
 	LRESULT OnHelp(WORD, WORD, HWND, BOOL&);
@@ -60,7 +77,7 @@ private:
 	LRESULT OnPaneInfo(WORD, WORD, HWND, BOOL&);
 	LRESULT OnExit(WORD, WORD, HWND, BOOL&);
 	LRESULT OnActiveCommand(WORD, WORD, HWND, BOOL&);
-	LRESULT OnTogglePane(WORD, WORD, HWND, BOOL&);
+	LRESULT OnShowPane(WORD, WORD, HWND, BOOL&);
 
 	void BuildMenu();
 	void CreateContent();
@@ -70,7 +87,10 @@ private:
 	void ApplyTheme();
 	void ApplyFonts();
 	void UpdateStatus();
-	std::wstring LayoutFilePath() const;
+	static std::wstring FileNextToExe(const wchar_t* name);
+	CEdit* EditOf(HWND content);
+	CEdit* CreateEditor(HWND parent);
+	void SaveNamedLayouts();
 
 	WTLDock::CDockHost m_Dock;
 
@@ -84,8 +104,8 @@ private:
 	CFont m_MonoFont;
 	CBrush m_DarkBrush;
 
-	CMenu m_PaneMenu, m_ActiveMenu, m_TabMenu;
+	CMenu m_PaneMenu, m_ActiveMenu, m_TabMenu, m_LayoutMenu;
 	std::vector<WTLDock::DockPane*> m_TabTargets;
-	std::string m_DefaultLayout;
+	std::wstring m_StateFile, m_LayoutsFile;
 	bool m_Dark{};
 };

@@ -12,3 +12,4 @@
 #include "DockTheme.h"
 #include "DockGeometry.h"
 #include "DockDrop.h"
+#include "DockStore.h"

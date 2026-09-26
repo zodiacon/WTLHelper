@@ -725,7 +725,7 @@ TEST(Load_FactoryCreatesMissingPanes) {
 			return nullptr;	// refuse this one
 		return id == L"a.cpp" ? AddDoc(layout, id.c_str()) : AddTool(layout, id.c_str(), DockSide::Left, 250, 250);
 	};
-	CHECK(copy.Load(text, factory));
+	CHECK(copy.Load(text, LoadOptions{ factory }));
 	CHECK(requested.size() == 4);
 	CHECK_DUMP(copy, L"main: V(H(T[Sol]@250 D[a.cpp]) T[Output]@150)");
 	CHECK_VALID(copy);
@@ -1333,6 +1333,175 @@ TEST(Model_CanQueriesMatchTheOperations) {
 	CHECK(!l.CanMoveGroupTo(p.Props->Group(), p.Ext->Group(), DockPosition::Tab));		// nothing docks to a group in a bar
 }
 
+// ---- Persistence ------------------------------------------------------------------
+
+static std::wstring TempFile(const wchar_t* name) {
+	wchar_t dir[MAX_PATH];
+	::GetTempPathW(_countof(dir), dir);
+	return std::wstring(dir) + L"WTLDockTests." + std::to_wstring(::GetCurrentProcessId()) + L"." + name;
+}
+
+TEST(Load_AnOlderApplicationVersionCanBeRefused) {
+	DockLayout l;
+	BuildStandard(l);
+	l.SetAppVersion(3);
+	const std::string text = l.Save();
+	CHECK(l.AppVersion() == 3);
+
+	DockLayout copy;
+	Register(copy);
+	LoadOptions options;
+	options.MinAppVersion = 3;
+	CHECK(copy.Load(text, options));
+	CHECK(copy.AppVersion() == 0);						// the application's version is the application's, not the file's
+
+	DockLayout newer;
+	Register(newer);
+	options.MinAppVersion = 4;
+	std::wstring error;
+	const std::wstring before = newer.Dump();
+	CHECK(!newer.Load(text, options, &error) && !error.empty());
+	CHECK_STR(newer.Dump(), before);					// untouched
+
+	// files from before there was a version count as 0, and 0 accepts everything
+	options.MinAppVersion = 0;
+	CHECK(newer.Load(R"({"version": 1, "main": {"type": "split", "axis": "h", "children": [{"type": "group", "kind": "document", "panes": []}]}})", options));
+	options.MinAppVersion = 1;
+	CHECK(!newer.Load(R"({"version": 1, "main": {"type": "split", "axis": "h", "children": [{"type": "group", "kind": "document", "panes": []}]}})", options));
+}
+
+TEST(Load_ShowNewPanesShowsOnlyThePanesTheFileDoesNotKnow) {
+	// an older application: only these panes existed
+	DockLayout l;
+	Panes p{};
+	p.Sol = AddTool(l, L"Sol", DockSide::Left, 250, 300);
+	p.Props = AddTool(l, L"Props", DockSide::Right, 200, 300);
+	p.Output = AddTool(l, L"Output", DockSide::Bottom, 300, 150);
+	p.A = AddDoc(l, L"a.cpp");
+	l.Show(p.Sol);
+	l.Show(p.Props);
+	l.Show(p.Output);
+	l.Show(p.A);
+	l.Hide(p.Props);									// the user closed it: the file knows and keeps it hidden
+	const std::string text = l.Save();
+
+	// a newer application: Output is unchanged, and Ext and Pinned are new
+	DockLayout plain, showing;
+	Register(plain);
+	Register(showing);
+	CHECK(plain.Load(text));
+	CHECK(plain.FindPane(L"Ext")->State() == PaneState::Hidden);
+
+	LoadOptions options;
+	options.ShowNewPanes = true;
+	CHECK(showing.Load(text, options));
+	CHECK(showing.FindPane(L"Ext")->State() == PaneState::Docked);
+	CHECK(showing.FindPane(L"Pinned")->State() == PaneState::Docked);
+	CHECK(showing.FindPane(L"Props")->State() == PaneState::Hidden);	// closed by the user
+	CHECK(showing.FindPane(L"c.cpp")->State() == PaneState::Document);	// unknown to the file too
+	CHECK_VALID(showing);
+}
+
+TEST(Store_KeepsNamedLayoutsInOrder) {
+	DockLayoutStore s;
+	CHECK(s.Empty() && s.Count() == 0 && s.Find(L"x") == nullptr);
+	CHECK(s.Set(L"Design", "one") && s.Set(L"Debug", "two") && s.Set(L"Über ✓", "three"));
+	CHECK(!s.Set(L"", "nothing"));
+	CHECK(s.Count() == 3 && s.Contains(L"Debug"));
+	CHECK(s.Set(L"Design", "replaced") && s.Count() == 3);
+	CHECK(*s.Find(L"Design") == "replaced");
+	const auto names = s.Names();
+	CHECK(names.size() == 3 && names[0] == L"Design" && names[1] == L"Debug" && names[2] == L"Über ✓");
+
+	CHECK(s.Rename(L"Debug", L"Run"));
+	CHECK(!s.Rename(L"Run", L"Design") && !s.Rename(L"nope", L"x") && !s.Rename(L"Run", L""));
+	CHECK(s.Names()[1] == L"Run" && *s.Find(L"Run") == "two");
+	CHECK(s.Remove(L"Run") && !s.Remove(L"Run"));
+	CHECK(s.Count() == 2);
+	s.Clear();
+	CHECK(s.Empty());
+}
+
+TEST(Store_RoundTripsThroughTextAndRejectsGarbage) {
+	DockLayoutStore s;
+	s.Set(L"B", "{\"a\": \"quoted \\\" text\", \"n\": 1}\n");
+	s.Set(L"A", "second");
+	s.Set(L"Über \U0001F600", "third");
+	const std::string text = s.Serialize();
+
+	DockLayoutStore t;
+	std::wstring error;
+	CHECK(t.Parse(text, &error) && error.empty());
+	CHECK(t.Names() == s.Names());
+	CHECK(*t.Find(L"B") == *s.Find(L"B") && *t.Find(L"Über \U0001F600") == "third");
+	CHECK(t.Serialize() == text);
+
+	// failures leave the contents alone
+	CHECK(!t.Parse("", &error) && !t.Parse("[]") && !t.Parse("{}") && !t.Parse(R"({"format": "other", "version": 1, "layouts": {}})"));
+	CHECK(!t.Parse(R"({"format": "WTLDockLayouts", "version": 2, "layouts": {}})"));
+	CHECK(!t.Parse(R"({"format": "WTLDockLayouts", "version": 1, "layouts": {"x": 5}})"));
+	CHECK(!t.Parse(R"({"format": "WTLDockLayouts", "version": 1})"));
+	CHECK(t.Count() == 3 && t.Names() == s.Names());
+
+	// without an "order" the layouts come in the order of the file
+	CHECK(t.Parse(R"({"format": "WTLDockLayouts", "version": 1, "layouts": {"z": "1", "y": "2"}})"));
+	CHECK(t.Names().size() == 2 && t.Names()[0] == L"z");
+}
+
+TEST(Files_AreWrittenWholeOrNotAtAll) {
+	const auto path = TempFile(L"text.json");
+	std::string text;
+	CHECK(!ReadTextFile(path, text));
+	CHECK(WriteTextFile(path, "first \xC3\xA4\xE2\x9C\x93"));
+	CHECK(ReadTextFile(path, text) && text == "first \xC3\xA4\xE2\x9C\x93");
+	CHECK(WriteTextFile(path, "second"));					// replaces
+	CHECK(ReadTextFile(path, text) && text == "second");
+	CHECK(WriteTextFile(path, ""));
+	CHECK(ReadTextFile(path, text) && text.empty());
+	CHECK(::GetFileAttributesW((path + L".tmp").c_str()) == INVALID_FILE_ATTRIBUTES);		// no temporary left behind
+	CHECK(!WriteTextFile(TempFile(L"no\\such\\directory\\x.json"), "text"));
+	::DeleteFileW(path.c_str());
+
+	// a store in a file
+	const auto storePath = TempFile(L"layouts.json");
+	DockLayoutStore s;
+	DockLayout l;
+	BuildStandard(l);
+	s.Set(L"Standard", l.Save());
+	CHECK(s.SaveToFile(storePath));
+	DockLayoutStore t;
+	std::wstring error;
+	CHECK(t.LoadFromFile(storePath, &error) && *t.Find(L"Standard") == l.Save());
+	CHECK(!t.LoadFromFile(TempFile(L"missing.json"), &error) && !error.empty());
+	CHECK(t.Count() == 1);
+	::DeleteFileW(storePath.c_str());
+}
+
+TEST(Screen_ARectangleThatIsOutOfReachComesBack) {
+	// the work area of the primary monitor, for a rectangle that certainly is on a screen
+	MONITORINFO mi{ sizeof(mi) };
+	::GetMonitorInfo(::MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi);
+	RECT fine{ mi.rcWork.left + 100, mi.rcWork.top + 100, mi.rcWork.left + 400, mi.rcWork.top + 350 };
+	const RECT original = fine;
+	CHECK(!KeepRectOnScreen(fine) && EqualRect(&fine, &original));
+
+	// partly off the screen but with the title bar in reach: left alone
+	RECT partly{ mi.rcWork.right - 50, mi.rcWork.top + 10, mi.rcWork.right + 250, mi.rcWork.top + 300 };
+	const RECT partlyBefore = partly;
+	CHECK(!KeepRectOnScreen(partly) && EqualRect(&partly, &partlyBefore));
+
+	RECT lost{ -30000, -30000, -29700, -29750 };
+	CHECK(KeepRectOnScreen(lost));
+	const RECT strip{ lost.left, lost.top, lost.right, lost.top + 40 };
+	CHECK(::MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) != nullptr);
+	CHECK(Width(lost) == 300 && Height(lost) == 250);
+
+	// bigger than any screen: shrunk to fit
+	RECT huge{ 50000, 50000, 60000, 60000 };
+	CHECK(KeepRectOnScreen(huge));
+	CHECK(Width(huge) <= Width(mi.rcWork) + 10000 && huge.left < 50000);
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -1546,6 +1715,13 @@ int wmain() {
 	Run_Drop_AnywhereElseFloatsWhereTheGhostIs();
 	Run_Drop_ApplyingADropDocksOrFloats();
 	Run_Model_CanQueriesMatchTheOperations();
+
+	Run_Load_AnOlderApplicationVersionCanBeRefused();
+	Run_Load_ShowNewPanesShowsOnlyThePanesTheFileDoesNotKnow();
+	Run_Store_KeepsNamedLayoutsInOrder();
+	Run_Store_RoundTripsThroughTextAndRejectsGarbage();
+	Run_Files_AreWrittenWholeOrNotAtAll();
+	Run_Screen_ARectangleThatIsOutOfReachComesBack();
 
 	Run_Random_OperationsKeepTheInvariants();
 

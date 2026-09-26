@@ -3,6 +3,7 @@
 #include "DockLayout.h"
 #include "DockGeometry.h"
 #include "DockTheme.h"
+#include "DockStore.h"
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -169,6 +170,58 @@ public:
 		m_LeaveMs = leaveDelayMs;
 	}
 
+	//
+	// Persistence. The state of the docking area is the layout, the pane that has the focus and, if asked for, where
+	// the top-level window is (restored onto a screen that exists). A layout alone is DockLayout::Save / Load.
+	// Panes that a saved state mentions and that are not registered are made by the options' factory or, without
+	// one, by SetPaneFactory.
+	//
+	std::string SaveState(bool includeWindowPlacement = true) const;
+	bool LoadState(std::string_view text, const LoadOptions& options = {}, std::wstring* error = nullptr, bool restoreWindowPlacement = true);
+	bool SaveStateToFile(const std::wstring& path, bool includeWindowPlacement = true) const;
+	bool LoadStateFromFile(const std::wstring& path, const LoadOptions& options = {}, std::wstring* error = nullptr, bool restoreWindowPlacement = true);
+
+	void SetPaneFactory(PaneFactory factory) {
+		m_PaneFactory = std::move(factory);
+	}
+	// Creates the content window of a pane the first time the pane is on show without one, as a child of 'parent'
+	// (the host). This is how panes that are created on demand, or made from a saved layout, get their windows.
+	void SetContentFactory(std::function<HWND(DockPane&, HWND parent)> factory) {
+		m_ContentFactory = std::move(factory);
+	}
+
+	// The default arrangement, to go back to (Window > Reset Window Layout): call CaptureDefaultLayout once the
+	// application has set its panes up.
+	void CaptureDefaultLayout();
+	bool HasDefaultLayout() const {
+		return !m_DefaultLayout.empty();
+	}
+	bool ResetLayout(std::wstring* error = nullptr);
+
+	// Named layouts, kept in Layouts() (which the application can save to a file and load again).
+	DockLayoutStore& Layouts() {
+		return m_Store;
+	}
+	bool SaveLayoutAs(const std::wstring& name);
+	bool ApplyLayout(const std::wstring& name, std::wstring* error = nullptr);
+
+	//
+	// Menus. A "View" menu lists panes: FillPaneMenu appends an item for every pane of a kind (checked if it is
+	// showing) with the ids firstId + index in Layout().Panes(); HandlePaneCommand shows or activates the pane behind
+	// such an id. The same for the named layouts.
+	//
+	int FillPaneMenu(HMENU menu, UINT firstId, PaneKind kind = PaneKind::Tool) const;
+	bool HandlePaneCommand(UINT id, UINT firstId);
+	// Brings a pane into view: shows it if it is hidden, slides it out if it is auto-hidden, else activates it.
+	bool ShowPane(DockPane* pane);
+	int FillLayoutMenu(HMENU menu, UINT firstId) const;
+	bool HandleLayoutCommand(UINT id, UINT firstId);
+
+	// Documents. Closing honours PaneCaps::CanClose and OnPaneClosing; returns how many were closed.
+	int CloseAllDocuments(bool exceptActive = false);
+	// the next (or previous) tab of the document group that has the focus, wrapping around
+	bool ActivateNextDocument(bool forward = true);
+
 	// the window of a group (in the main tree, a floating one or the flyout), or null
 	HWND GroupWindow(const DockGroup* group) const;
 	TabStripState GetTabState(const DockGroup* group) const;
@@ -239,6 +292,7 @@ private:
 	// makes 'child' a child window of 'parent', converting a popup window if necessary
 	static void Adopt(HWND child, HWND parent);
 	void SetActivePane(DockPane* pane);
+	void EnsureContent(DockPane* pane);
 	DockPane* PaneFromWindow(HWND hWnd) const;
 	void OnFocusChanged(HWND hWnd);
 	static void CALLBACK FocusEventProc(HWINEVENTHOOK hook, DWORD event, HWND hWnd, LONG idObject, LONG idChild, DWORD thread, DWORD time);
@@ -286,6 +340,10 @@ private:
 	HWINEVENTHOOK m_FocusHook{};
 	bool m_Syncing{};
 	bool m_KeepOnScreen{ true };
+	PaneFactory m_PaneFactory;
+	std::function<HWND(DockPane&, HWND)> m_ContentFactory;
+	std::string m_DefaultLayout;
+	DockLayoutStore m_Store;
 
 	// the flyout of an auto-hidden group: identified by a pane of the group, since nodes come and go
 	std::wstring m_FlyoutId;

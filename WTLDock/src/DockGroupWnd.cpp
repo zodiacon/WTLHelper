@@ -22,6 +22,7 @@ void CDockGroupWnd::Relayout() {
 		const GroupParts parts = ComputeGroupParts(*m_Group, rc, m_Host.Metrics());
 		const RECT& c = parts.Content;
 		const auto active = m_Group->ActivePane();
+		m_Host.EnsureContent(active);
 		for (auto pane : m_Group->Panes()) {
 			if (!pane->hWnd || !::IsWindow(pane->hWnd))
 				continue;

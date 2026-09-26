@@ -96,6 +96,7 @@
     <ClInclude Include="include\DockLayout.h" />
     <ClInclude Include="include\DockNode.h" />
     <ClInclude Include="include\DockPane.h" />
+    <ClInclude Include="include\DockStore.h" />
     <ClInclude Include="include\DockTheme.h" />
     <ClInclude Include="include\DockTypes.h" />
     <ClInclude Include="include\WTLDock.h" />
@@ -107,6 +108,7 @@
     <ClInclude Include="src\SplitterTracker.h" />
     <ClInclude Include="src\DockSerializer.h" />
     <ClInclude Include="src\Json.h" />
+    <ClInclude Include="src\Utf8.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\DockArrange.cpp" />
@@ -119,6 +121,7 @@
     <ClCompile Include="src\DockHost.cpp" />
     <ClCompile Include="src\DockLayout.cpp" />
     <ClCompile Include="src\DockSerializer.cpp" />
+    <ClCompile Include="src\DockStore.cpp" />
     <ClCompile Include="src\Json.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

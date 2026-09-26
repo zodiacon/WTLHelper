@@ -20,7 +20,7 @@ const wchar_t* const SampleSource[] = {
 
 	L"# DockDemo\r\n\r\nA playground for the WTLDock framework.\r\n\r\n"
 	L"* drag the splitters to resize the panes\r\n* click a tab to switch, the X in a caption to close a pane\r\n"
-	L"* use the *Active pane* menu to move the active pane around\r\n* Layout > Save / Load keeps the arrangement\r\n",
+	L"* use the *Active pane* menu to move the active pane around\r\n* Layout > Save state keeps the arrangement\r\n",
 };
 
 }
@@ -36,12 +36,45 @@ LRESULT CMainFrame::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dock.OnActivePaneChanged = [this] { UpdateStatus(); };
 	HookDock();
 
+	// Saved layouts mention documents that the application has to make again: Untitled<n> here.
+	m_Dock.SetPaneFactory([this](DockLayout& layout, const std::wstring& id) -> DockPane* {
+		if (!id.starts_with(L"Untitled"))
+			return nullptr;
+		m_UntitledCount = std::max(m_UntitledCount, _wtoi(id.c_str() + 8));
+		PaneDesc d;
+		d.Id = d.Title = id;
+		d.Kind = PaneKind::Document;
+		d.Icon = ::LoadIcon(nullptr, IDI_APPLICATION);
+		return layout.AddPane(d);		// no window: the content factory makes it when the pane is first on show
+	});
+	m_Dock.SetContentFactory([this](DockPane&, HWND parent) -> HWND {
+		return *CreateEditor(parent);
+	});
+
+	m_StateFile = FileNextToExe(L"DockDemo.state.json");
+	m_LayoutsFile = FileNextToExe(L"DockDemo.layouts.json");
+
 	CreateContent();
-	BuildLayout();
-	m_DefaultLayout = m_Dock.Layout().Save();
-	ApplyTheme();
 	ApplyFonts();
+	BuildLayout();
+	m_Dock.CaptureDefaultLayout();
+	ApplyTheme();
+
+	// A saved state is picked up if there is one; it exists only after Layout > Save state, so that a plain run
+	// always starts from the default arrangement.
+	m_Dock.Layouts().LoadFromFile(m_LayoutsFile);
+	std::wstring error;
+	if (::GetFileAttributes(m_StateFile.c_str()) != INVALID_FILE_ATTRIBUTES && !m_Dock.LoadStateFromFile(m_StateFile, {}, &error))
+		MessageBox((L"The saved state could not be used, starting with the default layout.\n" + error).c_str(), L"DockDemo", MB_ICONWARNING);
 	UpdateStatus();
+	return 0;
+}
+
+LRESULT CMainFrame::OnClose(UINT, WPARAM, LPARAM, BOOL& handled) {
+	// once the user has saved a state, it follows them
+	if (::GetFileAttributes(m_StateFile.c_str()) != INVALID_FILE_ATTRIBUTES)
+		m_Dock.SaveStateToFile(m_StateFile);
+	handled = FALSE;
 	return 0;
 }
 
@@ -228,8 +261,15 @@ void CMainFrame::BuildMenu() {
 	CMenu layout;
 	layout.CreatePopupMenu();
 	layout.AppendMenu(MF_STRING, ID_RESET, L"&Reset layout");
-	layout.AppendMenu(MF_STRING, ID_SAVE, L"&Save layout to file");
-	layout.AppendMenu(MF_STRING, ID_LOAD, L"&Load layout from file");
+	layout.AppendMenu(MF_SEPARATOR);
+	layout.AppendMenu(MF_STRING, ID_SAVE_NAMED, L"Save as &named layout");
+	m_LayoutMenu.CreatePopupMenu();		// filled in when it opens
+	layout.AppendMenu(MF_POPUP, (UINT_PTR)m_LayoutMenu.m_hMenu, L"&Apply named layout");
+	layout.AppendMenu(MF_STRING, ID_DELETE_NAMED, L"Delete all named la&youts");
+	layout.AppendMenu(MF_SEPARATOR);
+	layout.AppendMenu(MF_STRING, ID_SAVE, L"&Save state (and keep saving it at exit)");
+	layout.AppendMenu(MF_STRING, ID_LOAD, L"&Load saved state");
+	layout.AppendMenu(MF_STRING, ID_FORGET, L"&Forget saved state");
 	layout.AppendMenu(MF_SEPARATOR);
 	layout.AppendMenu(MF_STRING, ID_DUMP, L"Show &dump...");
 	layout.AppendMenu(MF_SEPARATOR);
@@ -270,6 +310,11 @@ void CMainFrame::BuildMenu() {
 	window.AppendMenu(MF_STRING, ID_CLOSE_ACTIVE, L"&Close active pane");
 	window.AppendMenu(MF_STRING, ID_CLOSE_OTHERS, L"Close &others in its group");
 	window.AppendMenu(MF_STRING, ID_CLOSE_GROUP, L"Close all in its &group");
+	window.AppendMenu(MF_SEPARATOR);
+	window.AppendMenu(MF_STRING, ID_CLOSE_DOCS, L"Close all doc&uments");
+	window.AppendMenu(MF_STRING, ID_CLOSE_DOCS_BUT, L"Close all documents but t&he active one");
+	window.AppendMenu(MF_STRING, ID_NEXT_DOC, L"Ne&xt document");
+	window.AppendMenu(MF_STRING, ID_PREV_DOC, L"&Previous document");
 	menu.AppendMenu(MF_POPUP, (UINT_PTR)window.m_hMenu, L"&Window");
 	window.Detach();
 
@@ -299,9 +344,14 @@ LRESULT CMainFrame::OnInitMenuPopup(UINT, WPARAM wp, LPARAM, BOOL& handled) {
 
 	if (popup == m_PaneMenu.m_hMenu) {
 		clear(m_PaneMenu.m_hMenu);
-		UINT id = ID_PANE_FIRST;
-		for (auto& p : layout.Panes())
-			m_PaneMenu.AppendMenu(MF_STRING | (p->State() != PaneState::Hidden ? MF_CHECKED : 0), id++, p->Title.c_str());
+		m_Dock.FillPaneMenu(m_PaneMenu, ID_PANE_FIRST, PaneKind::Tool);
+		m_PaneMenu.AppendMenu(MF_SEPARATOR);
+		m_Dock.FillPaneMenu(m_PaneMenu, ID_PANE_FIRST, PaneKind::Document);
+	}
+	else if (popup == m_LayoutMenu.m_hMenu) {
+		clear(m_LayoutMenu.m_hMenu);
+		if (m_Dock.FillLayoutMenu(m_LayoutMenu, ID_LAYOUT_FIRST) == 0)
+			m_LayoutMenu.AppendMenu(MF_STRING | MF_GRAYED, (UINT_PTR)0, L"(none saved)");
 	}
 	else if (popup == m_ActiveMenu.m_hMenu) {
 		auto pane = m_Dock.ActivePane();
@@ -361,19 +411,8 @@ LRESULT CMainFrame::OnActiveCommand(WORD, WORD id, HWND, BOOL&) {
 	return 0;
 }
 
-LRESULT CMainFrame::OnTogglePane(WORD, WORD id, HWND, BOOL&) {
-	size_t index = id - ID_PANE_FIRST;
-	auto& layout = m_Dock.Layout();
-	if (index < layout.Panes().size()) {
-		DockPane* pane = layout.Panes()[index].get();
-		if (pane->State() == PaneState::Hidden) {
-			layout.Show(pane);
-			m_Dock.ActivatePane(pane);
-		}
-		else {
-			layout.Hide(pane);
-		}
-	}
+LRESULT CMainFrame::OnShowPane(WORD, WORD id, HWND, BOOL&) {
+	m_Dock.HandlePaneCommand(id, ID_PANE_FIRST);
 	return 0;
 }
 
@@ -383,35 +422,74 @@ LRESULT CMainFrame::OnTogglePane(WORD, WORD id, HWND, BOOL&) {
 
 LRESULT CMainFrame::OnReset(WORD, WORD, HWND, BOOL&) {
 	std::wstring error;
-	if (!m_Dock.Layout().Load(m_DefaultLayout, {}, &error))
+	if (!m_Dock.ResetLayout(&error))
 		MessageBox(error.c_str(), L"DockDemo", MB_ICONERROR);
 	return 0;
 }
 
-std::wstring CMainFrame::LayoutFilePath() const {
+std::wstring CMainFrame::FileNextToExe(const wchar_t* name) {
 	wchar_t path[MAX_PATH];
 	::GetModuleFileName(nullptr, path, _countof(path));
 	std::wstring result(path);
-	return result.substr(0, result.find_last_of(L'\\') + 1) + L"DockDemo.layout.json";
+	return result.substr(0, result.find_last_of(L'\\') + 1) + name;
 }
 
 LRESULT CMainFrame::OnSave(WORD, WORD, HWND, BOOL&) {
-	std::ofstream file(LayoutFilePath(), std::ios::binary);
-	file << m_Dock.Layout().Save();
-	if (!file)
-		MessageBox(L"Failed to write the layout file", L"DockDemo", MB_ICONERROR);
+	if (!m_Dock.SaveStateToFile(m_StateFile))
+		MessageBox(L"Failed to write the state file", L"DockDemo", MB_ICONERROR);
 	else
-		MessageBox((L"Saved to " + LayoutFilePath()).c_str(), L"DockDemo", MB_ICONINFORMATION);
+		MessageBox((L"Saved to " + m_StateFile).c_str(), L"DockDemo", MB_ICONINFORMATION);
 	return 0;
 }
 
 LRESULT CMainFrame::OnLoad(WORD, WORD, HWND, BOOL&) {
-	std::ifstream file(LayoutFilePath(), std::ios::binary);
-	std::stringstream text;
-	text << file.rdbuf();
 	std::wstring error;
-	if (!file || !m_Dock.Layout().Load(text.str(), {}, &error))
-		MessageBox((L"Failed to load " + LayoutFilePath() + L"\n" + error).c_str(), L"DockDemo", MB_ICONERROR);
+	if (!m_Dock.LoadStateFromFile(m_StateFile, {}, &error))
+		MessageBox((L"Failed to load " + m_StateFile + L"\n" + error).c_str(), L"DockDemo", MB_ICONERROR);
+	return 0;
+}
+
+LRESULT CMainFrame::OnForget(WORD, WORD, HWND, BOOL&) {
+	::DeleteFile(m_StateFile.c_str());
+	return 0;
+}
+
+void CMainFrame::SaveNamedLayouts() {
+	if (m_Dock.Layouts().Empty())
+		::DeleteFile(m_LayoutsFile.c_str());
+	else if (!m_Dock.Layouts().SaveToFile(m_LayoutsFile))
+		MessageBox(L"Failed to write the layouts file", L"DockDemo", MB_ICONERROR);
+}
+
+LRESULT CMainFrame::OnSaveNamed(WORD, WORD, HWND, BOOL&) {
+	std::wstring name;
+	for (int i = 1; name.empty() || m_Dock.Layouts().Contains(name); i++)
+		name = std::format(L"Layout {}", i);
+	m_Dock.SaveLayoutAs(name);
+	SaveNamedLayouts();
+	return 0;
+}
+
+LRESULT CMainFrame::OnDeleteNamed(WORD, WORD, HWND, BOOL&) {
+	m_Dock.Layouts().Clear();
+	SaveNamedLayouts();
+	return 0;
+}
+
+LRESULT CMainFrame::OnApplyLayout(WORD, WORD id, HWND, BOOL&) {
+	if (!m_Dock.HandleLayoutCommand(id, ID_LAYOUT_FIRST))
+		::MessageBeep(MB_ICONEXCLAMATION);
+	return 0;
+}
+
+LRESULT CMainFrame::OnCloseDocuments(WORD, WORD id, HWND, BOOL&) {
+	m_Dock.CloseAllDocuments(id == ID_CLOSE_DOCS_BUT);
+	return 0;
+}
+
+LRESULT CMainFrame::OnNextDocument(WORD, WORD id, HWND, BOOL&) {
+	if (!m_Dock.ActivateNextDocument(id == ID_NEXT_DOC))
+		::MessageBeep(MB_ICONEXCLAMATION);
 	return 0;
 }
 
@@ -426,9 +504,9 @@ LRESULT CMainFrame::OnHelp(WORD, WORD, HWND, BOOL&) {
 		L"Click a tab to switch panes; click the X in a caption (or on a document tab) to close a pane; drag tabs to reorder them.\n"
 		L"The pin in a tool window's caption auto-hides it; hover or click its item on the bar to slide it out, and press the pin in the flyout to dock it again.\n"
 		L"The arrow next to the pin is the window's menu (float, dock, auto hide, close).\n"
-		L"The Panes menu shows and hides panes; the Active pane menu moves the pane that has the focus.\n"
+		L"The Panes menu brings a pane into view (showing it if it is hidden); the Active pane menu moves the pane that has the focus.\n"
 		L"Double click a tool window's caption (or a tab) to float it, and the caption or title bar of the floating window to dock it again.\n"
-		L"Layout > Save / Load round-trips the arrangement as JSON, floating windows included.\n\n"
+		L"Layout > Save state keeps the arrangement (floating windows, window position and active pane included) and restores it at the next start; named layouts are kept in DockDemo.layouts.json.\n\n"
 		L"Drag a tab or a caption to dock it somewhere else: drop it on a compass marker (tab, split) or an edge marker of the window, or anywhere else to float it. Hold Ctrl to float without docking, Esc to cancel.\n"
 		L"Drag a floating window by its title bar over the markers to dock it.",
 		L"DockDemo", MB_ICONINFORMATION);
@@ -456,24 +534,33 @@ void CMainFrame::UpdateStatus() {
 // documents and the tab hooks
 //
 
-DockPane* CMainFrame::NewDocument() {
+CEdit* CMainFrame::CreateEditor(HWND parent) {
 	auto edit = std::make_unique<CEdit>();
-	edit->Create(m_Dock, rcDefault, nullptr,
+	edit->Create(parent, rcDefault, nullptr,
 		WS_CHILD | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN);
 	edit->SetFont(m_MonoFont);
 	::SetWindowTheme(*edit, m_Dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+	m_NewDocuments.push_back(std::move(edit));
+	return m_NewDocuments.back().get();
+}
 
+CEdit* CMainFrame::EditOf(HWND content) {
+	for (auto& edit : m_NewDocuments)
+		if (content && (HWND)*edit == content)
+			return edit.get();
+	return nullptr;
+}
+
+DockPane* CMainFrame::NewDocument() {
 	PaneDesc d;
 	d.Id = d.Title = std::format(L"Untitled{}", ++m_UntitledCount);
-	d.hWnd = *edit;
 	d.Kind = PaneKind::Document;
 	d.Icon = ::LoadIcon(nullptr, IDI_APPLICATION);
-	m_NewDocuments.push_back(std::move(edit));
 
 	auto& layout = m_Dock.Layout();
 	auto pane = layout.AddPane(d);
 	layout.Show(pane);
-	m_Dock.ActivatePane(pane);
+	m_Dock.ActivatePane(pane);		// its editor is made by the content factory when the pane is first on show
 	return pane;
 }
 
@@ -482,17 +569,18 @@ void CMainFrame::HookDock() {
 	m_Dock.OnPaneClosing = [this](DockPane* pane) {
 		if (!pane->Id().starts_with(L"Untitled"))
 			return true;
-		for (auto& edit : m_NewDocuments) {
-			if ((HWND)*edit == pane->hWnd && edit->GetWindowTextLength() > 0)
-				return MessageBox(std::format(L"Close {} without saving?", pane->Title).c_str(), L"DockDemo", MB_YESNO | MB_ICONQUESTION) == IDYES;
-		}
+		auto edit = EditOf(pane->hWnd);
+		if (edit && edit->GetWindowTextLength() > 0)
+			return MessageBox(std::format(L"Close {} without saving?", pane->Title).c_str(), L"DockDemo", MB_YESNO | MB_ICONQUESTION) == IDYES;
 		return true;
 	};
 	m_Dock.OnPaneClosed = [this](DockPane* pane) {
 		if (!pane->Id().starts_with(L"Untitled"))
 			return;
-		std::erase_if(m_NewDocuments, [&](auto& edit) { return (HWND)*edit == pane->hWnd; });
-		::DestroyWindow(pane->hWnd);
+		if (pane->hWnd) {
+			std::erase_if(m_NewDocuments, [&](auto& edit) { return (HWND)*edit == pane->hWnd; });
+			::DestroyWindow(pane->hWnd);
+		}
 		m_Dock.Layout().RemovePane(pane);
 	};
 	// the framework's context menu already has Close, Close All But This, Close All Tabs and Auto Hide
@@ -505,7 +593,7 @@ void CMainFrame::HookDock() {
 LRESULT CMainFrame::OnNewDocument(WORD, WORD id, HWND, BOOL&) {
 	for (int i = 0; i < (id == ID_NEW_MANY ? 10 : 1); i++) {
 		auto pane = NewDocument();
-		if (auto edit = m_NewDocuments.back().get(); i % 2 == 0)
+		if (auto edit = EditOf(pane->hWnd); edit && i % 2 == 0)
 			edit->SetWindowText(std::format(L"// {}\r\n", pane->Title).c_str());
 	}
 	return 0;
