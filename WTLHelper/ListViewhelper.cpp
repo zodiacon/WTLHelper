@@ -173,51 +173,93 @@ CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separ
 
 bool ListViewHelper::WriteColumnsState(ColumnsState const& state, IStream* stm) {
 	auto count = state.Count;
-	stm->Write(&count, sizeof(count), nullptr);
-	stm->Write(&state.SortColumn, sizeof(state.SortColumn), nullptr);
-	stm->Write(&state.SortAscending, sizeof(state.SortAscending), nullptr);
-	stm->Write(state.Order.get(), sizeof(int) * count, nullptr);
-	stm->Write(state.Columns.get(), sizeof(LVCOLUMN) * count, nullptr);
-	stm->Write(state.Tags.get(), sizeof(int) * count, nullptr);
+	if (stm == nullptr || count <= 0 || !state.Order || !state.Columns || !state.Tags)
+		return false;
+
+	bool ok = true;
+	auto write = [&](const void* buffer, size_t size) {
+		ULONG bytes = 0;
+		if (ok && (FAILED(stm->Write(buffer, static_cast<ULONG>(size), &bytes)) || bytes != size))
+			ok = false;
+		};
+
+	write(&count, sizeof(count));
+	write(&state.SortColumn, sizeof(state.SortColumn));
+	write(&state.SortAscending, sizeof(state.SortAscending));
+	write(state.Order.get(), sizeof(int) * count);
+	write(state.Columns.get(), sizeof(LVCOLUMN) * count);
+	write(state.Tags.get(), sizeof(int) * count);
 	if (state.Text) {
 		for (int i = 0; i < count; i++) {
 			auto len = (uint16_t)state.Text[i].length();
-			stm->Write(&len, sizeof(len), nullptr);
+			write(&len, sizeof(len));
 			if (len) {
-				stm->Write(state.Text[i].c_str(), len * sizeof(WCHAR), nullptr);
+				write(state.Text[i].c_str(), len * sizeof(WCHAR));
 			}
 		}
 	}
 	uint32_t end = 0xffff;
-	stm->Write(&end, sizeof(end), nullptr);
-	return true;
+	write(&end, sizeof(end));
+	return ok;
 }
 
+//
+// Reads what WriteColumnsState wrote: the state is filled completely, or (false) not touched at all, whatever the stream
+// holds - a short or damaged one is rejected, not guessed at. The column records are LVCOLUMNs as they were in memory, so
+// a state is only good for the same build (bitness) that saved it; their text pointers mean nothing later and are cleared
+// (the texts, if there are any, are in state.Text).
+//
 bool ListViewHelper::ReadColumnsState(ColumnsState& state, IStream* stm) {
-	int count = 0;
-	stm->Read(&count, sizeof(count), nullptr);
-	if (count == 0)
+	if (stm == nullptr)
 		return false;
 
-	stm->Read(&state.SortColumn, sizeof(state.SortColumn), nullptr);
-	stm->Read(&state.SortAscending, sizeof(state.SortAscending), nullptr);
-	state.Order = std::make_unique<int[]>(count);
-	stm->Read(state.Order.get(), sizeof(int) * count, nullptr);
-	state.Columns = std::make_unique<LVCOLUMN[]>(count);
-	stm->Read(state.Order.get(), sizeof(LVCOLUMN) * count, nullptr);
-	state.Tags = std::make_unique<int[]>(count);
-	stm->Read(state.Tags.get(), sizeof(int) * count, nullptr);
+	auto read = [stm](void* buffer, size_t size) {
+		ULONG bytes = 0;
+		return SUCCEEDED(stm->Read(buffer, static_cast<ULONG>(size), &bytes)) && bytes == size;
+		};
 
+	constexpr int MaxColumns = 1024;
+	ColumnsState result;
+	int count = 0;
+	if (!read(&count, sizeof(count)) || count <= 0 || count > MaxColumns)
+		return false;
+	result.Count = count;
+
+	if (!read(&result.SortColumn, sizeof(result.SortColumn)) || !read(&result.SortAscending, sizeof(result.SortAscending)))
+		return false;
+	result.Order = std::make_unique<int[]>(count);
+	if (!read(result.Order.get(), sizeof(int) * count))
+		return false;
+	result.Columns = std::make_unique<LVCOLUMN[]>(count);
+	if (!read(result.Columns.get(), sizeof(LVCOLUMN) * count))
+		return false;
+	for (int i = 0; i < count; i++)
+		result.Columns[i].pszText = nullptr;
+	result.Tags = std::make_unique<int[]>(count);
+	if (!read(result.Tags.get(), sizeof(int) * count))
+		return false;
+
+	// the texts, each with its length, or nothing but the end marker (a 32 bit 0xffff: its low half is what is seen first)
 	uint16_t len = 0;
-	stm->Read(&len, sizeof(len), nullptr);
+	if (!read(&len, sizeof(len)))
+		return false;
 	if (len != 0xffff) {
-		state.Text = std::make_unique<std::wstring[]>(count);
+		result.Text = std::make_unique<std::wstring[]>(count);
 		for (int i = 0; i < count; i++) {
-			state.Text[i].resize(len);
-			stm->Read(state.Text[i].data(), len * sizeof(WCHAR), nullptr);
-			stm->Read(&len, sizeof(len), nullptr);
+			result.Text[i].resize(len);
+			if (len && !read(result.Text[i].data(), len * sizeof(WCHAR)))
+				return false;
+			if (!read(&len, sizeof(len)))
+				return false;
 		}
-		ATLASSERT(len == 0xffff);
+		if (len != 0xffff)
+			return false;
 	}
+	// the other half of the end marker
+	uint16_t high = 0;
+	if (!read(&high, sizeof(high)) || high != 0)
+		return false;
+
+	state = std::move(result);
 	return true;
 }
