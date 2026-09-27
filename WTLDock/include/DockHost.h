@@ -83,6 +83,24 @@ public:
 		return m_Theme;
 	}
 	void SetTheme(const DockTheme& theme);
+	// A theme that follows an application-wide one. The provider makes the DockTheme; the host asks it now, on
+	// RefreshTheme() and whenever the registered window message "ThemeChanged" arrives (which is what
+	// WTLHelper::SwitchToMode sends to the descendants of the window it is given). It then also passes the message on
+	// to the content of the floating windows, which that call cannot reach, and calls OnFloatingWindowThemeChanged for
+	// each of them (to apply the application's dark mode to it, for example DarkMode::setChildCtrlsTheme).
+	void SetThemeProvider(std::function<DockTheme()> provider);
+	void RefreshTheme();
+	std::function<void(HWND frame)> OnFloatingWindowThemeChanged;
+	// The Windows dialog colours itself after the theme (a dark theme: dark title bar, list and buttons). An
+	// application whose dark mode library already themes every dialog turns that off.
+	void SetStyleDialogs(bool style) {
+		m_StyleDialogs = style;
+	}
+	bool StyleDialogs() const {
+		return m_StyleDialogs;
+	}
+	// the frames of the floating windows
+	std::vector<HWND> FloatWindows() const;
 	const DockMetrics& Metrics() const {
 		return m_Metrics;
 	}
@@ -385,6 +403,7 @@ public:
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_REAP, OnReap)
 		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(ThemeChangedMessage(), OnThemeChanged)
 	END_MSG_MAP()
 
 private:
@@ -415,6 +434,11 @@ private:
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnReap(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnThemeChanged(UINT, WPARAM, LPARAM, BOOL&);
+	static UINT ThemeChangedMessage() {
+		static const UINT message = ::RegisterWindowMessageW(L"ThemeChanged");
+		return message;
+	}
 
 	// IDockAccessibleOwner: the auto-hide bar items are the host's own children, the group windows its windows
 	HWND AccWindow() const override {
@@ -510,6 +534,8 @@ private:
 
 	// tooltips
 	void ShowTipNow();
+	std::function<DockTheme()> m_ThemeProvider;
+	bool m_StyleDialogs{ true };
 	bool m_MultiRowTabs{};
 	bool m_Tips{ true };
 	int m_TipShowMs{ 500 }, m_TipVisibleMs{ 6000 };

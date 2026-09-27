@@ -4,6 +4,19 @@
 
 namespace WTLDock {
 
+// The colours of an application-wide dark mode: what a dark mode library (WTLHelper's DarkMode::get...Color) says the
+// windows, controls and text of the application look like. DockTheme::FromPalette turns it into a theme for the docking
+// chrome, so that chrome and content come from one palette.
+struct DockPalette {
+	COLORREF View;			// the background of views (what content windows have)
+	COLORREF Control;		// controls, raised parts
+	COLORREF Hot;			// under the mouse
+	COLORREF Dialog;		// the background of frames and dialogs
+	COLORREF Text;
+	COLORREF DarkerText;	// less important text
+	COLORREF Edge;			// lines and borders
+};
+
 // Colours of the docking chrome (captions, tabs, splitters). The content windows are the application's business.
 struct DockTheme {
 	bool IsDark;				// a dark theme: window title bars follow
@@ -30,6 +43,9 @@ struct DockTheme {
 
 	static DockTheme Light();
 	static DockTheme Dark();
+	// A dark theme in the colours of a palette. The palette has no accent (the active caption, the bar under the
+	// selected tab, the drop preview), so that is a parameter.
+	static DockTheme FromPalette(const DockPalette& palette, COLORREF accent = RGB(0, 122, 204));
 };
 
 // Sizes of the docking chrome in device pixels.

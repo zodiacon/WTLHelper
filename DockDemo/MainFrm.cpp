@@ -5,9 +5,6 @@ using namespace WTLDock;
 
 namespace {
 
-constexpr COLORREF DarkBack = RGB(30, 30, 30);
-constexpr COLORREF DarkText = RGB(220, 220, 220);
-
 const wchar_t* const SampleSource[] = {
 	L"// Program.cpp\r\n\r\n#include \"pch.h\"\r\n#include \"MainFrm.h\"\r\n\r\nCAppModule _Module;\r\n\r\nint Run(int nCmdShow) {\r\n"
 	L"\tCMessageLoop loop;\r\n\t_Module.AddMessageLoop(&loop);\r\n\r\n\tCMainFrame frame;\r\n\tif (frame.CreateEx() == nullptr)\r\n\t\treturn 0;\r\n"
@@ -32,6 +29,9 @@ LRESULT CMainFrame::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 	m_Dock.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
 	m_hWndClient = m_Dock;
+#ifdef DEMO_WTLHELPER
+	UseDarkModeTheme(m_Dock);		// the chrome follows WTLHelper's dark mode
+#endif
 	m_Dock.OnLayoutChanged = [this] { UpdateStatus(); };
 	m_Dock.OnActivePaneChanged = [this] { UpdateStatus(); };
 	HookDock();
@@ -63,7 +63,6 @@ LRESULT CMainFrame::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	ApplyFonts();
 	BuildLayout();
 	m_Dock.CaptureDefaultLayout();
-	ApplyTheme();
 
 	// A saved state is picked up if there is one; it exists only after Layout > Save state, so that a plain run
 	// always starts from the default arrangement.
@@ -272,54 +271,6 @@ void CMainFrame::BuildLayout() {
 // theme and fonts
 //
 
-void CMainFrame::ApplyTheme() {
-	m_Dock.SetTheme(m_Dark ? DockTheme::Dark() : DockTheme::Light());
-
-	const COLORREF back = m_Dark ? DarkBack : ::GetSysColor(COLOR_WINDOW);
-	const COLORREF text = m_Dark ? DarkText : ::GetSysColor(COLOR_WINDOWTEXT);
-	if (!m_DarkBrush.IsNull())
-		m_DarkBrush.DeleteObject();
-	m_DarkBrush.CreateSolidBrush(DarkBack);
-
-	for (auto* tree : { &m_Solution, &m_ClassView }) {
-		tree->SetBkColor(back);
-		tree->SetTextColor(text);
-	}
-	for (auto* list : { &m_Properties, &m_Errors }) {
-		list->SetBkColor(back);
-		list->SetTextBkColor(back);
-		list->SetTextColor(text);
-	}
-	// scroll bars and selection colours follow the visual style
-	const wchar_t* style = m_Dark ? L"DarkMode_Explorer" : L"Explorer";
-	for (HWND hWnd : { (HWND)m_Solution, (HWND)m_ClassView, (HWND)m_Toolbox, (HWND)m_Properties, (HWND)m_Errors,
-		(HWND)m_Output, (HWND)m_Documents[0], (HWND)m_Documents[1], (HWND)m_Documents[2] })
-		::SetWindowTheme(hWnd, style, nullptr);
-	for (auto& edit : m_NewDocuments)
-		::SetWindowTheme(*edit, style, nullptr);
-
-	// the header control of a list view takes its colours from the ItemsView style
-	for (auto* list : { &m_Properties, &m_Errors }) {
-		::SetWindowTheme(*list, m_Dark ? L"DarkMode_ItemsView" : L"Explorer", nullptr);
-		if (auto header = list->GetHeader())
-			::SetWindowTheme(header, m_Dark ? L"DarkMode_ItemsView" : L"Explorer", nullptr);
-	}
-
-	RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE);
-}
-
-LRESULT CMainFrame::OnCtlColor(UINT, WPARAM wp, LPARAM, BOOL& handled) {
-	// the edit and list box controls ask their parent (which is forwarded to us by the dock) for their colours
-	if (!m_Dark) {
-		handled = FALSE;
-		return 0;
-	}
-	HDC dc = (HDC)wp;
-	::SetTextColor(dc, DarkText);
-	::SetBkColor(dc, DarkBack);
-	return (LRESULT)m_DarkBrush.m_hBrush;
-}
-
 void CMainFrame::ApplyFonts() {
 	if (!m_MonoFont.IsNull())
 		m_MonoFont.DeleteObject();
@@ -339,11 +290,36 @@ LRESULT CMainFrame::OnDpiChanged(UINT, WPARAM, LPARAM lp, BOOL&) {
 	return 0;
 }
 
+#ifdef DEMO_WTLHELPER
+// Dark mode is WTLHelper's: switching it re-themes the controls in the panes, and the message it sends makes the
+// docking area take a theme from the same palette (see UseDarkModeTheme in OnCreate).
 LRESULT CMainFrame::OnDark(WORD, WORD, HWND, BOOL&) {
-	m_Dark = !m_Dark;
-	ApplyTheme();
+	WTLHelper::SwitchToMode(WTLHelper::IsDarkMode() ? DarkModeKind::Classic : DarkModeKind::Dark, m_hWnd);
+	::CheckMenuItem(GetMenu(), ID_DARK, MF_BYCOMMAND | (WTLHelper::IsDarkMode() ? MF_CHECKED : MF_UNCHECKED));
 	return 0;
 }
+
+// the colour tone of dark mode: black, red, green, ... (SetColorTone sends nothing: the docking area is told)
+LRESULT CMainFrame::OnTone(WORD, WORD, HWND, BOOL&) {
+	const int next = (static_cast<int>(WTLHelper::GetColorTone()) + 1) % 7;
+	WTLHelper::SetColorTone(static_cast<ColorTone>(next), m_hWnd);
+	m_Dock.RefreshTheme();
+	return 0;
+}
+#else
+// without WTLHelper: only the docking chrome has a dark theme
+LRESULT CMainFrame::OnDark(WORD, WORD, HWND, BOOL&) {
+	static bool dark = false;
+	dark = !dark;
+	m_Dock.SetTheme(dark ? DockTheme::Dark() : DockTheme::Light());
+	::CheckMenuItem(GetMenu(), ID_DARK, MF_BYCOMMAND | (dark ? MF_CHECKED : MF_UNCHECKED));
+	return 0;
+}
+
+LRESULT CMainFrame::OnTone(WORD, WORD, HWND, BOOL&) {
+	return 0;
+}
+#endif
 
 //
 // menus
@@ -426,6 +402,7 @@ void CMainFrame::BuildMenu() {
 	CMenu options;
 	options.CreatePopupMenu();
 	options.AppendMenu(MF_STRING, ID_DARK, L"&Dark theme");
+	options.AppendMenu(MF_STRING, ID_TONE, L"Color &tone (next)");
 	options.AppendMenu(MF_STRING, ID_MULTIROW, L"&Multi-row tabs");
 	options.AppendMenu(MF_STRING, ID_GERMAN, L"&German (sample translation of the framework's texts)");
 	menu.AppendMenu(MF_POPUP, (UINT_PTR)options.m_hMenu, L"&Options");
@@ -658,7 +635,6 @@ CEdit* CMainFrame::CreateEditor(HWND parent) {
 	edit->Create(parent, rcDefault, nullptr,
 		WS_CHILD | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN);
 	edit->SetFont(m_MonoFont);
-	::SetWindowTheme(*edit, m_Dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
 	m_NewDocuments.push_back(std::move(edit));
 	return m_NewDocuments.back().get();
 }

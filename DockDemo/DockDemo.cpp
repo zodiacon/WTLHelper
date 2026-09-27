@@ -30,6 +30,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPTSTR, int nCmdShow) {
 	hr = _Module.Init(nullptr, hInstance);
 	ATLASSERT(SUCCEEDED(hr));
 
+	// WTLHelper's dark mode: the controls (and, through UseDarkModeTheme, the docking area) follow it
+#ifdef DEMO_WTLHELPER
+	WTLHelper::InitDarkMode(DarkModeKind::Classic);
+#endif
+
 	int result = Run(nCmdShow);
 
 	_Module.Term();

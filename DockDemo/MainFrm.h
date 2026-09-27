@@ -18,7 +18,6 @@ public:
 		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
 		MESSAGE_HANDLER(WM_INITMENUPOPUP, OnInitMenuPopup)
 		MESSAGE_HANDLER(WM_CLOSE, OnClose)
-		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnCtlColor)
 		COMMAND_ID_HANDLER(ID_RESET, OnReset)
 		COMMAND_ID_HANDLER(ID_SAVE, OnSave)
 		COMMAND_ID_HANDLER(ID_LOAD, OnLoad)
@@ -38,6 +37,7 @@ public:
 		COMMAND_ID_HANDLER(ID_PREV_DOC, OnNextDocument)
 		COMMAND_ID_HANDLER(ID_DUMP, OnDump)
 		COMMAND_ID_HANDLER(ID_DARK, OnDark)
+		COMMAND_ID_HANDLER(ID_TONE, OnTone)
 		COMMAND_ID_HANDLER(ID_NEW_DOC, OnNewDocument)
 		COMMAND_ID_HANDLER(ID_NEW_MANY, OnNewDocument)
 		COMMAND_ID_HANDLER(ID_CLOSE_ACTIVE, OnCloseCommand)
@@ -61,7 +61,7 @@ public:
 private:
 	enum : UINT {
 		ID_RESET = 1001, ID_SAVE, ID_LOAD, ID_FORGET, ID_SAVE_NAMED, ID_DELETE_NAMED, ID_DUMP, ID_DARK, ID_HELP_USAGE, ID_EXIT,
-		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC, ID_SWITCHER, ID_SAVE_DOC, ID_WINDOWS, ID_MULTIROW, ID_NEW_PREVIEW, ID_GERMAN,
+		ID_NEW_DOC = 1030, ID_NEW_MANY, ID_CLOSE_ACTIVE, ID_CLOSE_OTHERS, ID_CLOSE_GROUP, ID_CLOSE_DOCS, ID_CLOSE_DOCS_BUT, ID_NEXT_DOC, ID_PREV_DOC, ID_SWITCHER, ID_SAVE_DOC, ID_WINDOWS, ID_MULTIROW, ID_NEW_PREVIEW, ID_GERMAN, ID_TONE,
 		ID_PANE_INFO = 3000,	// added to the tab context menu by OnBuildPaneMenu
 		ID_ACT_HIDE = 1100, ID_ACT_AUTOHIDE, ID_ACT_FLOAT,
 		ID_ACT_GROUP = 1105,	// + new horizontal group, new vertical group, move to next, move to previous
@@ -75,7 +75,6 @@ private:
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnInitMenuPopup(UINT, WPARAM, LPARAM, BOOL&);
-	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSwitcher(WORD, WORD, HWND, BOOL&);
@@ -96,6 +95,7 @@ private:
 	LRESULT OnNextDocument(WORD, WORD, HWND, BOOL&);
 	LRESULT OnDump(WORD, WORD, HWND, BOOL&);
 	LRESULT OnDark(WORD, WORD, HWND, BOOL&);
+	LRESULT OnTone(WORD, WORD, HWND, BOOL&);
 	LRESULT OnHelp(WORD, WORD, HWND, BOOL&);
 	LRESULT OnNewDocument(WORD, WORD, HWND, BOOL&);
 	LRESULT OnCloseCommand(WORD, WORD, HWND, BOOL&);
@@ -109,7 +109,6 @@ private:
 	void BuildLayout();
 	WTLDock::DockPane* NewDocument(bool preview = false);
 	void HookDock();
-	void ApplyTheme();
 	void ApplyFonts();
 	void UpdateStatus();
 	static std::wstring FileNextToExe(const wchar_t* name);
@@ -127,10 +126,8 @@ private:
 	int m_UntitledCount{};
 	WTLDock::DockPane* m_MenuPane{};	// the pane whose context menu is open
 	CFont m_MonoFont;
-	CBrush m_DarkBrush;
 
 	CMenu m_PaneMenu, m_ActiveMenu, m_TabMenu, m_LayoutMenu;
 	std::vector<WTLDock::DockPane*> m_TabTargets;
 	std::wstring m_StateFile, m_LayoutsFile;
-	bool m_Dark{};
 };

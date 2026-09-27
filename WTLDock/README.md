@@ -341,6 +341,42 @@ they are on, and their layout is rescaled when they move. Your content is yours:
 frame and recreate fonts, as usual for per-monitor DPI. `m_Dock.Font()` and `m_Dock.Dpi()` give the chrome's font and
 DPI at the moment.
 
+### With WTLHelper's dark mode
+
+If the application uses `WTLHelper::InitDarkMode` (darkmodelib), one palette can drive the controls and the docking
+chrome. `WTLDockDarkMode.h` is an optional header for that (it needs WTLHelper's directory on the include path;
+WTLDock itself does not depend on WTLHelper):
+
+```cpp
+#include <WTLDockUI.h>
+#include <WTLDockDarkMode.h>            // after WTLHelper.h and WTLDockUI.h
+
+WTLHelper::InitDarkMode(DarkModeKind::Classic);      // at start, before any window is made
+
+// once, after the docking window is made:
+UseDarkModeTheme(m_Dock);                            // (optional: an accent colour, default the Visual Studio blue)
+
+// later, as the application does today:
+WTLHelper::SwitchToMode(DarkModeKind::Dark, m_hWnd);          // controls and chrome
+WTLHelper::SetColorTone(ColorTone::Blue, m_hWnd);
+m_Dock.RefreshTheme();                                        // (SetColorTone sends no message)
+```
+
+What happens:
+
+* The controls in the panes are themed by WTLHelper's hook as they are created, like any window of the thread.
+* The chrome follows through a theme provider: `m_Dock.SetThemeProvider(...)` (which `UseDarkModeTheme` sets) is asked for
+  a `DockTheme` now, on `RefreshTheme()` and whenever the registered window message `"ThemeChanged"` arrives, which is
+  what `SwitchToMode` sends to the frame's descendants. In dark mode the theme is `DockTheme::FromPalette` of the
+  palette (`DarkMode::getBackgroundColor()` and the others), in Light and Classic mode `DockTheme::Light()`.
+* Floating windows are not children of the frame, so `SwitchToMode` does not reach their content. The host passes the
+  message on to it and calls `OnFloatingWindowThemeChanged(frame)` for each floating window, where `UseDarkModeTheme`
+  applies `setDarkTitleBarEx` and `setChildCtrlsTheme`.
+* The Windows dialog is left to the library's hook (`m_Dock.SetStyleDialogs(false)`); without WTLHelper it colours
+  itself after a dark `DockTheme`.
+
+Other dark mode libraries: fill a `DockPalette` from theirs and use `DockTheme::FromPalette` in your own provider.
+
 ## Keyboard
 
 Call `m_Dock.PreTranslateMessage(msg)` from your message loop (a `CMessageFilter`, as in the minimal application).

@@ -41,6 +41,58 @@ DockTheme DockTheme::Light() {
 	return t;
 }
 
+namespace {
+
+int Luminance(COLORREF c) {
+	return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
+}
+
+COLORREF Scale(COLORREF c, int percent) {
+	auto part = [&](int v) { return std::clamp(v * percent / 100, 0, 255); };
+	return RGB(part(GetRValue(c)), part(GetGValue(c)), part(GetBValue(c)));
+}
+
+}
+
+DockTheme DockTheme::FromPalette(const DockPalette& p, COLORREF accent) {
+	DockTheme t = Dark();
+	// text on the accent: white on a dark one, black on a light one
+	const COLORREF onAccent = Luminance(accent) < 140 ? RGB(255, 255, 255) : RGB(0, 0, 0);
+
+	t.Workspace = t.Splitter = p.Dialog;
+	t.SplitterDragging = accent;
+	t.GroupBack = p.View;
+	t.Border = p.Edge;
+
+	t.CaptionActiveBack = accent;
+	t.CaptionActiveText = onAccent;
+	t.CaptionInactiveBack = p.Control;
+	t.CaptionInactiveText = p.Text;
+	t.ButtonHotBack = p.Hot;
+	t.ButtonGlyph = p.Text;
+	t.ButtonGlyphHot = p.Text;
+
+	t.TabStripBack = p.Dialog;
+	t.TabActiveBack = p.View;
+	t.TabActiveText = p.Text;
+	t.TabActiveAccent = accent;
+	t.TabInactiveBack = p.Dialog;
+	t.TabInactiveText = p.DarkerText;
+	t.TabHotBack = p.Hot;
+
+	t.GuideBack = p.Control;
+	t.GuideBorder = p.Edge;
+	t.GuideGlyph = p.DarkerText;
+	t.GuideHot = accent;
+	t.PreviewFill = accent;
+	t.PreviewBorder = Scale(accent, 80);
+
+	t.BarBack = p.Dialog;
+	t.BarItemBack = p.Control;
+	t.BarItemText = p.Text;
+	return t;
+}
+
 DockTheme DockTheme::Dark() {
 	DockTheme t{};
 	t.IsDark = true;

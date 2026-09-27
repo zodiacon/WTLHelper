@@ -2587,6 +2587,30 @@ TEST(Drop_TheAutoHideBarsAreOfferedToToolWindowsOnly) {
 	CHECK_VALID(l);
 }
 
+// ---- Following an application-wide dark mode ---------------------------------------------------
+
+TEST(Theme_APaletteMakesADarkTheme) {
+	const DockPalette palette{ RGB(32, 33, 34), RGB(44, 45, 46), RGB(66, 67, 68), RGB(38, 39, 40), RGB(230, 231, 232), RGB(150, 151, 152), RGB(80, 81, 82) };
+	const COLORREF accent = RGB(200, 60, 20);
+	const DockTheme t = DockTheme::FromPalette(palette, accent);
+	CHECK(t.IsDark);
+	CHECK(t.GroupBack == palette.View && t.TabActiveBack == palette.View);
+	CHECK(t.Workspace == palette.Dialog && t.Splitter == palette.Dialog && t.TabStripBack == palette.Dialog && t.BarBack == palette.Dialog);
+	CHECK(t.CaptionInactiveBack == palette.Control && t.BarItemBack == palette.Control && t.GuideBack == palette.Control);
+	CHECK(t.TabHotBack == palette.Hot && t.ButtonHotBack == palette.Hot);
+	CHECK(t.CaptionInactiveText == palette.Text && t.TabActiveText == palette.Text && t.BarItemText == palette.Text);
+	CHECK(t.TabInactiveText == palette.DarkerText && t.GuideGlyph == palette.DarkerText);
+	CHECK(t.Border == palette.Edge && t.GuideBorder == palette.Edge);
+	// the accent is the accent
+	CHECK(t.CaptionActiveBack == accent && t.TabActiveAccent == accent && t.SplitterDragging == accent && t.PreviewFill == accent && t.GuideHot == accent);
+	CHECK(t.PreviewBorder != accent);
+	CHECK(t.CaptionActiveText == RGB(255, 255, 255));								// white on a dark accent
+	// and black on a light one
+	CHECK(DockTheme::FromPalette(palette, RGB(240, 230, 100)).CaptionActiveText == RGB(0, 0, 0));
+	// the default accent is the blue of the built-in dark theme
+	CHECK(DockTheme::FromPalette(palette).CaptionActiveBack == DockTheme::Dark().CaptionActiveBack);
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -2859,6 +2883,7 @@ int wmain() {
 	Run_AutoHideTo_AGroupGoesIntoAnyBar();
 	Run_AutoHideTo_OneOfSeveralTabsGoesOnItsOwn();
 	Run_Drop_TheAutoHideBarsAreOfferedToToolWindowsOnly();
+	Run_Theme_APaletteMakesADarkTheme();
 	Run_Random_OperationsKeepTheInvariants();
 
 	RunUiTests();

@@ -731,6 +731,36 @@ void CDockHost::UpdateDpi() {
 	Sync();
 }
 
+void CDockHost::SetThemeProvider(std::function<DockTheme()> provider) {
+	m_ThemeProvider = std::move(provider);
+	RefreshTheme();
+}
+
+void CDockHost::RefreshTheme() {
+	if (m_ThemeProvider)
+		SetTheme(m_ThemeProvider());
+}
+
+std::vector<HWND> CDockHost::FloatWindows() const {
+	std::vector<HWND> frames;
+	for (auto& [id, frame] : m_Frames)
+		if (frame && frame->m_hWnd)
+			frames.push_back(frame->m_hWnd);
+	return frames;
+}
+
+LRESULT CDockHost::OnThemeChanged(UINT msg, WPARAM wp, LPARAM lp, BOOL&) {
+	// (the application's mode has been switched before the message is sent: the provider sees the new one)
+	RefreshTheme();
+	// the floating windows are not children of the frame that the message was sent through
+	for (HWND frame : FloatWindows()) {
+		CWindow(frame).SendMessageToDescendants(msg, wp, lp);
+		if (OnFloatingWindowThemeChanged)
+			OnFloatingWindowThemeChanged(frame);
+	}
+	return 0;
+}
+
 void CDockHost::SetTheme(const DockTheme& theme) {
 	m_Theme = theme;
 	if (!m_hWnd)

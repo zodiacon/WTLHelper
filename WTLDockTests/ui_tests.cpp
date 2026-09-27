@@ -4300,6 +4300,115 @@ TEST(Host_TheWindowsDialogKeepsTheSystemLookWithALightTheme) {
 	CHECK(darkBack == DockTheme::Dark().GroupBack && lightBack == ::GetSysColor(COLOR_WINDOW));
 }
 
+// ---- The docking window and an application-wide theme ----------------------------------------
+
+// a content window that records the registered "ThemeChanged" message
+struct ThemeSink {
+	static inline int Count = 0;
+	static inline LPARAM LastLParam = 0;
+	static LRESULT CALLBACK Proc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
+		static const UINT themeChanged = ::RegisterWindowMessageW(L"ThemeChanged");
+		if (msg == themeChanged) {
+			Count++;
+			LastLParam = lp;
+			return 0;
+		}
+		return ::DefWindowProc(hWnd, msg, wp, lp);
+	}
+	static HWND Create(HWND parent) {
+		static bool registered = [] {
+			WNDCLASSW wc{};
+			wc.lpfnWndProc = Proc;
+			wc.hInstance = ::GetModuleHandle(nullptr);
+			wc.lpszClassName = L"WTLDockTestThemeSink";
+			return ::RegisterClassW(&wc) != 0;
+		}();
+		(void)registered;
+		return ::CreateWindowExW(0, L"WTLDockTestThemeSink", L"", WS_CHILD, 0, 0, 10, 10, parent, nullptr, ::GetModuleHandle(nullptr), nullptr);
+	}
+};
+
+TEST(Host_TheThemeCanComeFromAProvider) {
+	Fixture f;
+	f.AddStandard();
+	CHECK(!f.Host.Theme().IsDark);
+	bool dark = false;
+	int asked = 0;
+	f.Host.SetThemeProvider([&] {
+		asked++;
+		return dark ? DockTheme::Dark() : DockTheme::Light();
+	});
+	CHECK(asked == 1 && !f.Host.Theme().IsDark);								// asked at once
+
+	dark = true;
+	CHECK(!f.Host.Theme().IsDark);												// not until told
+	f.Host.RefreshTheme();
+	CHECK(asked == 2 && f.Host.Theme().IsDark);
+
+	// the message that WTLHelper::SwitchToMode sends does it
+	dark = false;
+	const UINT themeChanged = ::RegisterWindowMessageW(L"ThemeChanged");
+	::SendMessage(f.Host, themeChanged, 0, 1);
+	CHECK(asked == 3 && !f.Host.Theme().IsDark);
+	dark = true;
+	::SendMessage(f.Host, themeChanged, 0, 1);
+	CHECK(f.Host.Theme().IsDark);
+	VERIFY(f);
+
+	// without a provider the message changes nothing
+	Fixture g;
+	g.Host.SetTheme(DockTheme::Dark());
+	::SendMessage(g.Host, themeChanged, 0, 0);
+	CHECK(g.Host.Theme().IsDark);
+}
+
+TEST(Host_TheContentOfFloatingWindowsHearsThatTheThemeChanged) {
+	Fixture f;
+	f.AddStandard();
+	// a pane whose content is a window that records the message, floating
+	auto pane = f.Add(L"Ext", PaneKind::Tool);
+	::DestroyWindow(pane->hWnd);
+	pane->hWnd = ThemeSink::Create(f.Host);
+	CHECK(f.Host.Layout().Show(pane));
+	CHECK(f.Host.Layout().Float(pane, OffScreen(50, 50, 300, 250)));
+	auto docked = f.Add(L"Ext2", PaneKind::Tool);
+	::DestroyWindow(docked->hWnd);
+	docked->hWnd = ThemeSink::Create(f.Host);
+	CHECK(f.Host.Layout().Show(docked));
+	VERIFY(f);
+	CHECK(::GetParent(pane->hWnd) != f.Host.GroupWindow(docked->Group()));
+	CHECK(f.Host.FloatWindows().size() == 1 && f.Host.FloatWindows()[0] == f.Host.FloatWindow(pane->Group()->Float()->Id()));
+
+	std::vector<HWND> frames;
+	f.Host.OnFloatingWindowThemeChanged = [&](HWND frame) { frames.push_back(frame); };
+	ThemeSink::Count = 0;
+	const UINT themeChanged = ::RegisterWindowMessageW(L"ThemeChanged");
+	// what SwitchToMode does: the message goes to the descendants of the frame, which include the host and the
+	// windows of the docked panes; the floating windows are the host's to tell
+	::SendMessage(f.Host, themeChanged, 0, 42);
+	CHECK(frames.size() == 1 && frames[0] == f.Host.FloatWindow(pane->Group()->Float()->Id()));
+	CHECK(ThemeSink::Count == 1 && ThemeSink::LastLParam == 42);				// the floating one heard it, once (the docked one is the frame's to tell)
+}
+
+TEST(Host_TheWindowsDialogCanLeaveItsColoursToTheApplication) {
+	ResetDockTexts();
+	Fixture f;
+	f.AddStandard();
+	f.Host.SetTheme(DockTheme::Dark());
+	CHECK(f.Host.StyleDialogs());
+
+	f.Host.SetStyleDialogs(false);
+	COLORREF back = 0;
+	DialogDriver::Start([&](HWND dialog) { back = ListView_GetBkColor(Dlg(dialog, WindowsDialogIds::List)); });
+	f.Host.ShowWindowsDialog();
+	CHECK(back == ::GetSysColor(COLOR_WINDOW));									// left alone: the application's hook does it
+
+	f.Host.SetStyleDialogs(true);
+	DialogDriver::Start([&](HWND dialog) { back = ListView_GetBkColor(Dlg(dialog, WindowsDialogIds::List)); });
+	f.Host.ShowWindowsDialog();
+	CHECK(back == DockTheme::Dark().GroupBack);
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -4599,6 +4708,9 @@ void RunUiTests() {
 	Run_Host_ADropOnAnAutoHideMarkerNeedsNoOtherTarget();
 	Run_Host_TheWindowsDialogFollowsADarkTheme();
 	Run_Host_TheWindowsDialogKeepsTheSystemLookWithALightTheme();
+	Run_Host_TheThemeCanComeFromAProvider();
+	Run_Host_TheContentOfFloatingWindowsHearsThatTheThemeChanged();
+	Run_Host_TheWindowsDialogCanLeaveItsColoursToTheApplication();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

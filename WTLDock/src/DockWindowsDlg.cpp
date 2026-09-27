@@ -197,7 +197,7 @@ void Init(Dialog& d, HWND window) {
 	::AdjustWindowRectExForDpi(&rc, (DWORD)::GetWindowLongPtr(window, GWL_STYLE), FALSE, (DWORD)::GetWindowLongPtr(window, GWL_EXSTYLE), d.Dpi);
 	::SetWindowPos(window, nullptr, 0, 0, Width(rc), Height(rc), SWP_NOMOVE | SWP_NOZORDER);
 	Layout(d);
-	if (d.Host->Theme().IsDark)
+	if (d.Host->Theme().IsDark && d.Host->StyleDialogs())
 		ApplyDarkTheme(d);
 	Fill(d);
 	UpdateButtons(d);
