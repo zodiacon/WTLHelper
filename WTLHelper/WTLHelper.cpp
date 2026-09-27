@@ -17,7 +17,7 @@ static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
 static HHOOK g_hHook;
 static int g_SuspendCount;
 
-static LRESULT OnHook(int code, WPARAM wp, LPARAM lp) {
+static LRESULT CALLBACK OnHook(int code, WPARAM wp, LPARAM lp) {
 	if (g_SuspendCount <= 0 && code >= HC_ACTION) {
 		auto msg = (CWPRETSTRUCT*)lp;
 		if (msg->message == WM_INITDIALOG) {
