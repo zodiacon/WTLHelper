@@ -946,6 +946,61 @@ bool DockLayout::MoveGroupToEdge(DockGroup* group, DockSide side, DockFloat* win
 	return true;
 }
 
+bool DockLayout::CanAutoHideTo(const DockGroup* group) const {
+	if (!group || group->IsDocument() || group->m_Panes.empty())
+		return false;
+	return std::all_of(group->m_Panes.begin(), group->m_Panes.end(), [](auto p) { return Has(p->Caps, PaneCaps::CanAutoHide); });
+}
+
+bool DockLayout::CanAutoHidePane(const DockPane* pane) const {
+	return Owns(pane) && pane->Kind() == PaneKind::Tool && Has(pane->Caps, PaneCaps::CanAutoHide);
+}
+
+bool DockLayout::AutoHideTo(DockGroup* group, DockSide side) {
+	if (!CanAutoHideTo(group))
+		return false;
+	if (group->m_Where == GroupLocation::AutoHide && group->m_Side == side)
+		return false;
+
+	// how far it slides out: what it had along the bar's axis
+	const Axis axis = AxisOf(side);
+	int length = 0;
+	if (group->m_Where == GroupLocation::AutoHide)
+		length = AxisOf(*group->m_Side) == axis && group->AutoHideLength > 0 ? group->AutoHideLength : Along(group->m_Panes[0]->PreferredSize, axis);
+	else if (group->m_Where == GroupLocation::Float)
+		length = LengthWhenDocked(*group, side);
+	else
+		length = DefaultLength(*group, side);
+	if (length <= 0)
+		length = DefaultToolLength;
+
+	for (auto p : group->m_Panes)
+		RecordPlacement(p, true);
+	auto node = ReleaseGroup(group);
+	node->AutoHideLength = length;
+	m_AutoHide[(int)side].push_back(std::move(node));
+	Commit();
+	return true;
+}
+
+bool DockLayout::AutoHidePaneTo(DockPane* pane, DockSide side) {
+	if (!CanAutoHidePane(pane) || !pane->m_Group)
+		return false;
+	if (pane->m_Group->m_Panes.size() == 1)
+		return AutoHideTo(pane->m_Group, side);
+
+	// one of several tabs: it leaves them and goes on its own
+	int length = Along(pane->PreferredSize, AxisOf(side));
+	if (pane->m_Group->m_Where != GroupLocation::AutoHide && Length(pane->m_Group->Rect, AxisOf(side)) > 0)
+		length = pane->m_Group->m_Where == GroupLocation::Float ? LengthWhenDocked(*pane->m_Group, side) : Length(pane->m_Group->Rect, AxisOf(side));
+	DetachPane(pane);
+	auto g = NewGroup(pane);
+	g->AutoHideLength = length > 0 ? length : DefaultToolLength;
+	m_AutoHide[(int)side].push_back(std::move(g));
+	Commit();
+	return true;
+}
+
 bool DockLayout::AutoHide(DockGroup* group) {
 	if (!group || group->m_Where != GroupLocation::Main || group->IsDocument() || !group->m_Side)
 		return false;

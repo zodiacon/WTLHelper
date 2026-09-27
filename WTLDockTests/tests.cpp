@@ -4,6 +4,7 @@
 // of failed checks. Nothing here creates a window; the model is pure data.
 
 #include <random>
+#include <set>
 
 #include <crtdbg.h>
 #include "Harness.h"
@@ -1137,7 +1138,7 @@ TEST(Drop_ATabOverAnotherToolGroupIsOfferedTheWholeCompassAndTheEdges) {
 	l.Arrange(Client);
 	const auto c = MakeDrop(l, p.Sol, false, p.Props->Group());
 	const auto guides = BuildGuides(c);
-	CHECK(guides.size() == 9);
+	CHECK(guides.size() == 13);
 	CHECK(CountKind(guides, DropTarget::Kind::Tab) == 1 && CountKind(guides, DropTarget::Kind::Side) == 4 && CountKind(guides, DropTarget::Kind::Edge) == 4);
 
 	// the compass: the centre is the middle of the group, the arms are one step (a marker and a gap) away
@@ -1180,10 +1181,10 @@ TEST(Drop_AGroupIsNotOfferedItselfButASingleTabMayLeaveItsGroup) {
 	l.Arrange(Client);
 	// dragged as a whole over itself: nothing to do there, only the edges are left
 	auto guides = BuildGuides(MakeDrop(l, p.Props, true, p.Props->Group()));
-	CHECK(guides.size() == 4 && CountKind(guides, DropTarget::Kind::Edge) == 4);
+	CHECK(guides.size() == 8 && CountKind(guides, DropTarget::Kind::Edge) == 4 && CountKind(guides, DropTarget::Kind::AutoHide) == 4);
 	// the only tab of a group over its own group: same
 	guides = BuildGuides(MakeDrop(l, p.Props, false, p.Props->Group()));
-	CHECK(guides.size() == 4);
+	CHECK(guides.size() == 8);
 
 	// one of two tabs over its own group: it can be split off, but "as a tab" would change nothing
 	l.DockTo(p.Output, p.Props->Group(), DockPosition::Tab);
@@ -2407,6 +2408,185 @@ TEST(Anchor_ItIsSavedWithTheLayout) {
 	CHECK_VALID(odd);
 }
 
+// ---- Texts (translation) -----------------------------------------------------------------------
+
+TEST(Texts_TheDefaultsAreEnglishAndComplete) {
+	ResetDockTexts();
+	CHECK(DockText(Str::MenuClose) == L"&Close" && DockText(Str::TipAutoHide) == L"Auto Hide" && DockText(Str::DialogTitle) == L"Windows");
+	std::set<std::wstring> names;
+	for (int i = 0; i < (int)Str::Count; i++) {
+		const auto id = (Str)i;
+		CHECK(wcslen(DockTextName(id)) > 0 && wcslen(DockTextDefault(id)) > 0 && DockText(id) == DockTextDefault(id));
+		names.insert(DockTextName(id));
+	}
+	CHECK(names.size() == (size_t)Str::Count);								// every text has a name of its own
+	CHECK(DockText(Str::Count).empty() && wcslen(DockTextName(Str::Count)) == 0);
+	CHECK(DockSideText(DockSide::Left) == L"left" && DockSideText(DockSide::Bottom) == L"bottom");
+}
+
+TEST(Texts_ArgumentsAreFilledIn) {
+	ResetDockTexts();
+	CHECK(DockText(Str::AccCloseTab, { L"main.cpp" }) == L"Close main.cpp");
+	CHECK(DockText(Str::AccAutoHiddenItem, { L"Toolbox", L"left" }) == L"Toolbox (auto hidden left)");
+	SetDockText(Str::AccCloseTab, L"{0} schliessen ({0})");
+	CHECK(DockText(Str::AccCloseTab, { L"a" }) == L"a schliessen (a)");			// more than once
+	SetDockText(Str::AccCloseTab, L"Close {1}{0}");
+	CHECK(DockText(Str::AccCloseTab, { L"x" }) == L"Close {1}x");				// what has no argument stays
+	SetDockText(Str::AccCloseTab, L"Close {0}");
+	CHECK(DockText(Str::AccCloseTab, { L"{0}" }) == L"Close {0}");				// an argument that looks like a token is left alone
+	ResetDockTexts();
+}
+
+TEST(Texts_OneCanBeSetAndPutBack) {
+	ResetDockTexts();
+	SetDockText(Str::MenuClose, L"&Schlie\u00DFen");
+	CHECK(DockText(Str::MenuClose) == L"&Schlie\u00DFen" && DockText(Str::MenuCloseAll) == L"Close &All Tabs");
+	SetDockText(Str::MenuClose, L"");											// empty: the English one again
+	CHECK(DockText(Str::MenuClose) == L"&Close");
+	SetDockText(Str::MenuClose, L"x");
+	SetDockText(Str::TipClose, L"y");
+	ResetDockTexts();
+	CHECK(DockText(Str::MenuClose) == L"&Close" && DockText(Str::TipClose) == L"Close");
+	SetDockText(Str::Count, L"ignored");
+	CHECK(DockText(Str::Count).empty());
+}
+
+TEST(Texts_ATableCanBeLoadedFromJson) {
+	ResetDockTexts();
+	std::wstring error;
+	CHECK(LoadDockTexts(R"({"MenuClose": "&Schlie\u00DFen", "TipClose": "Schlie\u00DFen", "NoSuchText": "x", "Yes": 5, "SideLeft": "links"})", &error));
+	CHECK(DockText(Str::MenuClose) == L"&Schlie\u00DFen" && DockText(Str::TipClose) == L"Schlie\u00DFen" && DockText(Str::SideLeft) == L"links");
+	CHECK(DockText(Str::Yes) == L"Yes");										// not a string: ignored
+	CHECK(DockText(Str::TipDock) == L"Dock");									// not mentioned: as it was
+
+	CHECK(!LoadDockTexts("[1, 2]", &error) && !error.empty());
+	CHECK(!LoadDockTexts("this is not json") && !LoadDockTexts(""));
+	CHECK(DockText(Str::MenuClose) == L"&Schlie\u00DFen");						// a failed load changes nothing
+
+	// the dump of the defaults is a table to translate from, and loading it puts the English back
+	const std::string dump = DumpDockTexts(true);
+	CHECK(dump.find("\"MenuClose\"") != std::string::npos && dump.find("Close All &But This") != std::string::npos);
+	CHECK(LoadDockTexts(dump));
+	CHECK(DockText(Str::MenuClose) == L"&Close" && DockText(Str::SideLeft) == L"left");
+
+	SetDockText(Str::TipClose, L"Zu");
+	CHECK(DumpDockTexts(false).find("\"TipClose\": \"Zu\"") != std::string::npos || DumpDockTexts(false).find("\"TipClose\":\"Zu\"") != std::string::npos);
+	ResetDockTexts();
+}
+
+TEST(Texts_TheWindowListSpeaksTheTranslation) {
+	ResetDockTexts();
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Show(p.B);
+	CHECK(DockWindowList::StateText(*p.A) == L"Open" && DockWindowList::TypeText(*p.Sol) == L"Tool window");
+	CHECK(DockWindowList::StateText(*p.Sol) == L"Docked left");
+	LoadDockTexts(R"({"StateOpen": "Offen", "TypeToolWindow": "Werkzeugfenster", "StateDockedAt": "Angedockt {0}", "SideLeft": "links"})");
+	CHECK(DockWindowList::StateText(*p.A) == L"Offen" && DockWindowList::TypeText(*p.Sol) == L"Werkzeugfenster");
+	CHECK(DockWindowList::StateText(*p.Sol) == L"Angedockt links");
+	ResetDockTexts();
+}
+
+// ---- Auto-hide as a drop target --------------------------------------------------------------------
+
+TEST(AutoHideTo_AGroupGoesIntoAnyBar) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Arrange(Client);
+	CHECK(l.CanAutoHideTo(p.Sol->Group()) && !l.CanAutoHideTo(p.A->Group()) && !l.CanAutoHideTo(nullptr));
+
+	// from the left of the window into the bottom bar: it slides out as high as it was
+	const int height = Height(p.Sol->Group()->Rect);
+	CHECK(l.AutoHideTo(p.Sol->Group(), DockSide::Bottom));
+	CHECK(p.Sol->State() == PaneState::AutoHide && p.Sol->Group()->Side() == DockSide::Bottom);
+	CHECK(l.AutoHideGroups(DockSide::Bottom).size() == 1 && l.AutoHideGroups(DockSide::Bottom)[0]->AutoHideLength == height);
+	CHECK_VALID(l);
+
+	// the same bar again: nothing to do; another bar along the same axis keeps its length
+	CHECK(!l.AutoHideTo(p.Sol->Group(), DockSide::Bottom));
+	const int length = p.Sol->Group()->AutoHideLength;
+	CHECK(l.AutoHideTo(p.Sol->Group(), DockSide::Top));
+	CHECK(p.Sol->Group()->Side() == DockSide::Top && p.Sol->Group()->AutoHideLength == length && l.AutoHideGroups(DockSide::Bottom).empty());
+	// across to a bar of the other axis: what the pane remembers for that direction
+	CHECK(l.AutoHideTo(p.Sol->Group(), DockSide::Left));
+	CHECK(p.Sol->Group()->Side() == DockSide::Left && p.Sol->Group()->AutoHideLength > 0);
+	CHECK_VALID(l);
+
+	// a floating group, at the size it has there; and it goes back where it came from
+	CHECK(l.Unhide(p.Sol->Group()));
+	CHECK(l.Float(p.Sol, { 0, 0, 500, 400 }));
+	l.Arrange(*l.Floats()[0], { 0, 0, 480, 360 });
+	CHECK(l.AutoHideTo(p.Sol->Group(), DockSide::Right));
+	CHECK(p.Sol->Group()->Side() == DockSide::Right && p.Sol->Group()->AutoHideLength == 480 && l.Floats().empty());
+	CHECK(l.Unhide(p.Sol->Group()));
+	CHECK(p.Sol->State() == PaneState::Docked);
+	CHECK_VALID(l);
+
+	// groups whose panes cannot auto-hide, and documents, cannot
+	p.Props->Caps = PaneCaps::CanFloat | PaneCaps::CanClose;
+	CHECK(!l.CanAutoHideTo(p.Props->Group()) && !l.AutoHideTo(p.Props->Group(), DockSide::Left));
+}
+
+TEST(AutoHideTo_OneOfSeveralTabsGoesOnItsOwn) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Tab));
+	l.Arrange(Client);
+	CHECK(l.CanAutoHidePane(p.Ext) && !l.CanAutoHidePane(p.A) && !l.CanAutoHidePane(nullptr));
+	CHECK(l.AutoHidePaneTo(p.Ext, DockSide::Left));
+	CHECK(p.Ext->State() == PaneState::AutoHide && p.Ext->Group()->Panes().size() == 1 && p.Ext->Group()->Side() == DockSide::Left);
+	CHECK(p.Props->State() == PaneState::Docked && p.Props->Group()->Panes().size() == 1);				// the rest stays
+	CHECK_VALID(l);
+
+	// a pane alone in its group goes with the group; a pane that is not placed cannot
+	CHECK(l.AutoHidePaneTo(p.Props, DockSide::Right));
+	CHECK(p.Props->Group()->Side() == DockSide::Right);
+	CHECK(!l.AutoHidePaneTo(p.Pinned, DockSide::Left) && p.Pinned->State() == PaneState::Hidden);
+}
+
+TEST(Drop_TheAutoHideBarsAreOfferedToToolWindowsOnly) {
+	DockLayout l;
+	Panes p = BuildStandard(l);
+	l.Arrange(Client);
+	auto guides = BuildGuides(MakeDrop(l, p.Sol, false, p.Props->Group()));
+	CHECK(guides.size() == 13 && CountKind(guides, DropTarget::Kind::AutoHide) == 4);
+	// the markers do not lie on each other
+	for (size_t i = 0; i < guides.size(); i++)
+		for (size_t j = i + 1; j < guides.size(); j++) {
+			RECT overlap;
+			CHECK(!IntersectRect(&overlap, &guides[i].Rect, &guides[j].Rect));
+		}
+
+	auto c = MakeDrop(l, p.Sol, false, p.Props->Group());
+	auto pick = [&](const Guide& g) { return PickTarget(c, guides, CenterPoint(g.Rect)); };
+	auto left = pick(guides[9]);
+	CHECK(left.Type == DropTarget::Kind::AutoHide && left.Edge == DockSide::Left);
+	CHECK_RECT(left.Preview, 0, 0, 24, 600);									// the bar itself
+	CHECK_RECT(pick(guides[10]).Preview, 976, 0, 1000, 600);
+	CHECK_RECT(pick(guides[11]).Preview, 0, 0, 1000, 24);
+	CHECK_RECT(pick(guides[12]).Preview, 0, 576, 1000, 600);
+	CHECK(pick(guides[9]).SameTargetAs(left) && !pick(guides[10]).SameTargetAs(left));
+
+	// documents and panes that cannot auto-hide do not get them; nor does Ctrl
+	CHECK(CountKind(BuildGuides(MakeDrop(l, p.A, false, p.Props->Group())), DropTarget::Kind::AutoHide) == 0);
+	p.Sol->Caps = PaneCaps::CanFloat | PaneCaps::CanClose;
+	CHECK(CountKind(BuildGuides(MakeDrop(l, p.Sol, false, p.Props->Group())), DropTarget::Kind::AutoHide) == 0);
+	auto noDocking = MakeDrop(l, p.Props, false, nullptr);
+	noDocking.DockingAllowed = false;
+	CHECK(BuildGuides(noDocking).empty());
+
+	// dropping does it
+	p.Sol->Caps = PaneCaps::All;
+	DropTarget t;
+	t.Type = DropTarget::Kind::AutoHide;
+	t.Edge = DockSide::Bottom;
+	CHECK(ApplyDrop(l, p.Sol, true, t));
+	CHECK(p.Sol->State() == PaneState::AutoHide && p.Sol->Group()->Side() == DockSide::Bottom);
+	CHECK(l.DockTo(p.Ext, p.Props->Group(), DockPosition::Tab));
+	CHECK(ApplyDrop(l, p.Ext, false, t) && p.Ext->Group()->Side() == DockSide::Bottom && p.Props->State() == PaneState::Docked);
+	CHECK_VALID(l);
+}
+
 // ---- Randomized ----------------------------------------------------------------
 
 static void CheckGeometry(const DockNode& n, int line) {
@@ -2455,7 +2635,7 @@ TEST(Random_OperationsKeepTheInvariants) {
 		RECT rc{ (LONG)pick(200), (LONG)pick(200), 250 + (LONG)pick(300), 250 + (LONG)pick(300) };
 
 		bool ok = false;
-		switch (pick(14)) {
+		switch (pick(16)) {
 			case 0: ok = l.Show(anyPane()); break;
 			case 1: ok = l.Hide(anyPane()); break;
 			case 2: ok = l.DockTo(anyPane(), anyGroup(), anyPosition(), (int)pick(4) - 1); break;
@@ -2481,6 +2661,8 @@ TEST(Random_OperationsKeepTheInvariants) {
 				if (!l.Floats().empty())
 					ok = l.SetFloatRect(l.Floats()[pick(l.Floats().size())].get(), rc);
 				break;
+			case 14: ok = l.AutoHideTo(anyGroup(), anySide()); break;
+			case 15: ok = l.AutoHidePaneTo(anyPane(), anySide()); break;
 		}
 		succeeded += ok;
 
@@ -2669,6 +2851,14 @@ int wmain() {
 	Run_Anchor_ABeforeOrAfterTheNeighbourAndAboveOrBelowIt();
 	Run_Anchor_AnAutoHiddenGroupAndAFloatingGroupGoBackToo();
 	Run_Anchor_ItIsSavedWithTheLayout();
+	Run_Texts_TheDefaultsAreEnglishAndComplete();
+	Run_Texts_ArgumentsAreFilledIn();
+	Run_Texts_OneCanBeSetAndPutBack();
+	Run_Texts_ATableCanBeLoadedFromJson();
+	Run_Texts_TheWindowListSpeaksTheTranslation();
+	Run_AutoHideTo_AGroupGoesIntoAnyBar();
+	Run_AutoHideTo_OneOfSeveralTabsGoesOnItsOwn();
+	Run_Drop_TheAutoHideBarsAreOfferedToToolWindowsOnly();
 	Run_Random_OperationsKeepTheInvariants();
 
 	RunUiTests();

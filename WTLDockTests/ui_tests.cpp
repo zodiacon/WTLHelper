@@ -9,6 +9,7 @@ CAppModule _Module;
 #include <atlwin.h>
 #include <atlgdi.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 
 #include <map>
 #include <random>
@@ -1128,14 +1129,14 @@ TEST(Host_DraggingShowsGuidesAndAPreview) {
 	const POINT over = ScreenCenterOf(f, f.Props->Group());
 
 	CHECK(f.Host.BeginDrag(f.Sol, false, over));
-	CHECK(f.Host.IsDragging() && f.Host.VisibleGuides() == 9);		// the compass and four edges
+	CHECK(f.Host.IsDragging() && f.Host.VisibleGuides() == 13);		// the compass, four edges and four auto-hide bars
 	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Tab && f.Host.CurrentDropTarget().Group == f.Props->Group());
-	CHECK(GuideWindows() == 10);									// and the preview
+	CHECK(GuideWindows() == 14);									// and the preview
 	CHECK(!f.Host.BeginDrag(f.Output, false, over));				// one drag at a time
 
 	// away from every group: just the edges, and a floating window's outline
 	f.Host.UpdateDrag(NowhereOnScreen);
-	CHECK(f.Host.VisibleGuides() == 4 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float);
+	CHECK(f.Host.VisibleGuides() == 8 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float);
 
 	CHECK(!f.Host.EndDrag(false));
 	CHECK(!f.Host.IsDragging() && GuideWindows() == 0 && f.Host.VisibleGuides() == 0);
@@ -1224,11 +1225,11 @@ TEST(Host_ControlKeepsAPaneFromDocking) {
 	Fixture f;
 	f.AddStandard();
 	CHECK(f.Host.BeginDrag(f.Sol, false, ScreenCenterOf(f, f.Props->Group())));
-	CHECK(f.Host.VisibleGuides() == 9);
+	CHECK(f.Host.VisibleGuides() == 13);
 	f.Host.UpdateDrag(ScreenCenterOf(f, f.Props->Group()), true);
 	CHECK(f.Host.VisibleGuides() == 0 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float);
 	f.Host.UpdateDrag(ScreenCenterOf(f, f.Props->Group()), false);
-	CHECK(f.Host.VisibleGuides() == 9 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::Tab);
+	CHECK(f.Host.VisibleGuides() == 13 && f.Host.CurrentDropTarget().Type == DropTarget::Kind::Tab);
 	f.Host.EndDrag(false);
 	VERIFY(f);
 }
@@ -1368,7 +1369,7 @@ TEST(Host_DragsBetweenFloatingAndMainWindows) {
 	// a pane of the main window over a group in a frame: offered the compass of that group
 	CHECK(f.Host.BeginDrag(f.Sol, false, ScreenCenterOf(f, f.Output->Group())));
 	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Tab && f.Host.CurrentDropTarget().Group == f.Output->Group());
-	CHECK(f.Host.VisibleGuides() == 9);
+	CHECK(f.Host.VisibleGuides() == 13);
 	CHECK(f.Host.EndDrag(true));
 	VERIFY(f);
 	CHECK(f.Sol->Group() == f.Output->Group() && f.Sol->State() == PaneState::Floating);
@@ -3138,7 +3139,7 @@ struct DialogDriver {
 	static inline int Tries = 0;
 
 	static void CALLBACK Tick(HWND, UINT, UINT_PTR, DWORD) {
-		HWND dialog = ::FindWindowW(L"#32770", L"Windows");
+		HWND dialog = ::FindWindowW(L"#32770", DockText(Str::DialogTitle).c_str());
 		if ((!dialog || !::IsWindowVisible(dialog)) && ++Tries < 100)
 			return;		// (not there yet, or not shown yet)
 		if (dialog && !::IsWindowVisible(dialog))
@@ -4107,6 +4108,198 @@ TEST(Host_ATabThatWasFloatedComesBackToItsGroup) {
 	CHECK(f.Output->Group() == f.Sol->Group());
 }
 
+// ---- Translated texts reach the windows -------------------------------------------------------
+
+TEST(Host_TheChromeSpeaksTheTranslation) {
+	ResetDockTexts();
+	LoadDockTexts(R"({"TipClose": "Schlie\u00DFen", "TipAutoHide": "Automatisch ausblenden", "TipWindowPosition": "Fensterposition",
+		"AccCloseTab": "{0} schlie\u00DFen", "AccDocuments": "Dokumente", "AccDockingArea": "Dockbereich", "TipScrollTabsRight": "Nach rechts",
+		"AccActionPress": "Dr\u00FCcken"})");
+	Fixture f;
+	f.AddStandard();
+	f.Host.SetTipTiming(0, 0);
+
+	// tooltips of the caption buttons
+	HWND sol = f.Host.GroupWindow(f.Sol->Group());
+	RECT client;
+	::GetClientRect(sol, &client);
+	const auto b = ComputeCaptionButtons(ComputeGroupParts(*f.Sol->Group(), client, f.Host.Metrics()).Caption, true, true, true, f.Host.Metrics());
+	::SendMessage(sol, WM_MOUSEMOVE, 0, Center(b.Close));
+	CHECK(f.Host.TipText() == L"Schlie\u00DFen");
+	::SendMessage(sol, WM_MOUSEMOVE, 0, Center(b.Pin));
+	CHECK(f.Host.TipText() == L"Automatisch ausblenden");
+	::SendMessage(sol, WM_MOUSEMOVE, 0, Center(b.Menu));
+	CHECK(f.Host.TipText() == L"Fensterposition");
+	f.Host.HideTip();
+
+	// names and actions for screen readers
+	auto acc = AccessibleOfClient(sol);
+	CHECK(acc != nullptr);
+	if (acc) {
+		const auto children = ChildrenOf(acc);
+		const AccChild* pin = FindChild(children, L"Automatisch ausblenden");
+		CComBSTR action;
+		CHECK(pin && acc->get_accDefaultAction(ChildId(pin->Id), &action) == S_OK && std::wstring(action) == L"Dr\u00FCcken");
+	}
+	auto docs = AccessibleOfClient(f.Host.GroupWindow(f.A->Group()));
+	CHECK(docs && NameOf(docs, CHILDID_SELF) == L"Dokumente" && FindChild(ChildrenOf(docs), L"a.cpp schlie\u00DFen"));
+	auto host = AccessibleOfClient(f.Host);
+	CHECK(host && NameOf(host, CHILDID_SELF) == L"Dockbereich");
+	ResetDockTexts();
+}
+
+TEST(Host_TheWindowsDialogSpeaksTheTranslation) {
+	ResetDockTexts();
+	LoadDockTexts(R"({"DialogTitle": "Fenster", "DialogActivate": "&Aktivieren", "ColumnName": "Bezeichnung", "ColumnType": "Art",
+		"DialogIncludeToolWindows": "&Werkzeugfenster einbeziehen", "StateOpen": "Offen"})");
+	Fixture f;
+	f.AddStandard();
+
+	std::wstring activate, include, state;
+	HWND found = nullptr;
+	DialogDriver::Start([&](HWND dialog) {
+		found = dialog;
+		wchar_t text[128]{};
+		::GetWindowTextW(Dlg(dialog, WindowsDialogIds::Activate), text, _countof(text));
+		activate = text;
+		::GetWindowTextW(Dlg(dialog, WindowsDialogIds::IncludeTools), text, _countof(text));
+		include = text;
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		state = CellOf(list, RowOf(list, L"a.cpp"), 2);
+		HWND header = ListView_GetHeader(list);
+		HDITEMW item{};
+		wchar_t column[64]{};
+		item.mask = HDI_TEXT;
+		item.pszText = column;
+		item.cchTextMax = _countof(column);
+		Header_GetItem(header, 0, &item);
+		if (std::wstring(column) != L"Bezeichnung")
+			state = L"wrong column title: " + std::wstring(column);
+	});
+	f.Host.ShowWindowsDialog();
+	CHECK(found != nullptr);
+	CHECK(activate == L"&Aktivieren" && include == L"&Werkzeugfenster einbeziehen" && state == L"Offen");
+	ResetDockTexts();
+}
+
+// ---- Dropping on an auto-hide bar with the mouse ----------------------------------------------------
+
+POINT AutoHideGuide(Fixture& f, DockSide side) {
+	POINT p = EdgeGuide(f, side);
+	const int step = 2 * f.Host.Metrics().ButtonSize + f.Host.Metrics().ButtonMargin;
+	if (side == DockSide::Left || side == DockSide::Right)
+		p.y += step;
+	else
+		p.x += step;
+	return p;
+}
+
+TEST(Host_DroppingOnAnAutoHideMarkerAutoHidesTheGroup) {
+	Fixture f;
+	f.AddStandard();
+	auto& l = f.Host.Layout();
+
+	// a whole group (dragged by its caption) into the bar on the other side
+	CHECK(f.Host.BeginDrag(f.Sol, true, ScreenCenterOf(f, f.Sol->Group())));
+	f.Host.UpdateDrag(AutoHideGuide(f, DockSide::Right));
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::AutoHide && f.Host.CurrentDropTarget().Edge == DockSide::Right);
+	CHECK(Width(f.Host.CurrentDropTarget().Preview) == f.Host.Metrics().AutoHideBarThickness);
+	CHECK(f.Host.EndDrag(true));
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::AutoHide && f.Sol->Group()->Side() == DockSide::Right);
+	RECT item;
+	CHECK(f.Host.GetBarItemRect(f.Sol, item));									// it has its item on the right bar
+
+	// a single tab, to the top bar; the other tab stays where it is
+	CHECK(l.DockTo(f.Output, f.Props->Group(), DockPosition::Tab));
+	CHECK(f.Host.BeginDrag(f.Output, false, ScreenCenterOf(f, f.Props->Group())));
+	f.Host.UpdateDrag(AutoHideGuide(f, DockSide::Top));
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::AutoHide && f.Host.CurrentDropTarget().Edge == DockSide::Top);
+	CHECK(f.Host.EndDrag(true));
+	VERIFY(f);
+	CHECK(f.Output->Group()->Side() == DockSide::Top && f.Props->State() == PaneState::Docked);
+
+	// the flyout of what was dropped slides out, and the pin docks it again where it was
+	CHECK(f.Host.ShowFlyout(f.Sol, true));
+	f.Host.HideFlyout();
+	CHECK(f.Host.Execute(DockCommand::Dock, f.Sol));
+	VERIFY(f);
+	CHECK(f.Sol->State() == PaneState::Docked && f.Sol->Group()->Side() == DockSide::Left);
+}
+
+TEST(Host_ADropOnAnAutoHideMarkerNeedsNoOtherTarget) {
+	Fixture f;
+	f.AddStandard();
+	// a document has no auto-hide markers: dragging one shows the compass only
+	CHECK(f.Host.BeginDrag(f.A, false, ScreenCenterOf(f, f.B->Group())));
+	f.Host.UpdateDrag(AutoHideGuide(f, DockSide::Left));
+	CHECK(f.Host.CurrentDropTarget().Type != DropTarget::Kind::AutoHide);
+	f.Host.EndDrag(false);
+
+	// Ctrl while dragging leaves floating only
+	CHECK(f.Host.BeginDrag(f.Sol, true, ScreenCenterOf(f, f.Sol->Group())));
+	f.Host.UpdateDrag(AutoHideGuide(f, DockSide::Bottom), true);
+	CHECK(f.Host.CurrentDropTarget().Type == DropTarget::Kind::Float && f.Host.VisibleGuides() == 0);
+	f.Host.EndDrag(false);
+	CHECK(f.Sol->State() == PaneState::Docked);
+}
+
+TEST(Host_TheWindowsDialogFollowsADarkTheme) {
+	ResetDockTexts();
+	Fixture f;
+	f.AddStandard();
+	f.Host.SetTheme(DockTheme::Dark());
+	const DockTheme dark = DockTheme::Dark();
+
+	COLORREF back = 0, textBack = 0, text = 0;
+	BOOL titleBar = FALSE;
+	HBRUSH brush = nullptr;
+	COLORREF brushColor = 0;
+	DialogDriver::Start([&](HWND dialog) {
+		HWND list = Dlg(dialog, WindowsDialogIds::List);
+		back = ListView_GetBkColor(list);
+		textBack = ListView_GetTextBkColor(list);
+		text = ListView_GetTextColor(list);
+		::DwmGetWindowAttribute(dialog, 20, &titleBar, sizeof(titleBar));
+		// what the dialog answers a control that asks for its colours
+		CClientDC dc(dialog);
+		brush = (HBRUSH)::SendMessage(dialog, WM_CTLCOLORSTATIC, (WPARAM)dc.m_hDC, (LPARAM)Dlg(dialog, WindowsDialogIds::IncludeTools));
+		LOGBRUSH lb{};
+		if (brush && ::GetObject(brush, sizeof(lb), &lb))
+			brushColor = lb.lbColor;
+	});
+	f.Host.ShowWindowsDialog();
+	CHECK(back == dark.GroupBack && textBack == dark.GroupBack && text == dark.CaptionInactiveText);
+	CHECK(titleBar == TRUE);
+	CHECK(brush != nullptr && brushColor == dark.GroupBack);
+}
+
+TEST(Host_TheWindowsDialogKeepsTheSystemLookWithALightTheme) {
+	ResetDockTexts();
+	Fixture f;
+	f.AddStandard();
+	COLORREF back = 0;
+	BOOL titleBar = TRUE;
+	DialogDriver::Start([&](HWND dialog) {
+		back = ListView_GetBkColor(Dlg(dialog, WindowsDialogIds::List));
+		titleBar = FALSE;
+		::DwmGetWindowAttribute(dialog, 20, &titleBar, sizeof(titleBar));
+	});
+	f.Host.ShowWindowsDialog();
+	CHECK(back == ::GetSysColor(COLOR_WINDOW) && titleBar == FALSE);
+
+	// and the dialog follows the theme the host has when it opens: dark, then light again
+	f.Host.SetTheme(DockTheme::Dark());
+	COLORREF darkBack = 0;
+	DialogDriver::Start([&](HWND dialog) { darkBack = ListView_GetBkColor(Dlg(dialog, WindowsDialogIds::List)); });
+	f.Host.ShowWindowsDialog();
+	f.Host.SetTheme(DockTheme::Light());
+	COLORREF lightBack = 0;
+	DialogDriver::Start([&](HWND dialog) { lightBack = ListView_GetBkColor(Dlg(dialog, WindowsDialogIds::List)); });
+	f.Host.ShowWindowsDialog();
+	CHECK(darkBack == DockTheme::Dark().GroupBack && lightBack == ::GetSysColor(COLOR_WINDOW));
+}
+
 TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 	std::mt19937 rng(7);
 	auto pick = [&](size_t n) { return (size_t)(rng() % n); };
@@ -4133,7 +4326,7 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 		const RECT rc = OffScreen(20, 20, 300, 280);
 
 		bool ok = false;
-		switch (pick(30)) {
+		switch (pick(32)) {
 			case 0: ok = l.Show(anyPane()); break;
 			case 1: ok = l.Hide(anyPane()); break;
 			case 2: ok = l.DockTo(anyPane(), anyGroup(), (DockPosition)pick(5)); break;
@@ -4211,6 +4404,8 @@ TEST(Host_RandomOperationsKeepWindowsAndModelInStep) {
 			case 24: ok = f.Host.HandleShortcut(pick(2) ? VK_F6 : VK_F4, true, pick(2) != 0, pick(2) != 0, pick(2) != 0); break;
 			case 26: ok = f.Host.FocusChrome(anyPane()); break;
 			case 28: f.Host.SetMultiRowTabs(pick(2) != 0); break;
+			case 30: ok = l.AutoHideTo(anyGroup(), (DockSide)pick(4)); break;
+			case 31: ok = l.AutoHidePaneTo(anyPane(), (DockSide)pick(4)); break;
 			case 29: ok = f.Host.ShowPreview(anyPane()); break;
 			case 27:
 				// keys in the chrome
@@ -4398,6 +4593,12 @@ void RunUiTests() {
 	Run_Host_MergedSplitsHaveTheirWindowsAndSplittersInOrder();
 	Run_Host_AClosedToolWindowReopensWhereItWas();
 	Run_Host_ATabThatWasFloatedComesBackToItsGroup();
+	Run_Host_TheChromeSpeaksTheTranslation();
+	Run_Host_TheWindowsDialogSpeaksTheTranslation();
+	Run_Host_DroppingOnAnAutoHideMarkerAutoHidesTheGroup();
+	Run_Host_ADropOnAnAutoHideMarkerNeedsNoOtherTarget();
+	Run_Host_TheWindowsDialogFollowsADarkTheme();
+	Run_Host_TheWindowsDialogKeepsTheSystemLookWithALightTheme();
 	Run_Host_RandomOperationsKeepWindowsAndModelInStep();
 
 	_Module.Term();

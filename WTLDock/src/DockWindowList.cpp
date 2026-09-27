@@ -1,26 +1,27 @@
 #include "DockWindowList.h"
+#include "DockStrings.h"
 #include <algorithm>
 
 namespace WTLDock {
 
 std::wstring DockWindowList::TypeText(const DockPane& pane) {
-	return pane.Kind() == PaneKind::Document ? L"Document" : L"Tool window";
+	return DockText(pane.Kind() == PaneKind::Document ? Str::TypeDocument : Str::TypeToolWindow);
 }
 
 std::wstring DockWindowList::StateText(const DockPane& pane) {
-	static const wchar_t* const sides[] = { L"left", L"right", L"top", L"bottom" };
 	auto group = pane.Group();
+	const bool sided = group && group->Side();
 	switch (pane.State()) {
 		case PaneState::Document:
-			return pane.Pinned() ? L"Open, pinned" : pane.Preview ? L"Open, preview" : L"Open";
+			return DockText(pane.Pinned() ? Str::StateOpenPinned : pane.Preview ? Str::StateOpenPreview : Str::StateOpen);
 		case PaneState::Docked:
-			return group && group->Side() ? std::wstring(L"Docked ") + sides[(int)*group->Side()] : L"Docked";
+			return sided ? DockText(Str::StateDockedAt, { DockSideText(*group->Side()) }) : DockText(Str::StateDocked);
 		case PaneState::AutoHide:
-			return group && group->Side() ? std::wstring(L"Auto-hidden ") + sides[(int)*group->Side()] : L"Auto-hidden";
+			return sided ? DockText(Str::StateAutoHiddenAt, { DockSideText(*group->Side()) }) : DockText(Str::StateAutoHidden);
 		case PaneState::Floating:
-			return L"Floating";
+			return DockText(Str::StateFloating);
 		default:
-			return L"Hidden";
+			return DockText(Str::StateHidden);
 	}
 }
 

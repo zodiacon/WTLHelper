@@ -4,6 +4,7 @@
 #include "SplitterTracker.h"
 #include "DockDragSession.h"
 #include "DockNavigatorWnd.h"
+#include "DockStrings.h"
 #include "DockTipWnd.h"
 #include "Json.h"
 #include "Utf8.h"
@@ -1409,29 +1410,29 @@ void CDockHost::ShowPaneMenu(DockPane* pane, POINT screen) {
 	auto add = [&](DockCommand command, const wchar_t* text) {
 		menu.AppendMenu(MF_STRING | (CanExecute(command, pane) ? MF_ENABLED : MF_GRAYED), (UINT_PTR)(CmdBase + (UINT)command), text);
 	};
-	add(DockCommand::Close, L"&Close");
+	add(DockCommand::Close, DockText(Str::MenuClose).c_str());
 	if (pane->Group()->Panes().size() > 1) {
-		add(DockCommand::CloseOthers, L"Close All &But This");
-		add(DockCommand::CloseAll, L"Close &All Tabs");
+		add(DockCommand::CloseOthers, DockText(Str::MenuCloseOthers).c_str());
+		add(DockCommand::CloseAll, DockText(Str::MenuCloseAll).c_str());
 	}
 	menu.AppendMenu(MF_SEPARATOR);
 	if (pane->State() == PaneState::Floating)
-		add(DockCommand::Dock, L"&Dock");
+		add(DockCommand::Dock, DockText(Str::MenuDock).c_str());
 	else
-		add(DockCommand::Float, L"Floa&t");
+		add(DockCommand::Float, DockText(Str::MenuFloat).c_str());
 	if (pane->Kind() == PaneKind::Tool) {
-		add(DockCommand::AutoHide, L"&Auto Hide");
+		add(DockCommand::AutoHide, DockText(Str::MenuAutoHide).c_str());
 	}
 	else if (pane->State() == PaneState::Document || pane->State() == PaneState::Floating) {
 		menu.AppendMenu(MF_SEPARATOR);
 		if (pane->Pinned())
-			add(DockCommand::UnpinTab, L"Un&pin Tab");
+			add(DockCommand::UnpinTab, DockText(Str::MenuUnpinTab).c_str());
 		else
-			add(DockCommand::PinTab, L"&Pin Tab");
-		add(DockCommand::NewHorizontalGroup, L"New &Horizontal Tab Group");
-		add(DockCommand::NewVerticalGroup, L"New &Vertical Tab Group");
-		add(DockCommand::MoveToNextGroup, L"Move to &Next Tab Group");
-		add(DockCommand::MoveToPreviousGroup, L"Move to &Previous Tab Group");
+			add(DockCommand::PinTab, DockText(Str::MenuPinTab).c_str());
+		add(DockCommand::NewHorizontalGroup, DockText(Str::MenuNewHorizontalGroup).c_str());
+		add(DockCommand::NewVerticalGroup, DockText(Str::MenuNewVerticalGroup).c_str());
+		add(DockCommand::MoveToNextGroup, DockText(Str::MenuMoveToNextGroup).c_str());
+		add(DockCommand::MoveToPreviousGroup, DockText(Str::MenuMoveToPreviousGroup).c_str());
 	}
 	if (OnBuildPaneMenu) {
 		menu.AppendMenu(MF_SEPARATOR);
@@ -1548,7 +1549,7 @@ bool CDockHost::LoadStateFromFile(const std::wstring& path, const LoadOptions& o
 	std::string text;
 	if (!ReadTextFile(path, text)) {
 		if (error)
-			*error = L"the state file cannot be read";
+			*error = DockText(Str::ErrorStateFileUnreadable);
 		return false;
 	}
 	return LoadState(text, options, error, restoreWindowPlacement);
@@ -1561,7 +1562,7 @@ void CDockHost::CaptureDefaultLayout() {
 bool CDockHost::ResetLayout(std::wstring* error) {
 	if (m_DefaultLayout.empty()) {
 		if (error)
-			*error = L"no default layout has been captured";
+			*error = DockText(Str::ErrorNoDefaultLayout);
 		return false;
 	}
 	LoadOptions options;
@@ -1577,7 +1578,7 @@ bool CDockHost::ApplyLayout(const std::wstring& name, std::wstring* error) {
 	auto text = m_Store.Find(name);
 	if (!text) {
 		if (error)
-			*error = L"there is no layout with that name";
+			*error = DockText(Str::ErrorNoSuchLayout);
 		return false;
 	}
 	LoadOptions options;
@@ -1861,7 +1862,7 @@ LRESULT CDockHost::OnGetObject(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
 }
 
 std::wstring CDockHost::AccName() const {
-	return L"Docking area";
+	return DockText(Str::AccDockingArea);
 }
 
 LONG CDockHost::AccRole() const {
@@ -1892,17 +1893,16 @@ std::vector<AccElement> CDockHost::AccElements() const {
 	POINT origin{ 0, 0 };
 	::ClientToScreen(m_hWnd, &origin);
 	auto self = const_cast<CDockHost*>(this);
-	static const wchar_t* const sides[] = { L"left", L"right", L"top", L"bottom" };
 	for (int side = 0; side < SideCount; side++) {
 		for (auto& item : BarItems((DockSide)side, dc.m_hDC)) {
 			DockPane* pane = item.Pane;
 			AccElement e;
-			e.Name = pane->Title + L" (auto hidden " + sides[side] + L")";
+			e.Name = DockText(Str::AccAutoHiddenItem, { pane->Title, DockSideText((DockSide)side) });
 			e.Role = ROLE_SYSTEM_PUSHBUTTON;
 			e.State = m_FlyoutId == pane->Id() ? STATE_SYSTEM_PRESSED : 0;
 			e.Screen = item.Rect;
 			OffsetRect(&e.Screen, origin.x, origin.y);
-			e.Action = L"Show";
+			e.Action = DockText(Str::AccActionShow);
 			e.Invoke = [self, pane] { self->ShowFlyout(pane, true); };
 			list.push_back(std::move(e));
 		}

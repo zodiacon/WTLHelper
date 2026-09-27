@@ -143,6 +143,12 @@ public:
 
 	// auto-hide
 	bool AutoHide(DockGroup* group);
+	// Auto-hides a group, or a single pane, into the bar of the given side, wherever it is now (docked, floating or in
+	// another bar). The group keeps the length it had along the bar's axis (a floating one its size in the window).
+	bool CanAutoHideTo(const DockGroup* group) const;
+	bool CanAutoHidePane(const DockPane* pane) const;
+	bool AutoHideTo(DockGroup* group, DockSide side);
+	bool AutoHidePaneTo(DockPane* pane, DockSide side);
 	// Docks an auto-hidden group again where it was (see DockAnchor), else at the edge of its side.
 	bool Unhide(DockGroup* group);
 	// The same for a floating group: it goes back to its old tab group or its old place among the others, else to the

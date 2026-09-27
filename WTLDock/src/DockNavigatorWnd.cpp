@@ -1,4 +1,6 @@
 #include "DockNavigatorWnd.h"
+#include "DockStrings.h"
+#include "DockWindowList.h"
 #include <algorithm>
 
 namespace WTLDock {
@@ -7,7 +9,6 @@ namespace {
 
 constexpr UINT_PTR TimerWatch = 1;
 
-const wchar_t* const ColumnTitles[] = { L"Active Files", L"Active Tool Windows" };
 
 }
 
@@ -125,28 +126,7 @@ LRESULT CDockNavigatorWnd::OnTimer(UINT, WPARAM id, LPARAM, BOOL& handled) {
 }
 
 std::wstring CDockNavigatorWnd::Describe(const DockPane& pane) {
-	static const wchar_t* const sides[] = { L"left", L"right", L"top", L"bottom" };
-	std::wstring text = pane.Title + (pane.Modified ? L" (modified) - " : L" - ");
-	auto group = pane.Group();
-	switch (pane.State()) {
-		case PaneState::Docked:
-			text += L"docked";
-			if (group && group->Side())
-				text += std::wstring(L" ") + sides[(int)*group->Side()];
-			break;
-		case PaneState::AutoHide:
-			text += L"auto-hidden";
-			if (group && group->Side())
-				text += std::wstring(L" ") + sides[(int)*group->Side()];
-			break;
-		case PaneState::Floating:
-			text += L"floating";
-			break;
-		default:
-			text += L"document";
-			break;
-	}
-	return text;
+	return DockText(pane.Modified ? Str::NavigatorFooterModified : Str::NavigatorFooter, { pane.Title, DockWindowList::StateText(pane) });
 }
 
 LRESULT CDockNavigatorWnd::OnPaint(UINT msg, WPARAM wp, LPARAM, BOOL&) {
@@ -179,7 +159,8 @@ void CDockNavigatorWnd::Draw(HDC hdc) {
 		RECT header = m_Layout.Header[c];
 		header.left += metrics.TextPadding;
 		dc.SetTextColor(theme.TabInactiveText);
-		dc.DrawText(ColumnTitles[c], -1, &header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+		const std::wstring heading = DockText(c == 0 ? Str::NavigatorFiles : Str::NavigatorToolWindows);
+		dc.DrawText(heading.c_str(), -1, &header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 		RECT line{ m_Layout.Header[c].left, m_Layout.Header[c].bottom - 1, m_Layout.Header[c].right, m_Layout.Header[c].bottom };
 		dc.FillSolidRect(&line, theme.Border);
 	}

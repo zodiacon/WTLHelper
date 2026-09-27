@@ -53,6 +53,10 @@ bool CanSide(const DropContext& c, const DockGroup* hover, DockPosition pos) {
 	return c.Layout->CanDockTo(c.Pane, hover, pos);
 }
 
+bool CanAutoHide(const DropContext& c) {
+	return c.WholeGroup ? c.Layout->CanAutoHideTo(SourceGroup(c)) : c.Layout->CanAutoHidePane(c.Pane);
+}
+
 bool CanEdge(const DropContext& c) {
 	return c.WholeGroup ? c.Layout->CanMoveGroupToEdge(SourceGroup(c)) : c.Layout->CanDockToEdge(c.Pane);
 }
@@ -148,6 +152,30 @@ std::vector<Guide> BuildGuides(const DropContext& c) {
 			guides.push_back(g);
 		}
 	}
+
+	// the auto-hide bars: a marker below (or beside) each edge marker, and the bar itself is the preview
+	if (!IsRectEmpty(&c.MainBounds) && CanAutoHide(c)) {
+		const RECT& b = c.MainBounds;
+		const int margin = size / 2;
+		const int midX = (b.left + b.right) / 2, midY = (b.top + b.bottom) / 2;
+		const int bar = std::max(1, c.Metrics.AutoHideBarThickness);
+		struct Bar {
+			DockSide Side;
+			POINT Center;
+			RECT Preview;
+		};
+		for (auto e : { Bar{ DockSide::Left, { b.left + margin + size / 2, midY + step }, { b.left, b.top, b.left + bar, b.bottom } },
+			Bar{ DockSide::Right, { b.right - margin - size / 2, midY + step }, { b.right - bar, b.top, b.right, b.bottom } },
+			Bar{ DockSide::Top, { midX + step, b.top + margin + size / 2 }, { b.left, b.top, b.right, b.top + bar } },
+			Bar{ DockSide::Bottom, { midX + step, b.bottom - margin - size / 2 }, { b.left, b.bottom - bar, b.right, b.bottom } } }) {
+			Guide g;
+			g.Target.Type = DropTarget::Kind::AutoHide;
+			g.Target.Edge = e.Side;
+			g.Target.Preview = e.Preview;
+			g.Rect = CenteredSquare(e.Center, size);
+			guides.push_back(g);
+		}
+	}
 	return guides;
 }
 
@@ -197,6 +225,8 @@ bool ApplyDrop(DockLayout& layout, DockPane* pane, bool wholeGroup, const DropTa
 			return wholeGroup ? layout.MoveGroupTo(source, group, target.Position) : layout.DockTo(pane, group, target.Position);
 		case DropTarget::Kind::Edge:
 			return wholeGroup ? layout.MoveGroupToEdge(source, target.Edge) : layout.DockToEdge(pane, target.Edge);
+		case DropTarget::Kind::AutoHide:
+			return wholeGroup ? layout.AutoHideTo(source, target.Edge) : layout.AutoHidePaneTo(pane, target.Edge);
 		case DropTarget::Kind::Float:
 			return wholeGroup ? layout.FloatGroup(source, target.Preview) : layout.Float(pane, target.Preview);
 		default:

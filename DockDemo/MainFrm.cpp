@@ -104,6 +104,37 @@ LRESULT CMainFrame::OnSaveDocument(WORD, WORD, HWND, BOOL&) {
 	return 0;
 }
 
+// A sample translation: the framework's own texts (menus, tooltips, the Windows dialog, what screen readers hear) are
+// replaced by a table of the application's, here in German.
+LRESULT CMainFrame::OnGerman(WORD, WORD, HWND, BOOL&) {
+	static bool german = false;
+	german = !german;
+	if (german) {
+		LoadDockTexts(R"({
+			"MenuClose": "&Schliessen", "MenuCloseOthers": "Alle &anderen schliessen", "MenuCloseAll": "&Alle Register schliessen",
+			"MenuDock": "&Andocken", "MenuFloat": "&Schwebend", "MenuAutoHide": "Automatisch &ausblenden",
+			"MenuPinTab": "Register &anheften", "MenuUnpinTab": "Register &loesen",
+			"MenuNewHorizontalGroup": "Neue &horizontale Registergruppe", "MenuNewVerticalGroup": "Neue &vertikale Registergruppe",
+			"MenuMoveToNextGroup": "In die &naechste Registergruppe", "MenuMoveToPreviousGroup": "In die &vorherige Registergruppe",
+			"TipClose": "Schliessen", "TipDock": "Andocken", "TipAutoHide": "Automatisch ausblenden", "TipWindowPosition": "Fensterposition",
+			"TipUnpin": "Loesen", "TipShowOpenTabs": "Geoeffnete Register anzeigen", "TipScrollTabsLeft": "Register nach links", "TipScrollTabsRight": "Register nach rechts",
+			"AccDockingArea": "Dockbereich", "AccDocuments": "Dokumente", "AccTabList": "Registerliste", "AccCloseTab": "{0} schliessen",
+			"DialogTitle": "Fenster", "DialogIncludeToolWindows": "&Werkzeugfenster einbeziehen", "DialogActivate": "&Aktivieren",
+			"DialogSave": "&Speichern", "DialogCloseWindows": "Fenster &schliessen", "DialogClose": "S&chliessen",
+			"ColumnName": "Name", "ColumnType": "Typ", "ColumnState": "Status", "ColumnModified": "Geaendert", "Yes": "Ja",
+			"TypeDocument": "Dokument", "TypeToolWindow": "Werkzeugfenster", "StateOpen": "Offen", "StateDockedAt": "Angedockt {0}",
+			"SideLeft": "links", "SideRight": "rechts", "SideTop": "oben", "SideBottom": "unten",
+			"NavigatorFiles": "Aktive Dateien", "NavigatorToolWindows": "Aktive Werkzeugfenster"
+		})");
+	}
+	else {
+		ResetDockTexts();
+	}
+	::CheckMenuItem(GetMenu(), ID_GERMAN, MF_BYCOMMAND | (german ? MF_CHECKED : MF_UNCHECKED));
+	m_Dock.HideTip();
+	return 0;
+}
+
 LRESULT CMainFrame::OnMultiRow(WORD, WORD, HWND, BOOL&) {
 	m_Dock.SetMultiRowTabs(!m_Dock.MultiRowTabs());
 	::CheckMenuItem(GetMenu(), ID_MULTIROW, MF_BYCOMMAND | (m_Dock.MultiRowTabs() ? MF_CHECKED : MF_UNCHECKED));
@@ -396,6 +427,7 @@ void CMainFrame::BuildMenu() {
 	options.CreatePopupMenu();
 	options.AppendMenu(MF_STRING, ID_DARK, L"&Dark theme");
 	options.AppendMenu(MF_STRING, ID_MULTIROW, L"&Multi-row tabs");
+	options.AppendMenu(MF_STRING, ID_GERMAN, L"&German (sample translation of the framework's texts)");
 	menu.AppendMenu(MF_POPUP, (UINT_PTR)options.m_hMenu, L"&Options");
 	options.Detach();
 

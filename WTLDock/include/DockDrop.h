@@ -14,18 +14,18 @@ namespace WTLDock {
 // The targets are:
 //   - the compass around the group under the cursor: a tab of that group (centre) or a split on one of its sides,
 //     and dropping on the group's caption or tab strip is a tab too;
-//   - guides at the four edges of the main window: dock at that edge;
+//   - guides at the four edges of the main window: dock at that edge; and beside them four for the auto-hide bars;
 //   - anywhere else: a floating window where the ghost outline is.
 // Only what the model allows is offered.
 //
 
 struct DropTarget {
-	enum class Kind { None, Tab, Side, Edge, Float };
+	enum class Kind { None, Tab, Side, Edge, AutoHide, Float };
 
 	Kind Type{ Kind::None };
 	const DockGroup* Group{};						// Tab, Side: the group that is docked to
 	DockPosition Position{ DockPosition::Tab };		// Tab, Side
-	DockSide Edge{ DockSide::Left };				// Edge
+	DockSide Edge{ DockSide::Left };				// Edge, AutoHide: the bar
 	int TabIndex{ -1 };								// Tab: where among the tabs (-1: last)
 	RECT Preview{};									// what the drop would occupy
 

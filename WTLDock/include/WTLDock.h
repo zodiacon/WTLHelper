@@ -15,3 +15,4 @@
 #include "DockStore.h"
 #include "DockNavigator.h"
 #include "DockWindowList.h"
+#include "DockStrings.h"

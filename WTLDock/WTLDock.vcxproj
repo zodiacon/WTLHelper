@@ -99,6 +99,7 @@
     <ClInclude Include="include\DockNode.h" />
     <ClInclude Include="include\DockPane.h" />
     <ClInclude Include="include\DockStore.h" />
+    <ClInclude Include="include\DockStrings.h" />
     <ClInclude Include="include\DockTheme.h" />
     <ClInclude Include="include\DockWindowList.h" />
     <ClInclude Include="include\DockTypes.h" />
@@ -125,6 +126,7 @@
     <ClCompile Include="src\DockLayout.cpp" />
     <ClCompile Include="src\DockSerializer.cpp" />
     <ClCompile Include="src\DockStore.cpp" />
+    <ClCompile Include="src\DockStrings.cpp" />
     <ClCompile Include="src\DockAccessible.cpp" />
     <ClCompile Include="src\DockNavigator.cpp" />
     <ClCompile Include="src\DockNavigatorWnd.cpp" />

@@ -1,4 +1,5 @@
 #include "DockGroupWnd.h"
+#include "DockStrings.h"
 #include <algorithm>
 
 namespace WTLDock {
@@ -979,7 +980,7 @@ std::wstring CDockGroupWnd::AccName() const {
 	if (!m_Group)
 		return {};
 	if (m_Group->IsDocument())
-		return L"Documents";
+		return DockText(Str::AccDocuments);
 	auto pane = m_Group->ActivePane();
 	return pane ? pane->Title : std::wstring();
 }
@@ -1017,7 +1018,7 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 	const GroupParts parts = Parts(rc);
 	DockPane* active = m_Group->ActivePane();
 
-	auto button = [&](const wchar_t* name, LONG role, const RECT& where, const wchar_t* action, Button which) {
+	auto button = [&](const std::wstring& name, LONG role, const RECT& where, const std::wstring& action, Button which) {
 		AccElement e;
 		e.Name = name;
 		e.Role = role;
@@ -1032,18 +1033,18 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 		AccElement caption;
 		caption.Name = active ? active->Title : std::wstring();
 		if (active)
-			caption.Description = active->Modified ? L"Modified" : L"";
+			caption.Description = active->Modified ? DockText(Str::AccModified) : std::wstring();
 		caption.Role = ROLE_SYSTEM_TITLEBAR;
 		caption.Screen = toScreen(parts.Caption);
 		list.push_back(std::move(caption));
 
 		const CaptionButtons b = ButtonsFor(parts);
 		if (b.HasMenu)
-			button(L"Window Position", ROLE_SYSTEM_BUTTONMENU, b.Menu, L"Open", Button::Menu);
+			button(DockText(Str::TipWindowPosition), ROLE_SYSTEM_BUTTONMENU, b.Menu, DockText(Str::AccActionOpen), Button::Menu);
 		if (b.HasPin)
-			button(m_Group->Location() == GroupLocation::AutoHide ? L"Dock" : L"Auto Hide", ROLE_SYSTEM_PUSHBUTTON, b.Pin, L"Press", Button::Pin);
+			button(m_Group->Location() == GroupLocation::AutoHide ? DockText(Str::TipDock) : DockText(Str::TipAutoHide), ROLE_SYSTEM_PUSHBUTTON, b.Pin, DockText(Str::AccActionPress), Button::Pin);
 		if (b.HasClose)
-			button(L"Close", ROLE_SYSTEM_PUSHBUTTON, b.Close, L"Press", Button::Close);
+			button(DockText(Str::TipClose), ROLE_SYSTEM_PUSHBUTTON, b.Close, DockText(Str::AccActionPress), Button::Close);
 	}
 
 	if (parts.HasTabs) {
@@ -1059,11 +1060,11 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 
 			AccElement tab;
 			tab.Name = pane->Title;
-			tab.Description = pane->Modified ? (pane->Tooltip.empty() ? std::wstring(L"Modified") : pane->Tooltip + L" (modified)") : pane->Tooltip;
+			tab.Description = pane->Modified ? (pane->Tooltip.empty() ? DockText(Str::AccModified) : DockText(Str::AccWithModified, { pane->Tooltip })) : pane->Tooltip;
 			if (pane->Pinned())
-				tab.Description += tab.Description.empty() ? L"Pinned" : L" (pinned)";
+				tab.Description = tab.Description.empty() ? DockText(Str::AccPinned) : DockText(Str::AccWithPinned, { tab.Description });
 			if (pane->Preview)
-				tab.Description += tab.Description.empty() ? L"Preview" : L" (preview)";
+				tab.Description = tab.Description.empty() ? DockText(Str::AccPreview) : DockText(Str::AccWithPreview, { tab.Description });
 			tab.Role = ROLE_SYSTEM_PAGETAB;
 			tab.State = STATE_SYSTEM_SELECTABLE | STATE_SYSTEM_FOCUSABLE;
 			if (pane == active)
@@ -1074,20 +1075,20 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 				tab.Screen = toScreen(strip.Layout.Tabs[i - first]);
 			else
 				tab.State |= STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
-			tab.Action = L"Switch";
+			tab.Action = DockText(Str::AccActionSwitch);
 			tab.Invoke = tab.Select = [host, pane] { host->ActivatePane(pane); };
 			tab.Key = L"tab:" + pane->Id();
 			list.push_back(std::move(tab));
 
 			if (strip.Specs[i].Closable) {
 				AccElement close;
-				close.Name = (pane->Pinned() ? L"Unpin " : L"Close ") + pane->Title;
+				close.Name = DockText(pane->Pinned() ? Str::AccUnpinTab : Str::AccCloseTab, { pane->Title });
 				close.Role = ROLE_SYSTEM_PUSHBUTTON;
 				if (shown)
 					close.Screen = toScreen(strip.Layout.Close[i - first]);
 				else
 					close.State = STATE_SYSTEM_OFFSCREEN | STATE_SYSTEM_INVISIBLE;
-				close.Action = L"Press";
+				close.Action = DockText(Str::AccActionPress);
 				if (pane->Pinned())
 					close.Invoke = [host, pane] { host->Execute(DockCommand::UnpinTab, pane); };
 				else
@@ -1098,22 +1099,22 @@ std::vector<AccElement> CDockGroupWnd::AccElements() const {
 		}
 		if (strip.Layout.Overflow) {
 			AccElement more;
-			more.Name = L"Tab list";
+			more.Name = DockText(Str::AccTabList);
 			more.Role = ROLE_SYSTEM_BUTTONDROPDOWN;
 			more.Screen = toScreen(strip.Layout.OverflowButton);
-			more.Action = L"Open";
+			more.Action = DockText(Str::AccActionOpen);
 			const RECT where = strip.Layout.OverflowButton;
 			const bool bottom = m_Group->TabsAtBottom && !m_Group->IsDocument();
 			more.Invoke = [self, where, bottom] { self->ShowOverflowMenu(where, bottom); };
 			more.Key = L"overflow";
 			for (bool left : { true, false }) {
 				AccElement arrow;
-				arrow.Name = left ? L"Scroll tabs left" : L"Scroll tabs right";
+				arrow.Name = DockText(left ? Str::TipScrollTabsLeft : Str::TipScrollTabsRight);
 				arrow.Role = ROLE_SYSTEM_PUSHBUTTON;
 				const bool can = left ? strip.Layout.CanScrollLeft : strip.Layout.CanScrollRight;
 				arrow.State = can ? 0 : STATE_SYSTEM_UNAVAILABLE;
 				arrow.Screen = toScreen(left ? strip.Layout.ScrollLeft : strip.Layout.ScrollRight);
-				arrow.Action = L"Press";
+				arrow.Action = DockText(Str::AccActionPress);
 				const int step = left ? -1 : 1;
 				arrow.Invoke = [self, step] { self->ScrollTabs(step); };
 				arrow.Key = left ? L"scroll:left" : L"scroll:right";
@@ -1184,15 +1185,15 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 			const CaptionButtons b = ButtonsFor(parts);
 			if (hit.Type == Hit::Kind::CaptionClose) {
 				target = toScreen(b.Close);
-				text = L"Close";
+				text = DockText(Str::TipClose);
 			}
 			else if (hit.Type == Hit::Kind::CaptionPin) {
 				target = toScreen(b.Pin);
-				text = m_Group->Location() == GroupLocation::AutoHide ? L"Dock" : L"Auto Hide";
+				text = DockText(m_Group->Location() == GroupLocation::AutoHide ? Str::TipDock : Str::TipAutoHide);
 			}
 			else {
 				target = toScreen(b.Menu);
-				text = L"Window Position";
+				text = DockText(Str::TipWindowPosition);
 			}
 			return true;
 		}
@@ -1233,7 +1234,7 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 				return false;
 			if (hit.Type == Hit::Kind::TabClose) {
 				target = toScreen(strip.Layout.Close[k]);
-				text = pane->Pinned() ? L"Unpin" : L"Close";
+				text = DockText(pane->Pinned() ? Str::TipUnpin : Str::TipClose);
 				return true;
 			}
 			text = pane->Tooltip;
@@ -1252,7 +1253,7 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 			CClientDC dc(m_hWnd);
 			const Strip strip = LayoutStrip(parts, dc.m_hDC);
 			target = toScreen(strip.Layout.OverflowButton);
-			text = L"Show open tabs";
+			text = DockText(Str::TipShowOpenTabs);
 			return true;
 		}
 
@@ -1262,7 +1263,7 @@ bool CDockGroupWnd::TipFor(const Hit& hit, RECT& target, std::wstring& text) {
 			const Strip strip = LayoutStrip(parts, dc.m_hDC);
 			const bool left = hit.Type == Hit::Kind::ScrollLeft;
 			target = toScreen(left ? strip.Layout.ScrollLeft : strip.Layout.ScrollRight);
-			text = left ? L"Scroll tabs left" : L"Scroll tabs right";
+			text = DockText(left ? Str::TipScrollTabsLeft : Str::TipScrollTabsRight);
 			return true;
 		}
 

@@ -1,10 +1,15 @@
 #include "DockHost.h"
 #include "DockWindowList.h"
+#include "DockStrings.h"
 
 #include <commctrl.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 namespace WTLDock {
 
@@ -23,6 +28,9 @@ struct Dialog {
 	HWND ListView{};
 	int Dpi{ 96 };
 	bool CanSave{};
+	bool Dark{};				// the host's theme is a dark one: the dialog follows it
+	HBRUSH Background{};
+	COLORREF Back{}, Text{};
 };
 
 int Scaled(const Dialog& d, int value) {
@@ -78,7 +86,7 @@ void Fill(Dialog& d) {
 		ListView_InsertItem(d.ListView, &item);
 		ListView_SetItemText(d.ListView, index, 1, const_cast<wchar_t*>(row.Type.c_str()));
 		ListView_SetItemText(d.ListView, index, 2, const_cast<wchar_t*>(row.State.c_str()));
-		ListView_SetItemText(d.ListView, index, 3, const_cast<wchar_t*>(row.Modified ? L"Yes" : L""));
+		ListView_SetItemText(d.ListView, index, 3, const_cast<wchar_t*>(row.Modified ? DockText(Str::Yes).c_str() : L""));
 		index++;
 	}
 	if (index > 0)
@@ -105,6 +113,29 @@ void UpdateButtons(Dialog& d) {
 	::EnableWindow(::GetDlgItem(d.Window, Activate), !panes.empty());
 	::EnableWindow(::GetDlgItem(d.Window, Save), anyModified && d.CanSave);
 	::EnableWindow(::GetDlgItem(d.Window, CloseWindows), anyClosable);
+}
+
+// With a dark theme the dialog gets a dark title bar, the theme's background and text, and dark list, header and buttons.
+// (With a light one it keeps the system look.)
+void ApplyDarkTheme(Dialog& d) {
+	const DockTheme& theme = d.Host->Theme();
+	d.Dark = true;
+	d.Back = theme.GroupBack;
+	d.Text = theme.CaptionInactiveText;			// the light text of a dark caption: plain text on the dark background
+	d.Background = ::CreateSolidBrush(d.Back);
+
+	const BOOL on = TRUE;
+	::DwmSetWindowAttribute(d.Window, 19 /* DWMWA_USE_IMMERSIVE_DARK_MODE before 20H1 */, &on, sizeof(on));
+	::DwmSetWindowAttribute(d.Window, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &on, sizeof(on));
+
+	ListView_SetBkColor(d.ListView, d.Back);
+	ListView_SetTextBkColor(d.ListView, d.Back);
+	ListView_SetTextColor(d.ListView, d.Text);
+	::SetWindowTheme(d.ListView, L"DarkMode_Explorer", nullptr);
+	if (HWND header = ListView_GetHeader(d.ListView))
+		::SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
+	for (int id : { IncludeTools, Activate, Save, CloseWindows, Close })
+		::SetWindowTheme(::GetDlgItem(d.Window, id), L"DarkMode_Explorer", nullptr);
 }
 
 void Layout(Dialog& d) {
@@ -145,27 +176,29 @@ void Init(Dialog& d, HWND window) {
 	d.CanSave = (bool)d.Host->OnPaneSave;
 	HFONT font = (HFONT)::SendMessage(window, WM_GETFONT, 0, 0);
 
-	Make(d, L"BUTTON", L"Include &tool windows", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IncludeTools, font);
+	Make(d, L"BUTTON", DockText(Str::DialogIncludeToolWindows).c_str(), BS_AUTOCHECKBOX | WS_TABSTOP, 0, IncludeTools, font);
 	d.ListView = Make(d, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | WS_TABSTOP | WS_BORDER, 0, List, font);
 	ListView_SetExtendedListViewStyle(d.ListView, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-	const wchar_t* const titles[] = { L"Name", L"Type", L"State", L"Modified" };
+	const std::wstring titles[] = { DockText(Str::ColumnName), DockText(Str::ColumnType), DockText(Str::ColumnState), DockText(Str::ColumnModified) };
 	for (int i = 0; i < 4; i++) {
 		LVCOLUMNW column{};
 		column.mask = LVCF_TEXT | LVCF_WIDTH;
-		column.pszText = const_cast<wchar_t*>(titles[i]);
+		column.pszText = const_cast<wchar_t*>(titles[i].c_str());
 		column.cx = 100;
 		ListView_InsertColumn(d.ListView, i, &column);
 	}
-	Make(d, L"BUTTON", L"&Activate", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, Activate, font);
-	Make(d, L"BUTTON", L"&Save", BS_PUSHBUTTON | WS_TABSTOP, 0, Save, font);
-	Make(d, L"BUTTON", L"&Close Window(s)", BS_PUSHBUTTON | WS_TABSTOP, 0, CloseWindows, font);
-	Make(d, L"BUTTON", L"C&lose", BS_PUSHBUTTON | WS_TABSTOP, 0, Close, font);
+	Make(d, L"BUTTON", DockText(Str::DialogActivate).c_str(), BS_DEFPUSHBUTTON | WS_TABSTOP, 0, Activate, font);
+	Make(d, L"BUTTON", DockText(Str::DialogSave).c_str(), BS_PUSHBUTTON | WS_TABSTOP, 0, Save, font);
+	Make(d, L"BUTTON", DockText(Str::DialogCloseWindows).c_str(), BS_PUSHBUTTON | WS_TABSTOP, 0, CloseWindows, font);
+	Make(d, L"BUTTON", DockText(Str::DialogClose).c_str(), BS_PUSHBUTTON | WS_TABSTOP, 0, Close, font);
 
 	// the size of the client area, and the place on the screen
 	RECT rc{ 0, 0, Scaled(d, 560), Scaled(d, 380) };
 	::AdjustWindowRectExForDpi(&rc, (DWORD)::GetWindowLongPtr(window, GWL_STYLE), FALSE, (DWORD)::GetWindowLongPtr(window, GWL_EXSTYLE), d.Dpi);
 	::SetWindowPos(window, nullptr, 0, 0, Width(rc), Height(rc), SWP_NOMOVE | SWP_NOZORDER);
 	Layout(d);
+	if (d.Host->Theme().IsDark)
+		ApplyDarkTheme(d);
 	Fill(d);
 	UpdateButtons(d);
 }
@@ -196,6 +229,18 @@ INT_PTR CALLBACK Proc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
 			::SetWindowLongPtr(window, GWLP_USERDATA, (LONG_PTR)d);
 			Init(*d, window);
 			return TRUE;
+
+		case WM_CTLCOLORDLG:
+		case WM_CTLCOLORSTATIC:
+		case WM_CTLCOLORBTN:
+		case WM_CTLCOLOREDIT:
+		case WM_CTLCOLORLISTBOX:
+			if (d && d->Dark) {
+				::SetTextColor((HDC)wp, d->Text);
+				::SetBkColor((HDC)wp, d->Back);
+				return (INT_PTR)d->Background;
+			}
+			break;
 
 		case WM_COMMAND:
 			if (!d)
@@ -233,6 +278,21 @@ INT_PTR CALLBACK Proc(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
 			auto header = reinterpret_cast<NMHDR*>(lp);
 			if (header->idFrom != (UINT_PTR)List)
 				break;
+			if (header->code == NM_CUSTOMDRAW && d->Dark) {
+				// the visual style picks its own colour for some columns: every cell has the theme's text colour
+				auto draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
+				LRESULT result = CDRF_DODEFAULT;
+				if (draw->nmcd.dwDrawStage == CDDS_PREPAINT)
+					result = CDRF_NOTIFYITEMDRAW;
+				else if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT)
+					result = CDRF_NOTIFYSUBITEMDRAW;
+				else if (draw->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+					draw->clrText = d->Text;
+					result = CDRF_NEWFONT;
+				}
+				::SetWindowLongPtr(window, DWLP_MSGRESULT, result);
+				return TRUE;
+			}
 			if (header->code == LVN_ITEMCHANGED) {
 				UpdateButtons(*d);
 			}
@@ -278,9 +338,11 @@ bool CDockHost::ShowWindowsDialog(HWND parent) {
 	dialog.Host = this;
 	if (!parent)
 		parent = ::GetAncestor(m_hWnd, GA_ROOT);
-	const auto tmpl = MakeTemplate(L"Windows");
+	const auto tmpl = MakeTemplate(DockText(Str::DialogTitle).c_str());
 	const INT_PTR result = ::DialogBoxIndirectParamW(::GetModuleHandle(nullptr), reinterpret_cast<const DLGTEMPLATE*>(tmpl.data()),
 		parent, Proc, (LPARAM)&dialog);
+	if (dialog.Background)
+		::DeleteObject(dialog.Background);
 	if (result == IDOK && !dialog.ChosenId.empty())
 		return ShowPane(m_Layout.FindPane(dialog.ChosenId));
 	return false;

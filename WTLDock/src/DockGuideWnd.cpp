@@ -92,11 +92,18 @@ void CDockGuideWnd::Draw(HDC hdc) {
 		where = m_Target.Edge == DockSide::Left ? DockPosition::Left : m_Target.Edge == DockSide::Right ? DockPosition::Right :
 			m_Target.Edge == DockSide::Top ? DockPosition::Top : DockPosition::Bottom;
 
+	// an auto-hide bar: only a thin strip along the edge is taken
+	const bool bar = m_Target.Type == DropTarget::Kind::AutoHide;
+	if (bar)
+		where = m_Target.Edge == DockSide::Left ? DockPosition::Left : m_Target.Edge == DockSide::Right ? DockPosition::Right :
+			m_Target.Edge == DockSide::Top ? DockPosition::Top : DockPosition::Bottom;
+	const int strip = std::max(2, std::min(Width(box), Height(box)) / 5);
+
 	switch (where) {
-		case DockPosition::Left: part.right = box.left + Width(box) / 2; break;
-		case DockPosition::Right: part.left = box.right - Width(box) / 2; break;
-		case DockPosition::Top: part.bottom = box.top + Height(box) / 2; break;
-		case DockPosition::Bottom: part.top = box.bottom - Height(box) / 2; break;
+		case DockPosition::Left: part.right = bar ? box.left + strip : box.left + Width(box) / 2; break;
+		case DockPosition::Right: part.left = bar ? box.right - strip : box.right - Width(box) / 2; break;
+		case DockPosition::Top: part.bottom = bar ? box.top + strip : box.top + Height(box) / 2; break;
+		case DockPosition::Bottom: part.top = bar ? box.bottom - strip : box.bottom - Height(box) / 2; break;
 		default: part.bottom = box.top + std::max(3, Height(box) / 3); break;		// a tab: the header strip
 	}
 	dc.FillSolidRect(&part, fill);
