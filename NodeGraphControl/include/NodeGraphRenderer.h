@@ -5,6 +5,7 @@
 #include <dwrite.h>
 #include <wrl/client.h>
 #include <vector>
+#include <unordered_set>
 #include "NodeGraphModel.h"
 
 #pragma comment(lib, "d2d1.lib")
@@ -86,9 +87,11 @@ private:
     void DrawGrid(const RECT& clientRect, const ViewTransform& vt);
     void DrawEdge(const Edge& e, const NodeGraphModel& model,
                   const ViewTransform& vt, bool selected);
+    void DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, bool selected);
     void DrawEdgePreview(const EdgePreview& preview, const NodeGraphModel& model,
                          const ViewTransform& vt);
     void DrawNode(const Node& n, const ViewTransform& vt, bool selected);
+    void DrawCodeText(const Node& n, const ViewTransform& vt);
     void DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir);
     void DrawRubberBand(const RubberBand& rb);
     void DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
@@ -101,11 +104,15 @@ private:
     ComPtr<IDWriteFactory>      m_DwFactory;
     ComPtr<IDWriteTextFormat>   m_TextFormat;      // 13pt, used for node labels
     ComPtr<IDWriteTextFormat>   m_EdgeTextFormat;  // 11pt, used for edge labels
+    ComPtr<IDWriteTextFormat>   m_CodeTextFormat;  // 12 units monospaced, left aligned, for nodes with NodeStyle::Code
     ComPtr<ID2D1StrokeStyle>    m_DashStyle;
 
     // Device-dependent resources (recreated if device lost).
     ComPtr<ID2D1DCRenderTarget>  m_RenderTarget;
     ComPtr<ID2D1SolidColorBrush> m_Brush;
+
+    // the (from, to) pairs of the edges of the model that is being drawn: edges that have one going the other way are drawn apart
+    std::unordered_set<uint64_t> m_EdgePairs;
 };
 
 } // namespace NodeGraphCtrl

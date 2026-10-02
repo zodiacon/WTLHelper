@@ -44,6 +44,16 @@ HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     m_EdgeTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     m_EdgeTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
+    hr = m_DwFactory->CreateTextFormat(
+        L"Consolas", nullptr,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        12.0f, L"en-US",
+        m_CodeTextFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    m_CodeTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    m_CodeTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    m_CodeTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
     D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties();
     ssp.dashStyle = D2D1_DASH_STYLE_DASH;
     hr = m_D2dFactory->CreateStrokeStyle(ssp, nullptr, 0, m_DashStyle.GetAddressOf());
@@ -54,6 +64,7 @@ void NodeGraphRenderer::Shutdown() {
     DiscardDeviceResources();
     m_DashStyle.Reset();
     m_EdgeTextFormat.Reset();
+    m_CodeTextFormat.Reset();
     m_TextFormat.Reset();
     m_DwFactory.Reset();
     m_D2dFactory.Reset();
@@ -101,6 +112,9 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
 
     if (drawGrid) DrawGrid(clientRect, vt);
 
+    m_EdgePairs.clear();
+    for (const auto& e : model.Edges())
+        m_EdgePairs.insert((uint64_t)e.From << 32 | e.To);
     for (const auto& e : model.Edges())
         DrawEdge(e, model, vt, e.Id == selectedEdge);
 
@@ -178,40 +192,57 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
     const Node* to   = model.GetNode(e.To);
     if (!from || !to) return;
 
-    auto p0 = vt.ToScreen(from->X, from->Y);
-    auto p1 = vt.ToScreen(to->X,   to->Y);
+    if (from == to) {
+        DrawSelfLoop(e, *from, vt, selected);
+        return;
+    }
 
-    float dx = p1.x - p0.x, dy = p1.y - p0.y;
+    // The path: from the center of one node through the waypoints to the center of the other.
+    std::vector<D2D1_POINT_2F> pts;
+    pts.push_back(vt.ToScreen(from->X, from->Y));
+    for (const auto& w : e.Waypoints)
+        pts.push_back(vt.ToScreen(w.X, w.Y));
+    pts.push_back(vt.ToScreen(to->X, to->Y));
+
+    float dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
     float len = std::sqrtf(dx * dx + dy * dy);
-    if (len < 1.0f) return;
+    if (pts.size() == 2 && len < 1.0f) return;
 
-    float nx = dx / len, ny = dy / len;
+    // An edge that has one going the other way is moved to its right, so that the two can be told apart.
+    if (pts.size() == 2 && m_EdgePairs.contains((uint64_t)e.To << 32 | e.From)) {
+        const float lane = 7.0f;
+        float nx = dx / len, ny = dy / len;
+        for (auto& p : pts) { p.x -= ny * lane; p.y += nx * lane; }
+    }
 
-    // Clip endpoints to node boundaries.
-    float hw0 = from->Width  * vt.Scale * 0.5f;
-    float hh0 = from->Height * vt.Scale * 0.5f;
-    float hw1 = to->Width    * vt.Scale * 0.5f;
-    float hh1 = to->Height   * vt.Scale * 0.5f;
-
-    float t0 = std::min(std::fabsf(nx) > 0.0f ? hw0 / std::fabsf(nx) : 1e9f,
-                        std::fabsf(ny) > 0.0f ? hh0 / std::fabsf(ny) : 1e9f);
-    t0 = std::min(t0, len * 0.5f);
-    float t1 = std::min(std::fabsf(nx) > 0.0f ? hw1 / std::fabsf(nx) : 1e9f,
-                        std::fabsf(ny) > 0.0f ? hh1 / std::fabsf(ny) : 1e9f);
-    t1 = std::min(t1, len * 0.5f);
-
-    D2D1_POINT_2F start = { p0.x + nx * t0, p0.y + ny * t0 };
-    D2D1_POINT_2F end   = { p1.x - nx * t1, p1.y - ny * t1 };
+    // Clip the ends to the borders of the nodes.
+    auto clip = [&](const Node& n, D2D1_POINT_2F& at, D2D1_POINT_2F other) -> D2D1_POINT_2F {
+        float ddx = other.x - at.x, ddy = other.y - at.y;
+        float l = std::sqrtf(ddx * ddx + ddy * ddy);
+        if (l < 1.0f) return { 0.0f, 0.0f };
+        float nx = ddx / l, ny = ddy / l;
+        float hw = n.Width * vt.Scale * 0.5f, hh = n.Height * vt.Scale * 0.5f;
+        float t = std::min(std::fabsf(nx) > 0.0f ? hw / std::fabsf(nx) : 1e9f,
+                           std::fabsf(ny) > 0.0f ? hh / std::fabsf(ny) : 1e9f);
+        t = std::min(t, l * 0.5f);
+        at.x += nx * t; at.y += ny * t;
+        return { nx, ny };
+    };
+    clip(*from, pts.front(), pts[1]);
+    auto dir = clip(*to, pts.back(), pts[pts.size() - 2]);
+    dir = { -dir.x, -dir.y };	// from the last bend towards the node
 
     float strokeWidth = e.Style.Width * (selected ? 2.0f : 1.0f);
     m_Brush->SetColor(selected
         ? D2D1::ColorF(D2D1::ColorF::Yellow)
         : ColorrefToD2D(e.Style.Color));
-    m_RenderTarget->DrawLine(start, end, m_Brush.Get(), strokeWidth);
+    for (size_t i = 0; i + 1 < pts.size(); i++)
+        m_RenderTarget->DrawLine(pts[i], pts[i + 1], m_Brush.Get(), strokeWidth);
 
     if (e.Style.Directed)
-        DrawArrowhead(end, { nx, ny });
+        DrawArrowhead(pts.back(), dir);
 
+    D2D1_POINT_2F start = pts[(pts.size() - 1) / 2], end = pts[pts.size() / 2];
     if (!e.Label.empty()) {
         D2D1_POINT_2F mid = { (start.x + end.x) * 0.5f, (start.y + end.y) * 0.5f };
         const float lw = 110.0f, lh = 18.0f;
@@ -224,6 +255,25 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
         m_RenderTarget->DrawTextW(e.Label.c_str(), (UINT32)e.Label.size(),
             m_EdgeTextFormat.Get(), lr, m_Brush.Get());
     }
+}
+
+// A jump to its own block: a loop on the right side of the node.
+void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, bool selected) {
+    auto c = vt.ToScreen(n.X, n.Y);
+    float hw = n.Width * vt.Scale * 0.5f;
+    float hh = n.Height * vt.Scale * 0.5f;
+    float reach = std::max(24.0f * vt.Scale, 10.0f);
+    float top = c.y - std::min(hh * 0.5f, 40.0f * vt.Scale);
+    float bottom = c.y + std::min(hh * 0.5f, 40.0f * vt.Scale);
+    float right = c.x + hw;
+
+    m_Brush->SetColor(selected ? D2D1::ColorF(D2D1::ColorF::Yellow) : ColorrefToD2D(e.Style.Color));
+    float width = e.Style.Width * (selected ? 2.0f : 1.0f);
+    m_RenderTarget->DrawLine({ right, top }, { right + reach, top }, m_Brush.Get(), width);
+    m_RenderTarget->DrawLine({ right + reach, top }, { right + reach, bottom }, m_Brush.Get(), width);
+    m_RenderTarget->DrawLine({ right + reach, bottom }, { right + 8.0f, bottom }, m_Brush.Get(), width);
+    if (e.Style.Directed)
+        DrawArrowhead({ right, bottom }, { -1.0f, 0.0f });
 }
 
 void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
@@ -271,7 +321,10 @@ void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool se
     m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
 
     // Label
-    if (!n.Label.empty()) {
+    if (n.Style.Code) {
+        DrawCodeText(n, vt);
+    }
+    else if (!n.Label.empty()) {
         m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
         m_RenderTarget->DrawTextW(
             n.Label.c_str(), (UINT32)n.Label.size(),
@@ -279,6 +332,26 @@ void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool se
             rr.rect,
             m_Brush.Get());
     }
+}
+
+// The lines of the label in a monospaced font. The text is drawn at its size in graph space and scaled with the zoom, so
+// that it stays inside the node. When it would be too small to read it is not drawn.
+void NodeGraphRenderer::DrawCodeText(const Node& n, const ViewTransform& vt) {
+    if (n.Label.empty() || vt.Scale < 0.3f)
+        return;
+
+    auto center = vt.ToScreen(n.X, n.Y);
+    float left = center.x - n.Width * vt.Scale * 0.5f;
+    float top = center.y - n.Height * vt.Scale * 0.5f;
+    const float pad = 8.0f;
+    D2D1_RECT_F text = { pad, pad * 0.75f, n.Width - pad, n.Height - pad * 0.75f };
+
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(left, top));
+    m_RenderTarget->PushAxisAlignedClip(text, D2D1_ANTIALIAS_MODE_ALIASED);
+    m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
+    m_RenderTarget->DrawTextW(n.Label.c_str(), (UINT32)n.Label.size(), m_CodeTextFormat.Get(), text, m_Brush.Get());
+    m_RenderTarget->PopAxisAlignedClip();
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
 void NodeGraphRenderer::DrawRubberBand(const RubberBand& rb) {
@@ -440,16 +513,24 @@ EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, flo
         const Node* to   = model.GetNode(e.To);
         if (!from || !to) continue;
 
-        float dx = to->X - from->X, dy = to->Y - from->Y;
-        float len2 = dx * dx + dy * dy;
-        if (len2 < 1.0f) continue;
+        // every piece of the path from one node to the other
+        std::vector<Point> path;
+        path.push_back({ from->X, from->Y });
+        path.insert(path.end(), e.Waypoints.begin(), e.Waypoints.end());
+        path.push_back({ to->X, to->Y });
 
-        float t = ((gx - from->X) * dx + (gy - from->Y) * dy) / len2;
-        t = std::clamp(t, 0.0f, 1.0f);
-        float px = from->X + t * dx - gx;
-        float py = from->Y + t * dy - gy;
-        if (px * px + py * py <= tolerance * tolerance)
-            return e.Id;
+        for (size_t i = 0; i + 1 < path.size(); i++) {
+            float dx = path[i + 1].X - path[i].X, dy = path[i + 1].Y - path[i].Y;
+            float len2 = dx * dx + dy * dy;
+            if (len2 < 1.0f) continue;
+
+            float t = ((gx - path[i].X) * dx + (gy - path[i].Y) * dy) / len2;
+            t = std::clamp(t, 0.0f, 1.0f);
+            float px = path[i].X + t * dx - gx;
+            float py = path[i].Y + t * dy - gy;
+            if (px * px + py * py <= tolerance * tolerance)
+                return e.Id;
+        }
     }
     return InvalidEdge;
 }

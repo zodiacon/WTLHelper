@@ -189,6 +189,7 @@ namespace NodeGraphCtrl {
 
 	int CNodeGraphControl::OnCreate(LPCREATESTRUCT pcs) {
 		m_DrawGrid = (pcs->style & NGCS_GRID) != 0;
+		m_ReadOnly = (pcs->style & NGCS_READONLY) != 0;
 		m_Model = std::make_unique<NodeGraphModel>();
 
 		if (FAILED(m_Renderer.Init(pcs->hInstance))) return -1;
@@ -710,7 +711,7 @@ namespace NodeGraphCtrl {
 		RECT rc; GetClientRect(&rc);
 		MinimapConfig mmcfg = MakeMinimapConfig(rc.right, rc.bottom);
 		ResizeOverlay ro;
-		if (m_SelectedNodes.size() == 1) {
+		if (!m_ReadOnly && m_SelectedNodes.size() == 1) {
 			ro.Node = m_SelectedNodes[0];
 			ro.HoveredHandle = m_Resize.Active ? m_Resize.Handle : m_Resize.Hovered;
 		}
@@ -763,7 +764,7 @@ namespace NodeGraphCtrl {
 		}
 		POINT pt; ::GetCursorPos(&pt); ScreenToClient(&pt);
 
-		if (m_SelectedNodes.size() == 1) {
+		if (!m_ReadOnly && m_SelectedNodes.size() == 1) {
 			const Node* n = m_Model->GetNode(m_SelectedNodes[0]);
 			if (n) {
 				ResizeHandle h = m_Renderer.HitTestResizeHandle(*n, m_Vt, (float)pt.x, (float)pt.y);
@@ -794,6 +795,7 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::OnRButtonDown(UINT /*nFlags*/, CPoint pt) {
 		CommitLabelEdit();
+		if (m_ReadOnly) return;
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 		if (hit != InvalidNode) {
@@ -865,7 +867,7 @@ namespace NodeGraphCtrl {
 		}
 
 		// Resize handles take priority when one node is selected.
-		if (m_SelectedNodes.size() == 1) {
+		if (!m_ReadOnly && m_SelectedNodes.size() == 1) {
 			const Node* rn = m_Model->GetNode(m_SelectedNodes[0]);
 			if (rn) {
 				ResizeHandle h = m_Renderer.HitTestResizeHandle(*rn, m_Vt, (float)sx, (float)sy);
@@ -942,6 +944,17 @@ namespace NodeGraphCtrl {
 			m_SelectedEdge = InvalidEdge;
 			if (selChanged) FireSelChanged();
 
+			if (m_ReadOnly) {
+				// nothing to select with a rubber band: drag the graph
+				m_Panning = true;
+				m_PanStart = { sx, sy };
+				m_PanStartX = m_Vt.OffsetX;
+				m_PanStartY = m_Vt.OffsetY;
+				SetCapture();
+				Invalidate(FALSE);
+				return;
+			}
+
 			m_RubberBand.Active = true;
 			m_RubberBand.X0 = m_RubberBand.X1 = (float)sx;
 			m_RubberBand.Y0 = m_RubberBand.Y1 = (float)sy;
@@ -954,7 +967,11 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::OnLButtonDblClk(UINT /*nFlags*/, CPoint pt) {
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hitNode = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
-		if (hitNode != InvalidNode)
+		if (hitNode == InvalidNode)
+			return;
+		if (m_ReadOnly)
+			Notify(NGCN_NODEDBLCLICK, hitNode, InvalidEdge);
+		else
 			BeginEditLabel(hitNode);
 	}
 
@@ -1021,6 +1038,10 @@ namespace NodeGraphCtrl {
 					PushUndo(std::move(compound));
 				}
 			}
+		}
+		else if (m_Panning) {
+			m_Panning = false;
+			::ReleaseCapture();
 		}
 		else if (m_RubberBand.Active) {
 			FinalizeRubberBand();
@@ -1125,7 +1146,7 @@ namespace NodeGraphCtrl {
 		else {
 			// Update hovered resize handle for visual feedback.
 			ResizeHandle newHov = ResizeHandle::None;
-			if (m_SelectedNodes.size() == 1) {
+			if (!m_ReadOnly && m_SelectedNodes.size() == 1) {
 				const Node* rn = m_Model->GetNode(m_SelectedNodes[0]);
 				if (rn)
 					newHov = m_Renderer.HitTestResizeHandle(*rn, m_Vt, (float)sx, (float)sy);
@@ -1152,16 +1173,23 @@ namespace NodeGraphCtrl {
 			m_TooltipBuf[0] = L'\0';
 			if (nid != InvalidNode) {
 				const Node* n = m_Model->GetNode(nid);
-				if (n) wcsncpy_s(m_TooltipBuf, n->Label.c_str(), _TRUNCATE);
+				if (n && !n->Tooltip.empty())
+					wcsncpy_s(m_TooltipBuf, n->Tooltip.c_str(), _TRUNCATE);
+				else if (n && !n->Style.Code)
+					wcsncpy_s(m_TooltipBuf, n->Label.c_str(), _TRUNCATE);
 			}
 			else if (eid != InvalidEdge) {
 				const Edge* e = m_Model->GetEdge(eid);
-				if (e) {
+				if (e && !e->Tooltip.empty()) {
+					wcsncpy_s(m_TooltipBuf, e->Tooltip.c_str(), _TRUNCATE);
+				}
+				else if (e) {
 					const Node* f = m_Model->GetNode(e->From);
 					const Node* t = m_Model->GetNode(e->To);
-					swprintf_s(m_TooltipBuf, L"%s → %s",
-						f ? f->Label.c_str() : L"?",
-						t ? t->Label.c_str() : L"?");
+					if (!(f && f->Style.Code) && !(t && t->Style.Code))
+						swprintf_s(m_TooltipBuf, L"%s → %s",
+							f ? f->Label.c_str() : L"?",
+							t ? t->Label.c_str() : L"?");
 				}
 			}
 
@@ -1187,6 +1215,12 @@ namespace NodeGraphCtrl {
 	}
 
 	LRESULT CNodeGraphControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+		if (m_ReadOnly) {
+			if (wParam == 'F' && !(::GetKeyState(VK_CONTROL) & 0x8000)) { FitInView(); return 0; }
+			if (wParam == 'M' && !(::GetKeyState(VK_CONTROL) & 0x8000)) { SetMinimapVisible(!IsMinimapVisible()); return 0; }
+			bHandled = FALSE;
+			return 0;
+		}
 		if (wParam == VK_DELETE) { DeleteSelected(); return 0; }
 		if (::GetKeyState(VK_CONTROL) & 0x8000) {
 			if (wParam == 'Z') { Undo();  return 0; }
@@ -1272,6 +1306,15 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::SetZoom(float factor) {
 		m_Vt.Scale = std::clamp(factor, 0.05f, 50.0f);
+		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::CenterOn(float graphX, float graphY, float zoom) {
+		if (zoom > 0.0f)
+			m_Vt.Scale = std::clamp(zoom, 0.05f, 50.0f);
+		RECT rc; GetClientRect(&rc);
+		m_Vt.OffsetX = rc.right * 0.5f - graphX * m_Vt.Scale;
+		m_Vt.OffsetY = rc.bottom * 0.5f - graphY * m_Vt.Scale;
 		RequestInvalidate();
 	}
 

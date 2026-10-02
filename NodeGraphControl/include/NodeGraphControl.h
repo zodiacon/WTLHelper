@@ -66,6 +66,9 @@ constexpr wchar_t WC_NODEGRAPHCONTROL[] = L"NodeGraphControl";
 //   NGCS_AUTOZOOM    fit graph in view on model change
 #define NGCS_GRID      0x0001
 #define NGCS_AUTOZOOM  0x0002
+//   NGCS_READONLY    the graph can be looked at and nodes moved, but not edited: no new edges, deleting, renaming,
+//                    resizing or pasting. A double-click sends NGCN_NODEDBLCLICK.
+#define NGCS_READONLY  0x0004
 
 // Internal message used to commit/cancel the inline label editor.
 constexpr UINT WM_NODEGRAPHEDIT = WM_APP + 1;
@@ -158,6 +161,7 @@ public:
     void FitInView();
     void FitSelected();           // fit view around the currently selected nodes
     void SetZoom(float factor);   // 1.0 = 100%
+    void CenterOn(float graphX, float graphY, float zoom = 0.0f);  // put a point of the graph in the middle of the view (zoom 0: keep the zoom)
     float GetZoom() const;
 
     // Selection — single (backward compat) and multi.
@@ -250,6 +254,7 @@ private:
     std::vector<NodeId>           m_SelectedNodes;
     EdgeId                        m_SelectedEdge = InvalidEdge;
     bool                          m_DrawGrid     = false;
+    bool                          m_ReadOnly     = false;
 
     bool  m_Panning   = false;
     POINT m_PanStart  = {};

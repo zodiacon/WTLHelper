@@ -17,6 +17,7 @@ struct NodeStyle {
     COLORREF TextColor   = RGB(255, 255, 255);
     float    BorderWidth  = 1.5f;
     float    CornerRadius = 6.0f;
+    bool     Code         = false;   // monospaced, left aligned text that scales with the zoom (a block of code)
 };
 
 struct EdgeStyle {
@@ -31,7 +32,12 @@ struct Node {
     float        X = 0.0f, Y = 0.0f;   // center position in graph space
     float        Width = 120.0f, Height = 40.0f;
     NodeStyle    Style;
+    std::wstring Tooltip;               // shown instead of the label (nothing is shown for a Code node without one)
     void*        UserData = nullptr;
+};
+
+struct Point {
+    float X = 0.0f, Y = 0.0f;
 };
 
 struct Edge {
@@ -40,6 +46,8 @@ struct Edge {
     NodeId       To;
     std::wstring Label;
     EdgeStyle    Style;
+    std::wstring Tooltip;               // shown instead of "from -> to"
+    std::vector<Point> Waypoints;       // in graph space: the edge goes from the center of From through these to the center of To
     void*        UserData = nullptr;
 };
 
