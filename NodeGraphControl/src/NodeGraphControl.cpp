@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstdio>
+#include <cmath>
+#include <string>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -808,7 +810,10 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnRButtonUp(UINT /*nFlags*/, CPoint pt) {
-		if (!m_EdgePreview.Active) return;
+		if (!m_EdgePreview.Active) {
+			SetMsgHandled(FALSE);	// let the default processing send WM_CONTEXTMENU to the parent
+			return;
+		}
 		m_EdgePreview.Active = false;
 		::ReleaseCapture();
 
@@ -1503,6 +1508,184 @@ namespace NodeGraphCtrl {
 			s.resize(n);
 			return n == 0 || fread(s.data(), sizeof(wchar_t), n, f) == n;
 		}
+	}
+
+	// ---- SVG export -----------------------------------------------------------------
+
+	namespace {
+		std::string Utf8(const std::wstring& s) {
+			if (s.empty()) return {};
+			int n = ::WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+			std::string r(n, '\0');
+			::WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), r.data(), n, nullptr, nullptr);
+			return r;
+		}
+
+		std::string XmlEscape(const std::string& s) {
+			std::string r;
+			for (char c : s) {
+				switch (c) {
+					case '&': r += "&amp;"; break;
+					case '<': r += "&lt;"; break;
+					case '>': r += "&gt;"; break;
+					case '"': r += "&quot;"; break;
+					default: r += c;
+				}
+			}
+			return r;
+		}
+
+		std::string Hex(COLORREF c) {
+			char b[8];
+			sprintf_s(b, "#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+			return b;
+		}
+
+		std::string Num(float v) {
+			char b[32];
+			sprintf_s(b, "%.1f", v);
+			return b;
+		}
+
+		std::vector<std::wstring> SplitLines(const std::wstring& s) {
+			std::vector<std::wstring> lines;
+			size_t start = 0;
+			for (;;) {
+				auto end = s.find(L'\n', start);
+				lines.push_back(s.substr(start, end == std::wstring::npos ? end : end - start));
+				if (end == std::wstring::npos) break;
+				start = end + 1;
+			}
+			return lines;
+		}
+
+		// the distance from the center of a node to its border in a direction
+		float BorderDistance(const Node& n, float nx, float ny) {
+			float hw = n.Width * 0.5f, hh = n.Height * 0.5f;
+			return std::min(std::fabs(nx) > 0.0f ? hw / std::fabs(nx) : 1e9f,
+			                std::fabs(ny) > 0.0f ? hh / std::fabs(ny) : 1e9f);
+		}
+	}
+
+	bool NodeGraphModel::SaveSvg(const wchar_t* path) const {
+		if (m_Nodes.empty()) return false;
+
+		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+		auto extend = [&](float x, float y) {
+			minX = std::min(minX, x); maxX = std::max(maxX, x);
+			minY = std::min(minY, y); maxY = std::max(maxY, y);
+		};
+		for (const auto& n : m_Nodes) {
+			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
+			extend(n.X + n.Width * 0.5f + 30.0f, n.Y + n.Height * 0.5f);	// room for the loop of an edge to its own node
+		}
+		for (const auto& e : m_Edges)
+			for (const auto& w : e.Waypoints)
+				extend(w.X, w.Y);
+		const float margin = 24.0f;
+		minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+
+		std::string svg;
+		svg += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+		svg += "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) +
+			"\" viewBox=\"" + Num(minX) + " " + Num(minY) + " " + Num(maxX - minX) + " " + Num(maxY - minY) + "\">\n";
+		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"#262626\"/>\n";
+
+		// edges first, so that the nodes are on top
+		for (const auto& e : m_Edges) {
+			const Node* from = GetNode(e.From);
+			const Node* to = GetNode(e.To);
+			if (!from || !to) continue;
+			std::string color = Hex(e.Style.Color), stroke = Num(e.Style.Width);
+
+			if (from == to) {
+				float right = from->X + from->Width * 0.5f;
+				float top = from->Y - std::min(from->Height * 0.25f, 40.0f), bottom = from->Y + std::min(from->Height * 0.25f, 40.0f);
+				svg += "<path d=\"M" + Num(right) + " " + Num(top) + " L" + Num(right + 24) + " " + Num(top) + " L" + Num(right + 24) + " " +
+					Num(bottom) + " L" + Num(right + 8) + " " + Num(bottom) + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + stroke + "\"/>\n";
+				if (e.Style.Directed)
+					svg += "<polygon points=\"" + Num(right) + "," + Num(bottom) + " " + Num(right + 10) + "," + Num(bottom - 4) + " " + Num(right + 10) + "," + Num(bottom + 4) + "\" fill=\"" + color + "\"/>\n";
+				continue;
+			}
+
+			std::vector<Point> pts;
+			pts.push_back({ from->X, from->Y });
+			pts.insert(pts.end(), e.Waypoints.begin(), e.Waypoints.end());
+			pts.push_back({ to->X, to->Y });
+
+			float dx = pts[1].X - pts[0].X, dy = pts[1].Y - pts[0].Y;
+			float len = std::sqrt(dx * dx + dy * dy);
+			if (pts.size() == 2 && len < 1.0f) continue;
+			if (pts.size() == 2) {
+				// an edge with one going the other way is moved to its right
+				for (const auto& o : m_Edges)
+					if (o.From == e.To && o.To == e.From) {
+						float nx = dx / len, ny = dy / len;
+						for (auto& p : pts) { p.X -= ny * 7.0f; p.Y += nx * 7.0f; }
+						break;
+					}
+			}
+
+			auto clip = [&](const Node& n, Point& at, Point other) {
+				float ddx = other.X - at.X, ddy = other.Y - at.Y;
+				float l = std::sqrt(ddx * ddx + ddy * ddy);
+				if (l < 1.0f) return Point{};
+				float nx = ddx / l, ny = ddy / l;
+				float t = std::min(BorderDistance(n, nx, ny), l * 0.5f);
+				at.X += nx * t; at.Y += ny * t;
+				return Point{ nx, ny };
+			};
+			clip(*from, pts.front(), pts[1]);
+			Point dir = clip(*to, pts.back(), pts[pts.size() - 2]);
+			dir.X = -dir.X; dir.Y = -dir.Y;
+
+			svg += "<polyline points=\"";
+			for (size_t i = 0; i < pts.size(); i++)
+				svg += (i ? " " : "") + Num(pts[i].X) + "," + Num(pts[i].Y);
+			svg += "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + stroke + "\" stroke-linejoin=\"round\"/>\n";
+
+			if (e.Style.Directed) {
+				Point tip = pts.back();
+				float bx = -dir.X * 10.0f, by = -dir.Y * 10.0f, c = std::cos(0.4f), s = std::sin(0.4f);
+				Point l{ tip.X + bx * c - by * s, tip.Y + bx * s + by * c };
+				Point r{ tip.X + bx * c + by * s, tip.Y - bx * s + by * c };
+				svg += "<polygon points=\"" + Num(tip.X) + "," + Num(tip.Y) + " " + Num(l.X) + "," + Num(l.Y) + " " + Num(r.X) + "," + Num(r.Y) + "\" fill=\"" + color + "\"/>\n";
+			}
+			if (!e.Label.empty()) {
+				const Point& a = pts[(pts.size() - 1) / 2];
+				const Point& b = pts[pts.size() / 2];
+				svg += "<text x=\"" + Num((a.X + b.X) * 0.5f) + "\" y=\"" + Num((a.Y + b.Y) * 0.5f) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" text-anchor=\"middle\">" +
+					XmlEscape(Utf8(e.Label)) + "</text>\n";
+			}
+		}
+
+		for (const auto& n : m_Nodes) {
+			float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
+			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(n.Width) + "\" height=\"" + Num(n.Height) + "\" rx=\"" + Num(n.Style.CornerRadius) +
+				"\" fill=\"" + Hex(n.Style.FillColor) + "\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"/>\n";
+			if (n.Label.empty()) continue;
+
+			std::string text = "fill=\"" + Hex(n.Style.TextColor) + "\"";
+			if (n.Style.Code) {
+				svg += "<text xml:space=\"preserve\" " + text + " font-family=\"Consolas,'Cascadia Mono',monospace\" font-size=\"12\">";
+				float y = top + 4.5f + 12.0f;
+				for (const auto& line : SplitLines(n.Label)) {
+					svg += "<tspan x=\"" + Num(left + 8.0f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
+					y += 14.5f;
+				}
+				svg += "</text>\n";
+			}
+			else {
+				svg += "<text " + text + " x=\"" + Num(n.X) + "\" y=\"" + Num(n.Y) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
+					XmlEscape(Utf8(n.Label)) + "</text>\n";
+			}
+		}
+		svg += "</svg>\n";
+
+		FILE* f = nullptr;
+		if (_wfopen_s(&f, path, L"wb") != 0 || !f) return false;
+		bool ok = fwrite(svg.data(), 1, svg.size(), f) == svg.size();
+		return fclose(f) == 0 && ok;
 	}
 
 	bool NodeGraphModel::Save(const wchar_t* path) const {

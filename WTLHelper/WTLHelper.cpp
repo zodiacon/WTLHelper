@@ -17,6 +17,14 @@ static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
 static HHOOK g_hHook;
 static int g_SuspendCount;
 
+SuspendResumeHook::SuspendResumeHook() {
+	WTLHelper::SuspendHook();
+}
+
+SuspendResumeHook::~SuspendResumeHook() {
+	WTLHelper::ResumeHook();
+}
+
 static LRESULT CALLBACK OnHook(int code, WPARAM wp, LPARAM lp) {
 	if (g_SuspendCount <= 0 && code >= HC_ACTION) {
 		auto msg = (CWPRETSTRUCT*)lp;

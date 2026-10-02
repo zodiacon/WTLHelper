@@ -22,6 +22,11 @@ struct MenuItemData {
 	HICON hIcon { nullptr };
 };
 
+struct SuspendResumeHook {
+	SuspendResumeHook();
+	~SuspendResumeHook();
+};
+
 struct WTLHelper final {
 	inline static UINT ThemeChangedMessage = ::RegisterWindowMessage(L"ThemeChanged");
 	static bool InitDarkMode();
