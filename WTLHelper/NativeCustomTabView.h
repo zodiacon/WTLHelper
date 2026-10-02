@@ -1,5 +1,165 @@
 #pragma once
 
+#include "WTLHelper.h"
+
+// The close button of a tab: WTL's CTabViewCloseBtn with colors that follow the dark mode. WTL draws it with system colors, which
+// are not those of the dark mode: the button was black on black.
+class CNativeTabCloseBtn : public ATL::CWindowImpl<CNativeTabCloseBtn> {
+public:
+	DECLARE_WND_CLASS_EX(_T("NativeTabView_CloseBtn"), 0, -1)
+
+	enum { _xyBtnImageLeftTop = 3, _xyBtnImageRightBottom = 9 };
+
+	bool m_bHover{ false };
+	bool m_bPressed{ false };
+	CToolTipCtrl m_tip;
+
+	BEGIN_MSG_MAP(CNativeTabCloseBtn)
+		MESSAGE_RANGE_HANDLER(WM_MOUSEFIRST, WM_MOUSELAST, OnMouseMessage)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_PRINTCLIENT, OnPaint)
+		FORWARD_NOTIFICATIONS()
+	END_MSG_MAP()
+
+	LRESULT OnMouseMessage(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+		MSG msg = { m_hWnd, uMsg, wParam, lParam };
+		if (m_tip.IsWindow() != FALSE)
+			m_tip.RelayEvent(&msg);
+
+		bHandled = FALSE;
+		return 1;
+	}
+
+	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&) {
+		SetCapture();
+		m_bHover = false;
+		m_bPressed = true;
+		Invalidate(FALSE);
+		UpdateWindow();
+		return 0;
+	}
+
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
+		if (::GetCapture() == m_hWnd) {
+			POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+			ClientToScreen(&pt);
+			RECT rect = {};
+			GetWindowRect(&rect);
+			bool pressed = (::PtInRect(&rect, pt) != FALSE);
+			if (m_bPressed != pressed) {
+				m_bPressed = pressed;
+				Invalidate(FALSE);
+				UpdateWindow();
+			}
+		}
+		else {
+			if (!m_bHover) {
+				m_bHover = true;
+				Invalidate(FALSE);
+				UpdateWindow();
+			}
+			TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_hWnd };
+			::TrackMouseEvent(&tme);
+		}
+		return 0;
+	}
+
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
+		if (m_bHover) {
+			m_bHover = false;
+			Invalidate(FALSE);
+			UpdateWindow();
+		}
+		NMHDR nmhdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), TBVN_CLOSEBTNMOUSELEAVE };
+		GetParent().SendMessage(WM_NOTIFY, GetDlgCtrlID(), (LPARAM)&nmhdr);
+		return 0;
+	}
+
+	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+		if (::GetCapture() == m_hWnd) {
+			bool action = m_bPressed;
+			ReleaseCapture();
+			if (action)
+				GetParent().SendMessage(WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(), BN_CLICKED), (LPARAM)m_hWnd);
+		}
+		return 0;
+	}
+
+	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+		if (m_bPressed) {
+			m_bPressed = false;
+			Invalidate(FALSE);
+			UpdateWindow();
+		}
+		return 0;
+	}
+
+	LRESULT OnPaint(UINT, WPARAM wParam, LPARAM, BOOL&) {
+		if (wParam != NULL) {
+			DoPaint((HDC)wParam);
+		}
+		else {
+			CPaintDC dc(m_hWnd);
+			DoPaint(dc.m_hDC);
+		}
+		return 0;
+	}
+
+	void DoPaint(CDCHandle dc) {
+		RECT rect = {};
+		GetClientRect(&rect);
+
+		RECT rcImage = { _xyBtnImageLeftTop, _xyBtnImageLeftTop, _xyBtnImageRightBottom + 1, _xyBtnImageRightBottom + 1 };
+		::OffsetRect(&rcImage, rect.left, rect.top);
+		if (m_bPressed)
+			::OffsetRect(&rcImage, 1, 0);
+
+		COLORREF frame, fill, cross;
+		bool active = m_bHover || m_bPressed;
+		if (WTLHelper::IsDarkMode()) {
+			frame = active ? RGB(210, 210, 210) : RGB(120, 120, 120);
+			fill = m_bPressed ? RGB(110, 110, 110) : active ? RGB(70, 70, 70) : RGB(45, 45, 48);
+			cross = RGB(235, 235, 235);
+		}
+		else {
+			frame = ::GetSysColor(active ? COLOR_BTNTEXT : COLOR_BTNSHADOW);
+			fill = ::GetSysColor(m_bPressed ? COLOR_BTNSHADOW : COLOR_WINDOW);
+			cross = ::GetSysColor(COLOR_BTNTEXT);
+		}
+
+		CPen penFrame;
+		penFrame.CreatePen(PS_SOLID, 0, frame);
+		HPEN hPenOld = dc.SelectPen(penFrame);
+		CBrush brush;
+		brush.CreateSolidBrush(fill);
+		HBRUSH hBrushOld = dc.SelectBrush(brush);
+
+		dc.Rectangle(&rect);
+
+		CPen penX;
+		penX.CreatePen(PS_SOLID, 0, cross);
+		dc.SelectPen(penX);
+
+		dc.MoveTo(rcImage.left, rcImage.top);
+		dc.LineTo(rcImage.right, rcImage.bottom);
+		dc.MoveTo(rcImage.left + 1, rcImage.top);
+		dc.LineTo(rcImage.right + 1, rcImage.bottom);
+
+		dc.MoveTo(rcImage.left, rcImage.bottom - 1);
+		dc.LineTo(rcImage.right, rcImage.top - 1);
+		dc.MoveTo(rcImage.left + 1, rcImage.bottom - 1);
+		dc.LineTo(rcImage.right + 1, rcImage.top - 1);
+
+		dc.SelectPen(hPenOld);
+		dc.SelectBrush(hBrushOld);
+	}
+};
+
 template <class T, class TBase = ATL::CWindow, class TWinTraits = ATL::CControlWinTraits>
 class ATL_NO_VTABLE CNativeCustomTabViewImpl : public ATL::CWindowImpl< T, TBase, TWinTraits > {
 public:
@@ -44,7 +204,7 @@ public:
 	};
 
 	// Data members
-	CTabCtrl m_tab;
+	CTabCtrl m_tab;		// its messages also go to the ALT_MSG_MAP(1) of the message map (see TabSubclassProc): the close button needs them
 	int m_cyTabHeight;
 
 	int m_nActivePage;
@@ -67,7 +227,7 @@ public:
 	AutoScroll m_AutoScroll;
 	CUpDownCtrl m_ud;
 
-	CTabViewCloseBtn m_btnClose;
+	CNativeTabCloseBtn m_btnClose;
 	int m_nCloseItem;
 
 	bool m_bDestroyPageOnRemove : 1;
@@ -983,6 +1143,16 @@ public:
 		return true;
 	}
 
+	static LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
+		auto pT = reinterpret_cast<T*>(data);
+		LRESULT result = 0;
+		if (msg == WM_NCDESTROY)
+			::RemoveWindowSubclass(hWnd, TabSubclassProc, id);
+		else if (pT->ProcessWindowMessage(hWnd, msg, wp, lp, result, 1))
+			return result;
+		return ::DefSubclassProc(hWnd, msg, wp, lp);
+	}
+
 	// Implementation overrideables
 	bool CreateTabControl() {
 		m_tab.Create(this->m_hWnd, this->rcDefault, nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | TCS_TOOLTIPS, 0, m_nTabID);
@@ -990,10 +1160,17 @@ public:
 		if (m_tab.m_hWnd == nullptr)
 			return false;
 
+		// A comctl subclass and not a contained window: it chains with the subclass of the dark mode, which a replaced window procedure
+		// would bypass (the tabs were light).
+		::SetWindowSubclass(m_tab, TabSubclassProc, 1, (DWORD_PTR)this);
+
 		m_tab.SetFont(AtlCreateControlFont());
 		m_bInternalFont = true;
 
 		m_tab.SetItemExtra(sizeof(TABVIEWPAGE));
+
+		if (m_bTabCloseButton)
+			m_tab.SetPadding(CSize(_cxCloseBtn + 2, 3));	// the button is drawn over the right end of the tab: leave room for it
 
 		T* pT = static_cast<T*>(this);
 		m_cyTabHeight = pT->CalcTabHeight();

@@ -1239,7 +1239,9 @@ static void paintTabItem(
 		rcText.left += cx;
 	}
 
-	::DrawText(hdc, label.c_str(), -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	// left aligned (the room that the tab has to spare is at its right, where the close button appears)
+	rcText.left += 8;
+	::DrawText(hdc, label.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
 	::FrameRect(hdc, &rcFrame, DarkMode::getEdgeBrush());
 
