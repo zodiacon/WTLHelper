@@ -125,11 +125,25 @@ COLORREF WINAPI HookedGetSysColor2(int index) {
 	return OrgGetSysColor(index);
 }
 
+static decltype(::FillRect)* OrgFillRect;
+
+//
+// FillRect also accepts a system color index + 1 in place of a brush, which user32 resolves internally,
+// bypassing the GetSysColorBrush hook. The font dialog paints its owner drawn font and style lists this way.
+//
+int WINAPI HookedFillRect(HDC hdc, RECT const* rc, HBRUSH brush) {
+	if (g_DarkModeType == DarkModeKind::Dark && (ULONG_PTR)brush > 0 && (ULONG_PTR)brush <= COLOR_MENUBAR + 1)
+		brush = HookedGetSysColorBrush2((int)(ULONG_PTR)brush - 1);
+	return OrgFillRect(hdc, rc, brush);
+}
+
 bool InitHooks() {
 	OrgGetSysColor = (decltype(OrgGetSysColor))::GetProcAddress(::GetModuleHandle(L"user32"), "GetSysColor");
 	ATLASSERT(OrgGetSysColor);
 	OrgGetSysColorBrush = (decltype(OrgGetSysColorBrush))::GetProcAddress(::GetModuleHandle(L"user32"), "GetSysColorBrush");
 	ATLASSERT(OrgGetSysColorBrush);
+	OrgFillRect = (decltype(OrgFillRect))::GetProcAddress(::GetModuleHandle(L"user32"), "FillRect");
+	ATLASSERT(OrgFillRect);
 
 	if (NOERROR != DetourTransactionBegin())
 		return false;
@@ -137,6 +151,7 @@ bool InitHooks() {
 	DetourUpdateThread(::GetCurrentThread());
 	DetourAttach((PVOID*)&OrgGetSysColor, HookedGetSysColor2);
 	DetourAttach((PVOID*)&OrgGetSysColorBrush, HookedGetSysColorBrush2);
+	DetourAttach((PVOID*)&OrgFillRect, HookedFillRect);
 	auto error = DetourTransactionCommit();
 	ATLASSERT(error == NOERROR);
 	return error == NOERROR;
@@ -275,11 +290,5 @@ DarkMode::ColorTone WTLHelper::GetDarkTone() noexcept {
 }
 
 bool WTLHelper::InvokeFontDialog(CFontDialog& dlg, HWND hParent) {
-	auto mode = WTLHelper::DarkModeType();
-	WTLHelper::SwitchToMode(DarkModeKind::Classic, nullptr);
-	WTLHelper::SuspendHook();
-	auto ok = dlg.DoModal() == IDOK;
-	WTLHelper::ResumeHook();
-	WTLHelper::SwitchToMode(mode, hParent);
-	return ok;
+	return dlg.DoModal() == IDOK;
 }
