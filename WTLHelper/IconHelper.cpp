@@ -16,6 +16,19 @@ HICON IconHelper::Load(ATL::_U_STRINGorID id, int size) {
 	return AtlLoadIconImage(id, 0, size, size);
 }
 
+HICON IconHelper::LoadCached(UINT id, int size) {
+	static SRWLOCK lock = SRWLOCK_INIT;
+	static std::map<std::pair<UINT, int>, HICON> icons;
+
+	::AcquireSRWLockExclusive(&lock);
+	auto& hIcon = icons[{ id, size }];
+	if (!hIcon)
+		hIcon = Load(id, size);
+	auto result = hIcon;
+	::ReleaseSRWLockExclusive(&lock);
+	return result;
+}
+
 HICON IconHelper::GetStockIcon(SHSTOCKICONID id, bool big) {
 	SHSTOCKICONINFO ssii = { sizeof(ssii) };
 	if (FAILED(::SHGetStockIconInfo(id, (big ? SHGSI_LARGEICON : SHGSI_SMALLICON) | SHGSI_ICON, &ssii)))

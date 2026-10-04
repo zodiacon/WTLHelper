@@ -33,13 +33,13 @@ public:
 			CString text;
 			ok.GetWindowText(text);
 			ok.SetWindowText(L"  " + text);
-			ok.SetIcon(IconHelper::Load(okId, 16));
+			ok.SetIcon(IconHelper::LoadCached(okId, 16));
 		}
 
 		CButton cancel(dlg->GetDlgItem(IDCANCEL));
 		if (cancel) {
 			cancel.SetWindowText(L"  Cancel");
-			cancel.SetIcon(IconHelper::Load(cancelId, 16));
+			cancel.SetIcon(IconHelper::LoadCached(cancelId, 16));
 		}
 	}
 
@@ -47,7 +47,7 @@ public:
 		auto dlg = static_cast<T*>(this);
 		CButton button(dlg->GetDlgItem(id));
 		if (button) {
-			button.SetIcon(IconHelper::Load(icon, size));
+			button.SetIcon(IconHelper::LoadCached(icon, size));
 			CString text;
 			button.GetWindowText(text);
 			button.SetWindowText(L"  " + text);
@@ -55,10 +55,11 @@ public:
 		return (bool)button;
 	}
 
+	// icons set on windows aren't destroyed with them, so these come from a cache that loads each one once
 	void SetDialogIcon(UINT icon) {
 		auto dlg = static_cast<T*>(this);
-		dlg->SetIcon(IconHelper::Load(icon, 16), FALSE);
-		dlg->SetIcon(IconHelper::Load(icon, 32), TRUE);
+		dlg->SetIcon(IconHelper::LoadCached(icon, 16), FALSE);
+		dlg->SetIcon(IconHelper::LoadCached(icon, 32), TRUE);
 	}
 	void SetDialogIcon(HICON icon) {
 		auto dlg = static_cast<T*>(this);
