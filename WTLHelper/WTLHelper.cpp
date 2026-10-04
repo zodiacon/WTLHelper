@@ -274,12 +274,12 @@ DarkMode::ColorTone WTLHelper::GetDarkTone() noexcept {
 	return static_cast<DarkMode::ColorTone>(DarkMode::getColorTone());
 }
 
-bool WTLHelper::InvokeFontDialog(CFontDialog& dlg) {
+bool WTLHelper::InvokeFontDialog(CFontDialog& dlg, HWND hParent) {
 	auto mode = WTLHelper::DarkModeType();
-	WTLHelper::SwitchToMode(DarkModeKind::Light, nullptr);
+	WTLHelper::SwitchToMode(DarkModeKind::Classic, nullptr);
 	WTLHelper::SuspendHook();
 	auto ok = dlg.DoModal() == IDOK;
 	WTLHelper::ResumeHook();
-	WTLHelper::SwitchToMode(mode, nullptr);
+	WTLHelper::SwitchToMode(mode, hParent);
 	return ok;
 }
