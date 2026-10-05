@@ -3,6 +3,88 @@
 #include "IListView.h"
 #include <wil\resource.h>
 #include "VirtualListView.h"
+#include "WTLHelper.h"
+#include <atldlgs.h>
+
+namespace {
+	// quotes a field when it has a separator, a quote or a line break (quotes inside are doubled)
+	void AppendCsvField(CString& text, CString value) {
+		if (value.FindOneOf(L",\"\r\n") < 0) {
+			text += value;
+			return;
+		}
+		value.Replace(L"\"", L"\"\"");
+		text += L"\"" + value + L"\"";
+	}
+}
+
+bool ListViewHelper::SaveAsCsv(CListViewCtrl const& lv, PCWSTR path) {
+	CWaitCursor wait;	// cell texts may need lookups
+	int columns = lv.GetHeader().GetItemCount();
+	if (columns <= 0)
+		return false;
+
+	std::vector<int> order(columns);
+	lv.GetColumnOrderArray(columns, order.data());
+
+	CString text;
+	// the header
+	for (int i = 0; i < columns; i++) {
+		WCHAR name[128]{};
+		LVCOLUMN lvc{ LVCF_TEXT };
+		lvc.pszText = name;
+		lvc.cchTextMax = _countof(name);
+		lv.GetColumn(order[i], &lvc);
+		if (i)
+			text += L",";
+		AppendCsvField(text, name);
+	}
+	text += L"\r\n";
+
+	// the rows, as shown
+	int rows = lv.GetItemCount();
+	CString value;
+	for (int row = 0; row < rows; row++) {
+		for (int i = 0; i < columns; i++) {
+			value.Empty();
+			lv.GetItemText(row, order[i], value);
+			if (i)
+				text += L",";
+			AppendCsvField(text, value);
+		}
+		text += L"\r\n";
+	}
+
+	//
+	// UTF-8 with a BOM (so Excel detects the encoding)
+	//
+	CW2A utf8(text, CP_UTF8);
+	wil::unique_hfile hFile(::CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr));
+	if (!hFile)
+		return false;
+	static const BYTE bom[] = { 0xEF, 0xBB, 0xBF };
+	DWORD written;
+	return ::WriteFile(hFile.get(), bom, sizeof(bom), &written, nullptr) &&
+		::WriteFile(hFile.get(), (PCSTR)utf8, (DWORD)strlen(utf8), &written, nullptr);
+}
+
+CString ListViewHelper::PromptForCsvFile(HWND hOwner, PCWSTR defaultName) {
+	CString name(defaultName);
+	// characters that can't be in a file name
+	for (auto ch : L"\\/:*?\"<>|") {
+		if (ch)
+			name.Replace(ch, L'_');
+	}
+	name.Trim();
+
+	CSimpleFileDialog dlg(FALSE, L"csv", name,
+		OFN_EXPLORER | OFN_ENABLESIZING | OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY,
+		L"CSV Files (*.csv)\0*.csv\0All Files\0*.*\0", hOwner);
+	WTLHelper::SuspendHook();
+	auto ok = dlg.DoModal() == IDOK;
+	WTLHelper::ResumeHook();
+	return ok ? CString(dlg.m_szFileName) : CString();
+}
 
 bool ListViewHelper::SaveAll(PCWSTR path, CListViewCtrl& lv, PCWSTR separator, bool includeHeaders) {
 	wil::unique_handle hFile(::CreateFile(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr));
@@ -166,8 +248,9 @@ CString ListViewHelper::GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separ
 	for (int i = 0; i < count; i++) {
 		text += GetRowAsString(lv, i, separator) += cr;
 	}
+	// remove the last line break, whatever its length
 	if (!text.IsEmpty())
-		text = text.Left(text.GetLength() - 2);
+		text = text.Left(text.GetLength() - (int)wcslen(cr));
 	return text;
 }
 

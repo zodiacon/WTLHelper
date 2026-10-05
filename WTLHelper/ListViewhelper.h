@@ -6,6 +6,10 @@ struct ColumnsState;
 struct ListViewHelper final {
 	static bool SaveAll(PCWSTR path, CListViewCtrl& lv, PCWSTR separator = L",", bool includeHeaders = true);
 	static bool SaveAllToKey(CRegKey& key, CListViewCtrl& lv, bool includeHeaders = true);
+	// the rows as shown (filtered, sorted) with the columns in their displayed order, as CSV in UTF-8 (with a BOM)
+	static bool SaveAsCsv(CListViewCtrl const& lv, PCWSTR path);
+	// asks for a CSV file name; empty if cancelled
+	static CString PromptForCsvFile(HWND hOwner, PCWSTR defaultName);
 	static CString GetRowAsString(CListViewCtrl const& lv, int row, PCWSTR separator = L"\t");
 	static CString GetSelectedRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t", PCWSTR cr = L"\r\n");
 	static int FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial);
