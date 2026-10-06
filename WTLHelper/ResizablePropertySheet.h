@@ -5,9 +5,9 @@
 
 //
 // property sheet the user can resize (not for wizards).
-// The tab control stretches, the buttons move with the bottom-right corner,
-// and the active page fills the tab's display area. A page lays out its own controls
-// (e.g. with CDynamicDialogLayout or CDialogResize).
+// The tab control stretches, the visible buttons stay centered along the bottom,
+// and the active page fills the tab's display area (the sheet sizes other pages to it when it shows them).
+// A page lays out its own controls (e.g. with CDynamicDialogLayout or CDialogResize).
 // TBase is the sheet implementation to build on, so it composes with other sheet impls, e.g.
 //   class CMySheet : public CResizablePropertySheetImpl<CMySheet> {};
 // A derived class that defines OnSheetInitialized must call the base version.
@@ -21,9 +21,6 @@ public:
 		MESSAGE_HANDLER(WM_SHOWWINDOW, OnShowWindow)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_GETMINMAXINFO, OnGetMinMaxInfo)
-		MESSAGE_HANDLER(PSM_SETCURSEL, OnPageChange)
-		MESSAGE_HANDLER(PSM_SETCURSELID, OnPageChange)
-		NOTIFY_CODE_HANDLER(TCN_SELCHANGE, OnTabChanged)
 		CHAIN_MSG_MAP(TBase)
 	END_MSG_MAP()
 
@@ -115,24 +112,6 @@ protected:
 		}
 		bHandled = FALSE;
 		return 0;
-	}
-
-	//
-	// the sheet places a newly shown page at its original size, so fix it after the change
-	//
-	LRESULT OnPageChange(UINT msg, WPARAM wp, LPARAM lp, BOOL&) {
-		auto pT = static_cast<T*>(this);
-		auto result = pT->DefWindowProc(msg, wp, lp);
-		ResizePage(pT->GetActivePage());
-		return result;
-	}
-
-	LRESULT OnTabChanged(int, LPNMHDR, BOOL&) {
-		auto pT = static_cast<T*>(this);
-		auto msg = pT->GetCurrentMessage();
-		auto result = pT->DefWindowProc(msg->message, msg->wParam, msg->lParam);
-		ResizePage(pT->GetActivePage());
-		return result;
 	}
 
 private:

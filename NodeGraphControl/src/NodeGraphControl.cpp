@@ -12,8 +12,12 @@
 #include <cstdio>
 #include <cmath>
 #include <string>
+#include <wincodec.h>
+#include <shlwapi.h>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "shlwapi.lib")
 
 namespace NodeGraphCtrl {
 
@@ -1280,8 +1284,9 @@ namespace NodeGraphCtrl {
 		float sx = (rc.right - margin * 2) / (maxX - minX);
 		float sy = (rc.bottom - margin * 2) / (maxY - minY);
 		m_Vt.Scale = std::clamp(std::min(sx, sy), 0.05f, 50.0f);
-		m_Vt.OffsetX = margin - minX * m_Vt.Scale;
-		m_Vt.OffsetY = margin - minY * m_Vt.Scale;
+		// centered: the direction that doesn't fill the view gets the space on both sides
+		m_Vt.OffsetX = (rc.right - (maxX - minX) * m_Vt.Scale) / 2 - minX * m_Vt.Scale;
+		m_Vt.OffsetY = (rc.bottom - (maxY - minY) * m_Vt.Scale) / 2 - minY * m_Vt.Scale;
 		RequestInvalidate();
 	}
 
@@ -1304,8 +1309,8 @@ namespace NodeGraphCtrl {
 		float sx = (rc.right - margin * 2) / std::max(maxX - minX, 1.0f);
 		float sy = (rc.bottom - margin * 2) / std::max(maxY - minY, 1.0f);
 		m_Vt.Scale = std::clamp(std::min(sx, sy), 0.05f, 50.0f);
-		m_Vt.OffsetX = margin - minX * m_Vt.Scale;
-		m_Vt.OffsetY = margin - minY * m_Vt.Scale;
+		m_Vt.OffsetX = (rc.right - (maxX - minX) * m_Vt.Scale) / 2 - minX * m_Vt.Scale;
+		m_Vt.OffsetY = (rc.bottom - (maxY - minY) * m_Vt.Scale) / 2 - minY * m_Vt.Scale;
 		RequestInvalidate();
 	}
 
@@ -1329,6 +1334,13 @@ namespace NodeGraphCtrl {
 
 	NodeId CNodeGraphControl::GetSelectedNode() const {
 		return m_SelectedNodes.empty() ? InvalidNode : m_SelectedNodes[0];
+	}
+
+	NodeId CNodeGraphControl::NodeFromPoint(POINT pt) const {
+		if (!m_Model)
+			return InvalidNode;
+		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
+		return m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 	}
 
 	EdgeId CNodeGraphControl::GetSelectedEdge() const {
@@ -1356,6 +1368,99 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::Refresh() {
 		Invalidate(FALSE);
+	}
+
+	void CNodeGraphControl::SetBackgroundColor(COLORREF color) {
+		m_Renderer.SetBackgroundColor(color);
+		if (m_hWnd)
+			RequestInvalidate();
+	}
+
+	COLORREF CNodeGraphControl::GetBackgroundColor() const {
+		return m_Renderer.GetBackgroundColor();
+	}
+
+	bool CNodeGraphControl::SaveImage(const wchar_t* path, float scale) {
+		if (!m_Model || m_Model->Nodes().empty() || scale <= 0)
+			return false;
+
+		// the extent of the graph, as SaveSvg computes it
+		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+		auto extend = [&](float x, float y) {
+			minX = std::min(minX, x); maxX = std::max(maxX, x);
+			minY = std::min(minY, y); maxY = std::max(maxY, y);
+		};
+		for (const auto& n : m_Model->Nodes()) {
+			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
+			extend(n.X + n.Width * 0.5f + 30.0f, n.Y + n.Height * 0.5f);	// room for the loop of an edge to its own node
+		}
+		for (const auto& e : m_Model->Edges())
+			for (const auto& w : e.Waypoints)
+				extend(w.X, w.Y);
+		const float margin = 24.0f;
+		minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+
+		// Direct2D can't draw a bitmap larger than the device allows (16384 a side is common), and memory is limited
+		const float maxSide = 16384.0f, maxPixels = 32.0f * 1024 * 1024;
+		float w = maxX - minX, h = maxY - minY;
+		scale = std::min({ scale, maxSide / w, maxSide / h, std::sqrt(maxPixels / (w * h)) });
+		int cx = std::max(1, (int)(w * scale)), cy = std::max(1, (int)(h * scale));
+
+		BITMAPINFO bmi{};
+		bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+		bmi.bmiHeader.biWidth = cx;
+		bmi.bmiHeader.biHeight = -cy;	// top-down
+		bmi.bmiHeader.biPlanes = 1;
+		bmi.bmiHeader.biBitCount = 32;
+		bmi.bmiHeader.biCompression = BI_RGB;
+		void* bits = nullptr;
+		HBITMAP hBitmap = ::CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+		if (!hBitmap)
+			return false;
+		HDC hdc = ::CreateCompatibleDC(nullptr);
+		auto old = ::SelectObject(hdc, hBitmap);
+
+		ViewTransform vt;
+		vt.Scale = scale;
+		vt.OffsetX = -minX * scale;
+		vt.OffsetY = -minY * scale;
+		RECT rc{ 0, 0, cx, cy };
+		m_Renderer.Render(hdc, rc, *m_Model, vt, {}, InvalidEdge, false);
+		::GdiFlush();
+		::SelectObject(hdc, old);
+		::DeleteDC(hdc);
+
+		auto ext = ::PathFindExtensionW(path);
+		GUID format = GUID_ContainerFormatPng;
+		if (::_wcsicmp(ext, L".jpg") == 0 || ::_wcsicmp(ext, L".jpeg") == 0)
+			format = GUID_ContainerFormatJpeg;
+		else if (::_wcsicmp(ext, L".bmp") == 0)
+			format = GUID_ContainerFormatBmp;
+
+		bool ok = false;
+		ComPtr<IWICImagingFactory> factory;
+		ComPtr<IWICBitmap> bitmap;
+		ComPtr<IWICStream> stream;
+		ComPtr<IWICBitmapEncoder> encoder;
+		ComPtr<IWICBitmapFrameEncode> frame;
+		ComPtr<IPropertyBag2> props;
+		WICPixelFormatGUID pixelFormat = GUID_WICPixelFormat24bppBGR;
+		if (SUCCEEDED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(factory.GetAddressOf()))) &&
+			SUCCEEDED(factory->CreateBitmapFromHBITMAP(hBitmap, nullptr, WICBitmapIgnoreAlpha, bitmap.GetAddressOf())) &&
+			SUCCEEDED(factory->CreateStream(stream.GetAddressOf())) &&
+			SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+			SUCCEEDED(factory->CreateEncoder(format, nullptr, encoder.GetAddressOf())) &&
+			SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+			SUCCEEDED(encoder->CreateNewFrame(frame.GetAddressOf(), props.GetAddressOf())) &&
+			SUCCEEDED(frame->Initialize(props.Get())) &&
+			SUCCEEDED(frame->SetSize(cx, cy)) &&
+			SUCCEEDED(frame->SetPixelFormat(&pixelFormat)) &&
+			SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) &&
+			SUCCEEDED(frame->Commit()) &&
+			SUCCEEDED(encoder->Commit()))
+			ok = true;
+		::DeleteObject(hBitmap);
+		return ok;
 	}
 
 	void CNodeGraphControl::SetMinimapVisible(bool visible) {
@@ -1401,7 +1506,8 @@ namespace NodeGraphCtrl {
 		INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_BAR_CLASSES };
 		InitCommonControlsEx(&icc);
 		// Pre-register the window class; CWindowImpl::Create() also does this lazily.
-		ATOM a = CNodeGraphControl::GetWndClassInfo().Register(nullptr);
+		WNDPROC proc = nullptr;		// ATL requires it, even though it is only used for superclassing
+		ATOM a = CNodeGraphControl::GetWndClassInfo().Register(&proc);
 		return a != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 	}
 
@@ -1567,7 +1673,7 @@ namespace NodeGraphCtrl {
 		}
 	}
 
-	bool NodeGraphModel::SaveSvg(const wchar_t* path) const {
+	bool NodeGraphModel::SaveSvg(const wchar_t* path, COLORREF background) const {
 		if (m_Nodes.empty()) return false;
 
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
@@ -1589,7 +1695,7 @@ namespace NodeGraphCtrl {
 		svg += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 		svg += "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) +
 			"\" viewBox=\"" + Num(minX) + " " + Num(minY) + " " + Num(maxX - minX) + " " + Num(maxY - minY) + "\">\n";
-		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"#262626\"/>\n";
+		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"" + Hex(background) + "\"/>\n";
 
 		// edges first, so that the nodes are on top
 		for (const auto& e : m_Edges) {
@@ -1626,12 +1732,14 @@ namespace NodeGraphCtrl {
 					}
 			}
 
+			// as the renderer clips: half the segment at most for a straight edge, the whole segment next to a waypoint
+			const float maxPart = pts.size() == 2 ? 0.5f : 1.0f;
 			auto clip = [&](const Node& n, Point& at, Point other) {
 				float ddx = other.X - at.X, ddy = other.Y - at.Y;
 				float l = std::sqrt(ddx * ddx + ddy * ddy);
 				if (l < 1.0f) return Point{};
 				float nx = ddx / l, ny = ddy / l;
-				float t = std::min(BorderDistance(n, nx, ny), l * 0.5f);
+				float t = std::min(BorderDistance(n, nx, ny), l * maxPart);
 				at.X += nx * t; at.Y += ny * t;
 				return Point{ nx, ny };
 			};

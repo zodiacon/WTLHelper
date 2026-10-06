@@ -84,7 +84,8 @@ public:
     bool Load(const wchar_t* path);
 
     // Writes the graph as it is drawn (the colors, the bends of the edges) to a vector image. False for an empty graph or on error.
-    bool SaveSvg(const wchar_t* path) const;
+    // background: the canvas color (CNodeGraphControl::GetBackgroundColor for the control's).
+    bool SaveSvg(const wchar_t* path, COLORREF background = RGB(38, 38, 38)) const;
 
 private:
     std::vector<Node> m_Nodes;

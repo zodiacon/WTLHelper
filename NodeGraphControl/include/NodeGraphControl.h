@@ -166,6 +166,7 @@ public:
 
     // Selection — single (backward compat) and multi.
     NodeId GetSelectedNode() const;   // returns primary (first) selected node
+    NodeId NodeFromPoint(POINT pt) const;   // pt in client coordinates (e.g. for WM_CONTEXTMENU); InvalidNode if no node is there
     EdgeId GetSelectedEdge() const;
     std::vector<NodeId> GetSelectedNodes() const;
     void SelectNode(NodeId id, bool addToSelection = false);
@@ -210,6 +211,16 @@ public:
 
     // Force an immediate repaint without changing model state.
     void Refresh();
+
+    // The canvas color (dark gray by default); the grid and selection colors adapt to it. SaveImage uses it as well.
+    void     SetBackgroundColor(COLORREF color);
+    COLORREF GetBackgroundColor() const;
+
+    // Writes the whole graph (not only the part in view) as an image, without the selection, grid and minimap.
+    // The format comes from the extension: .jpg/.jpeg, .bmp, otherwise PNG. scale is pixels per graph unit; it is
+    // lowered if the image would be too large (more than 16384 pixels a side or about 32 million pixels).
+    // Needs COM to be initialized on the thread. False for an empty graph or on error.
+    bool SaveImage(const wchar_t* path, float scale = 1.0f);
 
 private:
     // ---- Message handlers ----

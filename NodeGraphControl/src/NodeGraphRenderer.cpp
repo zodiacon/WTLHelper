@@ -16,6 +16,16 @@ NodeGraphRenderer::~NodeGraphRenderer() {
     Shutdown();
 }
 
+bool NodeGraphRenderer::IsLightBackground() const {
+    // perceived brightness
+    return GetRValue(m_Background) * 299 + GetGValue(m_Background) * 587 + GetBValue(m_Background) * 114 > 128 * 1000;
+}
+
+D2D1_COLOR_F NodeGraphRenderer::SelectionColor() const {
+    // yellow doesn't show on a light background
+    return IsLightBackground() ? D2D1::ColorF(0.9f, 0.45f, 0.0f) : D2D1::ColorF(D2D1::ColorF::Yellow);
+}
+
 HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, m_D2dFactory.GetAddressOf());
     if (FAILED(hr)) return hr;
@@ -108,7 +118,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     }
 
     m_RenderTarget->BeginDraw();
-    m_RenderTarget->Clear(D2D1::ColorF(0.15f, 0.15f, 0.15f));
+    m_RenderTarget->Clear(ColorrefToD2D(m_Background));
 
     if (drawGrid) DrawGrid(clientRect, vt);
 
@@ -173,7 +183,7 @@ void NodeGraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
     const float gridSpacing = 40.0f * vt.Scale;
     if (gridSpacing < 8.0f) return;
 
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f));
+    m_Brush->SetColor(IsLightBackground() ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f));
     m_Brush->SetOpacity(1.0f);
 
     float startX = fmodf(vt.OffsetX, gridSpacing);
@@ -215,7 +225,10 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
         for (auto& p : pts) { p.x -= ny * lane; p.y += nx * lane; }
     }
 
-    // Clip the ends to the borders of the nodes.
+    // Clip the ends to the borders of the nodes. A straight edge is clipped at both ends of the same segment, so neither
+    // end may go past its middle (the nodes may overlap); next to a waypoint the end may take the whole segment, or
+    // a waypoint close to a node would leave the end, and its arrowhead, inside (under) the node.
+    const float maxPart = pts.size() == 2 ? 0.5f : 1.0f;
     auto clip = [&](const Node& n, D2D1_POINT_2F& at, D2D1_POINT_2F other) -> D2D1_POINT_2F {
         float ddx = other.x - at.x, ddy = other.y - at.y;
         float l = std::sqrtf(ddx * ddx + ddy * ddy);
@@ -224,7 +237,7 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
         float hw = n.Width * vt.Scale * 0.5f, hh = n.Height * vt.Scale * 0.5f;
         float t = std::min(std::fabsf(nx) > 0.0f ? hw / std::fabsf(nx) : 1e9f,
                            std::fabsf(ny) > 0.0f ? hh / std::fabsf(ny) : 1e9f);
-        t = std::min(t, l * 0.5f);
+        t = std::min(t, l * maxPart);
         at.x += nx * t; at.y += ny * t;
         return { nx, ny };
     };
@@ -234,7 +247,7 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
 
     float strokeWidth = e.Style.Width * (selected ? 2.0f : 1.0f);
     m_Brush->SetColor(selected
-        ? D2D1::ColorF(D2D1::ColorF::Yellow)
+        ? SelectionColor()
         : ColorrefToD2D(e.Style.Color));
     for (size_t i = 0; i + 1 < pts.size(); i++)
         m_RenderTarget->DrawLine(pts[i], pts[i + 1], m_Brush.Get(), strokeWidth);
@@ -250,7 +263,7 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
                            mid.x + lw * 0.5f, mid.y + lh * 0.5f };
         m_Brush->SetColor(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.88f));
         m_RenderTarget->FillRectangle(lr, m_Brush.Get());
-        m_Brush->SetColor(selected ? D2D1::ColorF(D2D1::ColorF::Yellow)
+        m_Brush->SetColor(selected ? SelectionColor()
                                    : D2D1::ColorF(0.85f, 0.85f, 0.85f));
         m_RenderTarget->DrawTextW(e.Label.c_str(), (UINT32)e.Label.size(),
             m_EdgeTextFormat.Get(), lr, m_Brush.Get());
@@ -267,7 +280,7 @@ void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTra
     float bottom = c.y + std::min(hh * 0.5f, 40.0f * vt.Scale);
     float right = c.x + hw;
 
-    m_Brush->SetColor(selected ? D2D1::ColorF(D2D1::ColorF::Yellow) : ColorrefToD2D(e.Style.Color));
+    m_Brush->SetColor(selected ? SelectionColor() : ColorrefToD2D(e.Style.Color));
     float width = e.Style.Width * (selected ? 2.0f : 1.0f);
     m_RenderTarget->DrawLine({ right, top }, { right + reach, top }, m_Brush.Get(), width);
     m_RenderTarget->DrawLine({ right + reach, top }, { right + reach, bottom }, m_Brush.Get(), width);
@@ -316,7 +329,7 @@ void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool se
     // Border
     float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
     m_Brush->SetColor(selected
-        ? D2D1::ColorF(D2D1::ColorF::Yellow)
+        ? SelectionColor()
         : ColorrefToD2D(n.Style.BorderColor));
     m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
 
@@ -382,10 +395,12 @@ void NodeGraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& client
 
     D2D1_RECT_F rect = { cfg.X, cfg.Y, cfg.X + cfg.Width, cfg.Y + cfg.Height };
 
-    m_Brush->SetColor(D2D1::ColorF(0.05f, 0.05f, 0.05f, 0.85f));
+    // a panel a little darker (lighter) than a light (dark) canvas
+    const bool light = IsLightBackground();
+    m_Brush->SetColor(light ? D2D1::ColorF(0.9f, 0.9f, 0.9f, 0.9f) : D2D1::ColorF(0.05f, 0.05f, 0.05f, 0.85f));
     m_RenderTarget->FillRectangle(rect, m_Brush.Get());
 
-    m_Brush->SetColor(D2D1::ColorF(0.55f, 0.55f, 0.55f));
+    m_Brush->SetColor(light ? D2D1::ColorF(0.6f, 0.6f, 0.6f) : D2D1::ColorF(0.55f, 0.55f, 0.55f));
     m_RenderTarget->DrawRectangle(rect, m_Brush.Get(), 1.0f);
 
     if (model.Nodes().empty()) return;
@@ -414,7 +429,7 @@ void NodeGraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& client
     m_RenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Edges
-    m_Brush->SetColor(D2D1::ColorF(0.6f, 0.6f, 0.6f, 0.8f));
+    m_Brush->SetColor(light ? D2D1::ColorF(0.45f, 0.45f, 0.45f, 0.8f) : D2D1::ColorF(0.6f, 0.6f, 0.6f, 0.8f));
     for (const auto& e : model.Edges()) {
         const Node* from = model.GetNode(e.From);
         const Node* to   = model.GetNode(e.To);
@@ -449,9 +464,9 @@ void NodeGraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& client
         originX + (vpGX1 - gMinX) * mmScale,
         originY + (vpGY1 - gMinY) * mmScale
     };
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f));
+    m_Brush->SetColor(light ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f));
     m_RenderTarget->FillRectangle(vpRect, m_Brush.Get());
-    m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.5f, 0.9f));
+    m_Brush->SetColor(light ? SelectionColor() : D2D1::ColorF(1.0f, 1.0f, 0.5f, 0.9f));
     m_RenderTarget->DrawRectangle(vpRect, m_Brush.Get(), 1.0f, m_DashStyle.Get());
 
     m_RenderTarget->PopAxisAlignedClip();
@@ -486,7 +501,7 @@ void NodeGraphRenderer::DrawResizeHandles(const Node& n, const ViewTransform& vt
         D2D1_RECT_F r = { pts[i].x - hs, pts[i].y - hs,
                           pts[i].x + hs, pts[i].y + hs };
         m_Brush->SetColor(h == hovered
-            ? D2D1::ColorF(D2D1::ColorF::Yellow)
+            ? SelectionColor()
             : D2D1::ColorF(1.0f, 1.0f, 1.0f));
         m_RenderTarget->FillRectangle(r, m_Brush.Get());
         m_Brush->SetColor(D2D1::ColorF(0.2f, 0.2f, 0.2f));

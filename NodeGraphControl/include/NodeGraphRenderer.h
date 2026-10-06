@@ -72,6 +72,10 @@ public:
                 const MinimapConfig& minimap = {},
                 const ResizeOverlay& resizeOverlay = {});
 
+    // The canvas color. The grid and the selection are drawn in colors that show on it (light or dark).
+    void     SetBackgroundColor(COLORREF color) { m_Background = color; }
+    COLORREF GetBackgroundColor() const { return m_Background; }
+
     // Hit testing in graph space.
     NodeId HitTestNode(const NodeGraphModel& model, float gx, float gy) const;
     EdgeId HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance = 5.0f) const;
@@ -113,6 +117,10 @@ private:
 
     // the (from, to) pairs of the edges of the model that is being drawn: edges that have one going the other way are drawn apart
     std::unordered_set<uint64_t> m_EdgePairs;
+
+    COLORREF m_Background = RGB(38, 38, 38);
+    bool IsLightBackground() const;
+    D2D1_COLOR_F SelectionColor() const;
 };
 
 } // namespace NodeGraphCtrl
