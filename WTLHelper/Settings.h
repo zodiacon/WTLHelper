@@ -49,8 +49,14 @@ struct Setting {
 
 	template<typename T>
 	void Set(const T& value) {
-		Buffer = std::make_unique<uint8_t[]>(sizeof(T));
-		memcpy(Buffer.get(), &value, sizeof(T));
+		// Size must follow the buffer: saving writes Size bytes. A bool is kept as a DWORD, as REG_DWORD needs
+		if constexpr (std::is_same_v<T, bool>) {
+			DWORD dword = value ? 1 : 0;
+			Set(&dword, sizeof(dword));
+		}
+		else {
+			Set(&value, sizeof(T));
+		}
 	}
 
 	void SetString(PCWSTR value);
