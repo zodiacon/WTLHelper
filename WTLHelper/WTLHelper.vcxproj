@@ -452,6 +452,9 @@
     <ClInclude Include="OwnerDrawnMenu.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="QuickFindEdit.h" />
+    <ClInclude Include="DarkModeSizeGrip.h" />
+    <ClInclude Include="IconPropertySheet.h" />
+    <ClInclude Include="ResizablePropertySheet.h" />
     <ClInclude Include="SecurityHelper.h" />
     <ClInclude Include="TabViewHelper.h" />
     <ClInclude Include="TreeListView.h" />

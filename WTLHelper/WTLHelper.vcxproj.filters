@@ -160,6 +160,15 @@
     <ClInclude Include="CompoundFileReaderWriter.h">
       <Filter>CompoundFiles</Filter>
     </ClInclude>
+    <ClInclude Include="DarkModeSizeGrip.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="IconPropertySheet.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
+    <ClInclude Include="ResizablePropertySheet.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
     <ClInclude Include="QuickFindEdit.h">
       <Filter>Controls</Filter>
     </ClInclude>
