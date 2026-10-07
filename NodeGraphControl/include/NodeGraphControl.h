@@ -13,6 +13,7 @@
 
 #include "NodeGraphModel.h"
 #include "NodeGraphRenderer.h"
+#include "NodeGraphLayout.h"
 
 // Notification codes sent via WM_NOTIFY to the parent window.
 #define NGCN_NODECLICK      1   // lParam -> NODEGRAPHNOTIFY*, node was left-clicked
@@ -97,6 +98,9 @@ struct MinimapState {
     float StartY      = 0.0f;
     float DragClickGX = 0.0f;
     float DragClickGY = 0.0f;
+    bool  Scrolling    = false;  // dragging with the right button: the view rectangle follows the mouse
+    float StartOffsetX = 0.0f;   // the view's offset when the scrolling started
+    float StartOffsetY = 0.0f;
 };
 
 struct DragOrigin {
@@ -204,6 +208,10 @@ public:
     void SetNodeStyle(NodeId id, const NodeStyle& style);
     void SetEdgeStyle(EdgeId id, const EdgeStyle& style);
 
+    // Arranges the nodes (and the bends of the edges) with one of the layout algorithms; can be undone.
+    // fitInView: zoom so the whole graph is in view afterwards.
+    void ApplyLayout(LayoutAlgorithm algorithm, const LayoutOptions& options = {}, bool fitInView = true);
+
     // Minimap overlay.
     void SetMinimapVisible(bool visible);
     bool IsMinimapVisible() const;
@@ -254,6 +262,7 @@ private:
     MinimapConfig MakeMinimapConfig(int cw, int ch) const;
     static bool MinimapScreenToGraph(const MinimapConfig& cfg, const NodeGraphModel& model,
                                       float sx, float sy, float& gxOut, float& gyOut);
+    bool IsOnMinimap(const MinimapConfig& cfg, int sx, int sy) const;
     void CommitLabelEdit();
     void CancelLabelEdit();
     void FinalizeRubberBand();

@@ -23,9 +23,14 @@ static constexpr int IDC_DELSEL  = 108;
 static constexpr int IDC_UNDO    = 109;
 static constexpr int IDC_REDO    = 110;
 static constexpr int IDC_MINIMAP = 111;
+static constexpr int IDC_SAMPLE  = 112;
+// IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
+static constexpr int IDC_LAYOUT    = 200;
+static constexpr int IDC_DIRECTION = 220;
 
 static CNodeGraphControl g_graph;
 static HWND g_status = nullptr;
+static LayoutDirection g_direction = LayoutDirection::TopToBottom;
 
 static void PopulateDemo(NodeGraphModel& m) {
     auto kernel  = m.AddNode(L"kernel32",   100, 100);
@@ -43,6 +48,25 @@ static void PopulateDemo(NodeGraphModel& m) {
     m.AddEdge(shell32, kernel,  L"imports");
     m.AddEdge(kernel,  ntdll,   L"imports");
     m.AddEdge(gdi32,   ntdll,   L"imports");
+}
+
+// A larger graph to try the layouts on: a few trees of modules that share some of their dependencies, with a cycle
+// and a node by itself.
+static void PopulateSample(NodeGraphModel& m) {
+    m.Clear();
+    std::vector<NodeId> n;
+    for (int i = 0; i < 28; i++) {
+        wchar_t label[16];
+        swprintf_s(label, L"m%d", i);
+        n.push_back(m.AddNode(label));
+    }
+    const int links[][2] = {
+        {0,1},{0,2},{0,3},{1,4},{1,5},{2,6},{2,7},{3,8},{3,9},{4,10},{5,10},{6,11},{7,11},{8,12},{9,12},
+        {10,13},{11,13},{12,13},{13,14},{14,15},{15,13},{0,16},{16,17},{17,18},{18,14},{1,16},{9,5},
+        {19,20},{19,21},{20,22},{21,22},{22,23},{20,23},{2,20},{24,25},{25,26},{26,24},
+    };
+    for (const auto& l : links)
+        m.AddEdge(n[l[0]], n[l[1]]);
 }
 
 static void UpdateStatus(HWND /*hwnd*/) {
@@ -126,7 +150,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_COMMAND:
+        if (LOWORD(wParam) >= IDC_LAYOUT && LOWORD(wParam) <= IDC_LAYOUT + (int)LayoutAlgorithm::Grid) {
+            LayoutOptions options;
+            options.Direction = g_direction;
+            g_graph.ApplyLayout((LayoutAlgorithm)(LOWORD(wParam) - IDC_LAYOUT), options);
+            return 0;
+        }
+        if (LOWORD(wParam) >= IDC_DIRECTION && LOWORD(wParam) <= IDC_DIRECTION + (int)LayoutDirection::RightToLeft) {
+            g_direction = (LayoutDirection)(LOWORD(wParam) - IDC_DIRECTION);
+            CheckMenuRadioItem(GetMenu(hwnd), IDC_DIRECTION, IDC_DIRECTION + (int)LayoutDirection::RightToLeft,
+                LOWORD(wParam), MF_BYCOMMAND);
+            return 0;
+        }
         switch (LOWORD(wParam)) {
+        case IDC_SAMPLE:
+            PopulateSample(*g_graph.GetModel());
+            g_graph.ApplyLayout(LayoutAlgorithm::Layered);
+            UpdateStatus(hwnd);
+            break;
         case IDC_MINIMAP:
             g_graph.SetMinimapVisible(!g_graph.IsMinimapVisible());
             break;
@@ -255,8 +296,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hGraph, MF_STRING, IDC_MINIMAP, L"Toggle &Minimap\tM");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hGraph, MF_STRING, IDC_SAMPLE,  L"&Sample Graph");
     AppendMenu(hGraph, MF_STRING, IDC_BTNCLR,  L"&Clear All");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hGraph, L"&Graph");
+
+    HMENU hLayout = CreatePopupMenu();
+    AppendMenu(hLayout, MF_STRING, IDC_LAYOUT + (int)LayoutAlgorithm::Layered,       L"&Layered\tCtrl+1");
+    AppendMenu(hLayout, MF_STRING, IDC_LAYOUT + (int)LayoutAlgorithm::Tree,          L"&Tree\tCtrl+2");
+    AppendMenu(hLayout, MF_STRING, IDC_LAYOUT + (int)LayoutAlgorithm::Radial,        L"&Radial\tCtrl+3");
+    AppendMenu(hLayout, MF_STRING, IDC_LAYOUT + (int)LayoutAlgorithm::ForceDirected, L"&Force Directed\tCtrl+4");
+    AppendMenu(hLayout, MF_STRING, IDC_LAYOUT + (int)LayoutAlgorithm::Circular,      L"&Circular\tCtrl+5");
+    AppendMenu(hLayout, MF_STRING, IDC_LAYOUT + (int)LayoutAlgorithm::Grid,          L"&Grid\tCtrl+6");
+    AppendMenu(hLayout, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hLayout, MF_STRING, IDC_DIRECTION + (int)LayoutDirection::TopToBottom, L"Top to &Bottom");
+    AppendMenu(hLayout, MF_STRING, IDC_DIRECTION + (int)LayoutDirection::BottomToTop, L"Bottom to T&op");
+    AppendMenu(hLayout, MF_STRING, IDC_DIRECTION + (int)LayoutDirection::LeftToRight, L"Left to R&ight");
+    AppendMenu(hLayout, MF_STRING, IDC_DIRECTION + (int)LayoutDirection::RightToLeft, L"Right to L&eft");
+    CheckMenuRadioItem(hLayout, IDC_DIRECTION, IDC_DIRECTION + (int)LayoutDirection::RightToLeft,
+        IDC_DIRECTION + (int)g_direction, MF_BYCOMMAND);
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hLayout, L"&Layout");
 
     SetMenu(hwnd, hMenu);
 
@@ -270,6 +328,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         { FVIRTKEY | FCONTROL,    'O', IDC_LOAD   },
         { FVIRTKEY | FCONTROL,    'Z', IDC_UNDO   },
         { FVIRTKEY | FCONTROL,    'Y', IDC_REDO   },
+        { FVIRTKEY | FCONTROL,    '1', IDC_LAYOUT + (int)LayoutAlgorithm::Layered },
+        { FVIRTKEY | FCONTROL,    '2', IDC_LAYOUT + (int)LayoutAlgorithm::Tree },
+        { FVIRTKEY | FCONTROL,    '3', IDC_LAYOUT + (int)LayoutAlgorithm::Radial },
+        { FVIRTKEY | FCONTROL,    '4', IDC_LAYOUT + (int)LayoutAlgorithm::ForceDirected },
+        { FVIRTKEY | FCONTROL,    '5', IDC_LAYOUT + (int)LayoutAlgorithm::Circular },
+        { FVIRTKEY | FCONTROL,    '6', IDC_LAYOUT + (int)LayoutAlgorithm::Grid },
     };
     HACCEL hAccel = CreateAcceleratorTable(accels, (int)std::size(accels));
 

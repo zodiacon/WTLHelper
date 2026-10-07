@@ -95,11 +95,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\NodeGraphControl.h" />
+    <ClInclude Include="include\NodeGraphLayout.h" />
     <ClInclude Include="include\NodeGraphModel.h" />
     <ClInclude Include="include\NodeGraphRenderer.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\NodeGraphControl.cpp" />
+    <ClCompile Include="src\NodeGraphLayout.cpp" />
     <ClCompile Include="src\NodeGraphRenderer.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

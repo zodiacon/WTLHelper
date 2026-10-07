@@ -112,6 +112,28 @@ namespace NodeGraphCtrl {
 			}
 		};
 
+		struct LayoutCmd : UndoCmd {
+			struct Place { NodeId Id; float X, Y; };
+			struct Route { EdgeId Id; std::vector<Point> Waypoints; };
+			std::vector<Place> OldPlaces, NewPlaces;
+			std::vector<Route> OldRoutes, NewRoutes;
+
+			static void Capture(const NodeGraphModel& m, std::vector<Place>& places, std::vector<Route>& routes) {
+				places.clear();
+				routes.clear();
+				for (const auto& n : m.Nodes()) places.push_back({ n.Id, n.X, n.Y });
+				for (const auto& e : m.Edges()) routes.push_back({ e.Id, e.Waypoints });
+			}
+			static void Restore(NodeGraphModel& m, const std::vector<Place>& places, const std::vector<Route>& routes) {
+				for (const auto& p : places)
+					if (Node* n = m.GetNode(p.Id)) { n->X = p.X; n->Y = p.Y; }
+				for (const auto& r : routes)
+					if (Edge* e = m.GetEdge(r.Id)) e->Waypoints = r.Waypoints;
+			}
+			void Apply(NodeGraphModel& m) override { Restore(m, NewPlaces, NewRoutes); }
+			void Revert(NodeGraphModel& m) override { Restore(m, OldPlaces, OldRoutes); }
+		};
+
 	} // anonymous namespace
 
 	// ---- Clipboard helpers -------------------------------------------------------
@@ -332,6 +354,12 @@ namespace NodeGraphCtrl {
 		gxOut = gMinX + (sx - originX) / mmScale;
 		gyOut = gMinY + (sy - originY) / mmScale;
 		return true;
+	}
+
+	bool CNodeGraphControl::IsOnMinimap(const MinimapConfig& cfg, int sx, int sy) const {
+		return m_Minimap.Visible
+			&& (float)sx >= cfg.X && (float)sx <= cfg.X + cfg.Width
+			&& (float)sy >= cfg.Y && (float)sy <= cfg.Y + cfg.Height;
 	}
 
 	// ---- Label edit ------------------------------------------------------------
@@ -770,6 +798,13 @@ namespace NodeGraphCtrl {
 		}
 		POINT pt; ::GetCursorPos(&pt); ScreenToClient(&pt);
 
+		// The minimap overlays the graph (the nodes under it aren't the ones the mouse would act on).
+		RECT rc; GetClientRect(&rc);
+		if (IsOnMinimap(MakeMinimapConfig(rc.right, rc.bottom), pt.x, pt.y)) {
+			::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
+			return TRUE;
+		}
+
 		if (!m_ReadOnly && m_SelectedNodes.size() == 1) {
 			const Node* n = m_Model->GetNode(m_SelectedNodes[0]);
 			if (n) {
@@ -801,6 +836,23 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::OnRButtonDown(UINT /*nFlags*/, CPoint pt) {
 		CommitLabelEdit();
+
+		// Dragging on the minimap with the right button scrolls: the view rectangle follows the mouse.
+		RECT rc; GetClientRect(&rc);
+		MinimapConfig mmcfg = MakeMinimapConfig(rc.right, rc.bottom);
+		if (IsOnMinimap(mmcfg, pt.x, pt.y)) {
+			if (MinimapScreenToGraph(mmcfg, *m_Model, (float)pt.x, (float)pt.y,
+				m_Minimap.DragClickGX, m_Minimap.DragClickGY)) {
+				m_Minimap.Scrolling = true;
+				m_Minimap.HasMoved = false;
+				m_Minimap.DragStart = { pt.x, pt.y };
+				m_Minimap.StartOffsetX = m_Vt.OffsetX;
+				m_Minimap.StartOffsetY = m_Vt.OffsetY;
+				SetCapture();
+			}
+			return;
+		}
+
 		if (m_ReadOnly) return;
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
@@ -814,6 +866,13 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnRButtonUp(UINT /*nFlags*/, CPoint pt) {
+		if (m_Minimap.Scrolling) {
+			m_Minimap.Scrolling = false;
+			::ReleaseCapture();
+			if (!m_Minimap.HasMoved)
+				SetMsgHandled(FALSE);	// a right click without a drag still brings the context menu
+			return;
+		}
 		if (!m_EdgePreview.Active) {
 			SetMsgHandled(FALSE);	// let the default processing send WM_CONTEXTMENU to the parent
 			return;
@@ -1104,6 +1163,20 @@ namespace NodeGraphCtrl {
 				rn->Height = bottom - top;
 			}
 			Invalidate(FALSE);
+		}
+		else if (m_Minimap.Scrolling) {
+			// the rectangle of the view follows the mouse: the graph moves the other way, at the view's scale
+			RECT rc; GetClientRect(&rc);
+			MinimapConfig mmcfg = MakeMinimapConfig(rc.right, rc.bottom);
+			float dx = (float)(sx - m_Minimap.DragStart.x), dy = (float)(sy - m_Minimap.DragStart.y);
+			if (dx * dx + dy * dy > 16.0f)
+				m_Minimap.HasMoved = true;
+			float gx, gy;
+			if (m_Minimap.HasMoved && MinimapScreenToGraph(mmcfg, *m_Model, (float)sx, (float)sy, gx, gy)) {
+				m_Vt.OffsetX = m_Minimap.StartOffsetX - (gx - m_Minimap.DragClickGX) * m_Vt.Scale;
+				m_Vt.OffsetY = m_Minimap.StartOffsetY - (gy - m_Minimap.DragClickGY) * m_Vt.Scale;
+				Invalidate(FALSE);
+			}
 		}
 		else if (m_Minimap.Dragging) {
 			float dx = (float)(sx - m_Minimap.DragStart.x);
@@ -1461,6 +1534,19 @@ namespace NodeGraphCtrl {
 			ok = true;
 		::DeleteObject(hBitmap);
 		return ok;
+	}
+
+	void CNodeGraphControl::ApplyLayout(LayoutAlgorithm algorithm, const LayoutOptions& options, bool fitInView) {
+		if (!m_Model || m_Model->Nodes().empty()) return;
+
+		auto cmd = std::make_unique<LayoutCmd>();
+		LayoutCmd::Capture(*m_Model, cmd->OldPlaces, cmd->OldRoutes);
+		Layout(*m_Model, algorithm, options);
+		LayoutCmd::Capture(*m_Model, cmd->NewPlaces, cmd->NewRoutes);
+		PushUndo(std::move(cmd));
+
+		if (fitInView) FitInView();
+		else RequestInvalidate();
 	}
 
 	void CNodeGraphControl::SetMinimapVisible(bool visible) {
