@@ -296,8 +296,6 @@ public:
 						nPage = ((nPage >= 0) && (nPage < (nCount - 1))) ? (nPage + 1) : 0;
 
 					SetActivePage(nPage);
-					T* pT = static_cast<T*>(this);
-					pT->OnPageActivated(m_nActivePage);
 				}
 
 				bRet = TRUE;
@@ -357,6 +355,8 @@ public:
 
 		pT->UpdateTitleBar();
 		pT->UpdateMenu();
+		// whoever makes a page active (a tab click, the keyboard, the Window menu...), the parent hears about it
+		pT->OnPageActivated(m_nActivePage);
 	}
 
 	HIMAGELIST GetImageList() const {
@@ -376,6 +376,16 @@ public:
 
 		T* pT = static_cast<T*>(this);
 		pT->UpdateMenu();
+	}
+
+	// the longest tab text, in characters (30 by default); a longer title ends with "...". Applies to titles set after the call
+	int GetMaxTabTextLength() const {
+		return m_cchTabTextLength;
+	}
+
+	void SetMaxTabTextLength(int length) {
+		ATLASSERT(length > 3);
+		m_cchTabTextLength = length;
 	}
 
 	void SetTitleBarWindow(HWND hWnd) {
@@ -559,7 +569,6 @@ public:
 			m_nActivePage++;
 
 		SetActivePage(nItem);
-		pT->OnPageActivated(m_nActivePage);
 
 		if (GetPageCount() == 1)
 			pT->ShowTabControl(true);
@@ -607,6 +616,8 @@ public:
 				this->UpdateWindow();
 				pT->UpdateTitleBar();
 				pT->UpdateMenu();
+				// the last page is gone: no page is active (SetActivePage notifies in the other cases)
+				pT->OnPageActivated(m_nActivePage);
 			}
 		}
 		else {
@@ -614,8 +625,6 @@ public:
 			m_nActivePage = -1;
 			SetActivePage(nPage);
 		}
-
-		pT->OnPageActivated(m_nActivePage);
 	}
 
 	void RemoveAllPages() {
@@ -904,8 +913,6 @@ public:
 		}
 
 		SetActivePage(m_tab.GetCurSel());
-		T* pT = static_cast<T*>(this);
-		pT->OnPageActivated(m_nActivePage);
 
 		return 0;
 	}
@@ -1137,8 +1144,6 @@ public:
 			ATLVERIFY(m_tab.DeleteItem(nMovePage) != FALSE);
 
 		SetActivePage(nInsertBeforePage);
-		T* pT = static_cast<T*>(this);
-		pT->OnPageActivated(m_nActivePage);
 
 		return true;
 	}

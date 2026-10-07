@@ -114,7 +114,7 @@ void HandleCreateWindow(CWPRETSTRUCT* cs) {
 	}
 	else if (name.CompareNoCase(L"ScrollBar") == 0) {
 		if (lpcs->style & SBS_SIZEGRIP) {
-			auto win = new CSizeGrip;
+			auto win = new CSizeGrip(true);
 			ATLVERIFY(win->SubclassWindow(cs->hwnd));
 		}
 		else {

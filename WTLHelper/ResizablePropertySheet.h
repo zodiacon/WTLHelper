@@ -1,7 +1,7 @@
 #pragma once
 
 #include <atldlgs.h>
-#include "DarkModeSizeGrip.h"
+#include "SizeGrip.h"
 
 //
 // property sheet the user can resize (not for wizards).
@@ -21,8 +21,21 @@ public:
 		MESSAGE_HANDLER(WM_SHOWWINDOW, OnShowWindow)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_GETMINMAXINFO, OnGetMinMaxInfo)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		CHAIN_MSG_MAP(TBase)
 	END_MSG_MAP()
+
+	//
+	// the sheet's (window) size, to restore a size the user gave it: set before the sheet is shown (it's applied
+	// once the sheet has laid itself out, never smaller than the sheet needs); after the sheet is closed, its last size
+	//
+	void SetSize(CSize const& size) {
+		m_Size = size;
+	}
+
+	CSize GetSize() const {
+		return m_Size;
+	}
 
 	//
 	// the sizing border must be part of the sheet's dialog template;
@@ -90,6 +103,28 @@ protected:
 		m_SizeGrip.CreateGrip(pT->m_hWnd);
 
 		Layout(client.Size());
+
+		if (m_Size.cx > 0 && m_Size.cy > 0) {
+			// around the same center (the sheet is placed before it's shown), inside the monitor's work area;
+			// the WM_SIZE lays out the controls
+			MONITORINFO mi{ sizeof(mi) };
+			::GetMonitorInfo(::MonitorFromWindow(pT->m_hWnd, MONITOR_DEFAULTTONEAREST), &mi);
+			CRect work(mi.rcWork);
+			int cx = (std::min)((int)(std::max)(m_Size.cx, m_MinSize.cx), work.Width());
+			int cy = (std::min)((int)(std::max)(m_Size.cy, m_MinSize.cy), work.Height());
+			auto center = window.CenterPoint();
+			int x = (std::max)(work.left, (std::min)(center.x - cx / 2, work.right - cx));
+			int y = (std::max)(work.top, (std::min)(center.y - cy / 2, work.bottom - cy));
+			pT->SetWindowPos(nullptr, x, y, cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+	}
+
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+		bHandled = FALSE;
+		CRect window;
+		static_cast<T*>(this)->GetWindowRect(&window);
+		m_Size = window.Size();
+		return 0;
 	}
 
 	LRESULT OnSize(UINT, WPARAM wp, LPARAM lp, BOOL& bHandled) {
@@ -184,8 +219,9 @@ private:
 		bool Stretch;
 	};
 	std::vector<ControlInfo> m_Controls;
-	CDarkModeSizeGrip m_SizeGrip;
+	CSizeGrip m_SizeGrip;
 	CSize m_ClientSize, m_MinSize;
+	CSize m_Size;		// to restore when shown; the last size once destroyed
 	CRect m_PageMargins;
 };
 

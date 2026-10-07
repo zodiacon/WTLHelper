@@ -1595,6 +1595,8 @@ namespace NodeGraphCtrl {
 
 	namespace {
 		constexpr uint32_t k_Magic = 0x01464347u; // 'G','C','F',0x01
+		// version 2 adds a node's Code style and tooltip, and an edge's tooltip and waypoints
+		constexpr uint32_t k_MagicV2 = 0x02464347u; // 'G','C','F',0x02
 
 		template<typename T>
 		bool BinWrite(FILE* f, const T& v) { return fwrite(&v, sizeof(T), 1, f) == 1; }
@@ -1610,7 +1612,8 @@ namespace NodeGraphCtrl {
 
 		bool BinReadStr(FILE* f, std::wstring& s) {
 			uint32_t n;
-			if (!BinRead(f, n)) return false;
+			// a corrupt length isn't allowed to allocate much
+			if (!BinRead(f, n) || n > (1u << 20)) return false;
 			s.resize(n);
 			return n == 0 || fread(s.data(), sizeof(wchar_t), n, f) == n;
 		}
@@ -1800,10 +1803,11 @@ namespace NodeGraphCtrl {
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, path, L"wb") != 0 || !f) return false;
 
-		bool ok = BinWrite(f, k_Magic)
+		bool ok = BinWrite(f, k_MagicV2)
 			&& BinWrite(f, (uint32_t)m_Nodes.size());
 
 		for (const auto& n : m_Nodes) {
+			uint32_t code = n.Style.Code ? 1u : 0u;
 			ok = ok
 				&& BinWrite(f, n.Id)
 				&& BinWrite(f, n.X) && BinWrite(f, n.Y)
@@ -1813,7 +1817,9 @@ namespace NodeGraphCtrl {
 				&& BinWrite(f, n.Style.TextColor)
 				&& BinWrite(f, n.Style.BorderWidth)
 				&& BinWrite(f, n.Style.CornerRadius)
-				&& BinWriteStr(f, n.Label);
+				&& BinWriteStr(f, n.Label)
+				&& BinWrite(f, code)
+				&& BinWriteStr(f, n.Tooltip);
 		}
 
 		ok = ok && BinWrite(f, (uint32_t)m_Edges.size());
@@ -1826,7 +1832,11 @@ namespace NodeGraphCtrl {
 				&& BinWrite(f, e.Style.Color)
 				&& BinWrite(f, e.Style.Width)
 				&& BinWrite(f, directed)
-				&& BinWriteStr(f, e.Label);
+				&& BinWriteStr(f, e.Label)
+				&& BinWriteStr(f, e.Tooltip)
+				&& BinWrite(f, (uint32_t)e.Waypoints.size());
+			for (const auto& w : e.Waypoints)
+				ok = ok && BinWrite(f, w.X) && BinWrite(f, w.Y);
 		}
 
 		ok = ok && BinWrite(f, m_NextNodeId) && BinWrite(f, m_NextEdgeId);
@@ -1840,13 +1850,15 @@ namespace NodeGraphCtrl {
 		if (_wfopen_s(&f, path, L"rb") != 0 || !f) return false;
 
 		uint32_t magic = 0;
-		if (!BinRead(f, magic) || magic != k_Magic) { fclose(f); return false; }
+		if (!BinRead(f, magic) || (magic != k_Magic && magic != k_MagicV2)) { fclose(f); return false; }
+		const bool v2 = magic == k_MagicV2;
+		const uint32_t maxWaypoints = 1u << 16;	// a corrupt count isn't allowed to allocate much
 
 		uint32_t nodeCount = 0;
 		bool ok = BinRead(f, nodeCount);
 
 		std::vector<Node> nodes;
-		nodes.reserve(nodeCount);
+		nodes.reserve((std::min)(nodeCount, 1u << 16));	// a corrupt count fails on reading, not on reserving
 		for (uint32_t i = 0; i < nodeCount && ok; ++i) {
 			Node n;
 			ok = BinRead(f, n.Id)
@@ -1858,6 +1870,11 @@ namespace NodeGraphCtrl {
 				&& BinRead(f, n.Style.BorderWidth)
 				&& BinRead(f, n.Style.CornerRadius)
 				&& BinReadStr(f, n.Label);
+			if (ok && v2) {
+				uint32_t code = 0;
+				ok = BinRead(f, code) && BinReadStr(f, n.Tooltip);
+				n.Style.Code = code != 0;
+			}
 			if (ok) nodes.push_back(std::move(n));
 		}
 
@@ -1865,7 +1882,7 @@ namespace NodeGraphCtrl {
 		ok = ok && BinRead(f, edgeCount);
 
 		std::vector<Edge> edges;
-		edges.reserve(edgeCount);
+		edges.reserve((std::min)(edgeCount, 1u << 16));
 		for (uint32_t i = 0; i < edgeCount && ok; ++i) {
 			Edge e;
 			uint32_t directed = 1;
@@ -1875,6 +1892,15 @@ namespace NodeGraphCtrl {
 				&& BinRead(f, e.Style.Width)
 				&& BinRead(f, directed)
 				&& BinReadStr(f, e.Label);
+			if (ok && v2) {
+				uint32_t count = 0;
+				ok = BinReadStr(f, e.Tooltip) && BinRead(f, count) && count <= maxWaypoints;
+				for (uint32_t w = 0; w < count && ok; ++w) {
+					Point p;
+					ok = BinRead(f, p.X) && BinRead(f, p.Y);
+					e.Waypoints.push_back(p);
+				}
+			}
 			if (ok) {
 				e.Style.Directed = directed != 0;
 				edges.push_back(std::move(e));
