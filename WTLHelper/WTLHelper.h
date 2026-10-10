@@ -39,7 +39,9 @@ struct WTLHelper final {
 	static void SetColorTone(ColorTone tone, HWND hWnd = nullptr);
 	static ColorTone GetColorTone() noexcept;
 	// sets the items' icons (as bitmaps on the current background); size: the icons' size in pixels
-	// (for a per-monitor DPI aware app, the window's DPI scaled)
+	// (for a per-monitor DPI aware app, the window's DPI scaled). The bitmaps are kept and shared by all menus
+	// (for each icon, size and background), so menus made and initialized again and again don't leak them;
+	// an item's hIcon (if not a resource icon) must therefore stay valid for the life of the process
 	static bool InitMenu(CMenuHandle menu, MenuItemData const* items, int count, int size = 16);
 	static bool InitMenu(CMenuHandle menu, MenuItemData const& item, int size = 16);
 	static bool IsSystemInDarkMode();

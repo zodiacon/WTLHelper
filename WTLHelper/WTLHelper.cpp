@@ -12,6 +12,7 @@
 #include "CustomMonthCalendar.h"
 #include "IconHelper.h"
 #include "CustomCheckAclUI.h"
+#include <tuple>
 
 static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
 static HHOOK g_hHook;
@@ -223,24 +224,41 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count,
 	ATLASSERT(::IsMenu(menu));
 	ATLASSERT(size > 0);
 
-	CDC mdc;
+	// the item bitmaps, by icon (resource ID or handle), size and background color; never deleted, as menus don't
+	// delete their item bitmaps and these are shared by every menu (a few for each icon: sizes and dark/light)
+	using Key = std::tuple<int, HICON, int, COLORREF>;
+	static std::map<Key, HBITMAP> s_Bitmaps;
+	static SRWLOCK s_Lock = SRWLOCK_INIT;
+
+	auto hBrush = WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush();
+	LOGBRUSH lb{};
+	::GetObject(hBrush, sizeof(lb), &lb);
+
 	CClientDC dc(::GetDesktopWindow());
-	mdc.CreateCompatibleDC(dc);
+	CDC mdc;
 	CRect rc(0, 0, size, size);
+	::AcquireSRWLockExclusive(&s_Lock);
 	for (int i = 0; i < count; i++) {
 		auto& cmd = items[i];
-		// resource icons are kept (for each size), as menus are initialized again and again
-		auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::LoadCached(cmd.icon, size);
-		ATLASSERT(hIcon);
-		CBitmap bmp;
-		bmp.CreateCompatibleBitmap(dc, size, size);
-		auto hOld = mdc.SelectBitmap(bmp);
-		mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
-		mdc.DrawIconEx(0, 0, hIcon, size, size);
-		mdc.SelectBitmap(hOld);
-		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
-		bmp.Detach();
+		Key key(cmd.hIcon ? 0 : cmd.icon, cmd.hIcon, size, lb.lbColor);
+		auto& hBitmap = s_Bitmaps[key];
+		if (!hBitmap) {
+			if (!mdc)
+				mdc.CreateCompatibleDC(dc);
+			// resource icons are kept (for each size) too
+			auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::LoadCached(cmd.icon, size);
+			ATLASSERT(hIcon);
+			CBitmap bmp;
+			bmp.CreateCompatibleBitmap(dc, size, size);
+			auto hOld = mdc.SelectBitmap(bmp);
+			mdc.FillRect(&rc, hBrush);
+			mdc.DrawIconEx(0, 0, hIcon, size, size);
+			mdc.SelectBitmap(hOld);
+			hBitmap = bmp.Detach();
+		}
+		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, hBitmap, hBitmap);
 	}
+	::ReleaseSRWLockExclusive(&s_Lock);
 	return true;
 }
 
