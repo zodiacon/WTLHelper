@@ -38,8 +38,10 @@ struct WTLHelper final {
 	static bool SwitchToMode(HWND hWnd);
 	static void SetColorTone(ColorTone tone, HWND hWnd = nullptr);
 	static ColorTone GetColorTone() noexcept;
-	static bool InitMenu(CMenuHandle menu, MenuItemData const* items, int count );
-	static bool InitMenu(CMenuHandle menu, MenuItemData const& item);
+	// sets the items' icons (as bitmaps on the current background); size: the icons' size in pixels
+	// (for a per-monitor DPI aware app, the window's DPI scaled)
+	static bool InitMenu(CMenuHandle menu, MenuItemData const* items, int count, int size = 16);
+	static bool InitMenu(CMenuHandle menu, MenuItemData const& item, int size = 16);
 	static bool IsSystemInDarkMode();
 	static int SuspendHook() noexcept;
 	static int ResumeHook() noexcept;
