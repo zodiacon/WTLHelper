@@ -387,6 +387,9 @@ public:
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_HSCROLL, OnHScroll)
 		MESSAGE_HANDLER(::RegisterWindowMessage(L"WTLHelperUpdateTheme"), OnUpdateTheme)
+		// what WTLHelper::SwitchToMode sends (WTLHelper::ThemeChangedMessage); not handling it left the tree in the old
+		// mode's background after switching between dark and light
+		MESSAGE_HANDLER(::RegisterWindowMessage(L"ThemeChanged"), OnUpdateTheme)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		NOTIFY_CODE_HANDLER(TVN_DELETEITEMA, OnTreeItemDelete)
 		NOTIFY_CODE_HANDLER(TVN_DELETEITEMW, OnTreeItemDelete)
@@ -413,6 +416,7 @@ public:
 
 	LRESULT OnUpdateTheme(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		m_ctrlTree.SetBkColor(::GetSysColor(COLOR_WINDOW));
+		m_ctrlTree.Invalidate();
 		return 0;
 	}
 
@@ -912,11 +916,13 @@ public:
 							dc.SetTextColor(pItem->clrText);
 						}
 						if (pItem->clrBack != CLR_NONE) {
-							dc.SetBkColor(clrBack);
-							if (i != 0) {
-								// For first item we already set background color
-								dc.FillSolidRect(&rc, pItem->clrBack);
-							}
+							// the text is drawn opaque, so its background is the cell's color too (it was the row's
+							// default color, which showed as a box around the text); the first column's cell is
+							// filled as well, from after its image
+							dc.SetBkColor(pItem->clrBack);
+							RECT rcFill = rc;
+							rcFill.left -= 2;	// from the column's edge (rc starts after the text margin)
+							dc.FillSolidRect(&rcFill, pItem->clrBack);
 						}
 						else {
 							COLORREF clrBack = m_ctrlTree.GetBkColor();
