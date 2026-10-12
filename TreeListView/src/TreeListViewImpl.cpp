@@ -793,7 +793,7 @@ void CTreeListViewCtrl::DrawColumn0(NMLVCUSTOMDRAW* pcd) {
 
 	// GetSubItemRect with iSubItem=0 returns the full item rect on Vista+
 	// comctl32. Use column 1's left edge as column 0's right boundary, less the
-	// last pixel: the ListView draws the column separator there.
+	// last two pixels: the ListView draws the column separator there.
 	CRect rcCol0;
 	m_List.GetSubItemRect(idx, 0, LVIR_BOUNDS, &rcCol0);
 	if (m_ColCount > 1) {
