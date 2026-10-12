@@ -404,6 +404,15 @@ public:
 		MESSAGE_HANDLER(WM_REAP, OnReap)
 		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 		MESSAGE_HANDLER(ThemeChangedMessage(), OnThemeChanged)
+		// Content made with the host as its parent: a common control sends its notifications to the window it was
+		// created in, also after the host has put it in a group window (which forwards what its own children say).
+		MESSAGE_HANDLER(WM_COMMAND, OnForward)
+		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
+		MESSAGE_HANDLER(WM_HSCROLL, OnForward)
+		MESSAGE_HANDLER(WM_VSCROLL, OnForward)
+		MESSAGE_HANDLER(WM_COMPAREITEM, OnForward)
+		MESSAGE_RANGE_HANDLER(WM_DRAWITEM, WM_CHARTOITEM, OnForward)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnForward)
 	END_MSG_MAP()
 
 private:
@@ -435,6 +444,7 @@ private:
 	LRESULT OnReap(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnThemeChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
 	static UINT ThemeChangedMessage() {
 		static const UINT message = ::RegisterWindowMessageW(L"ThemeChanged");
 		return message;

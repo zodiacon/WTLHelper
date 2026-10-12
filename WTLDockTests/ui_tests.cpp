@@ -438,6 +438,48 @@ TEST(Host_ForwardsWhatContentSaysToItsParent) {
 	::DestroyWindow(sink);
 }
 
+// A common control sends its notifications to the window it was created in. Made with the host as its parent (as the
+// README does), it still does so once the host has moved it into a group window: the host passes them on.
+TEST(Host_ForwardsWhatContentMadeInItSays) {
+	Fixture f;
+	f.AddStandard();
+	HWND sink = Sink::Create();
+	f.Host.SetNotifyTarget(sink);
+
+	HWND tree = ::CreateWindowExW(0, WC_TREEVIEWW, L"", WS_CHILD, 0, 0, 100, 100, f.Host, nullptr, nullptr, nullptr);
+	PaneDesc d;
+	d.Id = d.Title = L"Tree";
+	d.hWnd = tree;
+	d.DefaultSide = DockSide::Right;
+	auto pane = f.Host.Layout().AddPane(d);
+	CHECK(f.Host.Layout().Show(pane));
+	VERIFY(f);
+	CHECK(::GetParent(tree) == f.Host.GroupWindow(pane->Group()));
+
+	TVINSERTSTRUCTW ins{};
+	ins.hParent = TVI_ROOT;
+	ins.hInsertAfter = TVI_LAST;
+	ins.item.mask = TVIF_TEXT;
+	ins.item.pszText = const_cast<LPWSTR>(L"item");
+	auto item = (HTREEITEM)::SendMessage(tree, TVM_INSERTITEMW, 0, (LPARAM)&ins);
+	CHECK(item != nullptr);
+	Sink::Count = 0;
+	::SendMessage(tree, TVM_SELECTITEM, TVGN_CARET, (LPARAM)item);		// TVN_SELCHANGING, TVN_SELCHANGED
+	CHECK(Sink::Count >= 1 && Sink::LastMessage == WM_NOTIFY);
+
+	// sent to the host directly, as well
+	Sink::Count = 0;
+	CHECK(::SendMessage(f.Host, WM_COMMAND, MAKEWPARAM(4321, BN_CLICKED), (LPARAM)tree) == 77);
+	CHECK(Sink::LastMessage == WM_COMMAND && LOWORD(Sink::LastWParam) == 4321);
+
+	// a host that is its own target does not send to itself
+	f.Host.SetNotifyTarget(f.Host);
+	CHECK(::SendMessage(f.Host, WM_COMMAND, MAKEWPARAM(4321, BN_CLICKED), (LPARAM)tree) == 0);
+
+	f.Host.SetNotifyTarget(nullptr);
+	::DestroyWindow(sink);
+}
+
 TEST(Host_PaintsTheChromeInTheTheme) {
 	Fixture f;
 	f.AddStandard();
@@ -4591,6 +4633,7 @@ void RunUiTests() {
 	Run_Host_CloseButtonHidesTheActivePane();
 	Run_Host_ClickingATabActivatesThePane();
 	Run_Host_ForwardsWhatContentSaysToItsParent();
+	Run_Host_ForwardsWhatContentMadeInItSays();
 	Run_Host_PaintsTheChromeInTheTheme();
 	Run_Host_DocumentTabsHaveCloseButtons();
 	Run_Host_MiddleClickClosesADocumentTab();
