@@ -36,6 +36,9 @@ struct WTLHelper final {
 	static bool IsClassicMode() noexcept;
 	static bool SwitchToMode(DarkModeKind type, HWND hWnd);
 	static bool SwitchToMode(HWND hWnd);
+	// the current mode to a window and its controls (title bar, the controls' themes): of a top-level window other than the
+	// one the mode was switched with, which SwitchToMode does not do again once the mode is the one asked for
+	static void ApplyMode(HWND hWnd);
 	static void SetColorTone(ColorTone tone, HWND hWnd = nullptr);
 	static ColorTone GetColorTone() noexcept;
 	// sets the items' icons (as bitmaps on the current background); size: the icons' size in pixels

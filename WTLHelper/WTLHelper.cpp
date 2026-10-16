@@ -195,14 +195,18 @@ bool WTLHelper::SwitchToMode(DarkModeKind type, HWND hWnd) {
 
 	DarkMode::setDarkModeConfigEx(static_cast<UINT>(g_DarkModeType = type));
 	DarkMode::setDefaultColors(true);
-	if (hWnd) {
-		DarkMode::setDarkTitleBarEx(hWnd, true);
-		DarkMode::setChildCtrlsTheme(hWnd);
-
-		CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(type));
-		::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
-	}
+	ApplyMode(hWnd);
 	return true;
+}
+
+void WTLHelper::ApplyMode(HWND hWnd) {
+	if (!hWnd)
+		return;
+	DarkMode::setDarkTitleBarEx(hWnd, true);
+	DarkMode::setChildCtrlsTheme(hWnd);
+
+	CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(g_DarkModeType));
+	::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
 }
 
 bool WTLHelper::SwitchToMode(HWND hWnd) {
