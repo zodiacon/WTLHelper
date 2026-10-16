@@ -158,6 +158,13 @@ struct CVirtualListView {
 	void OnListViewClick(HWND, int row, int col, POINT const& pt) const noexcept {
 	}
 
+	// Forgets the state kept for the list views (their columns, the sorting). For a view whose list views were destroyed
+	// and that is created again: a new list view can get the handle of an old one.
+	void ResetControls() {
+		m_Controls.clear();
+		m_Columns.clear();
+	}
+
 protected:
 	ColumnManager* GetExistingColumnManager(HWND hListView) const {
 		auto it = std::find_if(m_Columns.begin(), m_Columns.end(), [=](auto& cm) {
