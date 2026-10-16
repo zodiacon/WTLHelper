@@ -41,11 +41,13 @@ public:
 			return;
 		m_Dark = dark;
 		ApplyColors();
-		// (the page that says there is none has the colors in it)
+		// (the page that says there is none has the colors in it; a site's page takes the scheme when it is loaded)
 		if (m_WebView && m_Url.empty()) {
 			m_Loaded = L"\n";
 			Load();
 		}
+		else if (m_WebView)
+			m_WebView->Reload();
 		if (m_hWnd)
 			Invalidate();
 	}
