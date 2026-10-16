@@ -121,6 +121,9 @@
     <ClInclude Include="CustomTabControl.h">
       <Filter>Controls</Filter>
     </ClInclude>
+    <ClInclude Include="DocPane.h">
+      <Filter>Controls</Filter>
+    </ClInclude>
     <ClInclude Include="CustomTabView.h">
       <Filter>Controls</Filter>
     </ClInclude>
