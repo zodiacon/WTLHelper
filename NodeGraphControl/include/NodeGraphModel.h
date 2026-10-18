@@ -56,6 +56,8 @@ struct Rect {
     bool  IsEmpty() const { return Right <= Left || Bottom <= Top; }
 };
 
+enum class NodePart : uint32_t { None, Title, Icon, Image, Label, Content };   // Content: the rest of the node
+
 // Where the parts of a node go, in graph units relative to the node's top-left corner. An empty rect: the part isn't shown.
 struct NodeLayout {
     Rect Title;          // the header band
@@ -64,6 +66,17 @@ struct NodeLayout {
     Rect ImageSource;    // the part of the image drawn there, in pixels
     Rect Icon;
     Rect Label;          // where the label (or the code) is drawn, and edited
+
+    // The part at a point (in the same units). The icon and the label can be on the image: they come first.
+    NodePart PartAt(float x, float y) const {
+        auto in = [&](const Rect& r) { return !r.IsEmpty() && x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom; };
+        if (in(Icon))    return NodePart::Icon;
+        if (in(Label))   return NodePart::Label;
+        if (in(Title))   return NodePart::Title;
+        if (in(Image))   return NodePart::Image;
+        if (in(Content)) return NodePart::Content;
+        return NodePart::None;
+    }
 };
 
 struct EdgeStyle {

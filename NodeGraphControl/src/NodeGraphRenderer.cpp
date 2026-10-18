@@ -451,6 +451,8 @@ void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
     m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
 }
 
+constexpr float k_MinIconPixels = 6.0f;    // a smaller icon (on the target) isn't drawn
+
 static COLORREF Darker(COLORREF cr, float factor = 0.72f) {
     return RGB(GetRValue(cr) * factor, GetGValue(cr) * factor, GetBValue(cr) * factor);
 }
@@ -505,7 +507,8 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
     }
 
     if (!(flags & NDF_SKIPCONTENT)) {
-        if (!layout.Icon.IsEmpty())
+        // an icon of a few pixels is only a smudge
+        if (!layout.Icon.IsEmpty() && (std::min)(layout.Icon.Width(), layout.Icon.Height()) * vt.Scale >= k_MinIconPixels)
             DrawImage(model, c.Icon, toScreen(layout.Icon));
         if (!layout.Title.IsEmpty())
             DrawTitle(n, layout.Title, vt);

@@ -225,7 +225,7 @@ namespace NodeGraphCtrl {
 
 	// ---- Notification helpers ------------------------------------------------
 
-	void CNodeGraphControl::Notify(UINT code, NodeId nodeId, EdgeId edgeId) {
+	void CNodeGraphControl::Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at) {
 		HWND parent = ::GetParent(m_hWnd);
 		if (!parent) return;
 		NODEGRAPHNOTIFY gn{};
@@ -234,6 +234,11 @@ namespace NodeGraphCtrl {
 		gn.Hdr.code = code;
 		gn.NodeId = nodeId;
 		gn.EdgeId = edgeId;
+		if (const Node* n = at ? m_Model->GetNode(nodeId) : nullptr) {
+			gn.NodeX = at->x - (n->X - n->Width * 0.5f);
+			gn.NodeY = at->y - (n->Y - n->Height * 0.5f);
+			gn.Part = m_Model->GetNodeLayout(*n).PartAt(gn.NodeX, gn.NodeY);
+		}
 		::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
 	}
 
@@ -1001,7 +1006,7 @@ namespace NodeGraphCtrl {
 				m_DragOffsetY = gp.y - clicked->Y;
 			}
 			SetCapture();
-			Notify(NGCN_NODECLICK, hitNode, InvalidEdge);
+			Notify(NGCN_NODECLICK, hitNode, InvalidEdge, &gp);
 		}
 		else if (hitEdge != InvalidEdge) {
 			bool selChanged = (m_SelectedEdge != hitEdge || !m_SelectedNodes.empty());
@@ -1042,7 +1047,7 @@ namespace NodeGraphCtrl {
 		if (hitNode == InvalidNode)
 			return;
 		if (m_ReadOnly)
-			Notify(NGCN_NODEDBLCLICK, hitNode, InvalidEdge);
+			Notify(NGCN_NODEDBLCLICK, hitNode, InvalidEdge, &gp);
 		else
 			BeginEditLabel(hitNode);
 	}

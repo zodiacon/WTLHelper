@@ -152,11 +152,24 @@ private:
         }
     }
 
-    // a bar along the bottom of the node
+public:
+    float Progress = 60;    // of the Download node, percent
+
+    // the bar along the bottom of the node (a little taller to click)
+    static Rect ProgressBar(const NodeLayout& layout) {
+        const Rect& c = layout.Content;
+        return { c.Left + 8, c.Bottom - 12, c.Right - 8, c.Bottom - 6 };
+    }
+    static bool OnProgressBar(const NodeLayout& layout, float x, float y) {
+        Rect bar = ProgressBar(layout);
+        return x >= bar.Left && x < bar.Right && y >= bar.Top - 4 && y < bar.Bottom + 4;
+    }
+
+private:
     void DrawProgress(const NodeDrawContext& ctx) {
-        const float percent = 65;
-        const Rect& c = ctx.Layout.Content;
-        D2D1_RECT_F bar{ c.Left + 8, c.Bottom - 12, c.Right - 8, c.Bottom - 6 };
+        const float percent = Progress;
+        const Rect r = ProgressBar(ctx.Layout);
+        D2D1_RECT_F bar{ r.Left, r.Top, r.Right, r.Bottom };
         m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.35f));
         ctx.Target->FillRoundedRectangle({ bar, 3, 3 }, m_Brush.Get());
         bar.right = bar.left + (bar.right - bar.left) * percent / 100;
@@ -356,6 +369,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
             0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)IDC_STATUS, nullptr, nullptr);
 
+        g_graph.SetDlgCtrlID(IDC_GRAPH);    // the notifications carry it
         g_graph.SetNodeDrawHandler(&g_drawHandler);
         PopulateDemo(*g_graph.GetModel());
         g_graph.FitInView();
@@ -381,6 +395,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             case NGCN_SELCHANGED:
                 UpdateStatus(hwnd);
                 break;
+            case NGCN_NODECLICK: {
+                auto* gn = reinterpret_cast<NODEGRAPHNOTIFY*>(lParam);
+                static const wchar_t* parts[] = { L"none", L"title", L"icon", L"image", L"label", L"content" };
+                const Node* n = g_graph.GetModel()->GetNode(gn->NodeId);
+                if (!n) break;
+                // the progress bar of the Download node is a button
+                if ((DemoDraw)(intptr_t)n->UserData == DemoDraw::Progress &&
+                    DemoDrawHandler::OnProgressBar(g_graph.GetModel()->GetNodeLayout(*n), gn->NodeX, gn->NodeY)) {
+                    g_drawHandler.Progress = g_drawHandler.Progress >= 100 ? 0 : g_drawHandler.Progress + 10;
+                    g_graph.Refresh();
+                }
+                wchar_t buf[200];
+                swprintf_s(buf, L"Clicked node %u at %.0f,%.0f (the %s)  |  progress %.0f%%", gn->NodeId, gn->NodeX, gn->NodeY,
+                    parts[(int)gn->Part], g_drawHandler.Progress);
+                SetWindowText(g_status, buf);
+                break;
+            }
             case NGCN_LABELCHANGED: {
                 auto* gln = reinterpret_cast<NODEGRAPHLABELNOTIFY*>(lParam);
                 wchar_t buf[300];

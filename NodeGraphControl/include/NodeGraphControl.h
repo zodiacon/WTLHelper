@@ -33,6 +33,11 @@ struct NODEGRAPHNOTIFY {
     NMHDR   Hdr;
     NodeId  NodeId;   // InvalidNode if not applicable
     EdgeId  EdgeId;   // InvalidEdge if not applicable
+    // NGCN_NODECLICK, NGCN_NODEDBLCLICK: where in the node, in its graph units from its top-left corner (as NodeLayout
+    // and owner drawing), and the part of its layout there. Otherwise 0 and None.
+    float    NodeX;
+    float    NodeY;
+    NodePart Part;
 };
 
 struct NODEGRAPHEDGENOTIFY {
@@ -266,7 +271,7 @@ private:
     LRESULT OnNodeGraphEdit(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
     // ---- Internal helpers ----
-    void Notify(UINT code, NodeId nodeId, EdgeId edgeId);
+    void Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at = nullptr);   // at: in graph space
     void NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId);
     void NotifyUndoChanged();
     void PushUndo(std::unique_ptr<UndoCmd> cmd);
