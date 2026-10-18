@@ -136,6 +136,9 @@ std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, flo
 // For a curved edge (EdgeStyle::Curved): the two control points of each cubic Bezier piece between the points of its
 // path (a Catmull-Rom curve, so it goes through every bend).
 std::vector<Point> CurveControls(const std::vector<Point>& path);
+// The loop of an edge from a node to itself, in graph units: out of the right of the node's outline, around a box reach
+// past it, and back (its 4 corners; the arrowhead at the last one, pointing left). Its label goes right of (reach, Y).
+std::vector<Point> SelfLoopPath(const Node& n, float reach = 24.0f);
 // The point halfway along a piece of a path (the curve's, for a curved one): where the label goes.
 Point EdgeLabelPoint(const std::vector<Point>& path, const std::vector<Point>& controls);
 
@@ -158,6 +161,7 @@ public:
     EdgeId AddEdge(NodeId from, NodeId to, std::wstring label = {});
 
     bool   RemoveNode(NodeId id);   // also removes incident edges
+    size_t RemoveNodes(const std::vector<NodeId>& ids);   // in one pass, with their edges (many: much faster); how many
     bool   RemoveEdge(EdgeId id);
 
     // Restore previously captured node/edge (push_back, no ID counter change).

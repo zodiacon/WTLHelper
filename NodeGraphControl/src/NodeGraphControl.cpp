@@ -29,6 +29,13 @@ namespace NodeGraphCtrl {
 
 	namespace {
 
+		std::vector<NodeId> NodeIds(const std::vector<Node>& nodes) {
+			std::vector<NodeId> ids;
+			ids.reserve(nodes.size());
+			for (const auto& n : nodes) ids.push_back(n.Id);
+			return ids;
+		}
+
 		void CollectNodeImages(const std::vector<Node>& nodes, std::vector<ImageId>& images) {
 			images.reserve(images.size() + nodes.size() * 2);
 			for (const auto& n : nodes) {
@@ -75,8 +82,7 @@ namespace NodeGraphCtrl {
 			std::vector<Node> Nodes;
 			std::vector<Edge> Edges;
 			void Apply(NodeGraphModel& m) override {
-				for (const auto& e : Edges) m.RemoveEdge(e.Id);
-				for (const auto& n : Nodes) m.RemoveNode(n.Id);
+				m.RemoveNodes(NodeIds(Nodes));	// Edges are theirs: they go with them
 			}
 			void Revert(NodeGraphModel& m) override {
 				for (const auto& n : Nodes) m.RestoreNode(n);
@@ -158,8 +164,7 @@ namespace NodeGraphCtrl {
 				for (const auto& e : PastedEdges) m.RestoreEdge(e);
 			}
 			void Revert(NodeGraphModel& m) override {
-				for (const auto& e : PastedEdges) m.RemoveEdge(e.Id);
-				for (const auto& n : PastedNodes) m.RemoveNode(n.Id);
+				m.RemoveNodes(NodeIds(PastedNodes));	// the pasted edges are between them
 			}
 			void CollectImages(std::vector<ImageId>& images) const override {
 				CollectNodeImages(PastedNodes, images);
@@ -237,6 +242,8 @@ namespace NodeGraphCtrl {
 		m_AutoZoom = (pcs->style & NGCS_AUTOZOOM) != 0;
 		m_WheelScrolls = (pcs->style & NGCS_WHEELSCROLL) != 0;
 		m_Highlight = (pcs->style & NGCS_HIGHLIGHT) != 0;
+		m_SnapToGrid = (pcs->style & NGCS_SNAPTOGRID) != 0;
+		m_Guides = (pcs->style & NGCS_GUIDES) != 0;
 		m_Model = std::make_unique<NodeGraphModel>();
 		m_Model->SetResetCallback([this] { OnModelReset(); });
 
@@ -608,22 +615,17 @@ namespace NodeGraphCtrl {
 				Node* n = m_Model->GetNode(nid);
 				if (n) cmd->Nodes.push_back(*n);
 			}
-			for (const auto& e : m_Model->Edges()) {
-				bool incident =
-					std::find(m_SelectedNodes.begin(), m_SelectedNodes.end(), e.From) != m_SelectedNodes.end()
-					|| std::find(m_SelectedNodes.begin(), m_SelectedNodes.end(), e.To) != m_SelectedNodes.end();
-				if (incident) {
-					bool dup = std::find_if(cmd->Edges.begin(), cmd->Edges.end(),
-						[&](const Edge& ex) { return ex.Id == e.Id; }) != cmd->Edges.end();
-					if (!dup) cmd->Edges.push_back(e);
-				}
-			}
+			// the edges of the deleted nodes (each once), for undo
+			const std::unordered_set<NodeId> selected(m_SelectedNodes.begin(), m_SelectedNodes.end());
+			for (const auto& e : m_Model->Edges())
+				if (selected.contains(e.From) || selected.contains(e.To))
+					cmd->Edges.push_back(e);
 
-			std::vector<NodeId> removed = m_SelectedNodes;
-			for (NodeId nid : removed) {
+			// told about each while it is still there, then all removed at once
+			const std::vector<NodeId> removed = m_SelectedNodes;
+			for (NodeId nid : removed)
 				Notify(NGCN_NODEREMOVED, nid, InvalidEdge);
-				m_Model->RemoveNode(nid);
-			}
+			m_Model->RemoveNodes(removed);
 			m_SelectedNodes.clear();
 			if (m_SelectedEdge != InvalidEdge && !m_Model->GetEdge(m_SelectedEdge))
 				m_SelectedEdge = InvalidEdge;
@@ -653,6 +655,7 @@ namespace NodeGraphCtrl {
 		m_EdgePreview.Active = false;
 		m_EdgePreview.FromNode = InvalidNode;
 		m_KeyMove = nullptr;
+		m_Renderer.SetGuides({});
 		if (m_hWnd && ::GetCapture() == m_hWnd)
 			::ReleaseCapture();
 
@@ -1231,6 +1234,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnLButtonUp(UINT /*nFlags*/, CPoint /*pt*/) {
+		m_Renderer.SetGuides({});	// the guides are only while dragging
 		if (m_Resize.Active) {
 			m_Resize.Active = false;
 			::ReleaseCapture();
@@ -1357,6 +1361,21 @@ namespace NodeGraphCtrl {
 				default: break;
 			}
 
+			// the sides that move snap (not past the smallest size)
+			{
+				const ResizeHandle h = m_Resize.Handle;
+				const bool ml = h == ResizeHandle::NW || h == ResizeHandle::W || h == ResizeHandle::SW;
+				const bool mr = h == ResizeHandle::NE || h == ResizeHandle::E || h == ResizeHandle::SE;
+				const bool mt = h == ResizeHandle::NW || h == ResizeHandle::N || h == ResizeHandle::NE;
+				const bool mb = h == ResizeHandle::SW || h == ResizeHandle::S || h == ResizeHandle::SE;
+				Snap snap = SnapBox(left, top, right, bottom, ml, mt, mr, mb, { m_Resize.NodeId });
+				if (ml && right - (left + snap.DX) >= k_MinNodeWidth) left += snap.DX;
+				if (mr && (right + snap.DX) - left >= k_MinNodeWidth) right += snap.DX;
+				if (mt && bottom - (top + snap.DY) >= k_MinNodeHeight) top += snap.DY;
+				if (mb && (bottom + snap.DY) - top >= k_MinNodeHeight) bottom += snap.DY;
+				m_Renderer.SetGuides(std::move(snap.Guides));
+			}
+
 			Node* rn = m_Model->GetNode(m_Resize.NodeId);
 			if (rn) {
 				rn->X = (left + right) * 0.5f;
@@ -1415,6 +1434,12 @@ namespace NodeGraphCtrl {
 			if (primary) {
 				float dx = baseGX - primary->X;
 				float dy = baseGY - primary->Y;
+				// the node under the mouse snaps; the others keep their places around it
+				const float hw = primary->Width * 0.5f, hh = primary->Height * 0.5f;
+				Snap snap = SnapBox(baseGX - hw, baseGY - hh, baseGX + hw, baseGY + hh, true, true, true, true, m_SelectedNodes);
+				dx += snap.DX;
+				dy += snap.DY;
+				m_Renderer.SetGuides(std::move(snap.Guides));
 				for (NodeId nid : m_SelectedNodes) {
 					Node* n = m_Model->GetNode(nid);
 					if (n) { n->X += dx; n->Y += dy; }
@@ -1544,7 +1569,9 @@ namespace NodeGraphCtrl {
 				const float dx = wParam == VK_LEFT ? -1.0f : wParam == VK_RIGHT ? 1.0f : 0.0f;
 				const float dy = wParam == VK_UP ? -1.0f : wParam == VK_DOWN ? 1.0f : 0.0f;
 				if (!ctrl && !m_SelectedNodes.empty()) {
-					const float step = shift ? 50.0f : 10.0f;
+					// a grid step when snapping to the grid
+					const float grid = m_Renderer.GetGridSize();
+					const float step = m_SnapToGrid ? (shift ? grid * 5 : grid) : (shift ? 50.0f : 10.0f);
 					MoveSelectionBy(dx * step, dy * step);
 				}
 				else
@@ -1782,6 +1809,156 @@ namespace NodeGraphCtrl {
 		for (const auto& cmd : m_UndoStack) cmd->CollectImages(keep);
 		for (const auto& cmd : m_RedoStack) cmd->CollectImages(keep);
 		return m_Model->RemoveUnusedImages(keep);
+	}
+
+	// ---- Snapping, alignment --------------------------------------------------------
+
+	void CNodeGraphControl::SetSnapToGrid(bool snap) { m_SnapToGrid = snap; }
+	bool CNodeGraphControl::GetSnapToGrid() const { return m_SnapToGrid; }
+	void CNodeGraphControl::SetAlignmentGuides(bool guides) { m_Guides = guides; }
+	bool CNodeGraphControl::GetAlignmentGuides() const { return m_Guides; }
+
+	void CNodeGraphControl::SetGridSize(float size) {
+		if (size <= 0) return;
+		m_Renderer.SetGridSize(size);
+		if (m_hWnd) Invalidate(FALSE);
+	}
+
+	float CNodeGraphControl::GetGridSize() const {
+		return m_Renderer.GetGridSize();
+	}
+
+	// Where a node's box (graph units) goes when snapped: how far it (its moving sides, when resizing) shifts, and the
+	// guides that show what it lined up with. On each axis the other nodes' sides and centers (within 6 pixels) win over
+	// the grid. Nothing with Alt held. skip: the nodes that move (they don't line up with themselves).
+	CNodeGraphControl::Snap CNodeGraphControl::SnapBox(float left, float top, float right, float bottom,
+		bool moveLeft, bool moveTop, bool moveRight, bool moveBottom, const std::vector<NodeId>& skip) const {
+		Snap snap;
+		if ((!m_SnapToGrid && !m_Guides) || ::GetKeyState(VK_MENU) < 0)
+			return snap;
+		const std::unordered_set<NodeId> moving(skip.begin(), skip.end());
+		const float tolerance = 6.0f / m_Vt.Scale, grid = m_Renderer.GetGridSize();
+
+		// one axis: lo..hi on it, otherLo..otherHi on the other (for the guide's length)
+		auto axis = [&](bool x, float lo, float hi, bool moveLo, bool moveHi, float otherLo, float otherHi, float& shift) {
+			const bool whole = moveLo && moveHi;
+			float mine[3];
+			int count = 0;
+			if (moveLo) mine[count++] = lo;
+			if (whole) mine[count++] = (lo + hi) * 0.5f;
+			if (moveHi) mine[count++] = hi;
+			if (count == 0) return;
+
+			if (m_Guides) {
+				float best = tolerance;
+				GuideLine guide{};
+				bool found = false;
+				for (const auto& n : m_Model->Nodes()) {
+					if (moving.contains(n.Id)) continue;
+					const float c = x ? n.X : n.Y, half = (x ? n.Width : n.Height) * 0.5f;
+					const float other = x ? n.Y : n.X, otherHalf = (x ? n.Height : n.Width) * 0.5f;
+					const float theirs[3] = { c - half, c, c + half };
+					for (int i = 0; i < count; i++)
+						for (float f : theirs)
+							if (std::fabs(f - mine[i]) < std::fabs(best)) {
+								best = f - mine[i];
+								found = true;
+								guide = { x, f, std::min(otherLo, other - otherHalf), std::max(otherHi, other + otherHalf) };
+							}
+				}
+				if (found) {
+					shift = best;
+					snap.Guides.push_back(guide);
+					return;
+				}
+			}
+			if (m_SnapToGrid) {
+				const float anchor = moveLo ? lo : hi;		// the box's left (top) side, or the side that moves
+				shift = std::round(anchor / grid) * grid - anchor;
+			}
+		};
+		axis(true, left, right, moveLeft, moveRight, top, bottom, snap.DX);
+		axis(false, top, bottom, moveTop, moveBottom, left, right, snap.DY);
+		return snap;
+	}
+
+	// The nodes moved (from their old places to where they are now): one undo step.
+	void CNodeGraphControl::PushMoves(const std::vector<NodeId>& ids, const std::vector<Point>& old) {
+		auto move = std::make_unique<KeyMoveCmd>();
+		move->Ids = ids;
+		move->Old = old;
+		move->New.reserve(ids.size());
+		bool moved = false;
+		for (size_t i = 0; i < ids.size(); i++) {
+			const Node* n = m_Model->GetNode(ids[i]);
+			move->New.push_back(n ? Point{ n->X, n->Y } : old[i]);
+			moved |= move->New[i].X != old[i].X || move->New[i].Y != old[i].Y;
+		}
+		if (moved)
+			PushUndo(std::move(move));
+	}
+
+	void CNodeGraphControl::AlignSelection(Alignment how) {
+		if (m_SelectedNodes.size() < 2) return;
+		const Node* first = m_Model->GetNode(m_SelectedNodes[0]);
+		if (!first) return;
+		const Rect to{ first->X - first->Width * 0.5f, first->Y - first->Height * 0.5f, first->X + first->Width * 0.5f, first->Y + first->Height * 0.5f };
+		std::vector<Point> old;
+		old.reserve(m_SelectedNodes.size());
+		for (NodeId id : m_SelectedNodes) {
+			Node* n = m_Model->GetNode(id);
+			old.push_back(n ? Point{ n->X, n->Y } : Point{});
+			if (!n) continue;
+			switch (how) {
+				case Alignment::Left:   n->X = to.Left + n->Width * 0.5f; break;
+				case Alignment::Center: n->X = first->X; break;
+				case Alignment::Right:  n->X = to.Right - n->Width * 0.5f; break;
+				case Alignment::Top:    n->Y = to.Top + n->Height * 0.5f; break;
+				case Alignment::Middle: n->Y = first->Y; break;
+				case Alignment::Bottom: n->Y = to.Bottom - n->Height * 0.5f; break;
+			}
+		}
+		PushMoves(m_SelectedNodes, old);
+		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::DistributeSelection(bool horizontally) {
+		std::vector<Node*> nodes;
+		nodes.reserve(m_SelectedNodes.size());
+		for (NodeId id : m_SelectedNodes)
+			if (Node* n = m_Model->GetNode(id)) nodes.push_back(n);
+		if (nodes.size() < 3) return;
+		auto pos = [&](const Node* n) -> float { return horizontally ? n->X : n->Y; };
+		auto size = [&](const Node* n) -> float { return horizontally ? n->Width : n->Height; };
+		std::vector<Point> old;
+		old.reserve(m_SelectedNodes.size());
+		for (NodeId id : m_SelectedNodes) {
+			const Node* n = m_Model->GetNode(id);
+			old.push_back(n ? Point{ n->X, n->Y } : Point{});
+		}
+
+		// in their order along the axis, the gaps between them the same; the first and the last stay
+		std::sort(nodes.begin(), nodes.end(), [&](const Node* a, const Node* b) { return pos(a) < pos(b); });
+		const float start = pos(nodes.front()) - size(nodes.front()) * 0.5f, end = pos(nodes.back()) + size(nodes.back()) * 0.5f;
+		float sizes = 0;
+		for (const Node* n : nodes) sizes += size(n);
+		const float gap = (end - start - sizes) / (nodes.size() - 1);
+		float at = start + size(nodes.front()) + gap;
+		for (size_t i = 1; i + 1 < nodes.size(); i++) {		// the outermost aren't moved at all
+			(horizontally ? nodes[i]->X : nodes[i]->Y) = at + size(nodes[i]) * 0.5f;
+			at += size(nodes[i]) + gap;
+		}
+		PushMoves(m_SelectedNodes, old);
+		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::SetDetailThreshold(float scale) {
+		m_Renderer.SetDetailThreshold(std::max(scale, 0.0f));
+		if (m_hWnd) Invalidate(FALSE);
+	}
+
+	float CNodeGraphControl::GetDetailThreshold() const {
+		return m_Renderer.GetDetailThreshold();
 	}
 
 	void CNodeGraphControl::SetHighlight(bool highlight) {
@@ -2361,6 +2538,17 @@ namespace NodeGraphCtrl {
 		return true;
 	}
 
+	size_t NodeGraphModel::RemoveNodes(const std::vector<NodeId>& ids) {
+		if (ids.empty()) return 0;
+		const std::unordered_set<NodeId> gone(ids.begin(), ids.end());
+		const size_t removed = std::erase_if(m_Nodes, [&](const Node& n) { return gone.contains(n.Id); });
+		if (!removed) return 0;
+		NodesChanged();
+		if (std::erase_if(m_Edges, [&](const Edge& e) { return gone.contains(e.From) || gone.contains(e.To); }))
+			EdgesChanged();
+		return removed;
+	}
+
 	bool NodeGraphModel::RemoveEdge(EdgeId id) {
 		const Edge* e = FindEdge(id);
 		if (!e) return false;
@@ -2668,15 +2856,15 @@ namespace NodeGraphCtrl {
 			const std::string stroke = "fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(e.Style.Width) + "\" stroke-linejoin=\"round\"" + DashArray(e.Style);
 
 			if (from == to) {
-				float right = from->X + from->Width * 0.5f;
-				float rise = std::min(from->Height * 0.25f, 40.0f);
-				float top = from->Y - rise, bottom = from->Y + rise;
-				float end = from->X + NodeHalfWidthAt(*from, rise);		// the ends on the outline of the shape
+				const auto loop = SelfLoopPath(*from);
 				const bool solidHead = e.Style.Directed && (e.Style.Arrow == ArrowHead::Filled || e.Style.Arrow == ArrowHead::Diamond);
-				svg += "<path d=\"M" + Num(end) + " " + Num(top) + " L" + Num(right + 24) + " " + Num(top) + " L" + Num(right + 24) + " " +
-					Num(bottom) + " L" + Num(end + (solidHead ? 8 : 0)) + " " + Num(bottom) + "\" " + stroke + "/>\n";
+				svg += "<path d=\"M" + Num(loop[0].X) + " " + Num(loop[0].Y) + " L" + Num(loop[1].X) + " " + Num(loop[1].Y) + " L" + Num(loop[2].X) + " " +
+					Num(loop[2].Y) + " L" + Num(loop[3].X + (solidHead ? 8 : 0)) + " " + Num(loop[3].Y) + "\" " + stroke + "/>\n";
 				if (e.Style.Directed)
-					svg += SvgArrowhead({ end, bottom }, { -1, 0 }, e.Style.Arrow, color);
+					svg += SvgArrowhead(loop[3], { -1, 0 }, e.Style.Arrow, color);
+				if (!e.Label.empty())	// right of the loop
+					svg += "<text x=\"" + Num(loop[1].X + 4) + "\" y=\"" + Num(from->Y) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" dominant-baseline=\"central\">" +
+						XmlEscape(Utf8(e.Label)) + "</text>\n";
 				continue;
 			}
 

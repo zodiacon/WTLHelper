@@ -38,6 +38,11 @@ static constexpr int IDC_READONLY = 119;
 static constexpr int IDC_FIND = 120;
 static constexpr int IDC_FINDNEXT = 121;
 static constexpr int IDC_FINDPREV = 122;
+static constexpr int IDC_SNAPGRID = 123;
+static constexpr int IDC_GUIDES = 124;
+static constexpr int IDC_DISTRIBUTEH = 125;
+static constexpr int IDC_DISTRIBUTEV = 126;
+static constexpr int IDC_ALIGN = 130;   // IDC_ALIGN + (int)Alignment
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -355,6 +360,7 @@ static void PopulateContent(NodeGraphModel& m) {
     m.AddEdge(decision, oval, L"no");
     m.AddEdge(oval, download);
     m.AddEdge(decision, decision);
+    m.AddEdge(oval, oval, L"wait");     // the label right of the loop (where nothing else is)
 
     // edge styles: lines, arrowheads, a curve, a label of a fixed size
     const struct { const wchar_t* label; EdgeLine line; ArrowHead arrow; } styles[] = {
@@ -682,6 +688,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_graph.Refresh();
             break;
         }
+        case IDC_SNAPGRID:
+            g_graph.SetSnapToGrid(!g_graph.GetSnapToGrid());
+            CheckMenuItem(GetMenu(hwnd), IDC_SNAPGRID, g_graph.GetSnapToGrid() ? MF_CHECKED : MF_UNCHECKED);
+            break;
+        case IDC_GUIDES:
+            g_graph.SetAlignmentGuides(!g_graph.GetAlignmentGuides());
+            CheckMenuItem(GetMenu(hwnd), IDC_GUIDES, g_graph.GetAlignmentGuides() ? MF_CHECKED : MF_UNCHECKED);
+            break;
+        case IDC_DISTRIBUTEH:
+        case IDC_DISTRIBUTEV:
+            g_graph.DistributeSelection(LOWORD(wParam) == IDC_DISTRIBUTEH);
+            break;
+        case IDC_ALIGN + (int)Alignment::Left:   case IDC_ALIGN + (int)Alignment::Center:
+        case IDC_ALIGN + (int)Alignment::Right:  case IDC_ALIGN + (int)Alignment::Top:
+        case IDC_ALIGN + (int)Alignment::Middle: case IDC_ALIGN + (int)Alignment::Bottom:
+            g_graph.AlignSelection((Alignment)(LOWORD(wParam) - IDC_ALIGN));
+            break;
         case IDC_FIND:
             ShowFindBar(hwnd);
             break;
@@ -867,6 +890,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     CheckMenuRadioItem(hLayout, IDC_DIRECTION, IDC_DIRECTION + (int)LayoutDirection::RightToLeft,
         IDC_DIRECTION + (int)g_direction, MF_BYCOMMAND);
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hLayout, L"&Layout");
+
+    HMENU hArrange = CreatePopupMenu();
+    AppendMenu(hArrange, MF_STRING, IDC_ALIGN + (int)Alignment::Left,   L"Align &Left");
+    AppendMenu(hArrange, MF_STRING, IDC_ALIGN + (int)Alignment::Center, L"Align &Center");
+    AppendMenu(hArrange, MF_STRING, IDC_ALIGN + (int)Alignment::Right,  L"Align &Right");
+    AppendMenu(hArrange, MF_STRING, IDC_ALIGN + (int)Alignment::Top,    L"Align &Top");
+    AppendMenu(hArrange, MF_STRING, IDC_ALIGN + (int)Alignment::Middle, L"Align &Middle");
+    AppendMenu(hArrange, MF_STRING, IDC_ALIGN + (int)Alignment::Bottom, L"Align &Bottom");
+    AppendMenu(hArrange, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hArrange, MF_STRING, IDC_DISTRIBUTEH, L"Distribute &Horizontally");
+    AppendMenu(hArrange, MF_STRING, IDC_DISTRIBUTEV, L"Distribute &Vertically");
+    AppendMenu(hArrange, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hArrange, MF_STRING, IDC_SNAPGRID, L"&Snap to Grid (Alt: Not)");
+    AppendMenu(hArrange, MF_STRING, IDC_GUIDES, L"Alignment &Guides");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hArrange, L"&Arrange");
 
     SetMenu(hwnd, hMenu);
 

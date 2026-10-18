@@ -51,6 +51,12 @@ struct MinimapConfig {
     float Width = 180.0f, Height = 130.0f;
 };
 
+// An alignment guide while dragging: a vertical (or horizontal) line at At, from From to To, in graph units.
+struct GuideLine {
+    bool  Vertical;
+    float At, From, To;
+};
+
 struct ResizeOverlay {
     NodeId       Node          = InvalidNode;
     ResizeHandle HoveredHandle = ResizeHandle::None;
@@ -151,6 +157,15 @@ public:
     // Draws these nodes, their neighbors and the edges between them in front, and the rest of the graph dimmed behind.
     // Empty: no highlight.
     void SetHighlight(std::vector<NodeId> focus) { m_Highlight = std::move(focus); }
+    // Below this zoom the graph is drawn plain, which is much faster with many nodes: the nodes their shape only (no
+    // title, image, icon, text, owner drawing), the edges lines only. 0: never. Not in images (SaveImage, SVG).
+    void  SetDetailThreshold(float scale) { m_DetailThreshold = scale; }
+    // The spacing of the grid, in graph units.
+    void  SetGridSize(float size) { m_GridSize = size; }
+    float GetGridSize() const { return m_GridSize; }
+    // The alignment guides to draw (empty: none).
+    void  SetGuides(std::vector<GuideLine> guides) { m_Guides = std::move(guides); }
+    float GetDetailThreshold() const { return m_DetailThreshold; }
     void SetExporting(bool exporting) { m_Exporting = exporting; }
 
 private:
@@ -162,7 +177,7 @@ private:
     void DrawEdge(const Edge& e, const NodeGraphModel& model,
                   const ViewTransform& vt, EdgeEmphasis emphasis);
     void DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, EdgeEmphasis emphasis);
-    void DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis);
+    void DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis, bool beside = false);
     void SetEdgeBrush(const Edge& e, EdgeEmphasis emphasis);
     float EdgeWidth(const Edge& e, EdgeEmphasis emphasis) const;
     void DrawEdgePreview(const EdgePreview& preview, const NodeGraphModel& model,
@@ -208,6 +223,12 @@ private:
     INodeDrawHandler* m_DrawHandler = nullptr;
     NodeId   m_HoveredNode = InvalidNode;
     std::vector<NodeId> m_Highlight;
+    float m_DetailThreshold = 0.25f;
+    float m_GridSize = 40.0f;
+    std::vector<GuideLine> m_Guides;
+    bool  m_Plain = false;      // this frame is drawn plain
+    void DrawNodePlain(const Node& n, const ViewTransform& vt, bool selected);
+    void DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis);
     bool     m_Exporting = false;
     uint32_t m_DeviceGeneration = 0;    // of the current render target, unique in the process
     uint32_t CallOwnerDraw(const NodeGraphModel& model, const Node& n, const NodeLayout& layout,

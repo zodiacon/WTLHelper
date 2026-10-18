@@ -267,6 +267,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     }
 
     PruneBitmaps(model);
+    m_Plain = !m_Exporting && vt.Scale < m_DetailThreshold;
 
     m_RenderTarget->BeginDraw();
     m_RenderTarget->Clear(ColorrefToD2D(m_Background));
@@ -318,8 +319,8 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
             // the edge stays within the box of the centers of its nodes and its bends (a curve a little past it)
             float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
             float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
-            if (from == to) {
-                left -= from->Width * 0.5f; right += from->Width * 0.5f;
+            if (from == to) {   // the loop and the label right of it
+                left -= from->Width * 0.5f; right += from->Width * 0.5f + (e.Label.empty() ? 0.0f : 140.0f);
                 top -= from->Height * 0.5f; bottom += from->Height * 0.5f;
             }
             for (const auto& w : e.Waypoints) {
@@ -353,6 +354,16 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
         drawNodes(true);
     }
 
+    // alignment guides: dashed, in the selection color
+    if (!m_Guides.empty()) {
+        m_Brush->SetColor(SelectionColor());
+        for (const auto& g : m_Guides) {
+            auto a = g.Vertical ? vt.ToScreen(g.At, g.From) : vt.ToScreen(g.From, g.At);
+            auto b = g.Vertical ? vt.ToScreen(g.At, g.To) : vt.ToScreen(g.To, g.At);
+            m_RenderTarget->DrawLine(a, b, m_Brush.Get(), 1.0f, m_DashStyle.Get());
+        }
+    }
+
     if (rubberBand.Active)
         DrawRubberBand(rubberBand);
 
@@ -364,6 +375,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     DrawMinimap(minimap, clientRect, model, vt);
 
     hr = m_RenderTarget->EndDraw();
+    m_Plain = false;    // (a picture of a node, RenderNodePicture, is drawn in full)
     if (hr == D2DERR_RECREATE_TARGET)
         DiscardDeviceResources();
 }
@@ -393,7 +405,7 @@ void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGr
 }
 
 void NodeGraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
-    const float gridSpacing = 40.0f * vt.Scale;
+    const float gridSpacing = m_GridSize * vt.Scale;
     if (gridSpacing < 8.0f) return;
 
     m_Brush->SetColor(IsLightBackground() ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f));
@@ -415,6 +427,11 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
     const Node* to   = model.GetNode(e.To);
     if (!from || !to) return;
 
+    if (m_Plain) {
+        if (from != to)     // (a loop is a few pixels this far out)
+            DrawEdgePlain(e, *from, *to, vt, emphasis);
+        return;
+    }
     if (from == to) {
         DrawSelfLoop(e, *from, vt, emphasis);
         return;
@@ -477,17 +494,20 @@ float NodeGraphRenderer::EdgeWidth(const Edge& e, EdgeEmphasis emphasis) const {
 
 // On a dark box at a point of the graph: as large as the zoom makes it (ScaleLabel; not drawn when too small to read),
 // or the same size at any zoom.
-void NodeGraphRenderer::DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis) {
-    const float lw = 110.0f, lh = 18.0f;
+// beside: the box starts a little right of the point (a self loop's label), instead of around it.
+void NodeGraphRenderer::DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis, bool beside) {
+    const float lw = 110.0f, lh = 18.0f, gap = 4.0f;
     D2D1_RECT_F box;
     if (e.Style.ScaleLabel) {
         if (vt.Scale < 0.3f) return;
         m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(vt.OffsetX, vt.OffsetY));
-        box = { at.X - lw * 0.5f, at.Y - lh * 0.5f, at.X + lw * 0.5f, at.Y + lh * 0.5f };
+        const float left = beside ? at.X + gap : at.X - lw * 0.5f;
+        box = { left, at.Y - lh * 0.5f, left + lw, at.Y + lh * 0.5f };
     }
     else {
         auto mid = vt.ToScreen(at.X, at.Y);
-        box = { mid.x - lw * 0.5f, mid.y - lh * 0.5f, mid.x + lw * 0.5f, mid.y + lh * 0.5f };
+        const float left = beside ? mid.x + gap : mid.x - lw * 0.5f;
+        box = { left, mid.y - lh * 0.5f, left + lw, mid.y + lh * 0.5f };
     }
     m_Brush->SetColor(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.88f));
     m_RenderTarget->FillRectangle(box, m_Brush.Get());
@@ -498,22 +518,18 @@ void NodeGraphRenderer::DrawEdgeLabel(const Edge& e, const Point& at, const View
 
 // A jump to its own block: a loop on the right side of the node.
 void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, EdgeEmphasis emphasis) {
-    auto c = vt.ToScreen(n.X, n.Y);
-    float hw = n.Width * vt.Scale * 0.5f;
-    float hh = n.Height * vt.Scale * 0.5f;
-    float reach = std::max(24.0f * vt.Scale, 10.0f);
-    float rise = std::min(hh * 0.5f, 40.0f * vt.Scale);
-    float top = c.y - rise, bottom = c.y + rise;
-    float right = c.x + hw;
-    // the ends on the outline of the shape (the loop goes around the box)
-    float end = c.x + NodeHalfWidthAt(n, rise / vt.Scale) * vt.Scale;
+    // 24 units past the node, but at least 10 pixels
+    const float reach = std::max(24.0f, 10.0f / vt.Scale);
+    const auto loop = SelfLoopPath(n, reach);
+    auto screen = [&](const Point& p) { return vt.ToScreen(p.X, p.Y); };
+    const D2D1_POINT_2F end = screen(loop[3]);
 
     SetEdgeBrush(e, emphasis);
     const float width = EdgeWidth(e, emphasis);
     ID2D1StrokeStyle* stroke = m_LineStyles[(int)e.Style.Line].Get();
     // the line stops at the base of a solid arrowhead
     const bool solidHead = e.Style.Directed && (e.Style.Arrow == ArrowHead::Filled || e.Style.Arrow == ArrowHead::Diamond);
-    const D2D1_POINT_2F points[] = { { end, top }, { right + reach, top }, { right + reach, bottom }, { end + (solidHead ? 8.0f : 0.0f), bottom } };
+    const D2D1_POINT_2F points[] = { screen(loop[0]), screen(loop[1]), screen(loop[2]), { end.x + (solidHead ? 8.0f : 0.0f), end.y } };
     ComPtr<ID2D1PathGeometry> geometry;
     ComPtr<ID2D1GeometrySink> sink;
     if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) && SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
@@ -524,7 +540,9 @@ void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTra
             m_RenderTarget->DrawGeometry(geometry.Get(), m_Brush.Get(), width, stroke);
     }
     if (e.Style.Directed)
-        DrawArrowhead({ end, bottom }, { -1.0f, 0.0f }, e.Style.Arrow);
+        DrawArrowhead(end, { -1.0f, 0.0f }, e.Style.Arrow);
+    if (!e.Label.empty())
+        DrawEdgeLabel(e, { loop[1].X, n.Y }, vt, emphasis, true);
 }
 
 // At the end of an edge, pointing along dir (a unit vector), 10 pixels long at any zoom, in the brush's color.
@@ -580,7 +598,40 @@ static COLORREF Darker(COLORREF cr, float factor = 0.72f) {
     return RGB(GetRValue(cr) * factor, GetGValue(cr) * factor, GetBValue(cr) * factor);
 }
 
+// Zoomed far out: lines from center to center (through the bends); the nodes, drawn after, cover their ends.
+void NodeGraphRenderer::DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis) {
+    SetEdgeBrush(e, emphasis);
+    const float width = EdgeWidth(e, emphasis);
+    D2D1_POINT_2F p = vt.ToScreen(from.X, from.Y);
+    for (const auto& w : e.Waypoints) {
+        const D2D1_POINT_2F q = vt.ToScreen(w.X, w.Y);
+        m_RenderTarget->DrawLine(p, q, m_Brush.Get(), width);
+        p = q;
+    }
+    m_RenderTarget->DrawLine(p, vt.ToScreen(to.X, to.Y), m_Brush.Get(), width);
+}
+
+// Zoomed far out: the shape in its fill (a diamond as its box), a border only to show the selection.
+void NodeGraphRenderer::DrawNodePlain(const Node& n, const ViewTransform& vt, bool selected) {
+    const auto c = vt.ToScreen(n.X, n.Y);
+    const float hw = n.Width * vt.Scale * 0.5f, hh = n.Height * vt.Scale * 0.5f;
+    const D2D1_RECT_F box{ c.x - hw, c.y - hh, c.x + hw, c.y + hh };
+    const bool ellipse = n.Style.Shape == NodeShape::Ellipse;
+    m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
+    if (ellipse) m_RenderTarget->FillEllipse({ c, hw, hh }, m_Brush.Get());
+    else m_RenderTarget->FillRectangle(box, m_Brush.Get());
+    if (selected) {
+        m_Brush->SetColor(SelectionColor());
+        if (ellipse) m_RenderTarget->DrawEllipse({ c, hw, hh }, m_Brush.Get(), 2.0f);
+        else m_RenderTarget->DrawRectangle(box, m_Brush.Get(), 2.0f);
+    }
+}
+
 void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, const ViewTransform& vt, bool selected) {
+    if (m_Plain) {
+        DrawNodePlain(n, vt, selected);
+        return;
+    }
     auto center = vt.ToScreen(n.X, n.Y);
     float hw = n.Width  * vt.Scale * 0.5f;
     float hh = n.Height * vt.Scale * 0.5f;
@@ -1004,12 +1055,12 @@ EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, flo
     for (const auto& e : model.Edges()) {
         const Node* from = model.GetNode(e.From);
         const Node* to   = model.GetNode(e.To);
-        if (!from || !to || from == to) continue;
+        if (!from || !to) continue;
 
-        // every piece of the path from one node to the other; a curve as short lines
-        std::vector<Point> path = EdgePath(e, *from, *to);
+        // every piece of the path from one node to the other (or around the node, back to it); a curve as short lines
+        std::vector<Point> path = from == to ? SelfLoopPath(*from) : EdgePath(e, *from, *to);
         if (path.size() < 2) continue;
-        if (e.Style.Curved && path.size() > 2) {
+        if (from != to && e.Style.Curved && path.size() > 2) {
             const auto controls = CurveControls(path);
             const int steps = 12;
             std::vector<Point> flat;

@@ -298,6 +298,13 @@ namespace NodeGraphCtrl {
         return path;
     }
 
+    std::vector<Point> SelfLoopPath(const Node& n, float reach) {
+        const float rise = (std::min)(n.Height * 0.25f, 40.0f);
+        const float right = n.X + n.Width * 0.5f + reach;
+        const float end = n.X + NodeHalfWidthAt(n, rise);     // on the outline of the shape
+        return { { end, n.Y - rise }, { right, n.Y - rise }, { right, n.Y + rise }, { end, n.Y + rise } };
+    }
+
     std::vector<Point> CurveControls(const std::vector<Point>& p) {
         std::vector<Point> controls;
         const size_t n = p.size();

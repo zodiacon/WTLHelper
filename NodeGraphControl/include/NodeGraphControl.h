@@ -96,6 +96,13 @@ constexpr wchar_t WC_NODEGRAPHCONTROL[] = L"NodeGraphControl";
 //   NGCS_HIGHLIGHT   the node under the mouse (or else the selected nodes), its neighbors and its edges are drawn in
 //                    front, the rest of the graph dimmed
 #define NGCS_HIGHLIGHT   0x0020
+//   NGCS_SNAPTOGRID  dragged and resized nodes snap to the grid (the edges of their box); Alt held: they don't
+//   NGCS_GUIDES      dragged and resized nodes snap to the sides and centers of the other nodes, and guide lines show it
+#define NGCS_SNAPTOGRID  0x0040
+#define NGCS_GUIDES      0x0080
+
+// CNodeGraphControl::AlignSelection: to the first selected node's side or center
+enum class Alignment { Left, Center, Right, Top, Middle, Bottom };
 
 // Internal message used to commit/cancel the inline label editor.
 constexpr UINT WM_NODEGRAPHEDIT = WM_APP + 1;
@@ -209,6 +216,25 @@ public:
     // Removes the images of the model no node shows and no undo or redo can put back (as after undoing a paste of
     // nodes with images). Returns how many.
     size_t RemoveUnusedImages();
+
+    // Snapping while dragging and resizing (NGCS_SNAPTOGRID, NGCS_GUIDES); holding Alt turns it off for the moment.
+    // The guides win over the grid. With the grid, the arrow keys move the selection a grid step.
+    void  SetSnapToGrid(bool snap);
+    bool  GetSnapToGrid() const;
+    void  SetAlignmentGuides(bool guides);
+    bool  GetAlignmentGuides() const;
+    void  SetGridSize(float size);   // graph units, 40 by default
+    float GetGridSize() const;
+
+    // The selected nodes lined up on the first one's side or center, or (at least 3) spread so that the gaps between
+    // them are the same, the outermost staying. One undo step each.
+    void AlignSelection(Alignment how);
+    void DistributeSelection(bool horizontally);
+
+    // Below this zoom the graph is drawn plain, which is much faster with many nodes: the nodes their shape only (no
+    // title, image, icon, text or owner drawing), the edges lines only. 0: never. 0.25 by default. Not in SaveImage/SaveSvg.
+    void  SetDetailThreshold(float scale);
+    float GetDetailThreshold() const;
 
     // The highlight of a node's neighborhood (NGCS_HIGHLIGHT).
     void SetHighlight(bool highlight);
@@ -415,6 +441,13 @@ private:
 
     size_t m_UndoLimit      = 0;
     bool m_Highlight        = false;
+    bool m_SnapToGrid       = false;
+    bool m_Guides           = false;
+    // where a node's box goes when snapped, while dragging (all of its sides) or resizing (the ones that move)
+    struct Snap { float DX = 0, DY = 0; std::vector<GuideLine> Guides; };
+    Snap SnapBox(float left, float top, float right, float bottom, bool moveLeft, bool moveTop, bool moveRight, bool moveBottom,
+                 const std::vector<NodeId>& skip) const;
+    void PushMoves(const std::vector<NodeId>& ids, const std::vector<Point>& old);
     bool TracksHover() const { return m_Highlight || m_Renderer.GetNodeDrawHandler(); }
     UndoCmd* m_KeyMove      = nullptr;       // the move by arrow keys on top of the undo stack, which more presses extend
     POINT m_RightDown       = {};            // where the right button went down (a click without a drag: the context menu)
