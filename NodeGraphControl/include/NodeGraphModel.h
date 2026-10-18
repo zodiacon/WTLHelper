@@ -5,11 +5,21 @@
 
 namespace NodeGraphCtrl {
 
-using NodeId = uint32_t;
-using EdgeId = uint32_t;
+using NodeId  = uint32_t;
+using EdgeId  = uint32_t;
+using ImageId = uint32_t;
 
-constexpr NodeId InvalidNode = UINT32_MAX;
-constexpr EdgeId InvalidEdge = UINT32_MAX;
+constexpr NodeId  InvalidNode  = UINT32_MAX;
+constexpr EdgeId  InvalidEdge  = UINT32_MAX;
+constexpr ImageId InvalidImage = UINT32_MAX;
+
+// An image of the graph, kept once and shared by the nodes that show it.
+struct Image {
+    ImageId              Id;
+    uint64_t             Key = 0;              // unique in the process: renderers cache their bitmaps by it
+    std::vector<uint8_t> Data;                 // encoded (PNG, JPEG, BMP, ICO, ... anything WIC decodes)
+    uint32_t             Width = 0, Height = 0; // in pixels (the largest frame of an icon file)
+};
 
 struct NodeStyle {
     COLORREF FillColor   = RGB(70, 130, 180);
@@ -73,7 +83,17 @@ public:
     const std::vector<Node>& Nodes() const { return m_Nodes; }
     const std::vector<Edge>& Edges() const { return m_Edges; }
 
-    void Clear();
+    // Images. They are decoded with WIC (COM is initialized for the call if the thread hasn't done it).
+    // Adding the same bytes again returns the existing image. InvalidImage if the data can't be decoded.
+    ImageId AddImage(const void* data, size_t size);
+    ImageId AddImage(const wchar_t* path);                       // the file's bytes as they are
+    ImageId AddImage(HICON icon);                                // stored as PNG
+    ImageId AddImage(HBITMAP bitmap, bool hasAlpha = false);     // stored as PNG; hasAlpha: a 32 bit DIB with straight alpha
+    bool    RemoveImage(ImageId id);
+    const Image* GetImage(ImageId id) const;
+    const std::vector<Image>& Images() const { return m_Images; }
+
+    void Clear();   // the nodes, edges and images
 
     void  SetDefaultNodeSize(float w, float h);
     float GetDefaultNodeWidth()  const { return m_DefaultNodeWidth;  }
@@ -92,8 +112,10 @@ public:
 private:
     std::vector<Node> m_Nodes;
     std::vector<Edge> m_Edges;
+    std::vector<Image> m_Images;
     NodeId m_NextNodeId       = 0;
     EdgeId m_NextEdgeId       = 0;
+    ImageId m_NextImageId     = 0;
     float  m_DefaultNodeWidth  = 120.0f;
     float  m_DefaultNodeHeight = 40.0f;
 };

@@ -1672,8 +1672,10 @@ namespace NodeGraphCtrl {
 	void NodeGraphModel::Clear() {
 		m_Nodes.clear();
 		m_Edges.clear();
+		m_Images.clear();
 		m_NextNodeId = 0;
 		m_NextEdgeId = 0;
+		m_NextImageId = 0;
 	}
 
 	// ---- Serialization ----------------------------------------------------------
@@ -2001,8 +2003,10 @@ namespace NodeGraphCtrl {
 
 		m_Nodes = std::move(nodes);
 		m_Edges = std::move(edges);
+		m_Images.clear();	// the file has none (yet): the images of the previous graph go with it
 		m_NextNodeId = nextNode;
 		m_NextEdgeId = nextEdge;
+		m_NextImageId = 0;
 		return true;
 	}
 

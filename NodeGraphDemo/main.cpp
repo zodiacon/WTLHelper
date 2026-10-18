@@ -273,7 +273,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(0, L"NodeGraphDemoWindow", L"NodeGraphControl Demo",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,	// or the window's background is painted over the graph on every resize (flicker)
         CW_USEDEFAULT, CW_USEDEFAULT, 900, 650,
         nullptr, nullptr, hInstance, nullptr);
 

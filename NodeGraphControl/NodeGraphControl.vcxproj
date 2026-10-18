@@ -98,9 +98,11 @@
     <ClInclude Include="include\NodeGraphLayout.h" />
     <ClInclude Include="include\NodeGraphModel.h" />
     <ClInclude Include="include\NodeGraphRenderer.h" />
+    <ClInclude Include="src\NodeGraphImaging.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\NodeGraphControl.cpp" />
+    <ClCompile Include="src\NodeGraphImaging.cpp" />
     <ClCompile Include="src\NodeGraphLayout.cpp" />
     <ClCompile Include="src\NodeGraphRenderer.cpp" />
   </ItemGroup>

@@ -1,4 +1,5 @@
 #include "../include/NodeGraphRenderer.h"
+#include "NodeGraphImaging.h"
 #include <cmath>
 #include <algorithm>
 #include <cfloat>
@@ -98,8 +99,59 @@ HRESULT NodeGraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/
 }
 
 void NodeGraphRenderer::DiscardDeviceResources() {
+    m_Bitmaps.clear();
     m_Brush.Reset();
     m_RenderTarget.Reset();
+}
+
+ID2D1Bitmap* NodeGraphRenderer::GetBitmap(const NodeGraphModel& model, ImageId id) {
+    const Image* image = model.GetImage(id);
+    if (!image || !m_RenderTarget)
+        return nullptr;
+
+    auto it = m_Bitmaps.find(image->Key);
+    if (it == m_Bitmaps.end())
+        it = m_Bitmaps.emplace(image->Key, CreateBitmap(*image)).first;
+    return it->second.Get();
+}
+
+ComPtr<ID2D1Bitmap> NodeGraphRenderer::CreateBitmap(const Image& image) {
+    Imaging::ComScope com;
+    ComPtr<IWICImagingFactory> factory;
+    ComPtr<IWICBitmapSource> source;
+    if (FAILED(Imaging::CreateFactory(factory.GetAddressOf())) ||
+        FAILED(Imaging::Decode(factory.Get(), image.Data.data(), image.Data.size(), source.GetAddressOf())))
+        return nullptr;
+
+    // a bitmap larger than the device allows is made smaller
+    UINT w = 0, h = 0;
+    source->GetSize(&w, &h);
+    const UINT maxSide = m_RenderTarget->GetMaximumBitmapSize();
+    if (w > maxSide || h > maxSide) {
+        const double scale = (double)maxSide / (std::max)(w, h);
+        ComPtr<IWICBitmapScaler> scaler;
+        if (FAILED(factory->CreateBitmapScaler(scaler.GetAddressOf())) ||
+            FAILED(scaler->Initialize(source.Get(), (std::max)(1u, (UINT)(w * scale)), (std::max)(1u, (UINT)(h * scale)), WICBitmapInterpolationModeFant)))
+            return nullptr;
+        source = scaler;
+    }
+
+    // 96 DPI, so that the size in DIPs is the size in pixels whatever the file says
+    auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap> bitmap;
+    if (FAILED(m_RenderTarget->CreateBitmapFromWicBitmap(source.Get(), &props, bitmap.GetAddressOf())))
+        return nullptr;
+    return bitmap;
+}
+
+// The bitmaps of images the model no longer has (removed, or of another model the renderer drew before).
+void NodeGraphRenderer::PruneBitmaps(const NodeGraphModel& model) {
+    if (m_Bitmaps.size() <= model.Images().size())
+        return;
+    std::unordered_set<uint64_t> keys;
+    for (const auto& image : model.Images())
+        keys.insert(image.Key);
+    std::erase_if(m_Bitmaps, [&](const auto& entry) { return !keys.contains(entry.first); });
 }
 
 void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
@@ -116,6 +168,8 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
         if (FAILED(EnsureDeviceResources(hdc, clientRect))) return;
         m_RenderTarget->BindDC(hdc, &clientRect);
     }
+
+    PruneBitmaps(model);
 
     m_RenderTarget->BeginDraw();
     m_RenderTarget->Clear(ColorrefToD2D(m_Background));

@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include "NodeGraphModel.h"
 
 #pragma comment(lib, "d2d1.lib")
@@ -84,6 +85,11 @@ public:
     ResizeHandle HitTestResizeHandle(const Node& n, const ViewTransform& vt,
                                      float sx, float sy) const;
 
+    // A bitmap of an image of the model for the render target, made the first time it is asked for. Its size in DIPs is
+    // the image's size in pixels. Use it only while drawing; null before the first Render, or if the image isn't in the
+    // model or can't be decoded.
+    ID2D1Bitmap* GetBitmap(const NodeGraphModel& model, ImageId id);
+
 private:
     HRESULT EnsureDeviceResources(HDC hdc, const RECT& rc);
     void    DiscardDeviceResources();
@@ -117,6 +123,11 @@ private:
 
     // the (from, to) pairs of the edges of the model that is being drawn: edges that have one going the other way are drawn apart
     std::unordered_set<uint64_t> m_EdgePairs;
+
+    // Image::Key -> its bitmap (null if it couldn't be made, so that it isn't tried on every paint). Device dependent.
+    std::unordered_map<uint64_t, ComPtr<ID2D1Bitmap>> m_Bitmaps;
+    void PruneBitmaps(const NodeGraphModel& model);
+    ComPtr<ID2D1Bitmap> CreateBitmap(const Image& image);
 
     COLORREF m_Background = RGB(38, 38, 38);
     bool IsLightBackground() const;

@@ -127,6 +127,8 @@ struct ResizeState {
 // ---- Main control ----------------------------------------------------------
 // A self-contained WTL control: derive-and-embed like any other CWindowImpl
 // class (e.g. CNodeGraphControl m_wndGraph; m_wndGraph.Create(...);).
+// Give the parent window WS_CLIPCHILDREN: otherwise, if its class has a background brush, it paints over the graph
+// on every resize before the graph repaints, and the graph flickers.
 class CNodeGraphControl : public CWindowImpl<CNodeGraphControl> {
 public:
     DECLARE_WND_CLASS_EX(WC_NODEGRAPHCONTROL, CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS, -1)
