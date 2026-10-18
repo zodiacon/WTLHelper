@@ -30,6 +30,8 @@ static constexpr int IDC_MINIMAP = 111;
 static constexpr int IDC_SAMPLE  = 112;
 static constexpr int IDC_CONTENT = 113;
 static constexpr int IDC_EXPORTSVG = 114;
+static constexpr int IDC_SCROLLBARS = 115;
+static constexpr int IDC_WHEELSCROLL = 116;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -363,7 +365,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int sbH = 22;
 
         g_graph.Create(hwnd, 0, 0, rc.right, rc.bottom - sbH,
-                       WS_CHILD | WS_VISIBLE, NGCS_GRID | NGCS_AUTOZOOM);
+                       WS_CHILD | WS_VISIBLE, NGCS_GRID | NGCS_AUTOZOOM | NGCS_SCROLLBARS);
 
         g_status = CreateWindowEx(0, STATUSCLASSNAME, nullptr,
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
@@ -455,6 +457,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             PopulateContent(*g_graph.GetModel());
             g_graph.FitInView();
             UpdateStatus(hwnd);
+            break;
+        case IDC_SCROLLBARS:
+            g_graph.SetScrollBars(!g_graph.HasScrollBars());
+            CheckMenuItem(GetMenu(hwnd), IDC_SCROLLBARS, g_graph.HasScrollBars() ? MF_CHECKED : MF_UNCHECKED);
+            break;
+        case IDC_WHEELSCROLL:
+            g_graph.SetWheelScrolls(!g_graph.GetWheelScrolls());
+            CheckMenuItem(GetMenu(hwnd), IDC_WHEELSCROLL, g_graph.GetWheelScrolls() ? MF_CHECKED : MF_UNCHECKED);
             break;
         case IDC_MINIMAP:
             g_graph.SetMinimapVisible(!g_graph.IsMinimapVisible());
@@ -599,6 +609,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_STRING, IDC_DELSEL,  L"&Delete Selected\tDel");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hGraph, MF_STRING, IDC_MINIMAP, L"Toggle &Minimap\tM");
+    AppendMenu(hGraph, MF_STRING | MF_CHECKED, IDC_SCROLLBARS, L"Scroll &Bars");
+    AppendMenu(hGraph, MF_STRING, IDC_WHEELSCROLL, L"&Wheel Scrolls (Ctrl+Wheel Zooms)");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hGraph, MF_STRING, IDC_SAMPLE,  L"&Sample Graph");
     AppendMenu(hGraph, MF_STRING, IDC_CONTENT, L"C&ontent Sample");

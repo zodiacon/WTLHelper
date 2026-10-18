@@ -193,6 +193,8 @@ namespace NodeGraphCtrl {
 	int CNodeGraphControl::OnCreate(LPCREATESTRUCT pcs) {
 		m_DrawGrid = (pcs->style & NGCS_GRID) != 0;
 		m_ReadOnly = (pcs->style & NGCS_READONLY) != 0;
+		m_ScrollBars = (pcs->style & NGCS_SCROLLBARS) != 0;
+		m_WheelScrolls = (pcs->style & NGCS_WHEELSCROLL) != 0;
 		m_Model = std::make_unique<NodeGraphModel>();
 
 		if (FAILED(m_Renderer.Init(pcs->hInstance))) return -1;
@@ -753,6 +755,9 @@ namespace NodeGraphCtrl {
 	// ---- Message handlers ----------------------------------------------------
 
 	void CNodeGraphControl::OnPaint(HDC /*unused*/) {
+		// whatever changed the graph or the view ends here: the bars follow (before painting, as they may resize the view)
+		if (m_ScrollBars || (GetStyle() & (WS_HSCROLL | WS_VSCROLL)))
+			UpdateScrollBars();
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(&ps);
 		RECT rc; GetClientRect(&rc);
@@ -789,7 +794,19 @@ namespace NodeGraphCtrl {
 		Invalidate(FALSE);
 	}
 
-	BOOL CNodeGraphControl::OnMouseWheel(UINT /*nFlags*/, short zDelta, CPoint pt) {
+	BOOL CNodeGraphControl::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt) {
+		if (m_WheelScrolls && !(nFlags & MK_CONTROL)) {
+			UINT lines = 3;
+			::SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+			RECT rc;
+			GetClientRect(&rc);
+			// a page at a time (WHEEL_PAGESCROLL) or lines; up: the view goes up
+			const float step = lines == WHEEL_PAGESCROLL ? ((nFlags & MK_SHIFT) ? rc.right : rc.bottom) * 0.9f : lines * LineSize();
+			const float amount = -zDelta / (float)WHEEL_DELTA * step;
+			if (nFlags & MK_SHIFT) ScrollBy(amount, 0);
+			else ScrollBy(0, amount);
+			return TRUE;
+		}
 		float delta = zDelta > 0 ? 1.1f : 1.0f / 1.1f;
 		ScreenToClient(&pt);  // lParam of WM_MOUSEWHEEL is in screen coords
 		m_Vt.OffsetX = pt.x - (pt.x - m_Vt.OffsetX) * delta;
@@ -1135,6 +1152,15 @@ namespace NodeGraphCtrl {
 			SetHoveredNode(m_Renderer.HitTestNode(*m_Model, gp.x, gp.y));
 		}
 
+		// a drag at (or past) an edge scrolls the view while the mouse stays there
+		if (!m_AutoScrolling && IsDraggingInView()) {
+			POINT v = AutoScrollSpeed(pt);
+			if (v.x || v.y) {
+				SetTimer(k_AutoScrollTimer, k_AutoScrollInterval);
+				m_AutoScrolling = true;
+			}
+		}
+
 		if (m_Resize.Active) {
 			auto gp = m_Vt.ToGraph((float)sx, (float)sy);
 			float dGX = gp.x - m_Resize.StartGX;
@@ -1393,16 +1419,16 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::FitInView() {
 		if (!m_Model || m_Model->Nodes().empty()) return;
 
-		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
-		for (const auto& n : m_Model->Nodes()) {
-			minX = std::min(minX, n.X - n.Width * 0.5f);
-			minY = std::min(minY, n.Y - n.Height * 0.5f);
-			maxX = std::max(maxX, n.X + n.Width * 0.5f);
-			maxY = std::max(maxY, n.Y + n.Height * 0.5f);
-		}
+		const Rect bounds = m_Model->GetBounds();
+		const float minX = bounds.Left, minY = bounds.Top, maxX = bounds.Right, maxY = bounds.Bottom;
 
+		// the view without the scroll bars, which the fitted graph won't need
 		RECT rc; GetClientRect(&rc);
-		float margin = 20.0f;
+		if (m_ScrollBars) {
+			if (GetStyle() & WS_VSCROLL) rc.right += ::GetSystemMetricsForDpi(SM_CXVSCROLL, ::GetDpiForWindow(m_hWnd));
+			if (GetStyle() & WS_HSCROLL) rc.bottom += ::GetSystemMetricsForDpi(SM_CYHSCROLL, ::GetDpiForWindow(m_hWnd));
+		}
+		const float margin = k_ViewMargin;
 		float sx = (rc.right - margin * 2) / (maxX - minX);
 		float sy = (rc.bottom - margin * 2) / (maxY - minY);
 		m_Vt.Scale = std::clamp(std::min(sx, sy), 0.05f, 50.0f);
@@ -1452,6 +1478,172 @@ namespace NodeGraphCtrl {
 
 	float CNodeGraphControl::GetZoom() const {
 		return m_Vt.Scale;
+	}
+
+	// ---- Scrolling ------------------------------------------------------------------
+
+	void CNodeGraphControl::SetScrollBars(bool show) {
+		m_ScrollBars = show;
+		if (m_hWnd) {
+			UpdateScrollBars();
+			Invalidate(FALSE);
+		}
+	}
+
+	bool CNodeGraphControl::HasScrollBars() const {
+		return m_ScrollBars;
+	}
+
+	void CNodeGraphControl::SetWheelScrolls(bool scrolls) {
+		m_WheelScrolls = scrolls;
+	}
+
+	bool CNodeGraphControl::GetWheelScrolls() const {
+		return m_WheelScrolls;
+	}
+
+	float CNodeGraphControl::LineSize() const {
+		return 20.0f * ::GetDpiForWindow(m_hWnd) / 96;
+	}
+
+	void CNodeGraphControl::ScrollBy(float dx, float dy) {
+		if (dx == 0 && dy == 0) return;
+		m_Vt.OffsetX -= dx;
+		m_Vt.OffsetY -= dy;
+		Invalidate(FALSE);
+	}
+
+	// A range that covers the graph (with the margin FitInView leaves) and the view; a bar is shown only when the graph
+	// doesn't fit. Showing or hiding one changes the size of the view, so this goes again until it doesn't.
+	void CNodeGraphControl::UpdateScrollBars() {
+		if (m_UpdatingScroll || m_TrackingThumb)
+			return;
+		m_UpdatingScroll = true;
+		const Rect bounds = m_ScrollBars && m_Model ? m_Model->GetBounds() : Rect{};
+
+		for (int pass = 0; pass < 3; pass++) {
+			RECT rc;
+			GetClientRect(&rc);
+			auto axis = [&](int bar, float lo, float hi, int page) {
+				SCROLLINFO si{ sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS };
+				si.nMax = 0;
+				si.nPage = 1;		// a range smaller than the page: the bar is hidden
+				lo -= k_ViewMargin;
+				hi += k_ViewMargin;
+				if (!bounds.IsEmpty() && (lo < -0.5f || hi > page + 0.5f)) {
+					const float start = std::min(lo, 0.0f), end = std::max(hi, (float)page);
+					si.nMax = std::max((int)std::ceil(end - start) - 1, page);
+					si.nPage = page;
+					si.nPos = (int)std::lround(-start);
+				}
+				SCROLLINFO now{ sizeof(now), SIF_RANGE | SIF_PAGE | SIF_POS };
+				if (!GetScrollInfo(bar, &now) || now.nMin != si.nMin || now.nMax != si.nMax || now.nPage != si.nPage || now.nPos != si.nPos)
+					SetScrollInfo(bar, &si, TRUE);
+			};
+			axis(SB_HORZ, bounds.Left * m_Vt.Scale + m_Vt.OffsetX, bounds.Right * m_Vt.Scale + m_Vt.OffsetX, rc.right);
+			axis(SB_VERT, bounds.Top * m_Vt.Scale + m_Vt.OffsetY, bounds.Bottom * m_Vt.Scale + m_Vt.OffsetY, rc.bottom);
+
+			RECT after;
+			GetClientRect(&after);
+			if (after.right == rc.right && after.bottom == rc.bottom)
+				break;
+		}
+		m_UpdatingScroll = false;
+	}
+
+	void CNodeGraphControl::OnScroll(int bar, int code) {
+		SCROLLINFO si{ sizeof(si), SIF_ALL };
+		if (!GetScrollInfo(bar, &si))
+			return;
+		const int page = (int)si.nPage;
+		int pos = si.nPos;
+		switch (code) {
+			case SB_LINEUP:        pos -= (int)LineSize(); break;
+			case SB_LINEDOWN:      pos += (int)LineSize(); break;
+			case SB_PAGEUP:        pos -= page * 9 / 10; break;
+			case SB_PAGEDOWN:      pos += page * 9 / 10; break;
+			case SB_TOP:           pos = si.nMin; break;
+			case SB_BOTTOM:        pos = si.nMax; break;
+			case SB_THUMBTRACK:    m_TrackingThumb = true; pos = si.nTrackPos; break;
+			case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+			case SB_ENDSCROLL:
+				m_TrackingThumb = false;
+				UpdateScrollBars();
+				return;
+			default: return;
+		}
+		pos = std::clamp(pos, si.nMin, std::max(si.nMin, si.nMax - page + 1));
+		if (pos == si.nPos)
+			return;
+		const float delta = (float)(pos - si.nPos);
+		si.fMask = SIF_POS;
+		si.nPos = pos;
+		SetScrollInfo(bar, &si, TRUE);
+		if (bar == SB_HORZ) ScrollBy(delta, 0);
+		else ScrollBy(0, delta);
+	}
+
+	void CNodeGraphControl::OnHScroll(int code, short /*pos*/, HWND /*scrollBar*/) {
+		OnScroll(SB_HORZ, code);
+	}
+
+	void CNodeGraphControl::OnVScroll(int code, short /*pos*/, HWND /*scrollBar*/) {
+		OnScroll(SB_VERT, code);
+	}
+
+	LRESULT CNodeGraphControl::OnMouseHWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
+		UINT chars = 3;
+		::SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0, &chars, 0);
+		ScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA * chars * LineSize(), 0);
+		return 0;
+	}
+
+	bool CNodeGraphControl::IsDraggingInView() const {
+		return m_DraggingNode || m_Resize.Active || m_RubberBand.Active || m_EdgePreview.Active;
+	}
+
+	// How far to scroll on a tick of the timer: the deeper into the band along an edge (or past it) the mouse is, the
+	// faster. Zero away from the edges.
+	POINT CNodeGraphControl::AutoScrollSpeed(POINT pt) const {
+		RECT rc;
+		GetClientRect(&rc);
+		const float dpi = ::GetDpiForWindow(m_hWnd) / 96.0f;
+		const float band = 24 * dpi, maxSpeed = 40 * dpi;
+		auto speed = [&](int at, int size) -> int {
+			float depth = at < band ? at - band : at > size - band ? at - (size - band) : 0;
+			if (depth == 0) return 0;
+			float v = std::clamp(std::fabs(depth) * 0.5f, 1.0f, maxSpeed);
+			return (int)(depth < 0 ? -v : v);
+		};
+		return { speed(pt.x, rc.right), speed(pt.y, rc.bottom) };
+	}
+
+	// Scrolls a step and does the drag again where the mouse is, now over another part of the graph.
+	void CNodeGraphControl::AutoScroll(POINT pt) {
+		POINT v = AutoScrollSpeed(pt);
+		if (v.x == 0 && v.y == 0) return;
+		ScrollBy((float)v.x, (float)v.y);
+		// the start of the rubber band stays on the same point of the graph
+		m_RubberBand.X0 -= v.x;
+		m_RubberBand.Y0 -= v.y;
+		OnMouseMove(0, CPoint(pt));
+	}
+
+	void CNodeGraphControl::OnTimer(UINT_PTR id) {
+		if (id != k_AutoScrollTimer) {
+			SetMsgHandled(FALSE);
+			return;
+		}
+		POINT pt;
+		::GetCursorPos(&pt);
+		ScreenToClient(&pt);
+		POINT v = AutoScrollSpeed(pt);
+		if (!IsDraggingInView() || ::GetCapture() != m_hWnd || (v.x == 0 && v.y == 0)) {
+			KillTimer(k_AutoScrollTimer);
+			m_AutoScrolling = false;
+			return;
+		}
+		AutoScroll(pt);
 	}
 
 	NodeId CNodeGraphControl::GetSelectedNode() const {
@@ -1506,21 +1698,10 @@ namespace NodeGraphCtrl {
 		if (!m_Model || m_Model->Nodes().empty() || scale <= 0)
 			return false;
 
-		// the extent of the graph, as SaveSvg computes it
-		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
-		auto extend = [&](float x, float y) {
-			minX = std::min(minX, x); maxX = std::max(maxX, x);
-			minY = std::min(minY, y); maxY = std::max(maxY, y);
-		};
-		for (const auto& n : m_Model->Nodes()) {
-			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
-			extend(n.X + n.Width * 0.5f + 30.0f, n.Y + n.Height * 0.5f);	// room for the loop of an edge to its own node
-		}
-		for (const auto& e : m_Model->Edges())
-			for (const auto& w : e.Waypoints)
-				extend(w.X, w.Y);
+		// the extent of the graph, as SaveSvg has it
+		const Rect bounds = m_Model->GetBounds();
 		const float margin = 24.0f;
-		minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+		float minX = bounds.Left - margin, minY = bounds.Top - margin, maxX = bounds.Right + margin, maxY = bounds.Bottom + margin;
 
 		// Direct2D can't draw a bitmap larger than the device allows (16384 a side is common), and memory is limited
 		const float maxSide = 16384.0f, maxPixels = 32.0f * 1024 * 1024;
@@ -1754,6 +1935,28 @@ namespace NodeGraphCtrl {
 		return nullptr;
 	}
 
+	Rect NodeGraphModel::GetBounds() const {
+		if (m_Nodes.empty())
+			return {};
+		Rect r{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
+		auto extend = [&](float x, float y) {
+			r.Left = std::min(r.Left, x); r.Right = std::max(r.Right, x);
+			r.Top = std::min(r.Top, y); r.Bottom = std::max(r.Bottom, y);
+		};
+		for (const auto& n : m_Nodes) {
+			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
+			extend(n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f);
+		}
+		for (const auto& e : m_Edges) {
+			for (const auto& w : e.Waypoints)
+				extend(w.X, w.Y);
+			if (e.From == e.To)
+				if (const Node* n = GetNode(e.From))
+					extend(n->X + n->Width * 0.5f + 30.0f, n->Y);	// the loop goes 24 units to the right of the node
+		}
+		return r;
+	}
+
 	void NodeGraphModel::Clear() {
 		m_Nodes.clear();
 		m_Edges.clear();
@@ -1878,20 +2081,9 @@ namespace NodeGraphCtrl {
 	bool NodeGraphModel::SaveSvg(const wchar_t* path, COLORREF background, const NodePictureFunc& picture) const {
 		if (m_Nodes.empty()) return false;
 
-		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
-		auto extend = [&](float x, float y) {
-			minX = std::min(minX, x); maxX = std::max(maxX, x);
-			minY = std::min(minY, y); maxY = std::max(maxY, y);
-		};
-		for (const auto& n : m_Nodes) {
-			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
-			extend(n.X + n.Width * 0.5f + 30.0f, n.Y + n.Height * 0.5f);	// room for the loop of an edge to its own node
-		}
-		for (const auto& e : m_Edges)
-			for (const auto& w : e.Waypoints)
-				extend(w.X, w.Y);
+		const Rect bounds = GetBounds();
 		const float margin = 24.0f;
-		minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+		float minX = bounds.Left - margin, minY = bounds.Top - margin, maxX = bounds.Right + margin, maxY = bounds.Bottom + margin;
 
 		std::string svg;
 		svg += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";

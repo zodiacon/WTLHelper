@@ -75,6 +75,10 @@ constexpr wchar_t WC_NODEGRAPHCONTROL[] = L"NodeGraphControl";
 //   NGCS_READONLY    the graph can be looked at and nodes moved, but not edited: no new edges, deleting, renaming,
 //                    resizing or pasting. A double-click sends NGCN_NODEDBLCLICK.
 #define NGCS_READONLY  0x0004
+//   NGCS_SCROLLBARS  scroll bars when the graph (at the zoom) doesn't fit in the view
+//   NGCS_WHEELSCROLL the mouse wheel scrolls (with Shift: sideways) and Ctrl+wheel zooms; without it the wheel zooms
+#define NGCS_SCROLLBARS  0x0008
+#define NGCS_WHEELSCROLL 0x0010
 
 // Internal message used to commit/cancel the inline label editor.
 constexpr UINT WM_NODEGRAPHEDIT = WM_APP + 1;
@@ -144,6 +148,10 @@ public:
         MSG_WM_PAINT(OnPaint)
         MSG_WM_SIZE(OnSize)
         MSG_WM_MOUSEWHEEL(OnMouseWheel)
+        MESSAGE_HANDLER(WM_MOUSEHWHEEL, OnMouseHWheel)
+        MSG_WM_HSCROLL(OnHScroll)
+        MSG_WM_VSCROLL(OnVScroll)
+        MSG_WM_TIMER(OnTimer)
         MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
         MSG_WM_RBUTTONDOWN(OnRButtonDown)
         MSG_WM_RBUTTONUP(OnRButtonUp)
@@ -175,6 +183,15 @@ public:
     void SetZoom(float factor);   // 1.0 = 100%
     void CenterOn(float graphX, float graphY, float zoom = 0.0f);  // put a point of the graph in the middle of the view (zoom 0: keep the zoom)
     float GetZoom() const;
+
+    // Scroll bars when the graph doesn't fit in the view (NGCS_SCROLLBARS). They cover the graph and the view, so
+    // the view can still be moved off the graph (by dragging it, or with the minimap).
+    void SetScrollBars(bool show);
+    bool HasScrollBars() const;
+    // The mouse wheel scrolls (Shift+wheel: sideways) and Ctrl+wheel zooms (NGCS_WHEELSCROLL); false: the wheel zooms.
+    // The tilt wheel scrolls sideways either way.
+    void SetWheelScrolls(bool scrolls);
+    bool GetWheelScrolls() const;
 
     // Selection — single (backward compat) and multi.
     NodeId GetSelectedNode() const;   // returns primary (first) selected node
@@ -255,6 +272,10 @@ private:
     void OnPaint(HDC dc);
     void OnSize(UINT nType, CSize size);
     BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
+    LRESULT OnMouseHWheel(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    void OnHScroll(int code, short pos, HWND scrollBar);
+    void OnVScroll(int code, short pos, HWND scrollBar);
+    void OnTimer(UINT_PTR id);
     LRESULT OnSetCursor(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     void OnRButtonDown(UINT nFlags, CPoint pt);
     void OnRButtonUp(UINT nFlags, CPoint pt);
@@ -286,6 +307,13 @@ private:
     void CancelLabelEdit();
     RECT LabelEditRect(const Node& n) const;
     void SetHoveredNode(NodeId id);
+    void UpdateScrollBars();
+    void OnScroll(int bar, int code);
+    void ScrollBy(float dx, float dy);         // moves the view (the graph moves the other way), in pixels
+    float LineSize() const;
+    bool IsDraggingInView() const;             // a drag that scrolls the view at its edges
+    POINT AutoScrollSpeed(POINT pt) const;
+    void AutoScroll(POINT pt);
     template<typename T, T Node::*Member>
     void SetNodeMember(NodeId id, const T& value, bool undoable);
     void FinalizeRubberBand();
@@ -328,6 +356,16 @@ private:
     bool m_PendingInvalidate = false;
 
     NodeId m_HoveredNode = InvalidNode;     // tracked only while there is a node draw handler
+
+    bool m_ScrollBars       = false;
+    bool m_WheelScrolls     = false;
+    bool m_UpdatingScroll   = false;        // showing or hiding a bar resizes the window
+    bool m_TrackingThumb    = false;        // the range isn't changed while a thumb is dragged
+    bool m_AutoScrolling    = false;        // the timer runs
+    static constexpr UINT_PTR k_AutoScrollTimer    = 1;
+    static constexpr UINT     k_AutoScrollInterval = 20;    // ms
 };
+
+constexpr float k_ViewMargin = 20.0f;       // pixels around a graph fitted in the view (and the scroll range)
 
 } // namespace NodeGraphCtrl

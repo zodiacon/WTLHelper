@@ -146,6 +146,10 @@ public:
     // Where the title, image, icon and label of the node go (the same for drawing, exporting and editing).
     NodeLayout GetNodeLayout(const Node& n) const;
 
+    // What the graph covers, in graph units: the nodes, the bends of the edges and the loops of edges to their own
+    // node. Empty without nodes.
+    Rect GetBounds() const;
+
     void Clear();   // the nodes, edges and images
 
     void  SetDefaultNodeSize(float w, float h);
