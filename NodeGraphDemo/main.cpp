@@ -43,6 +43,8 @@ static constexpr int IDC_GUIDES = 124;
 static constexpr int IDC_DISTRIBUTEH = 125;
 static constexpr int IDC_DISTRIBUTEV = 126;
 static constexpr int IDC_ALIGN = 130;   // IDC_ALIGN + (int)Alignment
+static constexpr int IDC_GROUP = 140;
+static constexpr int IDC_UNGROUP = 141;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -361,15 +363,24 @@ static void PopulateContent(NodeGraphModel& m) {
     m.AddEdge(oval, download);
     m.AddEdge(decision, decision);
     m.AddEdge(oval, oval, L"wait");     // the label right of the loop (where nothing else is)
+    m.AddGroup(L"Pipeline", { start, download, cpu });
+    const GroupId shapes = m.AddGroup(L"Shapes", { decision, oval });
+    m.GetGroup(shapes)->Collapsed = true;   // its box stands for them: the edges to them end on it
+    m.GetGroup(shapes)->FillColor = RGB(120, 90, 50);
+    m.GetGroup(shapes)->BorderColor = RGB(170, 130, 70);
 
     // edge styles: lines, arrowheads, a curve, a label of a fixed size
     const struct { const wchar_t* label; EdgeLine line; ArrowHead arrow; } styles[] = {
         { L"dash", EdgeLine::Dash, ArrowHead::Filled }, { L"dot", EdgeLine::Dot, ArrowHead::Open },
         { L"dash dot", EdgeLine::DashDot, ArrowHead::Diamond }, { L"circle", EdgeLine::Solid, ArrowHead::Circle },
     };
+    std::vector<NodeId> styled;
+    styled.reserve(10);
     for (int i = 0; i < 4; i++) {
         NodeId a = node(styles[i].label, 100 + i * 170.0f, 900, 100, 36, [](Node&) {});
         NodeId b = node(L"", 100 + i * 170.0f, 1010, 60, 30, [](Node&) {});
+        styled.push_back(a);
+        styled.push_back(b);
         Edge& e = *m.GetEdge(m.AddEdge(a, b));
         e.Style.Line = styles[i].line;
         e.Style.Arrow = styles[i].arrow;
@@ -381,6 +392,9 @@ static void PopulateContent(NodeGraphModel& m) {
     curved.Waypoints = { { 900, 900 }, { 790, 990 } };
     curved.Style.Curved = true;
     curved.Style.ScaleLabel = false;   // the same size at any zoom
+    styled.push_back(c1);
+    styled.push_back(c2);
+    m.AddGroup(L"Edge styles", styled);
 }
 
 // The demo keeps which owner drawing a node gets in its UserData: saved (and copied) as one byte.
@@ -572,9 +586,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 // what a menu would have for a node, an edge or the canvas
                 auto* cm = reinterpret_cast<NODEGRAPHCONTEXTMENUNOTIFY*>(lParam);
                 NodeGraphModel& m = *g_graph.GetModel();
-                enum { Rename = 1, Delete, Rectangle, Ellipse, Diamond, AddHere, PasteHere, Fit };
+                enum { Rename = 1, Delete, Rectangle, Ellipse, Diamond, AddHere, PasteHere, Fit, Collapse, Ungroup };
                 HMENU menu = CreatePopupMenu();
-                if (const Node* n = m.GetNode(cm->NodeId)) {
+                if (const Group* g = m.GetGroup(cm->GroupId)) {
+                    AppendMenu(menu, MF_STRING, Collapse, g->Collapsed ? L"&Expand" : L"&Collapse");
+                    AppendMenu(menu, MF_STRING, Ungroup, L"&Ungroup\tCtrl+Shift+G");
+                    AppendMenu(menu, MF_STRING, Delete, L"&Delete the Nodes\tDel");
+                }
+                else if (const Node* n = m.GetNode(cm->NodeId)) {
                     HMENU shapes = CreatePopupMenu();
                     AppendMenu(shapes, MF_STRING, Rectangle, L"&Rectangle");
                     AppendMenu(shapes, MF_STRING, Ellipse, L"&Ellipse");
@@ -612,6 +631,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                     case PasteHere: g_graph.Paste(); break;
                     case Fit: g_graph.FitInView(); break;
+                    case Collapse: g_graph.SetGroupCollapsed(cm->GroupId, !m.GetGroup(cm->GroupId)->Collapsed); break;
+                    case Ungroup: g_graph.Ungroup(cm->GroupId); break;
                 }
                 return TRUE;
             }
@@ -696,6 +717,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_graph.SetAlignmentGuides(!g_graph.GetAlignmentGuides());
             CheckMenuItem(GetMenu(hwnd), IDC_GUIDES, g_graph.GetAlignmentGuides() ? MF_CHECKED : MF_UNCHECKED);
             break;
+        case IDC_GROUP:
+            if (!g_graph.GetSelectedNodes().empty()) {
+                static int s_groups = 0;
+                g_graph.GroupSelection(L"Group " + std::to_wstring(++s_groups));
+            }
+            break;
+        case IDC_UNGROUP: {
+            // the groups of the selected nodes
+            NodeGraphModel& m = *g_graph.GetModel();
+            std::vector<GroupId> groups;
+            for (NodeId id : g_graph.GetSelectedNodes())
+                if (GroupId g = m.GroupOf(id); g != InvalidGroup && std::find(groups.begin(), groups.end(), g) == groups.end())
+                    groups.push_back(g);
+            for (GroupId g : groups)
+                g_graph.Ungroup(g);
+            break;
+        }
         case IDC_DISTRIBUTEH:
         case IDC_DISTRIBUTEV:
             g_graph.DistributeSelection(LOWORD(wParam) == IDC_DISTRIBUTEH);
@@ -904,6 +942,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hArrange, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hArrange, MF_STRING, IDC_SNAPGRID, L"&Snap to Grid (Alt: Not)");
     AppendMenu(hArrange, MF_STRING, IDC_GUIDES, L"Alignment &Guides");
+    AppendMenu(hArrange, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hArrange, MF_STRING, IDC_GROUP, L"&Group\tCtrl+G");
+    AppendMenu(hArrange, MF_STRING, IDC_UNGROUP, L"&Ungroup\tCtrl+Shift+G");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hArrange, L"&Arrange");
 
     SetMenu(hwnd, hMenu);
@@ -919,6 +960,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         { FVIRTKEY | FCONTROL,    'Z', IDC_UNDO   },
         { FVIRTKEY | FCONTROL,    'Y', IDC_REDO   },
         { FVIRTKEY | FCONTROL,    'F', IDC_FIND   },
+        { FVIRTKEY | FCONTROL,    'G', IDC_GROUP  },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'G', IDC_UNGROUP },
         { FVIRTKEY,             VK_F3, IDC_FINDNEXT },
         { FVIRTKEY | FSHIFT,    VK_F3, IDC_FINDPREV },
         { FVIRTKEY | FCONTROL,    '1', IDC_LAYOUT + (int)LayoutAlgorithm::Layered },

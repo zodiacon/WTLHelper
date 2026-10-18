@@ -2,7 +2,9 @@
 #include "NodeGraphSerialization.h"
 #include <shlwapi.h>
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
+#include <unordered_set>
 #include <cstdio>
 #include <cstring>
 
@@ -332,6 +334,132 @@ namespace NodeGraphCtrl {
             return { (path[a].X + 3 * c1.X + 3 * c2.X + path[b].X) / 8, (path[a].Y + 3 * c1.Y + 3 * c2.Y + path[b].Y) / 8 };
         }
         return path[a];
+    }
+
+    // ---- NodeGraphModel: groups ---------------------------------------------------------
+
+    GroupId NodeGraphModel::AddGroup(std::wstring title, const std::vector<NodeId>& nodes) {
+        Group g;
+        g.Id = m_NextGroupId++;
+        g.Title = std::move(title);
+        m_Groups.push_back(std::move(g));
+        const GroupId id = m_Groups.back().Id;
+        for (NodeId n : nodes)
+            AddToGroup(id, n);
+        return id;
+    }
+
+    bool NodeGraphModel::RemoveGroup(GroupId id) {
+        auto it = std::find_if(m_Groups.begin(), m_Groups.end(), [id](const Group& g) { return g.Id == id; });
+        if (it == m_Groups.end()) return false;
+        for (NodeId n : it->Nodes) m_GroupOf.erase(n);
+        m_Groups.erase(it);
+        return true;
+    }
+
+    void NodeGraphModel::RestoreGroup(const Group& g) {
+        RemoveGroup(g.Id);
+        Group copy = g;
+        copy.Nodes.clear();
+        m_Groups.push_back(std::move(copy));
+        for (NodeId n : g.Nodes)
+            AddToGroup(g.Id, n);
+        m_NextGroupId = (std::max)(m_NextGroupId, g.Id + 1);
+    }
+
+    bool NodeGraphModel::AddToGroup(GroupId id, NodeId node) {
+        Group* g = GetGroup(id);
+        if (!g || !GetNode(node)) return false;
+        if (GroupOf(node) == id) return true;
+        RemoveFromGroup(node);
+        g->Nodes.push_back(node);
+        m_GroupOf[node] = id;
+        return true;
+    }
+
+    void NodeGraphModel::RemoveFromGroup(NodeId node) {
+        auto it = m_GroupOf.find(node);
+        if (it == m_GroupOf.end()) return;
+        if (Group* g = GetGroup(it->second))
+            std::erase(g->Nodes, node);
+        m_GroupOf.erase(it);
+    }
+
+    void NodeGraphModel::ForgetMembers(const std::vector<NodeId>& nodes) {
+        if (m_GroupOf.empty()) return;
+        // in one pass over each group (a large group deleted: not a search of it for each node)
+        std::unordered_set<NodeId> gone;
+        gone.reserve(nodes.size());
+        for (NodeId n : nodes)
+            if (m_GroupOf.erase(n)) gone.insert(n);
+        if (gone.empty()) return;
+        for (auto& g : m_Groups)
+            std::erase_if(g.Nodes, [&](NodeId n) { return gone.contains(n); });
+    }
+
+    Group* NodeGraphModel::GetGroup(GroupId id) {
+        for (auto& g : m_Groups) if (g.Id == id) return &g;
+        return nullptr;
+    }
+
+    const Group* NodeGraphModel::GetGroup(GroupId id) const {
+        for (const auto& g : m_Groups) if (g.Id == id) return &g;
+        return nullptr;
+    }
+
+    GroupId NodeGraphModel::GroupOf(NodeId node) const {
+        auto it = m_GroupOf.find(node);
+        return it == m_GroupOf.end() ? InvalidGroup : it->second;
+    }
+
+    bool NodeGraphModel::IsHidden(NodeId node) const {
+        if (m_GroupOf.empty()) return false;
+        const Group* g = GetGroup(GroupOf(node));
+        return g && g->Collapsed;
+    }
+
+    Rect NodeGraphModel::GetGroupBox(const Group& g) const {
+        Rect r{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
+        for (NodeId id : g.Nodes)
+            if (const Node* n = GetNode(id)) {
+                r.Left = (std::min)(r.Left, n->X - n->Width * 0.5f);
+                r.Top = (std::min)(r.Top, n->Y - n->Height * 0.5f);
+                r.Right = (std::max)(r.Right, n->X + n->Width * 0.5f);
+                r.Bottom = (std::max)(r.Bottom, n->Y + n->Height * 0.5f);
+            }
+        if (r.Left > r.Right) return {};
+        if (g.Collapsed) {
+            const float cx = (r.Left + r.Right) * 0.5f, cy = (r.Top + r.Bottom) * 0.5f;
+            return { cx - k_CollapsedWidth * 0.5f, cy - k_CollapsedHeight * 0.5f, cx + k_CollapsedWidth * 0.5f, cy + k_CollapsedHeight * 0.5f };
+        }
+        return { r.Left - k_GroupPadding, r.Top - k_GroupPadding - k_GroupHeader, r.Right + k_GroupPadding, r.Bottom + k_GroupPadding };
+    }
+
+    Rect NodeGraphModel::GetGroupHeader(const Group& g) const {
+        Rect box = GetGroupBox(g);
+        if (!box.IsEmpty() && !g.Collapsed)
+            box.Bottom = box.Top + k_GroupHeader;
+        return box;
+    }
+
+    Rect NodeGraphModel::GetGroupButton(const Group& g) const {
+        const Rect header = GetGroupHeader(g);
+        if (header.IsEmpty()) return {};
+        // at the right of the title band (of a collapsed box: of its top band's height)
+        const float top = header.Top + (k_GroupHeader - k_GroupButton) * 0.5f, right = header.Right - 6.0f;
+        return { right - k_GroupButton, top, right, top + k_GroupButton };
+    }
+
+    Node NodeGraphModel::CollapsedNode(const Group& g) const {
+        const Rect box = GetGroupBox(g);
+        Node n;
+        n.Id = InvalidNode;
+        n.X = (box.Left + box.Right) * 0.5f;
+        n.Y = (box.Top + box.Bottom) * 0.5f;
+        n.Width = box.Width();
+        n.Height = box.Height();
+        n.Label = g.Title;
+        return n;
     }
 
     // ---- NodeGraphModel: search ---------------------------------------------------------

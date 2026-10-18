@@ -61,10 +61,11 @@ struct NODEGRAPHTOOLTIPNOTIFY {
 
 struct NODEGRAPHCONTEXTMENUNOTIFY {
     NMHDR   Hdr;
-    NodeId  NodeId;     // what the menu is for: a node, an edge, or neither (the canvas)
+    NodeId  NodeId;     // what the menu is for: a node, an edge, a group (its title band or collapsed box), or none (the canvas)
     EdgeId  EdgeId;
     POINT   ScreenPt;   // where to show the menu (for the keyboard: the middle of the node or edge, or of the view)
     BOOL    Keyboard;   // asked for with the keyboard
+    GroupId GroupId;    // (its nodes are selected)
 };
 
 struct NODEGRAPHLABELNOTIFY {
@@ -225,6 +226,14 @@ public:
     bool  GetAlignmentGuides() const;
     void  SetGridSize(float size);   // graph units, 40 by default
     float GetGridSize() const;
+
+    // Groups (NodeGraphModel::AddGroup): of the selected nodes (taken out of the groups they were in), or none any more;
+    // both can be undone. Collapsing is how the graph is looked at, not an edit: it isn't undone. A click on a group's
+    // title band selects its nodes and drags them, on its button collapses or expands it; so does a double click.
+    GroupId GroupSelection(const std::wstring& title);
+    void    Ungroup(GroupId id);
+    void    SetGroupCollapsed(GroupId id, bool collapsed);
+    GroupId GroupFromPoint(POINT pt) const;     // client coordinates: a group's title band or collapsed box
 
     // The selected nodes lined up on the first one's side or center, or (at least 3) spread so that the gaps between
     // them are the same, the outermost staying. One undo step each.

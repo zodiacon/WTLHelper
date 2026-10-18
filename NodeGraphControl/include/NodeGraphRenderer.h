@@ -137,6 +137,10 @@ public:
     NodeId HitTestNode(const NodeGraphModel& model, float gx, float gy) const;
     EdgeId HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance = 5.0f) const;
 
+    // The group whose header (the title band, or all of a collapsed box) is at a point in graph space; onButton: on its
+    // collapse button. InvalidGroup if none.
+    GroupId HitTestGroup(const NodeGraphModel& model, float gx, float gy, bool* onButton = nullptr) const;
+
     // Resize handle hit test in screen space. Returns None if no handle is hit.
     ResizeHandle HitTestResizeHandle(const Node& n, const ViewTransform& vt,
                                      float sx, float sy) const;
@@ -228,6 +232,11 @@ private:
     std::vector<GuideLine> m_Guides;
     bool  m_Plain = false;      // this frame is drawn plain
     void DrawNodePlain(const Node& n, const ViewTransform& vt, bool selected);
+    // the collapsed groups' boxes as nodes (the ends of the edges to their nodes), made for each frame
+    std::unordered_map<GroupId, Node> m_Collapsed;
+    const Node* EdgeEnd(const NodeGraphModel& model, NodeId id) const;
+    void DrawGroup(const NodeGraphModel& model, const Group& g, const ViewTransform& vt, bool selected);
+    void DrawGroupText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt);
     void DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis);
     bool     m_Exporting = false;
     uint32_t m_DeviceGeneration = 0;    // of the current render target, unique in the process

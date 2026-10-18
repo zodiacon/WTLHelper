@@ -18,13 +18,15 @@ namespace NodeGraphCtrl::Serialization {
     // version 3 adds images, a node's content and its ScaleLabel and OwnerDraw styles (and its Shape, in bits of the
     // same flags: version 3 readers take it for a rectangle);
     // version 4 adds the UserData of nodes and edges (as their serializer makes it; empty without one);
-    // version 5 adds an edge's line, arrowhead, Curved and ScaleLabel
-    constexpr uint32_t Version = 5;
+    // version 5 adds an edge's line, arrowhead, Curved and ScaleLabel;
+    // version 6 adds the groups (after the edges) and the next group id (after the next image id)
+    constexpr uint32_t Version = 6;
 
     // the fewest bytes a record takes (its first version, empty strings and data): to cap counts read from the input
     constexpr size_t MinImageRecord = 4 * 4 + 1;                    // id, width, height, data size, a byte of data
     constexpr size_t MinNodeRecord  = 4 + 4 * 4 + 3 * 4 + 2 * 4 + 4; // id, place and size, colors, border, label size
     constexpr size_t MinEdgeRecord  = 3 * 4 + 4 + 4 + 4 + 4;         // id, from, to, color, width, directed, label size
+    constexpr size_t MinGroupRecord = 4 + 4 + 1 + 3 * 4 + 4;         // id, title size, flags, colors, node count
 
     struct Writer {
         std::vector<uint8_t> Data;
@@ -83,6 +85,8 @@ namespace NodeGraphCtrl::Serialization {
     bool ReadNode(Reader& r, Node& n, uint32_t version, IUserDataSerializer* serializer);
     void WriteEdge(Writer& w, const Edge& e, IUserDataSerializer* serializer);
     bool ReadEdge(Reader& r, Edge& e, uint32_t version, IUserDataSerializer* serializer);
+    void WriteGroup(Writer& w, const Group& g);
+    bool ReadGroup(Reader& r, Group& g);
     void WriteImage(Writer& w, const Image& image);     // the id, the size and the encoded bytes (not the key)
     bool ReadImage(Reader& r, Image& image);
 

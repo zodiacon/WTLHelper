@@ -81,12 +81,18 @@ namespace NodeGraphCtrl {
 		struct DeleteSelectionCmd : UndoCmd {
 			std::vector<Node> Nodes;
 			std::vector<Edge> Edges;
+			std::vector<std::pair<NodeId, GroupId>> Groups;		// the groups the nodes were in
 			void Apply(NodeGraphModel& m) override {
-				m.RemoveNodes(NodeIds(Nodes));	// Edges are theirs: they go with them
+				m.RemoveNodes(NodeIds(Nodes));	// Edges are theirs: they go with them (and the nodes out of their groups)
 			}
 			void Revert(NodeGraphModel& m) override {
 				for (const auto& n : Nodes) m.RestoreNode(n);
 				for (const auto& e : Edges) m.RestoreEdge(e);
+				for (const auto& [n, g] : Groups) m.AddToGroup(g, n);
+			}
+			void Capture(const NodeGraphModel& m) {
+				for (const auto& n : Nodes)
+					if (GroupId g = m.GroupOf(n.Id); g != InvalidGroup) Groups.push_back({ n.Id, g });
 			}
 			void CollectImages(std::vector<ImageId>& images) const override {
 				CollectNodeImages(Nodes, images);
@@ -154,6 +160,20 @@ namespace NodeGraphCtrl {
 				for (size_t i = 0; i < Ids.size(); i++)
 					if (Node* n = m.GetNode(Ids[i])) { n->X = at[i].X; n->Y = at[i].Y; }
 			}
+		};
+
+		// a group made (Create) or removed; the groups its nodes were in before it was made
+		struct GroupCmd : UndoCmd {
+			Group G;
+			bool  Create = true;
+			std::vector<std::pair<NodeId, GroupId>> Before;
+			void Make(NodeGraphModel& m) { m.RestoreGroup(G); }
+			void Unmake(NodeGraphModel& m) {
+				m.RemoveGroup(G.Id);
+				for (const auto& [n, g] : Before) m.AddToGroup(g, n);
+			}
+			void Apply(NodeGraphModel& m) override { if (Create) Make(m); else m.RemoveGroup(G.Id); }
+			void Revert(NodeGraphModel& m) override { if (Create) Unmake(m); else m.RestoreGroup(G); }
 		};
 
 		struct PasteCmd : UndoCmd {
@@ -571,6 +591,7 @@ namespace NodeGraphCtrl {
 		cmd->Nodes.push_back(*n);
 		for (const auto& e : m_Model->Edges())
 			if (e.From == id || e.To == id) cmd->Edges.push_back(e);
+		cmd->Capture(*m_Model);
 
 		if (!m_Model->RemoveNode(id)) return false;
 
@@ -620,6 +641,7 @@ namespace NodeGraphCtrl {
 			for (const auto& e : m_Model->Edges())
 				if (selected.contains(e.From) || selected.contains(e.To))
 					cmd->Edges.push_back(e);
+			cmd->Capture(*m_Model);
 
 			// told about each while it is still there, then all removed at once
 			const std::vector<NodeId> removed = m_SelectedNodes;
@@ -882,10 +904,19 @@ namespace NodeGraphCtrl {
 
 		m_SelectedNodes.clear();
 		m_SelectedEdge = InvalidEdge;
-		for (const auto& n : m_Model->Nodes()) {
-			auto sc = m_Vt.ToScreen(n.X, n.Y);
-			if (sc.x >= sx0 && sc.x <= sx1 && sc.y >= sy0 && sc.y <= sy1)
+		auto inBand = [&](float gx, float gy) {
+			auto sc = m_Vt.ToScreen(gx, gy);
+			return sc.x >= sx0 && sc.x <= sx1 && sc.y >= sy0 && sc.y <= sy1;
+		};
+		for (const auto& n : m_Model->Nodes())
+			if (!m_Model->IsHidden(n.Id) && inBand(n.X, n.Y))
 				m_SelectedNodes.push_back(n.Id);
+		// a collapsed group stands for its nodes
+		for (const auto& g : m_Model->Groups()) {
+			if (!g.Collapsed) continue;
+			const Rect box = m_Model->GetGroupBox(g);
+			if (!box.IsEmpty() && inBand((box.Left + box.Right) * 0.5f, (box.Top + box.Bottom) * 0.5f))
+				m_SelectedNodes.insert(m_SelectedNodes.end(), g.Nodes.begin(), g.Nodes.end());
 		}
 		FireSelChanged();
 	}
@@ -1206,6 +1237,37 @@ namespace NodeGraphCtrl {
 
 		bool shiftHeld = (nFlags & MK_SHIFT) != 0;
 
+		// a group's collapsed box (in front of the nodes) or title band (where no node is): its button collapses or
+		// expands it; elsewhere its nodes are selected and dragged
+		bool onButton = false;
+		const GroupId hitGroup = m_Renderer.HitTestGroup(*m_Model, gp.x, gp.y, &onButton);
+		if (const Group* group = m_Model->GetGroup(hitGroup); group && (group->Collapsed || hitNode == InvalidNode)) {
+			if (onButton) {
+				SetGroupCollapsed(hitGroup, !group->Collapsed);
+				return;
+			}
+			const std::vector<NodeId> members = group->Nodes;
+			if (!shiftHeld)
+				m_SelectedNodes.clear();
+			for (NodeId n : members)
+				if (!IsSelected(n)) m_SelectedNodes.push_back(n);
+			m_SelectedEdge = InvalidEdge;
+			FireSelChanged();
+
+			const Node* primary = m_Model->GetNode(members[0]);
+			m_DraggingNode = true;
+			m_DragPrimaryId = members[0];
+			m_DragOrigins.clear();
+			m_DragOrigins.reserve(m_SelectedNodes.size());
+			for (NodeId nid : m_SelectedNodes)
+				if (const Node* n = m_Model->GetNode(nid)) m_DragOrigins.push_back({ nid, n->X, n->Y });
+			m_DragOffsetX = gp.x - primary->X;
+			m_DragOffsetY = gp.y - primary->Y;
+			SetCapture();
+			Invalidate(FALSE);
+			return;
+		}
+
 		// the parent may take the click (a button drawn on the node): then it doesn't select or drag
 		if (hitNode != InvalidNode && Notify(NGCN_NODECLICK, hitNode, InvalidEdge, &gp))
 			return;
@@ -1279,6 +1341,12 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::OnLButtonDblClk(UINT /*nFlags*/, CPoint pt) {
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hitNode = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
+		// on a group's collapsed box or title band: collapsed or expanded (on its button: as its second click)
+		const GroupId hitGroup = m_Renderer.HitTestGroup(*m_Model, gp.x, gp.y);
+		if (const Group* group = m_Model->GetGroup(hitGroup); group && (group->Collapsed || hitNode == InvalidNode)) {
+			SetGroupCollapsed(hitGroup, !group->Collapsed);
+			return;
+		}
 		if (hitNode == InvalidNode)
 			return;
 		// the parent may take the double click; if not, in an editable graph the label is edited
@@ -1584,8 +1652,8 @@ namespace NodeGraphCtrl {
 					const Node* f = m_Model->GetNode(e->From);
 					const Node* t = m_Model->GetNode(e->To);
 					if (!(f && f->Style.Code) && !(t && t->Style.Code))
-						swprintf_s(m_TooltipBuf, L"%s → %s",
-							f ? f->Label.c_str() : L"?",
+						swprintf_s(m_TooltipBuf, L"%s %c %s",	// an arrow (as a number: the source isn't read as UTF-8)
+							f ? f->Label.c_str() : L"?", (wchar_t)0x2192,
 							t ? t->Label.c_str() : L"?");
 				}
 			}
@@ -1712,6 +1780,7 @@ namespace NodeGraphCtrl {
 		cm.Hdr.code = NGCN_CONTEXTMENU;
 		cm.NodeId = InvalidNode;
 		cm.EdgeId = InvalidEdge;
+		cm.GroupId = InvalidGroup;
 		cm.Keyboard = pt.x == -1 && pt.y == -1;
 
 		RECT rc;
@@ -1745,11 +1814,19 @@ namespace NodeGraphCtrl {
 			if (!IsOnMinimap(mmcfg, client.x, client.y)) {	// the minimap is in front of the graph: there it's the canvas
 				auto gp = m_Vt.ToGraph((float)client.x, (float)client.y);
 				cm.NodeId = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
-				if (cm.NodeId == InvalidNode)
+				// a group's collapsed box (in front of the nodes) or title band (where no node is)
+				const GroupId g = m_Renderer.HitTestGroup(*m_Model, gp.x, gp.y);
+				if (const Group* group = m_Model->GetGroup(g); group && (group->Collapsed || cm.NodeId == InvalidNode)) {
+					cm.GroupId = g;
+					cm.NodeId = InvalidNode;
+				}
+				else if (cm.NodeId == InvalidNode)
 					cm.EdgeId = m_Renderer.HitTestEdge(*m_Model, gp.x, gp.y);
 			}
-			// what the menu is for is selected (a node in the selection keeps the others)
-			if (cm.NodeId != InvalidNode && !IsSelected(cm.NodeId))
+			// what the menu is for is selected (a node in the selection keeps the others; a group, its nodes)
+			if (const Group* group = m_Model->GetGroup(cm.GroupId))
+				SelectNodes(group->Nodes);
+			else if (cm.NodeId != InvalidNode && !IsSelected(cm.NodeId))
 				SelectNode(cm.NodeId);
 			else if (cm.EdgeId != InvalidEdge && cm.EdgeId != m_SelectedEdge)
 				SelectEdge(cm.EdgeId);
@@ -1865,6 +1942,45 @@ namespace NodeGraphCtrl {
 		return m_Model->RemoveUnusedImages(keep);
 	}
 
+	// ---- Groups -----------------------------------------------------------------------
+
+	GroupId CNodeGraphControl::GroupSelection(const std::wstring& title) {
+		if (m_SelectedNodes.empty()) return InvalidGroup;
+		auto cmd = std::make_unique<GroupCmd>();
+		for (NodeId n : m_SelectedNodes)
+			if (GroupId g = m_Model->GroupOf(n); g != InvalidGroup) cmd->Before.push_back({ n, g });
+		const GroupId id = m_Model->AddGroup(title, m_SelectedNodes);
+		cmd->G = *m_Model->GetGroup(id);
+		PushUndo(std::move(cmd));
+		RequestInvalidate();
+		return id;
+	}
+
+	void CNodeGraphControl::Ungroup(GroupId id) {
+		const Group* g = m_Model->GetGroup(id);
+		if (!g) return;
+		auto cmd = std::make_unique<GroupCmd>();
+		cmd->G = *g;
+		cmd->Create = false;
+		m_Model->RemoveGroup(id);
+		PushUndo(std::move(cmd));
+		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::SetGroupCollapsed(GroupId id, bool collapsed) {
+		Group* g = m_Model->GetGroup(id);
+		if (!g || g->Collapsed == collapsed) return;
+		g->Collapsed = collapsed;
+		if (m_LabelEdit && m_Model->IsHidden(m_EditNodeId))
+			CancelLabelEdit();
+		RequestInvalidate();
+	}
+
+	GroupId CNodeGraphControl::GroupFromPoint(POINT pt) const {
+		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
+		return m_Renderer.HitTestGroup(*m_Model, gp.x, gp.y);
+	}
+
 	// ---- Snapping, alignment --------------------------------------------------------
 
 	void CNodeGraphControl::SetSnapToGrid(bool snap) { m_SnapToGrid = snap; }
@@ -1908,7 +2024,7 @@ namespace NodeGraphCtrl {
 				GuideLine guide{};
 				bool found = false;
 				for (const auto& n : m_Model->Nodes()) {
-					if (moving.contains(n.Id)) continue;
+					if (moving.contains(n.Id) || m_Model->IsHidden(n.Id)) continue;
 					const float c = x ? n.X : n.Y, half = (x ? n.Width : n.Height) * 0.5f;
 					const float other = x ? n.Y : n.X, otherHalf = (x ? n.Height : n.Width) * 0.5f;
 					const float theirs[3] = { c - half, c, c + half };
@@ -2056,6 +2172,8 @@ namespace NodeGraphCtrl {
 			for (NodeId id : found)
 				if (at == SIZE_MAX || index(id) > at) { next = id; break; }
 		}
+		if (m_Model->IsHidden(next))		// found in a collapsed group: shown
+			SetGroupCollapsed(m_Model->GroupOf(next), false);
 		SelectNode(next);
 		EnsureVisible(next);
 		return true;
@@ -2354,11 +2472,16 @@ namespace NodeGraphCtrl {
 		const auto& nodes = m_Model->Nodes();
 		if (nodes.empty()) return;
 		const Node* current = m_Model->GetNode(GetSelectedNode());
-		size_t index = backwards ? nodes.size() - 1 : 0;
+		const size_t count = nodes.size();
+		size_t index = backwards ? count - 1 : 0;
 		if (current) {
 			size_t at = current - nodes.data();
-			index = backwards ? (at + nodes.size() - 1) % nodes.size() : (at + 1) % nodes.size();
+			index = backwards ? (at + count - 1) % count : (at + 1) % count;
 		}
+		// past the nodes in collapsed groups
+		for (size_t tries = 0; tries < count && m_Model->IsHidden(nodes[index].Id); tries++)
+			index = backwards ? (index + count - 1) % count : (index + 1) % count;
+		if (m_Model->IsHidden(nodes[index].Id)) return;
 		SelectNode(nodes[index].Id);
 		EnsureVisible(nodes[index].Id);
 	}
@@ -2644,6 +2767,7 @@ namespace NodeGraphCtrl {
 	bool NodeGraphModel::RemoveNode(NodeId id) {
 		const Node* n = FindNode(id);
 		if (!n) return false;
+		RemoveFromGroup(id);
 		m_Nodes.erase(m_Nodes.begin() + (n - m_Nodes.data()));
 		NodesChanged();
 		if (std::erase_if(m_Edges, [id](const Edge& e) { return e.From == id || e.To == id; }))
@@ -2657,6 +2781,7 @@ namespace NodeGraphCtrl {
 		const size_t removed = std::erase_if(m_Nodes, [&](const Node& n) { return gone.contains(n.Id); });
 		if (!removed) return 0;
 		NodesChanged();
+		ForgetMembers(ids);
 		if (std::erase_if(m_Edges, [&](const Edge& e) { return gone.contains(e.From) || gone.contains(e.To); }))
 			EdgesChanged();
 		return removed;
@@ -2759,6 +2884,12 @@ namespace NodeGraphCtrl {
 				extend(x + labelWidth * 0.5f, y + labelHeight * 0.5f);
 			}
 		}
+		for (const auto& g : m_Groups) {
+			const Rect box = GetGroupBox(g);
+			if (box.IsEmpty()) continue;
+			extend(box.Left, box.Top);
+			extend(box.Right, box.Bottom);
+		}
 		return r;
 	}
 
@@ -2768,9 +2899,12 @@ namespace NodeGraphCtrl {
 		NodesChanged();
 		EdgesChanged();
 		m_Images.clear();
+		m_Groups.clear();
+		m_GroupOf.clear();
 		m_NextNodeId = 0;
 		m_NextEdgeId = 0;
 		m_NextImageId = 0;
+		m_NextGroupId = 0;
 		Reset();
 	}
 
@@ -2860,6 +2994,50 @@ namespace NodeGraphCtrl {
 			}
 		}
 
+		// Titles as long as fit a width, in the font the renderer has for them (Segoe UI semibold, 12): longer ones cut,
+		// ending in an ellipsis, as DirectWrite trims them on the screen. Made when first needed.
+		class TitleFitter {
+		public:
+			std::wstring Fit(const std::wstring& title, float width) {
+				if (!Ready() || Width(title) <= width)
+					return title;
+				const std::wstring ellipsis(1, (wchar_t)0x2026);	// (as a number: the source isn't read as UTF-8)
+				size_t lo = 0, hi = title.size();	// the longest beginning that fits with the ellipsis: lo
+				while (lo < hi) {
+					const size_t mid = (lo + hi + 1) / 2;
+					if (Width(title.substr(0, mid) + ellipsis) <= width) lo = mid;
+					else hi = mid - 1;
+				}
+				if (lo > 0 && IS_HIGH_SURROGATE(title[lo - 1])) lo--;		// not half a character
+				while (lo > 0 && title[lo - 1] == L' ') lo--;				// "far too..." rather than "far too ..."
+				if (lo == 0 && Width(ellipsis) > width) return {};
+				return title.substr(0, lo) + ellipsis;
+			}
+
+		private:
+			ComPtr<IDWriteFactory> m_Factory;
+			ComPtr<IDWriteTextFormat> m_Format;
+			bool m_Tried = false;
+
+			bool Ready() {
+				if (!m_Tried) {
+					m_Tried = true;
+					if (SUCCEEDED(::DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(m_Factory.GetAddressOf()))))
+						m_Factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+							DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-US", m_Format.GetAddressOf());
+				}
+				return m_Format != nullptr;
+			}
+			float Width(const std::wstring& s) {
+				ComPtr<IDWriteTextLayout> layout;
+				DWRITE_TEXT_METRICS metrics{};
+				if (FAILED(m_Factory->CreateTextLayout(s.c_str(), (UINT32)s.size(), m_Format.Get(), 1e6f, 100.0f, layout.GetAddressOf())) ||
+					FAILED(layout->GetMetrics(&metrics)))
+					return 0;
+				return metrics.widthIncludingTrailingWhitespace;
+			}
+		};
+
 		// The SVG element of a node's shape, with these attributes (fill, stroke).
 		std::string ShapeElement(const Node& n, const std::string& attributes) {
 			const float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
@@ -2948,6 +3126,8 @@ namespace NodeGraphCtrl {
 		std::vector<ImageId> used;
 		used.reserve(m_Nodes.size() * 2);
 		for (size_t i = 0; i < m_Nodes.size(); i++) {
+			if (IsHidden(m_Nodes[i].Id))	// in a collapsed group: not written
+				continue;
 			if (picture)
 				pictures[i] = picture(m_Nodes[i]);
 			if (!pictures[i].Png.empty())
@@ -2973,8 +3153,56 @@ namespace NodeGraphCtrl {
 			svg += "</defs>\n";
 		}
 		auto isWritten = [&](ImageId id) { return std::find(written.begin(), written.end(), id) != written.end(); };
+		TitleFitter titles;
 
 		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"" + Hex(background) + "\"/>\n";
+
+		// the groups: a collapsed one stands as a node for its nodes (and is written with the nodes); an expanded one is
+		// behind everything, as the renderer draws them
+		std::unordered_map<GroupId, Node> collapsed;
+		for (const auto& g : m_Groups)
+			if (g.Collapsed && !g.Nodes.empty())
+				collapsed.emplace(g.Id, CollapsedNode(g));
+		auto edgeEnd = [&](NodeId id) -> const Node* {
+			if (!collapsed.empty())
+				if (auto it = collapsed.find(GroupOf(id)); it != collapsed.end()) return &it->second;
+			return GetNode(id);
+		};
+		auto writeGroup = [&](const Group& g) {
+			const Rect box = GetGroupBox(g);
+			if (box.IsEmpty()) return;
+			const Rect header = GetGroupHeader(g), button = GetGroupButton(g);
+			const std::string rect = "x=\"" + Num(box.Left) + "\" y=\"" + Num(box.Top) + "\" width=\"" + Num(box.Width()) + "\" height=\"" + Num(box.Height()) + "\" rx=\"8\"";
+			if (g.Collapsed)
+				svg += "<rect " + rect + " fill=\"" + Hex(g.FillColor) + "\"/>\n";
+			else {
+				svg += "<rect " + rect + " fill=\"" + Hex(g.FillColor) + "\" fill-opacity=\"0.18\"/>\n";
+				svg += "<path d=\"" + BandPath(header.Left, header.Top, header.Width(), header.Height(), 8, false) + "\" fill=\"" + Hex(g.FillColor) + "\" fill-opacity=\"0.8\"/>\n";
+			}
+			svg += "<rect " + rect + " fill=\"none\" stroke=\"" + Hex(g.BorderColor) + "\" stroke-width=\"1.5\"/>\n";
+			// the button: a minus, a plus when collapsed
+			const std::string ink = "stroke=\"" + Hex(g.TextColor) + "\"";
+			const float cx = (button.Left + button.Right) * 0.5f, cy = (button.Top + button.Bottom) * 0.5f, arm = button.Width() * 0.3f;
+			svg += "<rect x=\"" + Num(button.Left) + "\" y=\"" + Num(button.Top) + "\" width=\"" + Num(button.Width()) + "\" height=\"" + Num(button.Height()) +
+				"\" fill=\"none\" " + ink + " stroke-width=\"1\"/>\n";
+			svg += "<path d=\"M" + Num(cx - arm) + " " + Num(cy) + " L" + Num(cx + arm) + " " + Num(cy) +
+				(g.Collapsed ? " M" + Num(cx) + " " + Num(cy - arm) + " L" + Num(cx) + " " + Num(cy + arm) : std::string()) + "\" " + ink + " stroke-width=\"1.5\"/>\n";
+			// the title: a collapsed one with how many nodes it has, in the middle of the box
+			const std::string fill = "fill=\"" + Hex(g.TextColor) + "\"";
+			const float textLeft = header.Left + 8, width = std::max(button.Left - 4 - textLeft, 0.0f);
+			if (g.Collapsed) {
+				const std::wstring text = g.Title + L" (" + std::to_wstring(g.Nodes.size()) + L")";
+				svg += "<svg x=\"" + Num(textLeft) + "\" y=\"" + Num(box.Top) + "\" width=\"" + Num(width) + "\" height=\"" + Num(box.Height()) + "\"><text " + fill +
+					" x=\"" + Num(width * 0.5f) + "\" y=\"" + Num(box.Height() * 0.5f) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
+					XmlEscape(Utf8(text)) + "</text></svg>\n";
+			}
+			else
+				svg += "<svg x=\"" + Num(textLeft) + "\" y=\"" + Num(header.Top) + "\" width=\"" + Num(width) + "\" height=\"" + Num(header.Height()) + "\"><text " + fill +
+					" x=\"0\" y=\"" + Num(header.Height() * 0.5f) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"12\" font-weight=\"600\" dominant-baseline=\"central\">" +
+					XmlEscape(Utf8(titles.Fit(g.Title, width))) + "</text></svg>\n";
+		};
+		for (const auto& g : m_Groups)
+			if (!g.Collapsed) writeGroup(g);
 
 		// edges first, so that the nodes are on top; as the renderer draws them (EdgePath), at the zoom of 1
 		std::unordered_set<uint64_t> pairs;
@@ -2982,9 +3210,10 @@ namespace NodeGraphCtrl {
 		for (const auto& e : m_Edges)
 			pairs.insert((uint64_t)e.From << 32 | e.To);
 		for (const auto& e : m_Edges) {
-			const Node* from = GetNode(e.From);
-			const Node* to = GetNode(e.To);
+			const Node* from = edgeEnd(e.From);
+			const Node* to = edgeEnd(e.To);
 			if (!from || !to) continue;
+			if (from == to && IsHidden(e.From)) continue;	// inside a collapsed group
 			const std::string color = Hex(e.Style.Color);
 			const std::string stroke = "fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(e.Style.Width) + "\" stroke-linejoin=\"round\"" + DashArray(e.Style);
 
@@ -3035,6 +3264,7 @@ namespace NodeGraphCtrl {
 		// the parts of the nodes as the renderer draws them (the layout is in the node's units: moved to its top-left corner)
 		for (size_t i = 0; i < m_Nodes.size(); i++) {
 			const Node& n = m_Nodes[i];
+			if (IsHidden(n.Id)) continue;
 			const float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
 			auto at = [&](const Rect& r) { return Rect{ left + r.Left, top + r.Top, left + r.Right, top + r.Bottom }; };
 
@@ -3049,70 +3279,77 @@ namespace NodeGraphCtrl {
 			const bool rectangle = n.Style.Shape == NodeShape::Rectangle;
 			svg += ShapeElement(n, "fill=\"" + Hex(n.Style.FillColor) + "\"") + "\n";
 
-			// what fills the node is clipped to a shape other than the rectangle
-			const bool clip = !rectangle && (!layout.Title.IsEmpty() || (!layout.Image.IsEmpty() && isWritten(c.Image)));
-			if (clip) {
-				const std::string id = "shape" + std::to_string(n.Id);
-				svg += "<clipPath id=\"" + id + "\">" + ShapeElement(n, "") + "</clipPath>\n<g clip-path=\"url(#" + id + ")\">\n";
-			}
+			// as the renderer: the inside (title band, image) and the text (icon, title, label) in the clip of a shape other
+			// than the rectangle, then the border over them; a rectangle has its border before the text
+			std::string inside, text;
 			if (!layout.Title.IsEmpty()) {
 				Rect t = at(layout.Title);
 				COLORREF fill = c.TitleFill != CLR_INVALID ? c.TitleFill
 					: RGB(GetRValue(n.Style.FillColor) * 0.72f, GetGValue(n.Style.FillColor) * 0.72f, GetBValue(n.Style.FillColor) * 0.72f);
 				if (rectangle)
-					svg += "<path d=\"" + BandPath(t.Left, t.Top, t.Width(), t.Height(), n.Style.CornerRadius, layout.Content.IsEmpty()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
+					inside += "<path d=\"" + BandPath(t.Left, t.Top, t.Width(), t.Height(), n.Style.CornerRadius, layout.Content.IsEmpty()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
 				else
-					svg += "<rect x=\"" + Num(t.Left) + "\" y=\"" + Num(t.Top) + "\" width=\"" + Num(t.Width()) + "\" height=\"" + Num(t.Height()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
+					inside += "<rect x=\"" + Num(t.Left) + "\" y=\"" + Num(t.Top) + "\" width=\"" + Num(t.Width()) + "\" height=\"" + Num(t.Height()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
 			}
 			if (!layout.Image.IsEmpty() && isWritten(c.Image))
-				svg += PlaceImage(c.Image, at(layout.Image), layout.ImageSource);
+				inside += PlaceImage(c.Image, at(layout.Image), layout.ImageSource);
 			if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
 				Rect b = at(layout.Label);
-				svg += "<rect x=\"" + Num(b.Left) + "\" y=\"" + Num(b.Top) + "\" width=\"" + Num(b.Width()) + "\" height=\"" + Num(b.Height()) + "\" fill=\"#000000\" fill-opacity=\"0.5\"/>\n";
+				inside += "<rect x=\"" + Num(b.Left) + "\" y=\"" + Num(b.Top) + "\" width=\"" + Num(b.Width()) + "\" height=\"" + Num(b.Height()) + "\" fill=\"#000000\" fill-opacity=\"0.5\"/>\n";
 			}
-			if (clip)
-				svg += "</g>\n";
-
-			svg += ShapeElement(n, "fill=\"none\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"") + "\n";
 
 			if (!layout.Icon.IsEmpty() && isWritten(c.Icon)) {
 				const Image* icon = GetImage(c.Icon);
-				svg += PlaceImage(c.Icon, at(layout.Icon), Rect{ 0, 0, (float)icon->Width, (float)icon->Height });
+				text += PlaceImage(c.Icon, at(layout.Icon), Rect{ 0, 0, (float)icon->Width, (float)icon->Height });
 			}
-
-			std::string text = "fill=\"" + Hex(n.Style.TextColor) + "\"";
+			const std::string color = "fill=\"" + Hex(n.Style.TextColor) + "\"";
 			if (!layout.Title.IsEmpty()) {
-				// a nested viewport clips the title to its band
+				// a nested viewport clips the title to its band; too long, it ends in an ellipsis as on the screen
 				Rect t = at(layout.Title);
-				svg += "<svg x=\"" + Num(t.Left + 8) + "\" y=\"" + Num(t.Top) + "\" width=\"" + Num(std::max(t.Width() - 16, 0.0f)) + "\" height=\"" + Num(t.Height()) + "\">" +
-					"<text " + text + " x=\"0\" y=\"" + Num(t.Height() * 0.5f) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"12\" font-weight=\"600\" dominant-baseline=\"central\">" +
-					XmlEscape(Utf8(c.Title)) + "</text></svg>\n";
+				const float width = std::max(t.Width() - 16, 0.0f);
+				text += "<svg x=\"" + Num(t.Left + 8) + "\" y=\"" + Num(t.Top) + "\" width=\"" + Num(width) + "\" height=\"" + Num(t.Height()) + "\">" +
+					"<text " + color + " x=\"0\" y=\"" + Num(t.Height() * 0.5f) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"12\" font-weight=\"600\" dominant-baseline=\"central\">" +
+					XmlEscape(Utf8(titles.Fit(c.Title, width))) + "</text></svg>\n";
 			}
+			if (!n.Label.empty() && !layout.Label.IsEmpty()) {
+				Rect l = at(layout.Label);
+				if (n.Style.Code) {
+					text += "<text xml:space=\"preserve\" " + color + " font-family=\"Consolas,'Cascadia Mono',monospace\" font-size=\"12\">";
+					float y = l.Top + 4.5f + 12.0f;
+					for (const auto& line : SplitLines(n.Label)) {
+						text += "<tspan x=\"" + Num(l.Left + 8.0f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
+						y += 14.5f;
+					}
+					text += "</text>\n";
+				}
+				else {
+					// the lines centered in the label's area, as DirectWrite does
+					const auto lines = SplitLines(n.Label);
+					const float lineHeight = 17.3f;
+					float y = (l.Top + l.Bottom) * 0.5f - (lines.size() - 1) * lineHeight * 0.5f;
+					text += "<text " + color + " font-family=\"Segoe UI,sans-serif\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"central\">";
+					for (const auto& line : lines) {
+						text += "<tspan x=\"" + Num((l.Left + l.Right) * 0.5f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
+						y += lineHeight;
+					}
+					text += "</text>\n";
+				}
+			}
+			const std::string border = ShapeElement(n, "fill=\"none\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"") + "\n";
 
-			if (n.Label.empty() || layout.Label.IsEmpty()) continue;
-			Rect l = at(layout.Label);
-			if (n.Style.Code) {
-				svg += "<text xml:space=\"preserve\" " + text + " font-family=\"Consolas,'Cascadia Mono',monospace\" font-size=\"12\">";
-				float y = l.Top + 4.5f + 12.0f;
-				for (const auto& line : SplitLines(n.Label)) {
-					svg += "<tspan x=\"" + Num(l.Left + 8.0f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
-					y += 14.5f;
-				}
-				svg += "</text>\n";
-			}
+			if (rectangle)
+				svg += inside + border + text;
 			else {
-				// the lines centered in the label's area, as DirectWrite does
-				const auto lines = SplitLines(n.Label);
-				const float lineHeight = 17.3f;
-				float y = (l.Top + l.Bottom) * 0.5f - (lines.size() - 1) * lineHeight * 0.5f;
-				svg += "<text " + text + " font-family=\"Segoe UI,sans-serif\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"central\">";
-				for (const auto& line : lines) {
-					svg += "<tspan x=\"" + Num((l.Left + l.Right) * 0.5f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
-					y += lineHeight;
+				if (!inside.empty() || !text.empty()) {
+					const std::string id = "shape" + std::to_string(n.Id);
+					svg += "<clipPath id=\"" + id + "\">" + ShapeElement(n, "") + "</clipPath>\n<g clip-path=\"url(#" + id + ")\">\n" + inside + text + "</g>\n";
 				}
-				svg += "</text>\n";
+				svg += border;
 			}
 		}
+		// the collapsed groups, with the nodes (in front of the edges to them)
+		for (const auto& g : m_Groups)
+			if (g.Collapsed) writeGroup(g);
 		svg += "</svg>\n";
 
 		FILE* f = nullptr;

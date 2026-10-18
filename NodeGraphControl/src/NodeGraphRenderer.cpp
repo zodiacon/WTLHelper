@@ -310,12 +310,32 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     const bool highlight = !related.empty();
 
     std::unordered_set<NodeId> selected(selectedNodes.begin(), selectedNodes.end());
+
+    // the groups: a collapsed one stands as a node for its nodes; an expanded one is behind everything
+    m_Collapsed.clear();
+    for (const auto& g : model.Groups())
+        if (g.Collapsed && !g.Nodes.empty())
+            m_Collapsed.emplace(g.Id, model.CollapsedNode(g));
+    auto groupSelected = [&](const Group& g) {      // all of its nodes
+        return !g.Nodes.empty() && std::all_of(g.Nodes.begin(), g.Nodes.end(), [&](NodeId n) { return selected.contains(n); });
+    };
+    auto drawGroups = [&](bool collapsed) {
+        for (const auto& g : model.Groups()) {
+            if (g.Collapsed != collapsed) continue;
+            const Rect box = model.GetGroupBox(g);
+            if (!box.IsEmpty() && inView(box.Left, box.Top, box.Right, box.Bottom))
+                DrawGroup(model, g, vt, groupSelected(g));
+        }
+    };
+    drawGroups(false);
+
     auto drawEdges = [&](bool inHighlight) {
         for (const auto& e : model.Edges()) {
             if (highlight && relatedEdges.contains(e.Id) != inHighlight) continue;
-            const Node* from = model.GetNode(e.From);
-            const Node* to = model.GetNode(e.To);
+            const Node* from = EdgeEnd(model, e.From);
+            const Node* to = EdgeEnd(model, e.To);
             if (!from || !to) continue;
+            if (from == to && model.IsHidden(e.From)) continue;	// inside a collapsed group
             // the edge stays within the box of the centers of its nodes and its bends (a curve a little past it)
             float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
             float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
@@ -334,6 +354,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     auto drawNodes = [&](bool inHighlight) {
         for (const auto& n : model.Nodes()) {
             if (highlight && related.contains(n.Id) != inHighlight) continue;
+            if (!m_Collapsed.empty() && model.IsHidden(n.Id)) continue;
             if (inView(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f))
                 DrawNode(model, n, vt, selected.contains(n.Id));
         }
@@ -343,6 +364,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     if (preview.Active && !highlight)
         DrawEdgePreview(preview, model, vt);
     drawNodes(false);
+    drawGroups(true);
     if (highlight) {
         D2D1_COLOR_F veil = ColorrefToD2D(m_Background);
         veil.a = 0.65f;
@@ -423,9 +445,10 @@ void NodeGraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
 
 void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
                              const ViewTransform& vt, EdgeEmphasis emphasis) {
-    const Node* from = model.GetNode(e.From);
-    const Node* to   = model.GetNode(e.To);
+    const Node* from = EdgeEnd(model, e.From);
+    const Node* to   = EdgeEnd(model, e.To);
     if (!from || !to) return;
+    if (from == to && model.IsHidden(e.From)) return;     // inside a collapsed group
 
     if (m_Plain) {
         if (from != to)     // (a loop is a few pixels this far out)
@@ -598,6 +621,76 @@ static COLORREF Darker(COLORREF cr, float factor = 0.72f) {
     return RGB(GetRValue(cr) * factor, GetGValue(cr) * factor, GetBValue(cr) * factor);
 }
 
+// A node where an edge ends: the node, or the box of the collapsed group it is in.
+const Node* NodeGraphRenderer::EdgeEnd(const NodeGraphModel& model, NodeId id) const {
+    if (!m_Collapsed.empty()) {
+        auto it = m_Collapsed.find(model.GroupOf(id));
+        if (it != m_Collapsed.end()) return &it->second;
+    }
+    return model.GetNode(id);
+}
+
+// An expanded group: a box around its nodes (behind them and their edges), its title in a band on top, and a button to
+// collapse it. Collapsed: a box in its nodes' place with its title and how many nodes it has, and a button to expand it.
+void NodeGraphRenderer::DrawGroup(const NodeGraphModel& model, const Group& g, const ViewTransform& vt, bool selected) {
+    const Rect box = model.GetGroupBox(g);
+    auto screen = [&](const Rect& r) -> D2D1_RECT_F {
+        auto a = vt.ToScreen(r.Left, r.Top), b = vt.ToScreen(r.Right, r.Bottom);
+        return { a.x, a.y, b.x, b.y };
+    };
+    const float radius = 8.0f * vt.Scale;
+    const D2D1_ROUNDED_RECT rr{ screen(box), radius, radius };
+    const D2D1_COLOR_F fill = ColorrefToD2D(g.FillColor);
+
+    if (g.Collapsed) {
+        m_Brush->SetColor(fill);
+        m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+    }
+    else {
+        m_Brush->SetColor(D2D1::ColorF(fill.r, fill.g, fill.b, 0.18f));
+        m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+        if (!m_Plain) {
+            m_Brush->SetColor(D2D1::ColorF(fill.r, fill.g, fill.b, 0.8f));
+            FillBand(screen(model.GetGroupHeader(g)), radius, true, false);
+        }
+    }
+    m_Brush->SetColor(selected ? SelectionColor() : ColorrefToD2D(g.BorderColor));
+    m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), selected ? 2.5f : 1.5f);
+    if (m_Plain || vt.Scale < 0.3f)
+        return;
+
+    // the button: a minus to collapse, a plus to expand
+    const Rect button = model.GetGroupButton(g);
+    const D2D1_RECT_F b = screen(button);
+    m_Brush->SetColor(ColorrefToD2D(g.TextColor));
+    m_RenderTarget->DrawRectangle(b, m_Brush.Get(), 1.0f);
+    const float cx = (b.left + b.right) * 0.5f, cy = (b.top + b.bottom) * 0.5f, arm = (b.right - b.left) * 0.3f;
+    m_RenderTarget->DrawLine({ cx - arm, cy }, { cx + arm, cy }, m_Brush.Get(), 1.5f);
+    if (g.Collapsed)
+        m_RenderTarget->DrawLine({ cx, cy - arm }, { cx, cy + arm }, m_Brush.Get(), 1.5f);
+
+    if (g.Collapsed) {
+        std::wstring text = g.Title + L" (" + std::to_wstring(g.Nodes.size()) + L")";
+        DrawGroupText(text, { box.Left + 8, box.Top, button.Left - 4, box.Bottom }, m_TextFormat.Get(), g.TextColor, vt);
+    }
+    else {
+        const Rect header = model.GetGroupHeader(g);
+        DrawGroupText(g.Title, { header.Left + 8, header.Top, button.Left - 4, header.Bottom }, m_TitleTextFormat.Get(), g.TextColor, vt);
+    }
+}
+
+// Text in an area of the graph, at the zoom, clipped to it.
+void NodeGraphRenderer::DrawGroupText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt) {
+    if (area.IsEmpty() || text.empty()) return;
+    const D2D1_RECT_F rect{ area.Left, area.Top, area.Right, area.Bottom };
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(vt.OffsetX, vt.OffsetY));
+    m_RenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
+    m_Brush->SetColor(ColorrefToD2D(color));
+    m_RenderTarget->DrawTextW(text.c_str(), (UINT32)text.size(), format, rect, m_Brush.Get());
+    m_RenderTarget->PopAxisAlignedClip();
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
 // Zoomed far out: lines from center to center (through the bends); the nodes, drawn after, cover their ends.
 void NodeGraphRenderer::DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis) {
     SetEdgeBrush(e, emphasis);
@@ -651,57 +744,69 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
     const bool ownerDraw = n.Style.OwnerDraw && m_DrawHandler;
     const uint32_t flags = ownerDraw ? CallOwnerDraw(model, n, layout, rr, vt, selected, false) : NDF_DEFAULT;
 
-    // a shape other than the rounded rectangle is a geometry, and what fills the node (the title band, the image) is
-    // clipped to it
+    // a shape other than the rounded rectangle is a geometry, and what is inside the node (the title band, the image,
+    // the icon, the text) is clipped to it
     const bool rectangle = n.Style.Shape == NodeShape::Rectangle;
     ComPtr<ID2D1Geometry> outline = rectangle ? nullptr : ShapeGeometry(n.Style.Shape, rr);
-    const bool clip = outline && ((!(flags & NDF_SKIPBACKGROUND) && !layout.Title.IsEmpty()) || (!(flags & NDF_SKIPCONTENT) && !layout.Image.IsEmpty()));
     if (!(flags & NDF_SKIPBACKGROUND)) {
         m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
         if (outline) m_RenderTarget->FillGeometry(outline.Get(), m_Brush.Get());
         else m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
     }
-    if (clip) {
-        if (!m_Layer)
-            m_RenderTarget->CreateLayer(m_Layer.GetAddressOf());
-        m_RenderTarget->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), outline.Get()), m_Layer.Get());
-    }
 
-    if (!(flags & NDF_SKIPBACKGROUND) && !layout.Title.IsEmpty()) {
-        m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
-        if (rectangle) FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
-        else m_RenderTarget->FillRectangle(toScreen(layout.Title), m_Brush.Get());
-    }
-
-    if (!(flags & NDF_SKIPCONTENT)) {
-        if (!layout.Image.IsEmpty())
-            DrawImage(model, c.Image, toScreen(layout.Image), &layout.ImageSource);
-
-        // a band for the label over the bottom of the image, so that it can be read whatever the image is
-        if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
-            m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.5f));
-            m_RenderTarget->FillRectangle(toScreen(layout.Label), m_Brush.Get());
+    auto drawInside = [&] {    // the title band, the image (with the band of its label)
+        if (!(flags & NDF_SKIPBACKGROUND) && !layout.Title.IsEmpty()) {
+            m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
+            if (rectangle) FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
+            else m_RenderTarget->FillRectangle(toScreen(layout.Title), m_Brush.Get());
         }
-    }
-    if (clip)
-        m_RenderTarget->PopLayer();
+        if (!(flags & NDF_SKIPCONTENT)) {
+            if (!layout.Image.IsEmpty())
+                DrawImage(model, c.Image, toScreen(layout.Image), &layout.ImageSource);
 
-    if (!(flags & NDF_SKIPBORDER)) {
+            // a band for the label over the bottom of the image, so that it can be read whatever the image is
+            if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
+                m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.5f));
+                m_RenderTarget->FillRectangle(toScreen(layout.Label), m_Brush.Get());
+            }
+        }
+    };
+    auto drawBorder = [&] {
+        if (flags & NDF_SKIPBORDER) return;
         float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
         m_Brush->SetColor(selected
             ? SelectionColor()
             : ColorrefToD2D(n.Style.BorderColor));
         if (outline) m_RenderTarget->DrawGeometry(outline.Get(), m_Brush.Get(), borderWidth);
         else m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
-    }
-
-    if (!(flags & NDF_SKIPCONTENT)) {
+    };
+    auto drawText = [&] {      // the icon, the title's text, the label
+        if (flags & NDF_SKIPCONTENT) return;
         // an icon of a few pixels is only a smudge
         if (!layout.Icon.IsEmpty() && (std::min)(layout.Icon.Width(), layout.Icon.Height()) * vt.Scale >= k_MinIconPixels)
             DrawImage(model, c.Icon, toScreen(layout.Icon));
         if (!layout.Title.IsEmpty())
             DrawTitle(n, layout.Title, vt);
         DrawLabel(n, layout.Label, rr.rect, vt);
+    };
+
+    if (outline) {
+        // all of the inside in the shape's clip (one layer), the border over it
+        const bool inside = !layout.Title.IsEmpty() || !layout.Image.IsEmpty() || !layout.Icon.IsEmpty() || (!n.Label.empty() && !layout.Label.IsEmpty());
+        if (inside) {
+            if (!m_Layer)
+                m_RenderTarget->CreateLayer(m_Layer.GetAddressOf());
+            m_RenderTarget->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), outline.Get()), m_Layer.Get());
+            drawInside();
+            drawText();
+            m_RenderTarget->PopLayer();
+        }
+        drawBorder();
+    }
+    else {
+        drawInside();
+        drawBorder();
+        drawText();
     }
 
     if (ownerDraw && (flags & NDF_POSTPAINT))
@@ -913,9 +1018,22 @@ void NodeGraphRenderer::DrawRubberBand(const RubberBand& rb) {
 
 NodeId NodeGraphRenderer::HitTestNode(const NodeGraphModel& model, float gx, float gy) const {
     for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it)
-        if (NodeContains(*it, gx, gy))
+        if (NodeContains(*it, gx, gy) && !model.IsHidden(it->Id))
             return it->Id;
     return InvalidNode;
+}
+
+GroupId NodeGraphRenderer::HitTestGroup(const NodeGraphModel& model, float gx, float gy, bool* onButton) const {
+    auto in = [&](const Rect& r) { return !r.IsEmpty() && gx >= r.Left && gx <= r.Right && gy >= r.Top && gy <= r.Bottom; };
+    // the last drawn on top: collapsed boxes (drawn with the nodes) before the headers of expanded groups
+    for (int collapsed = 1; collapsed >= 0; collapsed--)
+        for (auto it = model.Groups().rbegin(); it != model.Groups().rend(); ++it)
+            if (it->Collapsed == (collapsed == 1) && in(model.GetGroupHeader(*it))) {
+                if (onButton) *onButton = in(model.GetGroupButton(*it));
+                return it->Id;
+            }
+    if (onButton) *onButton = false;
+    return InvalidGroup;
 }
 
 void NodeGraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
@@ -970,8 +1088,9 @@ void NodeGraphRenderer::DrawMinimap(const MinimapConfig& cfg, const RECT& client
         m_RenderTarget->DrawLine(p0, p1, m_Brush.Get(), 0.75f);
     }
 
-    // Nodes as small filled rectangles
+    // Nodes as small filled rectangles (not those in a collapsed group)
     for (const auto& n : model.Nodes()) {
+        if (model.IsHidden(n.Id)) continue;
         float hw = std::max(n.Width  * mmScale * 0.5f, 2.0f);
         float hh = std::max(n.Height * mmScale * 0.5f, 2.0f);
         float cx = originX + (n.X - gMinX) * mmScale;
@@ -1052,10 +1171,20 @@ ResizeHandle NodeGraphRenderer::HitTestResizeHandle(const Node& n, const ViewTra
 }
 
 EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance) const {
+    // an end in a collapsed group is its box (made once for each group)
+    std::unordered_map<GroupId, Node> collapsed;
+    auto end = [&](NodeId id) -> const Node* {
+        if (!model.IsHidden(id)) return model.GetNode(id);
+        const GroupId g = model.GroupOf(id);
+        auto it = collapsed.find(g);
+        if (it == collapsed.end()) it = collapsed.emplace(g, model.CollapsedNode(*model.GetGroup(g))).first;
+        return &it->second;
+    };
     for (const auto& e : model.Edges()) {
-        const Node* from = model.GetNode(e.From);
-        const Node* to   = model.GetNode(e.To);
+        const Node* from = end(e.From);
+        const Node* to   = end(e.To);
         if (!from || !to) continue;
+        if (from == to && model.IsHidden(e.From)) continue;   // inside a collapsed group
 
         // every piece of the path from one node to the other (or around the node, back to it); a curve as short lines
         std::vector<Point> path = from == to ? SelfLoopPath(*from) : EdgePath(e, *from, *to);

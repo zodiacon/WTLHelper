@@ -129,6 +129,26 @@ struct Edge {
     void*        UserData = nullptr;
 };
 
+using GroupId = uint32_t;
+constexpr GroupId InvalidGroup = UINT32_MAX;
+
+// Nodes kept together under a title: a box around them that follows them (GetGroupBox), or, collapsed, one box in their
+// middle that stands for them (the edges to them end on it, the nodes and the edges between them aren't shown). A node
+// is in one group at most; groups aren't nested.
+struct Group {
+    GroupId              Id;
+    std::wstring         Title;
+    std::vector<NodeId>  Nodes;
+    bool                 Collapsed   = false;
+    COLORREF             FillColor   = RGB(70, 90, 120);
+    COLORREF             BorderColor = RGB(110, 140, 180);
+    COLORREF             TextColor   = RGB(255, 255, 255);
+};
+
+// The sizes of a group's box, in graph units.
+constexpr float k_GroupPadding = 16.0f, k_GroupHeader = 24.0f, k_GroupButton = 14.0f;
+constexpr float k_CollapsedWidth = 160.0f, k_CollapsedHeight = 48.0f;
+
 // Where an edge between two different nodes goes, in graph units: from the outline of one through the bends to the
 // outline of the other. lane moves a straight edge to its right (an edge with one going the other way is drawn apart
 // from it). Empty if it has no length. The renderer, hit testing and SVG export all use it.
@@ -192,12 +212,32 @@ public:
     // Where the title, image, icon and label of the node go (the same for drawing, exporting and editing).
     NodeLayout GetNodeLayout(const Node& n) const;
 
+    // Groups. AddGroup takes the nodes out of the groups they were in. Removing a group leaves its nodes; removing a
+    // node takes it out of its group.
+    GroupId AddGroup(std::wstring title, const std::vector<NodeId>& nodes);
+    bool    RemoveGroup(GroupId id);
+    void    RestoreGroup(const Group& g);              // (undo: with its id, taking its nodes back)
+    bool    AddToGroup(GroupId id, NodeId node);
+    void    RemoveFromGroup(NodeId node);
+    Group*       GetGroup(GroupId id);
+    const Group* GetGroup(GroupId id) const;
+    const std::vector<Group>& Groups() const { return m_Groups; }
+    GroupId GroupOf(NodeId node) const;                // InvalidGroup if it's in none
+    bool    IsHidden(NodeId node) const;               // in a collapsed group
+    // The group's box: around its nodes with a padding and the header band (expanded), or the collapsed box in their
+    // middle. Empty if it has no nodes. The header (the title band, or all of a collapsed box) and its collapse button.
+    Rect GetGroupBox(const Group& g) const;
+    Rect GetGroupHeader(const Group& g) const;
+    Rect GetGroupButton(const Group& g) const;
+    // A node standing for a collapsed group (its box): the end of the edges to the nodes in it.
+    Node CollapsedNode(const Group& g) const;
+
     // The nodes whose label, title or tooltip has the text, in the order of the model. Not matchCase: as the user's
     // language compares it, ignoring case.
     std::vector<NodeId> FindNodes(const std::wstring& text, bool matchCase = false) const;
 
-    // What the graph covers, in graph units: the nodes, the bends of the edges, the loops of edges to their own node and
-    // the labels of the edges (the size they have at the zoom of 1). Empty without nodes.
+    // What the graph covers, in graph units: the nodes, the bends of the edges, the loops of edges to their own node,
+    // the labels of the edges (the size they have at the zoom of 1) and the boxes of the groups. Empty without nodes.
     Rect GetBounds() const;
 
     void Clear();   // the nodes, edges and images
@@ -217,10 +257,10 @@ public:
     float GetDefaultNodeHeight() const { return m_DefaultNodeHeight; }
 
     // Returns false on I/O or format error.
-    // A binary file of the images the nodes show, and of the nodes and edges with their styles, content, tooltips and
-    // waypoints, and their UserData if there is a serializer. Load also reads the earlier versions of the file
-    // (version 4: no edge line, arrowhead, curve, the edge labels scale; version 3: nor UserData; version 2: nor images
-    // or content, the labels scale; version 1: nor the Code style, tooltips and waypoints).
+    // A binary file of the images the nodes show, of the nodes and edges with their styles, content, tooltips and
+    // waypoints, and their UserData if there is a serializer, and of the groups. Load also reads the earlier versions of
+    // the file (version 5: no groups; version 4: nor edge line, arrowhead, curve, the edge labels scale; version 3: nor
+    // UserData; version 2: nor images or content, the labels scale; version 1: nor the Code style, tooltips and waypoints).
     bool Save(const wchar_t* path) const;
     bool Load(const wchar_t* path);
 
@@ -243,6 +283,10 @@ private:
     std::vector<Node> m_Nodes;
     std::vector<Edge> m_Edges;
     std::vector<Image> m_Images;
+    std::vector<Group> m_Groups;
+    std::unordered_map<NodeId, GroupId> m_GroupOf;
+    GroupId m_NextGroupId = 0;
+    void ForgetMembers(const std::vector<NodeId>& nodes);   // nodes removed: out of their groups
 
     // id -> index in m_Nodes / m_Edges, made again on the next lookup after a removal (the indices after it move)
     mutable std::unordered_map<NodeId, uint32_t> m_NodeIndex;
