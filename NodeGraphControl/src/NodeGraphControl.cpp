@@ -136,6 +136,18 @@ namespace NodeGraphCtrl {
 			}
 		};
 
+		// nodes moved with the arrow keys: more presses on the same nodes make the same move longer
+		struct KeyMoveCmd : UndoCmd {
+			std::vector<NodeId> Ids;
+			std::vector<Point>  Old, New;
+			void Apply(NodeGraphModel& m) override { Place(m, New); }
+			void Revert(NodeGraphModel& m) override { Place(m, Old); }
+			void Place(NodeGraphModel& m, const std::vector<Point>& at) {
+				for (size_t i = 0; i < Ids.size(); i++)
+					if (Node* n = m.GetNode(Ids[i])) { n->X = at[i].X; n->Y = at[i].Y; }
+			}
+		};
+
 		struct PasteCmd : UndoCmd {
 			std::vector<Node> PastedNodes;
 			std::vector<Edge> PastedEdges;
@@ -221,6 +233,7 @@ namespace NodeGraphCtrl {
 		m_AutoZoom = (pcs->style & NGCS_AUTOZOOM) != 0;
 		m_WheelScrolls = (pcs->style & NGCS_WHEELSCROLL) != 0;
 		m_Model = std::make_unique<NodeGraphModel>();
+		m_Model->SetResetCallback([this] { OnModelReset(); });
 
 		if (FAILED(m_Renderer.Init(pcs->hInstance))) return -1;
 
@@ -575,7 +588,40 @@ namespace NodeGraphCtrl {
 
 	// ---- Undo / Redo ---------------------------------------------------------
 
+	// The graph was replaced (Clear, Load, another model): what refers to the old one goes. Undo would apply its
+	// commands to the new graph, and the selection would pick nodes of it by the old ids.
+	void CNodeGraphControl::OnModelReset() {
+		if (m_LabelEdit) CancelLabelEdit();
+		m_DraggingNode = false;
+		m_DragPrimaryId = InvalidNode;
+		m_DragOrigins.clear();
+		m_Resize.Active = false;
+		m_Resize.NodeId = InvalidNode;
+		m_Resize.Hovered = ResizeHandle::None;
+		m_RubberBand.Active = false;
+		m_EdgePreview.Active = false;
+		m_EdgePreview.FromNode = InvalidNode;
+		m_KeyMove = nullptr;
+		if (m_hWnd && ::GetCapture() == m_hWnd)
+			::ReleaseCapture();
+
+		const bool hadUndo = !m_UndoStack.empty() || !m_RedoStack.empty();
+		m_UndoStack.clear();
+		m_RedoStack.clear();
+		if (hadUndo && m_hWnd) NotifyUndoChanged();
+
+		const bool hadSelection = !m_SelectedNodes.empty() || m_SelectedEdge != InvalidEdge;
+		m_SelectedNodes.clear();
+		m_SelectedEdge = InvalidEdge;
+		if (hadSelection && m_hWnd) FireSelChanged();
+
+		m_HoveredNode = InvalidNode;
+		m_Renderer.SetHoveredNode(InvalidNode);
+		if (m_hWnd) Invalidate(FALSE);
+	}
+
 	void CNodeGraphControl::Undo() {
+		m_KeyMove = nullptr;	// the next arrow key starts a new move
 		if (m_UndoStack.empty()) return;
 		auto cmd = std::move(m_UndoStack.back());
 		m_UndoStack.pop_back();
@@ -586,6 +632,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::Redo() {
+		m_KeyMove = nullptr;
 		if (m_RedoStack.empty()) return;
 		auto cmd = std::move(m_RedoStack.back());
 		m_RedoStack.pop_back();
@@ -894,6 +941,8 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::OnRButtonDown(UINT /*nFlags*/, CPoint pt) {
 		CommitLabelEdit();
+		SetFocus();
+		m_RightDown = pt;
 
 		// Dragging on the minimap with the right button scrolls: the view rectangle follows the mouse.
 		RECT rc; GetClientRect(&rc);
@@ -940,6 +989,15 @@ namespace NodeGraphCtrl {
 
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		NodeId hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
+		// released where it went down: a right click on the node, not a new edge; the default processing sends
+		// WM_CONTEXTMENU (OnContextMenu)
+		const int dx = pt.x - m_RightDown.x, dy = pt.y - m_RightDown.y;
+		if (hit == m_EdgePreview.FromNode && dx * dx + dy * dy <= 16) {
+			m_EdgePreview.FromNode = InvalidNode;
+			Invalidate(FALSE);
+			SetMsgHandled(FALSE);
+			return;
+		}
 		if (hit != InvalidNode && hit != m_EdgePreview.FromNode) {
 			EdgeId eid = m_Model->AddEdge(m_EdgePreview.FromNode, hit);
 			const Edge* e = m_Model->GetEdge(eid);
@@ -1405,22 +1463,150 @@ namespace NodeGraphCtrl {
 		return 0;
 	}
 
+	// Arrows move the selected nodes (Shift: further), or scroll without a selection or with Ctrl. PageUp/PageDown
+	// scroll a page (Shift: sideways), Home fits the graph in view, Tab/Shift+Tab select the next/previous node,
+	// Esc clears the selection, F2 renames, Delete deletes, Ctrl+A/C/X/V/Z/Y select all, copy, cut, paste, undo, redo,
+	// Ctrl+Plus/Minus/0 zoom in, out, to 100%. A read-only graph doesn't edit: moving nodes is all it does of it.
 	LRESULT CNodeGraphControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
-		if (m_ReadOnly) {
-			if (wParam == 'F' && !(::GetKeyState(VK_CONTROL) & 0x8000)) { FitInView(); return 0; }
-			if (wParam == 'M' && !(::GetKeyState(VK_CONTROL) & 0x8000)) { SetMinimapVisible(!IsMinimapVisible()); return 0; }
-			bHandled = FALSE;
-			return 0;
-		}
-		if (wParam == VK_DELETE) { DeleteSelected(); return 0; }
-		if (::GetKeyState(VK_CONTROL) & 0x8000) {
-			if (wParam == 'Z') { Undo();  return 0; }
-			if (wParam == 'Y') { Redo();  return 0; }
-			if (wParam == 'C') { Copy();  return 0; }
-			if (wParam == 'V') { Paste(); return 0; }
+		const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
+		switch (wParam) {
+			case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN: {
+				const float dx = wParam == VK_LEFT ? -1.0f : wParam == VK_RIGHT ? 1.0f : 0.0f;
+				const float dy = wParam == VK_UP ? -1.0f : wParam == VK_DOWN ? 1.0f : 0.0f;
+				if (!ctrl && !m_SelectedNodes.empty()) {
+					const float step = shift ? 50.0f : 10.0f;
+					MoveSelectionBy(dx * step, dy * step);
+				}
+				else
+					ScrollBy(dx * LineSize(), dy * LineSize());
+				return 0;
+			}
+			case VK_PRIOR: case VK_NEXT: {
+				RECT rc;
+				GetClientRect(&rc);
+				const float page = (shift ? rc.right : rc.bottom) * 0.9f * (wParam == VK_PRIOR ? -1 : 1);
+				if (shift) ScrollBy(page, 0);
+				else ScrollBy(0, page);
+				return 0;
+			}
+			case VK_HOME:
+				FitInView();
+				return 0;
+			case VK_TAB:
+				if (ctrl) break;
+				SelectNext(shift);
+				return 0;
+			case VK_ESCAPE:
+				if (!m_SelectedNodes.empty() || m_SelectedEdge != InvalidEdge)
+					ClearSelection();
+				return 0;
+			case VK_F2:
+				if (!m_ReadOnly && m_SelectedNodes.size() == 1)
+					BeginEditLabel(m_SelectedNodes[0]);
+				return 0;
+			case VK_DELETE:
+				if (!m_ReadOnly) DeleteSelected();
+				return 0;
+			case VK_ADD: case VK_OEM_PLUS:
+				if (!ctrl) break;
+				ZoomAroundCenter(1.25f);
+				return 0;
+			case VK_SUBTRACT: case VK_OEM_MINUS:
+				if (!ctrl) break;
+				ZoomAroundCenter(0.8f);
+				return 0;
+			case '0': case VK_NUMPAD0:
+				if (!ctrl) break;
+				ZoomAroundCenter(1.0f / m_Vt.Scale);
+				return 0;
+			case 'A':
+				if (!ctrl) break;
+				SelectAll();
+				return 0;
+			case 'C':
+				if (!ctrl) break;
+				Copy();
+				return 0;
+			case 'X': case 'V': case 'Z': case 'Y':
+				if (!ctrl || m_ReadOnly) break;
+				if (wParam == 'X') Cut();
+				else if (wParam == 'V') Paste();
+				else if (wParam == 'Z') Undo();
+				else Redo();
+				return 0;
+			case 'F':	// in a read-only graph, as in a viewer
+				if (ctrl || !m_ReadOnly) break;
+				FitInView();
+				return 0;
+			case 'M':
+				if (ctrl || !m_ReadOnly) break;
+				SetMinimapVisible(!IsMinimapVisible());
+				return 0;
 		}
 		bHandled = FALSE;
 		return 0;
+	}
+
+	// In a dialog: the arrows are the graph's, Tab still moves to the next control.
+	UINT CNodeGraphControl::OnGetDlgCode(LPMSG /*msg*/) {
+		return DLGC_WANTARROWS | DLGC_WANTCHARS;
+	}
+
+	// WM_CONTEXTMENU, from a right click (see OnRButtonUp) or the keyboard (pt is -1, -1): the parent gets
+	// NGCN_CONTEXTMENU for what it is about; if it doesn't show a menu, WM_CONTEXTMENU goes on to it.
+	void CNodeGraphControl::OnContextMenu(HWND /*wnd*/, CPoint pt) {
+		NODEGRAPHCONTEXTMENUNOTIFY cm{};
+		cm.Hdr.hwndFrom = m_hWnd;
+		cm.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
+		cm.Hdr.code = NGCN_CONTEXTMENU;
+		cm.NodeId = InvalidNode;
+		cm.EdgeId = InvalidEdge;
+		cm.Keyboard = pt.x == -1 && pt.y == -1;
+
+		RECT rc;
+		GetClientRect(&rc);
+		if (cm.Keyboard) {
+			// the selection, or the middle of the view
+			POINT at{ rc.right / 2, rc.bottom / 2 };
+			if (const Node* n = m_Model->GetNode(GetSelectedNode())) {
+				EnsureVisible(n->Id);
+				auto c = m_Vt.ToScreen(n->X, n->Y);
+				at = { (LONG)c.x, (LONG)c.y };
+				cm.NodeId = n->Id;
+			}
+			else if (const Edge* e = m_Model->GetEdge(m_SelectedEdge)) {
+				const Node* from = m_Model->GetNode(e->From);
+				const Node* to = m_Model->GetNode(e->To);
+				if (from && to) {
+					auto c = m_Vt.ToScreen((from->X + to->X) * 0.5f, (from->Y + to->Y) * 0.5f);
+					at = { std::clamp((LONG)c.x, 0L, rc.right), std::clamp((LONG)c.y, 0L, rc.bottom) };
+				}
+				cm.EdgeId = e->Id;
+			}
+			ClientToScreen(&at);
+			cm.ScreenPt = at;
+		}
+		else {
+			cm.ScreenPt = pt;
+			POINT client = pt;
+			ScreenToClient(&client);
+			MinimapConfig mmcfg = MakeMinimapConfig(rc.right, rc.bottom);
+			if (!IsOnMinimap(mmcfg, client.x, client.y)) {	// the minimap is in front of the graph: there it's the canvas
+				auto gp = m_Vt.ToGraph((float)client.x, (float)client.y);
+				cm.NodeId = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
+				if (cm.NodeId == InvalidNode)
+					cm.EdgeId = m_Renderer.HitTestEdge(*m_Model, gp.x, gp.y);
+			}
+			// what the menu is for is selected (a node in the selection keeps the others)
+			if (cm.NodeId != InvalidNode && !IsSelected(cm.NodeId))
+				SelectNode(cm.NodeId);
+			else if (cm.EdgeId != InvalidEdge && cm.EdgeId != m_SelectedEdge)
+				SelectEdge(cm.EdgeId);
+		}
+
+		HWND parent = GetParent();
+		if (!parent || !::SendMessage(parent, WM_NOTIFY, cm.Hdr.idFrom, reinterpret_cast<LPARAM>(&cm)))
+			SetMsgHandled(FALSE);
 	}
 
 	BOOL CNodeGraphControl::OnEraseBkgnd(CDCHandle) {
@@ -1444,6 +1630,9 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::SetModel(NodeGraphModel* model) {
 		m_Model.reset(model);
 		m_FittedModel = nullptr;	// a new model at the address of the old one is still new
+		if (m_Model)
+			m_Model->SetResetCallback([this] { OnModelReset(); });
+		OnModelReset();
 		RequestInvalidate();
 	}
 
@@ -1709,6 +1898,11 @@ namespace NodeGraphCtrl {
 		return m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 	}
 
+	Point CNodeGraphControl::ClientToGraph(POINT pt) const {
+		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
+		return { gp.x, gp.y };
+	}
+
 	EdgeId CNodeGraphControl::GetSelectedEdge() const {
 		return m_SelectedEdge;
 	}
@@ -1730,6 +1924,96 @@ namespace NodeGraphCtrl {
 		m_SelectedEdge = InvalidEdge;
 		FireSelChanged();
 		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::SelectEdge(EdgeId id) {
+		m_SelectedNodes.clear();
+		m_SelectedEdge = m_Model->GetEdge(id) ? id : InvalidEdge;
+		FireSelChanged();
+		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::SelectAll() {
+		m_SelectedNodes.clear();
+		for (const auto& n : m_Model->Nodes())
+			m_SelectedNodes.push_back(n.Id);
+		m_SelectedEdge = InvalidEdge;
+		FireSelChanged();
+		RequestInvalidate();
+	}
+
+	// The least scrolling that brings the node in view (with the margin a fitted graph has); centered if it's larger.
+	void CNodeGraphControl::EnsureVisible(NodeId id) {
+		const Node* n = m_Model->GetNode(id);
+		if (!n) return;
+		RECT rc;
+		GetClientRect(&rc);
+		auto axis = [](float lo, float hi, float view) -> float {	// how far the view moves
+			if (hi - lo > view - 2 * k_ViewMargin) return (lo + hi - view) * 0.5f;
+			if (lo < k_ViewMargin) return lo - k_ViewMargin;
+			if (hi > view - k_ViewMargin) return hi - (view - k_ViewMargin);
+			return 0;
+		};
+		auto tl = m_Vt.ToScreen(n->X - n->Width * 0.5f, n->Y - n->Height * 0.5f);
+		auto br = m_Vt.ToScreen(n->X + n->Width * 0.5f, n->Y + n->Height * 0.5f);
+		ScrollBy(axis(tl.x, br.x, (float)rc.right), axis(tl.y, br.y, (float)rc.bottom));
+	}
+
+	void CNodeGraphControl::Cut() {
+		if (m_ReadOnly || m_SelectedNodes.empty()) return;
+		Copy();
+		DeleteSelected();
+	}
+
+	void CNodeGraphControl::MoveSelectionBy(float dx, float dy) {
+		if (m_SelectedNodes.empty()) return;
+		// the same nodes moved again: the same undo step
+		auto* cmd = m_UndoStack.empty() ? nullptr : dynamic_cast<KeyMoveCmd*>(m_UndoStack.back().get());
+		if (!cmd || cmd != m_KeyMove || cmd->Ids != m_SelectedNodes) {
+			auto move = std::make_unique<KeyMoveCmd>();
+			move->Ids = m_SelectedNodes;
+			for (NodeId id : m_SelectedNodes) {
+				const Node* n = m_Model->GetNode(id);
+				move->Old.push_back(n ? Point{ n->X, n->Y } : Point{});
+			}
+			move->New = move->Old;
+			cmd = move.get();
+			PushUndo(std::move(move));
+			m_KeyMove = cmd;
+		}
+		for (size_t i = 0; i < cmd->Ids.size(); i++)
+			if (Node* n = m_Model->GetNode(cmd->Ids[i])) {
+				n->X += dx;
+				n->Y += dy;
+				cmd->New[i] = { n->X, n->Y };
+			}
+		EnsureVisible(m_SelectedNodes[0]);
+		RequestInvalidate();
+	}
+
+	// The node after (before) the selected one, in the order of the model, around.
+	void CNodeGraphControl::SelectNext(bool backwards) {
+		const auto& nodes = m_Model->Nodes();
+		if (nodes.empty()) return;
+		const Node* current = m_Model->GetNode(GetSelectedNode());
+		size_t index = backwards ? nodes.size() - 1 : 0;
+		if (current) {
+			size_t at = current - nodes.data();
+			index = backwards ? (at + nodes.size() - 1) % nodes.size() : (at + 1) % nodes.size();
+		}
+		SelectNode(nodes[index].Id);
+		EnsureVisible(nodes[index].Id);
+	}
+
+	void CNodeGraphControl::ZoomAroundCenter(float factor) {
+		RECT rc;
+		GetClientRect(&rc);
+		const float cx = rc.right * 0.5f, cy = rc.bottom * 0.5f;
+		const float scale = std::clamp(m_Vt.Scale * factor, 0.05f, 50.0f);
+		m_Vt.OffsetX = cx - (cx - m_Vt.OffsetX) * scale / m_Vt.Scale;
+		m_Vt.OffsetY = cy - (cy - m_Vt.OffsetY) * scale / m_Vt.Scale;
+		m_Vt.Scale = scale;
+		Invalidate(FALSE);
 	}
 
 	void CNodeGraphControl::Refresh() {
@@ -2043,11 +2327,11 @@ namespace NodeGraphCtrl {
 		m_Edges.clear();
 		NodesChanged();
 		EdgesChanged();
-		++m_ResetCount;
 		m_Images.clear();
 		m_NextNodeId = 0;
 		m_NextEdgeId = 0;
 		m_NextImageId = 0;
+		Reset();
 	}
 
 	// ---- SVG export -----------------------------------------------------------------

@@ -28,6 +28,9 @@
 #define NGCN_EDGEREMOVED    8   // lParam -> NODEGRAPHNOTIFY*, edge removed
 #define NGCN_LABELCHANGED   9   // lParam -> NODEGRAPHLABELNOTIFY*, node label edited inline
 #define NGCN_UNDOCHANGED   10   // lParam -> NMHDR*, undo/redo stack changed
+#define NGCN_CONTEXTMENU   11   // lParam -> NODEGRAPHCONTEXTMENUNOTIFY*, a context menu is asked for (right click, Shift+F10,
+                                //   the menu key); the node or edge is selected first. Return nonzero if it was shown;
+                                //   0: WM_CONTEXTMENU goes on to the parent, as without the notification
 
 namespace NodeGraphCtrl {
 
@@ -54,6 +57,14 @@ struct NODEGRAPHTOOLTIPNOTIFY {
     NodeId   NodeId;       // InvalidNode if not over a node
     EdgeId   EdgeId;       // InvalidEdge if not over an edge
     wchar_t  SzText[256];  // pre-filled with default label; host may override
+};
+
+struct NODEGRAPHCONTEXTMENUNOTIFY {
+    NMHDR   Hdr;
+    NodeId  NodeId;     // what the menu is for: a node, an edge, or neither (the canvas)
+    EdgeId  EdgeId;
+    POINT   ScreenPt;   // where to show the menu (for the keyboard: the middle of the node or edge, or of the view)
+    BOOL    Keyboard;   // asked for with the keyboard
 };
 
 struct NODEGRAPHLABELNOTIFY {
@@ -168,6 +179,8 @@ public:
         MSG_WM_MOUSELEAVE(OnMouseLeave)
         MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
         MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+        MSG_WM_GETDLGCODE(OnGetDlgCode)
+        MSG_WM_CONTEXTMENU(OnContextMenu)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
         MESSAGE_HANDLER(WM_NODEGRAPHEDIT, OnNodeGraphEdit)
     END_MSG_MAP()
@@ -208,10 +221,14 @@ public:
     // Selection — single (backward compat) and multi.
     NodeId GetSelectedNode() const;   // returns primary (first) selected node
     NodeId NodeFromPoint(POINT pt) const;   // pt in client coordinates (e.g. for WM_CONTEXTMENU); InvalidNode if no node is there
+    Point  ClientToGraph(POINT pt) const;   // where a point of the window is in the graph (e.g. to add a node there)
     EdgeId GetSelectedEdge() const;
     std::vector<NodeId> GetSelectedNodes() const;
     void SelectNode(NodeId id, bool addToSelection = false);
+    void SelectEdge(EdgeId id);      // instead of the nodes
+    void SelectAll();                // the nodes
     void ClearSelection();
+    void EnsureVisible(NodeId id);   // moves the view to the node if it isn't all in view
 
     // Deletion — also clears selection and fires NGCN_NODEREMOVED / NGCN_EDGEREMOVED.
     bool DeleteNode(NodeId id);
@@ -234,6 +251,7 @@ public:
 
     // Clipboard — copy selected nodes and their inter-edges; paste at offset.
     void Copy();
+    void Cut();                      // copy, then delete (not in a read-only graph)
     void Paste();
     bool CanPaste() const;
 
@@ -300,6 +318,8 @@ private:
     void OnMouseLeave();
     LRESULT OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    UINT OnGetDlgCode(LPMSG msg);
+    void OnContextMenu(HWND wnd, CPoint pt);
     BOOL OnEraseBkgnd(CDCHandle dc);
     LRESULT OnNodeGraphEdit(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
@@ -319,6 +339,10 @@ private:
     void CancelLabelEdit();
     RECT LabelEditRect(const Node& n) const;
     void SetHoveredNode(NodeId id);
+    void OnModelReset();
+    void MoveSelectionBy(float dx, float dy);
+    void SelectNext(bool backwards);
+    void ZoomAroundCenter(float factor);
     void UpdateScrollBars();
     void OnScroll(int bar, int code);
     void ScrollBy(float dx, float dy);         // moves the view (the graph moves the other way), in pixels
@@ -369,6 +393,8 @@ private:
 
     NodeId m_HoveredNode = InvalidNode;     // tracked only while there is a node draw handler
 
+    UndoCmd* m_KeyMove      = nullptr;       // the move by arrow keys on top of the undo stack, which more presses extend
+    POINT m_RightDown       = {};            // where the right button went down (a click without a drag: the context menu)
     bool m_AutoZoom         = false;
     const NodeGraphModel* m_FittedModel = nullptr;   // the graph AutoZoom fitted last (the model and its reset count)
     uint32_t m_FittedResets = 0;

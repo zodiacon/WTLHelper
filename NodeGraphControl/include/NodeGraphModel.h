@@ -183,6 +183,9 @@ public:
 
     // Counts the times the graph was replaced (Clear, Load): CNodeGraphControl fits a new graph in view with it (NGCS_AUTOZOOM).
     uint32_t GetResetCount() const { return m_ResetCount; }
+    // Called after the graph is replaced (Clear, Load). CNodeGraphControl sets it on its model, to drop what refers to
+    // the old graph (its undo and redo, its selection).
+    void SetResetCallback(std::function<void()> callback) { m_OnReset = std::move(callback); }
 
     void  SetDefaultNodeSize(float w, float h);
     float GetDefaultNodeWidth()  const { return m_DefaultNodeWidth;  }
@@ -230,6 +233,8 @@ private:
     ImageId m_NextImageId     = 0;
     uint32_t m_ResetCount     = 0;
     IUserDataSerializer* m_Serializer = nullptr;
+    std::function<void()> m_OnReset;
+    void Reset() { ++m_ResetCount; if (m_OnReset) m_OnReset(); }
     float  m_DefaultNodeWidth  = 120.0f;
     float  m_DefaultNodeHeight = 40.0f;
 };

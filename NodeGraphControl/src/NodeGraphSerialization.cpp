@@ -269,10 +269,10 @@ namespace NodeGraphCtrl {
         m_Edges = std::move(edges);
         NodesChanged();
         EdgesChanged();
-        ++m_ResetCount;
         m_NextNodeId = nextNode;
         m_NextEdgeId = nextEdge;
         m_NextImageId = nextImage;
+        Reset();
         return true;
     }
 

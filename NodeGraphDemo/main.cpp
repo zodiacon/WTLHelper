@@ -444,6 +444,53 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetWindowText(g_status, buf);
                 return button;
             }
+            case NGCN_CONTEXTMENU: {
+                // what a menu would have for a node, an edge or the canvas
+                auto* cm = reinterpret_cast<NODEGRAPHCONTEXTMENUNOTIFY*>(lParam);
+                NodeGraphModel& m = *g_graph.GetModel();
+                enum { Rename = 1, Delete, Rectangle, Ellipse, Diamond, AddHere, PasteHere, Fit };
+                HMENU menu = CreatePopupMenu();
+                if (const Node* n = m.GetNode(cm->NodeId)) {
+                    HMENU shapes = CreatePopupMenu();
+                    AppendMenu(shapes, MF_STRING, Rectangle, L"&Rectangle");
+                    AppendMenu(shapes, MF_STRING, Ellipse, L"&Ellipse");
+                    AppendMenu(shapes, MF_STRING, Diamond, L"&Diamond");
+                    CheckMenuRadioItem(shapes, Rectangle, Diamond, Rectangle + (int)n->Style.Shape, MF_BYCOMMAND);
+                    AppendMenu(menu, MF_STRING, Rename, L"&Rename\tF2");
+                    AppendMenu(menu, MF_STRING, Delete, L"&Delete\tDel");
+                    AppendMenu(menu, MF_POPUP, (UINT_PTR)shapes, L"&Shape");
+                }
+                else if (cm->EdgeId != InvalidEdge)
+                    AppendMenu(menu, MF_STRING, Delete, L"&Delete Edge\tDel");
+                else {
+                    AppendMenu(menu, MF_STRING, AddHere, L"&Add Node Here");
+                    AppendMenu(menu, MF_STRING | (g_graph.CanPaste() ? 0 : MF_GRAYED), PasteHere, L"&Paste\tCtrl+V");
+                    AppendMenu(menu, MF_STRING, Fit, L"&Fit in View\tHome");
+                }
+                int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, cm->ScreenPt.x, cm->ScreenPt.y, 0, hwnd, nullptr);
+                DestroyMenu(menu);
+                switch (cmd) {
+                    case Rename: g_graph.BeginEditLabel(cm->NodeId); break;
+                    case Delete: g_graph.DeleteSelected(); break;
+                    case Rectangle: case Ellipse: case Diamond:
+                        for (NodeId id : g_graph.GetSelectedNodes()) {
+                            NodeStyle style = m.GetNode(id)->Style;
+                            style.Shape = (NodeShape)(cmd - Rectangle);
+                            g_graph.SetNodeStyle(id, style, true);
+                        }
+                        break;
+                    case AddHere: {
+                        POINT at = cm->ScreenPt;
+                        ScreenToClient(g_graph, &at);
+                        Point gp = g_graph.ClientToGraph(at);
+                        g_graph.SelectNode(m.AddNode(L"new", gp.X, gp.Y));
+                        break;
+                    }
+                    case PasteHere: g_graph.Paste(); break;
+                    case Fit: g_graph.FitInView(); break;
+                }
+                return TRUE;
+            }
             case NGCN_NODEDBLCLICK: {
                 // a double click on the progress bar is two clicks of the button, not a rename
                 auto* gn = reinterpret_cast<NODEGRAPHNOTIFY*>(lParam);
