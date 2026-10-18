@@ -1877,6 +1877,17 @@ void CDockHost::CancelNavigator() {
 // accessibility
 //
 
+// What content says to the host (its parent since it was created) goes to the notify target, as for the group windows.
+// A target that is the host itself (or none) leaves the message to the default handling.
+LRESULT CDockHost::OnForward(UINT msg, WPARAM wp, LPARAM lp, BOOL& handled) {
+	HWND target = NotifyTarget();
+	if (!target || target == m_hWnd) {
+		handled = FALSE;
+		return 0;
+	}
+	return ::SendMessage(target, msg, wp, lp);
+}
+
 LRESULT CDockHost::OnGetObject(UINT, WPARAM wp, LPARAM lp, BOOL& handled) {
 	if ((LONG)lp != OBJID_CLIENT) {
 		handled = FALSE;

@@ -36,10 +36,17 @@ struct WTLHelper final {
 	static bool IsClassicMode() noexcept;
 	static bool SwitchToMode(DarkModeKind type, HWND hWnd);
 	static bool SwitchToMode(HWND hWnd);
+	// the current mode to a window and its controls (title bar, the controls' themes): of a top-level window other than the
+	// one the mode was switched with, which SwitchToMode does not do again once the mode is the one asked for
+	static void ApplyMode(HWND hWnd);
 	static void SetColorTone(ColorTone tone, HWND hWnd = nullptr);
 	static ColorTone GetColorTone() noexcept;
-	static bool InitMenu(CMenuHandle menu, MenuItemData const* items, int count );
-	static bool InitMenu(CMenuHandle menu, MenuItemData const& item);
+	// sets the items' icons (as bitmaps on the current background); size: the icons' size in pixels
+	// (for a per-monitor DPI aware app, the window's DPI scaled). The bitmaps are kept and shared by all menus
+	// (for each icon, size and background), so menus made and initialized again and again don't leak them;
+	// an item's hIcon (if not a resource icon) must therefore stay valid for the life of the process
+	static bool InitMenu(CMenuHandle menu, MenuItemData const* items, int count, int size = 16);
+	static bool InitMenu(CMenuHandle menu, MenuItemData const& item, int size = 16);
 	static bool IsSystemInDarkMode();
 	static int SuspendHook() noexcept;
 	static int ResumeHook() noexcept;

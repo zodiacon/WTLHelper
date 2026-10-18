@@ -206,7 +206,9 @@ m_Dock.SetContentFactory([this](DockPane& pane, HWND parent) -> HWND {
 
 Messages that a content window sends to its parent (`WM_COMMAND`, `WM_NOTIFY`, `WM_CTLCOLOR*`, ...) are forwarded to
 the host's parent window, your frame, as if the control were its child. Use `m_Dock.SetNotifyTarget(hWnd)` to send
-them elsewhere.
+them elsewhere. This holds whatever the content window was created in: the common controls (tree and list views,
+among others) keep sending their notifications to the window they were created in after the host has moved them into
+a group, so the host forwards what reaches it as well.
 
 Content windows are destroyed together with the host. If you destroy one yourself (a closed document), remove the
 pane as well; see the next section.

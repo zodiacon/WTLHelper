@@ -20,6 +20,13 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
 
+namespace {
+	// perceived brightness below the middle
+	bool IsDarkColor(COLORREF clr) {
+		return (GetRValue(clr) * 299 + GetGValue(clr) * 587 + GetBValue(clr) * 114) / 1000 < 128;
+	}
+}
+
 // ---- OnCreate ---------------------------------------------------------------
 
 LRESULT CTreeListViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
@@ -785,13 +792,14 @@ void CTreeListViewCtrl::DrawColumn0(NMLVCUSTOMDRAW* pcd) {
 	bool lvFocused = (::GetFocus() == m_List.m_hWnd);
 
 	// GetSubItemRect with iSubItem=0 returns the full item rect on Vista+
-	// comctl32. Use column 1's left edge as column 0's right boundary.
+	// comctl32. Use column 1's left edge as column 0's right boundary, less the
+	// last two pixels: the ListView draws the column separator there.
 	CRect rcCol0;
 	m_List.GetSubItemRect(idx, 0, LVIR_BOUNDS, &rcCol0);
 	if (m_ColCount > 1) {
 		CRect rcNext;
 		m_List.GetSubItemRect(idx, 1, LVIR_BOUNDS, &rcNext);
-		rcCol0.right = rcNext.left;
+		rcCol0.right = rcNext.left - 2;
 	}
 
 	int savedDC = dc.SaveDC();
@@ -806,7 +814,15 @@ void CTreeListViewCtrl::DrawColumn0(NMLVCUSTOMDRAW* pcd) {
 	COLORREF fallbackTxt = (lvTxt != CLR_NONE) ? lvTxt : ::GetSysColor(COLOR_WINDOWTEXT);
 
 	COLORREF bkClr, txtClr;
-	if (sel) {
+	if (sel && !lvFocused && IsDarkColor(fallbackBk)) {
+		// dark background (dark mode): the system colors of an inactive selection are those of light mode
+		// (black text on light gray), so the selection is a lighter shade of the background with white text
+		bkClr = RGB(GetRValue(fallbackBk) + (255 - GetRValue(fallbackBk)) / 4,
+			GetGValue(fallbackBk) + (255 - GetGValue(fallbackBk)) / 4,
+			GetBValue(fallbackBk) + (255 - GetBValue(fallbackBk)) / 4);
+		txtClr = RGB(255, 255, 255);
+	}
+	else if (sel) {
 		bkClr = ::GetSysColor(lvFocused ? COLOR_HIGHLIGHT : COLOR_BTNFACE);
 		txtClr = ::GetSysColor(lvFocused ? COLOR_HIGHLIGHTTEXT : COLOR_BTNTEXT);
 	}
