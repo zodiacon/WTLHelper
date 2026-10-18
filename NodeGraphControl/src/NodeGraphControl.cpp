@@ -5,6 +5,8 @@
 
 #include "../include/NodeGraphControl.h"
 #include "NodeGraphImaging.h"
+#include "NodeGraphSerialization.h"
+#include <unordered_map>
 
 #include <commctrl.h>
 #include <memory>
@@ -100,6 +102,19 @@ namespace NodeGraphCtrl {
 			}
 		};
 
+		// a change of one member of a node (its style, its content)
+		template<typename T, T Node::*Member>
+		struct NodeMemberCmd : UndoCmd {
+			NodeId Id;
+			T      Old, New;
+			void Apply(NodeGraphModel& m) override {
+				if (Node* n = m.GetNode(Id)) n->*Member = New;
+			}
+			void Revert(NodeGraphModel& m) override {
+				if (Node* n = m.GetNode(Id)) n->*Member = Old;
+			}
+		};
+
 		struct PasteCmd : UndoCmd {
 			std::vector<Node> PastedNodes;
 			std::vector<Edge> PastedEdges;
@@ -141,51 +156,10 @@ namespace NodeGraphCtrl {
 
 	namespace {
 
-		struct ByteBuffer {
-			std::vector<unsigned char> Data;
-			template<typename T>
-			void Write(const T& v) {
-				auto p = reinterpret_cast<const unsigned char*>(&v);
-				Data.insert(Data.end(), p, p + sizeof(T));
-			}
-			void WriteWStr(const std::wstring& s) {
-				uint32_t n = (uint32_t)s.size();
-				Write(n);
-				if (n) {
-					auto p = reinterpret_cast<const unsigned char*>(s.data());
-					Data.insert(Data.end(), p, p + n * sizeof(wchar_t));
-				}
-			}
-		};
-
-		struct ByteReader {
-			const unsigned char* Data;
-			size_t               Pos;
-			size_t               Size;
-			template<typename T>
-			bool Read(T& v) {
-				if (Pos + sizeof(T) > Size) return false;
-				memcpy(&v, Data + Pos, sizeof(T));
-				Pos += sizeof(T);
-				return true;
-			}
-			bool ReadWStr(std::wstring& s) {
-				uint32_t n;
-				if (!Read(n)) return false;
-				if (n > 0) {
-					if (Pos + n * sizeof(wchar_t) > Size) return false;
-					s.assign(reinterpret_cast<const wchar_t*>(Data + Pos), n);
-					Pos += n * sizeof(wchar_t);
-				}
-				else {
-					s.clear();
-				}
-				return true;
-			}
-		};
-
+		// The data: the serialization version, the images the nodes show, the nodes, the edges between them (records
+		// of NodeGraphSerialization). Another name than the first format's, which had none of it.
 		static UINT GetClipboardFormat() {
-			static UINT s_fmt = ::RegisterClipboardFormatW(L"NodeGraphControlClipboard");
+			static UINT s_fmt = ::RegisterClipboardFormatW(L"NodeGraphControlClipboard2");
 			return s_fmt;
 		}
 
@@ -606,6 +580,17 @@ namespace NodeGraphCtrl {
 		for (NodeId id : m_SelectedNodes)
 			if (const Node* n = m_Model->GetNode(id)) nodes.push_back(n);
 
+		std::vector<const Image*> images;
+		auto addImage = [&](ImageId id) {
+			const Image* image = m_Model->GetImage(id);
+			if (image && std::find(images.begin(), images.end(), image) == images.end())
+				images.push_back(image);
+		};
+		for (const Node* n : nodes) {
+			addImage(n->Content.Icon);
+			addImage(n->Content.Image);
+		}
+
 		std::vector<const Edge*> edges;
 		for (const auto& e : m_Model->Edges()) {
 			bool f = std::find(m_SelectedNodes.begin(), m_SelectedNodes.end(), e.From) != m_SelectedNodes.end();
@@ -613,39 +598,28 @@ namespace NodeGraphCtrl {
 			if (f && t) edges.push_back(&e);
 		}
 
-		ByteBuffer buf;
-		buf.Write((uint32_t)nodes.size());
-		for (const Node* n : nodes) {
-			buf.Write(n->X);  buf.Write(n->Y);
-			buf.Write(n->Width); buf.Write(n->Height);
-			buf.Write(n->Style.FillColor);
-			buf.Write(n->Style.BorderColor);
-			buf.Write(n->Style.TextColor);
-			buf.Write(n->Style.BorderWidth);
-			buf.Write(n->Style.CornerRadius);
-			buf.WriteWStr(n->Label);
-		}
-		buf.Write((uint32_t)edges.size());
-		for (const Edge* e : edges) {
-			auto fi = std::find_if(nodes.begin(), nodes.end(), [&](const Node* n) { return n->Id == e->From; });
-			auto ti = std::find_if(nodes.begin(), nodes.end(), [&](const Node* n) { return n->Id == e->To;   });
-			buf.Write((uint32_t)(fi - nodes.begin()));
-			buf.Write((uint32_t)(ti - nodes.begin()));
-			buf.Write(e->Style.Color);
-			buf.Write(e->Style.Width);
-			buf.Write((uint32_t)(e->Style.Directed ? 1u : 0u));
-			buf.WriteWStr(e->Label);
-		}
+		Serialization::Writer w;
+		w.Write(Serialization::Version);
+		w.Write((uint32_t)images.size());
+		for (const Image* image : images)
+			Serialization::WriteImage(w, *image);
+		w.Write((uint32_t)nodes.size());
+		for (const Node* n : nodes)
+			Serialization::WriteNode(w, *n);
+		w.Write((uint32_t)edges.size());
+		for (const Edge* e : edges)
+			Serialization::WriteEdge(w, *e);
 
 		if (!::OpenClipboard(m_hWnd)) return;
 		::EmptyClipboard();
-		HGLOBAL hg = ::GlobalAlloc(GMEM_MOVEABLE, buf.Data.size());
+		HGLOBAL hg = ::GlobalAlloc(GMEM_MOVEABLE, w.Data.size());
 		if (hg) {
 			void* p = ::GlobalLock(hg);
 			if (p) {
-				memcpy(p, buf.Data.data(), buf.Data.size());
+				memcpy(p, w.Data.data(), w.Data.size());
 				::GlobalUnlock(hg);
-				::SetClipboardData(GetClipboardFormat(), hg);
+				if (!::SetClipboardData(GetClipboardFormat(), hg))
+					::GlobalFree(hg);
 			}
 			else {
 				::GlobalFree(hg);
@@ -662,64 +636,81 @@ namespace NodeGraphCtrl {
 		HGLOBAL hg = (HGLOBAL)::GetClipboardData(fmt);
 		if (!hg) { ::CloseClipboard(); return; }
 
-		const unsigned char* raw = (const unsigned char*)::GlobalLock(hg);
-		size_t               size = ::GlobalSize(hg);
+		const uint8_t* raw = (const uint8_t*)::GlobalLock(hg);
+		size_t         size = ::GlobalSize(hg);
 		if (!raw) { ::CloseClipboard(); return; }
 
-		ByteReader rd{ raw, 0, size };
-
-		struct ClipNode { float X, Y, W, H; NodeStyle Style; std::wstring Label; };
-		struct ClipEdge { uint32_t Fi, Ti; EdgeStyle Style; std::wstring Label; };
-
-		uint32_t nodeCount = 0;
-		bool ok = rd.Read(nodeCount);
-
-		std::vector<ClipNode> clipNodes;
-		clipNodes.reserve(nodeCount);
-		for (uint32_t i = 0; i < nodeCount && ok; ++i) {
-			ClipNode cn{};
-			ok = rd.Read(cn.X) && rd.Read(cn.Y) && rd.Read(cn.W) && rd.Read(cn.H)
-				&& rd.Read(cn.Style.FillColor) && rd.Read(cn.Style.BorderColor)
-				&& rd.Read(cn.Style.TextColor) && rd.Read(cn.Style.BorderWidth)
-				&& rd.Read(cn.Style.CornerRadius) && rd.ReadWStr(cn.Label);
-			if (ok) clipNodes.push_back(std::move(cn));
+		Serialization::Reader r{ raw, size };
+		std::vector<Image> images;
+		std::vector<Node> nodes;
+		std::vector<Edge> edges;
+		uint32_t version = 0, count = 0;
+		bool ok = r.Read(version) && version >= 3 && version <= Serialization::Version && r.Read(count);
+		for (uint32_t i = 0; i < count && ok; ++i) {
+			Image image;
+			ok = Serialization::ReadImage(r, image);
+			images.push_back(std::move(image));
 		}
-
-		uint32_t edgeCount = 0;
-		ok = ok && rd.Read(edgeCount);
-
-		std::vector<ClipEdge> clipEdges;
-		clipEdges.reserve(edgeCount);
-		for (uint32_t i = 0; i < edgeCount && ok; ++i) {
-			ClipEdge ce{};
-			uint32_t directed = 1;
-			ok = rd.Read(ce.Fi) && rd.Read(ce.Ti)
-				&& rd.Read(ce.Style.Color) && rd.Read(ce.Style.Width)
-				&& rd.Read(directed) && rd.ReadWStr(ce.Label);
-			if (ok) { ce.Style.Directed = directed != 0; clipEdges.push_back(std::move(ce)); }
+		ok = ok && r.Read(count);
+		for (uint32_t i = 0; i < count && ok; ++i) {
+			Node n;
+			ok = Serialization::ReadNode(r, n, version);
+			nodes.push_back(std::move(n));
+		}
+		ok = ok && r.Read(count);
+		for (uint32_t i = 0; i < count && ok; ++i) {
+			Edge e;
+			ok = Serialization::ReadEdge(r, e, version);
+			edges.push_back(std::move(e));
 		}
 
 		::GlobalUnlock(hg);
 		::CloseClipboard();
 
-		if (!ok || clipNodes.empty()) return;
+		if (!ok || nodes.empty()) return;
+
+		// the images are added to this model (an image it has already isn't added again): their ids here
+		std::unordered_map<ImageId, ImageId> imageIds;
+		for (const auto& image : images)
+			imageIds[image.Id] = m_Model->AddImage(image.Data.data(), image.Data.size());
+		auto mapImage = [&](ImageId id) {
+			auto it = imageIds.find(id);
+			return it == imageIds.end() ? InvalidImage : it->second;
+		};
 
 		const float offset = 20.0f;
 		auto cmd = std::make_unique<PasteCmd>();
+		std::unordered_map<NodeId, NodeId> nodeIds;
 		std::vector<NodeId> newIds;
-		newIds.reserve(clipNodes.size());
+		newIds.reserve(nodes.size());
 
-		for (const auto& cn : clipNodes) {
-			NodeId id = m_Model->AddNode(cn.Label, cn.X + offset, cn.Y + offset, cn.W, cn.H);
+		for (auto& pasted : nodes) {
+			NodeId id = m_Model->AddNode(pasted.Label);
 			Node* n = m_Model->GetNode(id);
-			if (n) { n->Style = cn.Style; cmd->PastedNodes.push_back(*n); }
+			nodeIds[pasted.Id] = id;
+			pasted.Id = id;
+			pasted.X += offset;
+			pasted.Y += offset;
+			pasted.Content.Icon = mapImage(pasted.Content.Icon);
+			pasted.Content.Image = mapImage(pasted.Content.Image);
+			*n = pasted;
+			cmd->PastedNodes.push_back(*n);
 			newIds.push_back(id);
 		}
-		for (const auto& ce : clipEdges) {
-			if (ce.Fi >= newIds.size() || ce.Ti >= newIds.size()) continue;
-			EdgeId eid = m_Model->AddEdge(newIds[ce.Fi], newIds[ce.Ti], ce.Label);
+		for (auto& pasted : edges) {
+			auto from = nodeIds.find(pasted.From), to = nodeIds.find(pasted.To);
+			if (from == nodeIds.end() || to == nodeIds.end()) continue;
+			EdgeId eid = m_Model->AddEdge(from->second, to->second);
 			Edge* e = m_Model->GetEdge(eid);
-			if (e) { e->Style = ce.Style; cmd->PastedEdges.push_back(*e); }
+			pasted.Id = eid;
+			pasted.From = from->second;
+			pasted.To = to->second;
+			for (auto& p : pasted.Waypoints) {
+				p.X += offset;
+				p.Y += offset;
+			}
+			*e = pasted;
+			cmd->PastedEdges.push_back(*e);
 		}
 
 		PushUndo(std::move(cmd));
@@ -1620,9 +1611,27 @@ namespace NodeGraphCtrl {
 		RequestInvalidate();
 	}
 
-	void CNodeGraphControl::SetNodeStyle(NodeId id, const NodeStyle& style) {
+	template<typename T, T Node::*Member>
+	void CNodeGraphControl::SetNodeMember(NodeId id, const T& value, bool undoable) {
 		Node* n = m_Model->GetNode(id);
-		if (n) { n->Style = style; RequestInvalidate(); }
+		if (!n) return;
+		if (undoable) {
+			auto cmd = std::make_unique<NodeMemberCmd<T, Member>>();
+			cmd->Id = id;
+			cmd->Old = n->*Member;
+			cmd->New = value;
+			PushUndo(std::move(cmd));
+		}
+		n->*Member = value;
+		RequestInvalidate();
+	}
+
+	void CNodeGraphControl::SetNodeStyle(NodeId id, const NodeStyle& style, bool undoable) {
+		SetNodeMember<NodeStyle, &Node::Style>(id, style, undoable);
+	}
+
+	void CNodeGraphControl::SetNodeContent(NodeId id, const NodeContent& content, bool undoable) {
+		SetNodeMember<NodeContent, &Node::Content>(id, content, undoable);
 	}
 
 	void CNodeGraphControl::SetEdgeStyle(EdgeId id, const EdgeStyle& style) {
@@ -1732,35 +1741,6 @@ namespace NodeGraphCtrl {
 		m_NextNodeId = 0;
 		m_NextEdgeId = 0;
 		m_NextImageId = 0;
-	}
-
-	// ---- Serialization ----------------------------------------------------------
-	// Binary format: magic "GCF\x01", then nodes, then edges, then ID counters.
-
-	namespace {
-		constexpr uint32_t k_Magic = 0x01464347u; // 'G','C','F',0x01
-		// version 2 adds a node's Code style and tooltip, and an edge's tooltip and waypoints
-		constexpr uint32_t k_MagicV2 = 0x02464347u; // 'G','C','F',0x02
-
-		template<typename T>
-		bool BinWrite(FILE* f, const T& v) { return fwrite(&v, sizeof(T), 1, f) == 1; }
-
-		template<typename T>
-		bool BinRead(FILE* f, T& v) { return fread(&v, sizeof(T), 1, f) == 1; }
-
-		bool BinWriteStr(FILE* f, const std::wstring& s) {
-			uint32_t n = (uint32_t)s.size();
-			if (!BinWrite(f, n)) return false;
-			return n == 0 || fwrite(s.data(), sizeof(wchar_t), n, f) == n;
-		}
-
-		bool BinReadStr(FILE* f, std::wstring& s) {
-			uint32_t n;
-			// a corrupt length isn't allowed to allocate much
-			if (!BinRead(f, n) || n > (1u << 20)) return false;
-			s.resize(n);
-			return n == 0 || fread(s.data(), sizeof(wchar_t), n, f) == n;
-		}
 	}
 
 	// ---- SVG export -----------------------------------------------------------------
@@ -1941,129 +1921,6 @@ namespace NodeGraphCtrl {
 		if (_wfopen_s(&f, path, L"wb") != 0 || !f) return false;
 		bool ok = fwrite(svg.data(), 1, svg.size(), f) == svg.size();
 		return fclose(f) == 0 && ok;
-	}
-
-	bool NodeGraphModel::Save(const wchar_t* path) const {
-		FILE* f = nullptr;
-		if (_wfopen_s(&f, path, L"wb") != 0 || !f) return false;
-
-		bool ok = BinWrite(f, k_MagicV2)
-			&& BinWrite(f, (uint32_t)m_Nodes.size());
-
-		for (const auto& n : m_Nodes) {
-			uint32_t code = n.Style.Code ? 1u : 0u;
-			ok = ok
-				&& BinWrite(f, n.Id)
-				&& BinWrite(f, n.X) && BinWrite(f, n.Y)
-				&& BinWrite(f, n.Width) && BinWrite(f, n.Height)
-				&& BinWrite(f, n.Style.FillColor)
-				&& BinWrite(f, n.Style.BorderColor)
-				&& BinWrite(f, n.Style.TextColor)
-				&& BinWrite(f, n.Style.BorderWidth)
-				&& BinWrite(f, n.Style.CornerRadius)
-				&& BinWriteStr(f, n.Label)
-				&& BinWrite(f, code)
-				&& BinWriteStr(f, n.Tooltip);
-		}
-
-		ok = ok && BinWrite(f, (uint32_t)m_Edges.size());
-
-		for (const auto& e : m_Edges) {
-			uint32_t directed = e.Style.Directed ? 1u : 0u;
-			ok = ok
-				&& BinWrite(f, e.Id)
-				&& BinWrite(f, e.From) && BinWrite(f, e.To)
-				&& BinWrite(f, e.Style.Color)
-				&& BinWrite(f, e.Style.Width)
-				&& BinWrite(f, directed)
-				&& BinWriteStr(f, e.Label)
-				&& BinWriteStr(f, e.Tooltip)
-				&& BinWrite(f, (uint32_t)e.Waypoints.size());
-			for (const auto& w : e.Waypoints)
-				ok = ok && BinWrite(f, w.X) && BinWrite(f, w.Y);
-		}
-
-		ok = ok && BinWrite(f, m_NextNodeId) && BinWrite(f, m_NextEdgeId);
-
-		fclose(f);
-		return ok;
-	}
-
-	bool NodeGraphModel::Load(const wchar_t* path) {
-		FILE* f = nullptr;
-		if (_wfopen_s(&f, path, L"rb") != 0 || !f) return false;
-
-		uint32_t magic = 0;
-		if (!BinRead(f, magic) || (magic != k_Magic && magic != k_MagicV2)) { fclose(f); return false; }
-		const bool v2 = magic == k_MagicV2;
-		const uint32_t maxWaypoints = 1u << 16;	// a corrupt count isn't allowed to allocate much
-
-		uint32_t nodeCount = 0;
-		bool ok = BinRead(f, nodeCount);
-
-		std::vector<Node> nodes;
-		nodes.reserve((std::min)(nodeCount, 1u << 16));	// a corrupt count fails on reading, not on reserving
-		for (uint32_t i = 0; i < nodeCount && ok; ++i) {
-			Node n;
-			ok = BinRead(f, n.Id)
-				&& BinRead(f, n.X) && BinRead(f, n.Y)
-				&& BinRead(f, n.Width) && BinRead(f, n.Height)
-				&& BinRead(f, n.Style.FillColor)
-				&& BinRead(f, n.Style.BorderColor)
-				&& BinRead(f, n.Style.TextColor)
-				&& BinRead(f, n.Style.BorderWidth)
-				&& BinRead(f, n.Style.CornerRadius)
-				&& BinReadStr(f, n.Label);
-			if (ok && v2) {
-				uint32_t code = 0;
-				ok = BinRead(f, code) && BinReadStr(f, n.Tooltip);
-				n.Style.Code = code != 0;
-			}
-			if (ok) nodes.push_back(std::move(n));
-		}
-
-		uint32_t edgeCount = 0;
-		ok = ok && BinRead(f, edgeCount);
-
-		std::vector<Edge> edges;
-		edges.reserve((std::min)(edgeCount, 1u << 16));
-		for (uint32_t i = 0; i < edgeCount && ok; ++i) {
-			Edge e;
-			uint32_t directed = 1;
-			ok = BinRead(f, e.Id)
-				&& BinRead(f, e.From) && BinRead(f, e.To)
-				&& BinRead(f, e.Style.Color)
-				&& BinRead(f, e.Style.Width)
-				&& BinRead(f, directed)
-				&& BinReadStr(f, e.Label);
-			if (ok && v2) {
-				uint32_t count = 0;
-				ok = BinReadStr(f, e.Tooltip) && BinRead(f, count) && count <= maxWaypoints;
-				for (uint32_t w = 0; w < count && ok; ++w) {
-					Point p;
-					ok = BinRead(f, p.X) && BinRead(f, p.Y);
-					e.Waypoints.push_back(p);
-				}
-			}
-			if (ok) {
-				e.Style.Directed = directed != 0;
-				edges.push_back(std::move(e));
-			}
-		}
-
-		uint32_t nextNode = 0, nextEdge = 0;
-		ok = ok && BinRead(f, nextNode) && BinRead(f, nextEdge);
-		fclose(f);
-
-		if (!ok) return false;
-
-		m_Nodes = std::move(nodes);
-		m_Edges = std::move(edges);
-		m_Images.clear();	// the file has none (yet): the images of the previous graph go with it
-		m_NextNodeId = nextNode;
-		m_NextEdgeId = nextEdge;
-		m_NextImageId = 0;
-		return true;
 	}
 
 } // namespace NodeGraphCtrl

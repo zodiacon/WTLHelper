@@ -1,7 +1,6 @@
 #include "NodeGraphImaging.h"
-#include "../include/NodeGraphModel.h"
+#include "NodeGraphSerialization.h"
 #include <shlwapi.h>
-#include <atomic>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -126,8 +125,6 @@ namespace NodeGraphCtrl {
     // ---- NodeGraphModel: images ---------------------------------------------------
 
     namespace {
-        std::atomic<uint64_t> s_NextImageKey = 1;
-
         // the PNG of a bitmap WIC made of a handle
         template<typename MakeSource>
         std::vector<uint8_t> HandleToPng(MakeSource make) {
@@ -164,7 +161,7 @@ namespace NodeGraphCtrl {
 
         Image image;
         image.Id = m_NextImageId++;
-        image.Key = s_NextImageKey++;
+        image.Key = Serialization::NewImageKey();
         image.Data.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
         image.Width = w;
         image.Height = h;

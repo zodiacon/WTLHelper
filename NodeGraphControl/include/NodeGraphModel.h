@@ -139,8 +139,9 @@ public:
     float GetDefaultNodeHeight() const { return m_DefaultNodeHeight; }
 
     // Returns false on I/O or format error.
-    // A binary file of the nodes and edges with their styles, tooltips and waypoints (not UserData).
-    // Load also reads the first version of the file (without the Code style, tooltips and waypoints).
+    // A binary file of the images, and of the nodes and edges with their styles, content, tooltips and waypoints (not
+    // UserData). Load also reads the earlier versions of the file (version 2: no images or content, the labels scale;
+    // version 1: nor the Code style, tooltips and waypoints).
     bool Save(const wchar_t* path) const;
     bool Load(const wchar_t* path);
 

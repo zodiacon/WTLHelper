@@ -99,12 +99,14 @@
     <ClInclude Include="include\NodeGraphModel.h" />
     <ClInclude Include="include\NodeGraphRenderer.h" />
     <ClInclude Include="src\NodeGraphImaging.h" />
+    <ClInclude Include="src\NodeGraphSerialization.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\NodeGraphControl.cpp" />
     <ClCompile Include="src\NodeGraphContent.cpp" />
     <ClCompile Include="src\NodeGraphLayout.cpp" />
     <ClCompile Include="src\NodeGraphRenderer.cpp" />
+    <ClCompile Include="src\NodeGraphSerialization.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

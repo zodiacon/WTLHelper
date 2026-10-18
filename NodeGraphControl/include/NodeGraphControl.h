@@ -207,8 +207,9 @@ public:
     void SetNodeSize(NodeId id, float w, float h);
     void SetDefaultNodeSize(float w, float h);
 
-    // Style helpers — set and immediately repaint.
-    void SetNodeStyle(NodeId id, const NodeStyle& style);
+    // Style helpers — set and immediately repaint. undoable: the change can be undone (as the user's own edits can).
+    void SetNodeStyle(NodeId id, const NodeStyle& style, bool undoable = false);
+    void SetNodeContent(NodeId id, const NodeContent& content, bool undoable = false);
     void SetEdgeStyle(EdgeId id, const EdgeStyle& style);
 
     // Arranges the nodes (and the bends of the edges) with one of the layout algorithms; can be undone.
@@ -276,6 +277,8 @@ private:
     void CancelLabelEdit();
     RECT LabelEditRect(const Node& n) const;
     void SetHoveredNode(NodeId id);
+    template<typename T, T Node::*Member>
+    void SetNodeMember(NodeId id, const T& value, bool undoable);
     void FinalizeRubberBand();
 
 private:
