@@ -102,7 +102,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\NodeGraphControl.cpp" />
-    <ClCompile Include="src\NodeGraphImaging.cpp" />
+    <ClCompile Include="src\NodeGraphContent.cpp" />
     <ClCompile Include="src\NodeGraphLayout.cpp" />
     <ClCompile Include="src\NodeGraphRenderer.cpp" />
   </ItemGroup>

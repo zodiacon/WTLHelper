@@ -28,6 +28,40 @@ struct NodeStyle {
     float    BorderWidth  = 1.5f;
     float    CornerRadius = 6.0f;
     bool     Code         = false;   // monospaced, left aligned text that scales with the zoom (a block of code)
+    bool     ScaleLabel   = true;    // the label scales with the zoom (false: the same size on the screen at any zoom)
+};
+
+enum class IconPlacement  : uint8_t { Left, Top, Right };          // where the icon is, next to the label
+enum class ImageFit       : uint8_t { Fit, Fill, Stretch, Center }; // Fit: all of it, Fill: cropped to cover the area, Center: actual size (cropped if larger)
+enum class LabelPlacement : uint8_t { Center, Below, Overlay, Hidden }; // the label with an image: over it, under it, on a band over its bottom, none
+
+// What a node shows besides its label. Images are of the model (NodeGraphModel::AddImage); sizes are in graph units.
+struct NodeContent {
+    ImageId        Icon      = InvalidImage;
+    IconPlacement  IconPos   = IconPlacement::Left;
+    float          IconSize  = 16.0f;
+    ImageId        Image     = InvalidImage;   // fills the node under the title (inside a padding)
+    ImageFit       Fit       = ImageFit::Fit;
+    LabelPlacement LabelPos  = LabelPlacement::Center;
+    std::wstring   Title;                      // a header band at the top of the node, in bold
+    COLORREF       TitleFill = CLR_INVALID;    // CLR_INVALID: a darker FillColor
+};
+
+struct Rect {
+    float Left = 0, Top = 0, Right = 0, Bottom = 0;
+    float Width()  const { return Right - Left; }
+    float Height() const { return Bottom - Top; }
+    bool  IsEmpty() const { return Right <= Left || Bottom <= Top; }
+};
+
+// Where the parts of a node go, in graph units relative to the node's top-left corner. An empty rect: the part isn't shown.
+struct NodeLayout {
+    Rect Title;          // the header band
+    Rect Content;        // the rest of the node (empty when the node is too small for more than the title)
+    Rect Image;          // where the image is drawn
+    Rect ImageSource;    // the part of the image drawn there, in pixels
+    Rect Icon;
+    Rect Label;          // where the label (or the code) is drawn, and edited
 };
 
 struct EdgeStyle {
@@ -42,6 +76,7 @@ struct Node {
     float        X = 0.0f, Y = 0.0f;   // center position in graph space
     float        Width = 120.0f, Height = 40.0f;
     NodeStyle    Style;
+    NodeContent  Content;
     std::wstring Tooltip;               // shown instead of the label (nothing is shown for a Code node without one)
     void*        UserData = nullptr;
 };
@@ -92,6 +127,9 @@ public:
     bool    RemoveImage(ImageId id);
     const Image* GetImage(ImageId id) const;
     const std::vector<Image>& Images() const { return m_Images; }
+
+    // Where the title, image, icon and label of the node go (the same for drawing, exporting and editing).
+    NodeLayout GetNodeLayout(const Node& n) const;
 
     void Clear();   // the nodes, edges and images
 

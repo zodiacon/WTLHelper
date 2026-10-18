@@ -267,6 +267,7 @@ private:
     bool IsOnMinimap(const MinimapConfig& cfg, int sx, int sy) const;
     void CommitLabelEdit();
     void CancelLabelEdit();
+    RECT LabelEditRect(const Node& n) const;
     void FinalizeRubberBand();
 
 private:

@@ -216,4 +216,126 @@ namespace NodeGraphCtrl {
         return nullptr;
     }
 
+    // ---- NodeGraphModel: node layout ----------------------------------------------
+
+    namespace {
+        constexpr float k_Pad           = 6.0f;
+        constexpr float k_TitleHeight   = 22.0f;
+        constexpr float k_CaptionHeight = 20.0f;   // the label under an image, or on a band over it
+        constexpr float k_MinIconSize   = 4.0f;    // smaller than this isn't drawn
+        constexpr float k_MinContentHeight = 8.0f; // less than this under the title: only the title is shown
+
+        Rect Deflate(const Rect& r, float dx, float dy) {
+            return { r.Left + dx, r.Top + dy, r.Right - dx, r.Bottom - dy };
+        }
+
+        Rect Centered(const Rect& r, float w, float h) {
+            float x = (r.Left + r.Right - w) * 0.5f, y = (r.Top + r.Bottom - h) * 0.5f;
+            return { x, y, x + w, y + h };
+        }
+
+        // the image (w x h pixels) in an area: where it goes, and the part of it that goes there
+        void FitImage(ImageFit fit, const Rect& area, float w, float h, Rect& dst, Rect& src) {
+            const Rect whole{ 0, 0, w, h };
+            switch (fit) {
+                case ImageFit::Stretch:
+                    dst = area;
+                    src = whole;
+                    break;
+                case ImageFit::Fit: {
+                    float s = (std::min)(area.Width() / w, area.Height() / h);
+                    dst = Centered(area, w * s, h * s);
+                    src = whole;
+                    break;
+                }
+                case ImageFit::Fill: {
+                    float s = (std::max)(area.Width() / w, area.Height() / h);
+                    dst = area;
+                    src = Centered(whole, area.Width() / s, area.Height() / s);
+                    break;
+                }
+                case ImageFit::Center: {
+                    float cw = (std::min)(w, area.Width()), ch = (std::min)(h, area.Height());
+                    dst = Centered(area, cw, ch);
+                    src = Centered(whole, cw, ch);
+                    break;
+                }
+            }
+        }
+    }
+
+    NodeLayout NodeGraphModel::GetNodeLayout(const Node& n) const {
+        const NodeContent& c = n.Content;
+        NodeLayout layout;
+
+        Rect content{ 0, 0, n.Width, n.Height };
+        if (!c.Title.empty()) {
+            layout.Title = { 0, 0, n.Width, (std::min)(k_TitleHeight, n.Height) };
+            content.Top = layout.Title.Bottom;
+        }
+        if (!c.Title.empty() && content.Height() < k_MinContentHeight) {    // the title takes the node
+            layout.Title.Bottom = n.Height;
+            return layout;
+        }
+        layout.Content = content;
+
+        // the image takes the content but for the caption under it; the label and the icon share what is left for the label
+        Rect labelArea = content;
+        bool showLabel = true;
+        if (const Image* image = GetImage(c.Image)) {
+            Rect area = Deflate(content, k_Pad, k_Pad);
+            const float caption = (std::min)(k_CaptionHeight, content.Height());
+            switch (c.LabelPos) {
+                case LabelPlacement::Below:
+                    labelArea.Top = content.Bottom - caption;
+                    area.Bottom = labelArea.Top;
+                    break;
+                case LabelPlacement::Overlay:
+                    labelArea.Top = content.Bottom - caption;
+                    break;
+                case LabelPlacement::Hidden:
+                    showLabel = false;
+                    break;
+                case LabelPlacement::Center:
+                    break;
+            }
+            if (!area.IsEmpty())
+                FitImage(c.Fit, area, (float)image->Width, (float)image->Height, layout.Image, layout.ImageSource);
+            // the band goes over the bottom of the image itself
+            if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty())
+                labelArea = { layout.Image.Left, (std::max)(layout.Image.Top, layout.Image.Bottom - caption), layout.Image.Right, layout.Image.Bottom };
+        }
+
+        Rect label = labelArea;
+        if (GetImage(c.Icon)) {
+            const bool alone = !showLabel || n.Label.empty();    // an icon without a label is centered
+            float size = (std::min)({ c.IconSize, labelArea.Width() - 2 * k_Pad,
+                c.IconPos == IconPlacement::Top || alone ? labelArea.Height() - 2 * k_Pad : labelArea.Height() - 4.0f });
+            if (c.IconPos == IconPlacement::Top && !alone)
+                size = (std::min)(size, labelArea.Height() * 0.6f);
+            if (size >= k_MinIconSize) {
+                const float cx = (labelArea.Left + labelArea.Right) * 0.5f, cy = (labelArea.Top + labelArea.Bottom) * 0.5f;
+                if (alone)
+                    layout.Icon = Centered(labelArea, size, size);
+                else if (c.IconPos == IconPlacement::Left) {
+                    layout.Icon = { labelArea.Left + k_Pad, cy - size * 0.5f, labelArea.Left + k_Pad + size, cy + size * 0.5f };
+                    label.Left = layout.Icon.Right + 4.0f;
+                    label.Right -= 4.0f;
+                }
+                else if (c.IconPos == IconPlacement::Right) {
+                    layout.Icon = { labelArea.Right - k_Pad - size, cy - size * 0.5f, labelArea.Right - k_Pad, cy + size * 0.5f };
+                    label.Right = layout.Icon.Left - 4.0f;
+                    label.Left += 4.0f;
+                }
+                else {
+                    layout.Icon = { cx - size * 0.5f, labelArea.Top + k_Pad, cx + size * 0.5f, labelArea.Top + k_Pad + size };
+                    label.Top = layout.Icon.Bottom + 2.0f;
+                }
+            }
+        }
+        if (showLabel)
+            layout.Label = label;
+        return layout;
+    }
+
 } // namespace NodeGraphCtrl

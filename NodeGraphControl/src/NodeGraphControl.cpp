@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "../include/NodeGraphControl.h"
+#include "NodeGraphImaging.h"
 
 #include <commctrl.h>
 #include <memory>
@@ -426,11 +427,8 @@ namespace NodeGraphCtrl {
 		Node* n = m_Model->GetNode(id);
 		if (!n) return;
 
-		auto sc = m_Vt.ToScreen(n->X, n->Y);
-		float hw = n->Width * m_Vt.Scale * 0.5f;
-		float hh = n->Height * m_Vt.Scale * 0.5f;
-		int x = (int)(sc.x - hw), y = (int)(sc.y - hh);
-		int w = (int)(hw * 2.0f), h = (int)(hh * 2.0f);
+		RECT rc = LabelEditRect(*n);
+		int x = rc.left, y = rc.top, w = rc.right - rc.left, h = rc.bottom - rc.top;
 
 		// Convert \n → \r\n for the EDIT control.
 		std::wstring editText;
@@ -445,8 +443,9 @@ namespace NodeGraphCtrl {
 			x, y, w, h, m_hWnd, nullptr, nullptr, nullptr);
 		if (!m_LabelEdit) return;
 
-		// Segoe UI at the same point size the D2D renderer uses (13 DIPs ≈ 10 pt at 96 DPI).
-		int fontPx = MulDiv(10, ::GetDpiForWindow(m_hWnd), 72);
+		// Segoe UI at the size the D2D renderer uses (13 DIPs), times the zoom if the label scales with it.
+		const float scale = n->Style.ScaleLabel && !n->Style.Code ? m_Vt.Scale : 1.0f;
+		int fontPx = std::max(8, (int)(13.0f * ::GetDpiForWindow(m_hWnd) / 96.0f * scale + 0.5f));
 		m_LabelEditFont.CreateFont(
 			-fontPx, 0, 0, 0, FW_NORMAL,
 			FALSE, FALSE, FALSE,
@@ -462,6 +461,24 @@ namespace NodeGraphCtrl {
 
 		SetWindowSubclass(m_LabelEdit, EditSubclassProc, 1,
 			reinterpret_cast<DWORD_PTR>(m_hWnd));
+	}
+
+	// Over the label's part of the node (the content when the label is hidden, the node when the title takes it all), at
+	// least a line of text high.
+	RECT CNodeGraphControl::LabelEditRect(const Node& n) const {
+		NodeLayout layout = m_Model->GetNodeLayout(n);
+		const Rect whole{ 0, 0, n.Width, n.Height };
+		const Rect& part = !layout.Label.IsEmpty() ? layout.Label : !layout.Content.IsEmpty() ? layout.Content : whole;
+		float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
+		auto p0 = m_Vt.ToScreen(left + part.Left, top + part.Top);
+		auto p1 = m_Vt.ToScreen(left + part.Right, top + part.Bottom);
+		const float minHeight = (float)MulDiv(24, ::GetDpiForWindow(m_hWnd), 96);
+		if (p1.y - p0.y < minHeight) {
+			float grow = (minHeight - (p1.y - p0.y)) * 0.5f;
+			p0.y -= grow;
+			p1.y += grow;
+		}
+		return { (int)p0.x, (int)p0.y, (int)p1.x, (int)p1.y };
 	}
 
 	bool CNodeGraphControl::IsEditingLabel() const {
@@ -768,12 +785,8 @@ namespace NodeGraphCtrl {
 		if (m_LabelEdit && m_EditNodeId != InvalidNode) {
 			Node* n = m_Model->GetNode(m_EditNodeId);
 			if (n) {
-				auto sc = m_Vt.ToScreen(n->X, n->Y);
-				float hw = n->Width * m_Vt.Scale * 0.5f;
-				float hh = n->Height * m_Vt.Scale * 0.5f;
-				::SetWindowPos(m_LabelEdit, nullptr,
-					(int)(sc.x - hw), (int)(sc.y - hh),
-					(int)(hw * 2.0f), (int)(hh * 2.0f),
+				RECT rc = LabelEditRect(*n);
+				::SetWindowPos(m_LabelEdit, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
 					SWP_NOZORDER | SWP_NOACTIVATE);
 			}
 		}
@@ -1511,6 +1524,7 @@ namespace NodeGraphCtrl {
 			format = GUID_ContainerFormatBmp;
 
 		bool ok = false;
+		Imaging::ComScope com;
 		ComPtr<IWICImagingFactory> factory;
 		ComPtr<IWICBitmap> bitmap;
 		ComPtr<IWICStream> stream;

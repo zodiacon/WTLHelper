@@ -65,6 +65,20 @@ HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     m_CodeTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     m_CodeTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
+    hr = m_DwFactory->CreateTextFormat(
+        L"Segoe UI", nullptr,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        12.0f, L"en-US",
+        m_TitleTextFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    m_TitleTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    m_TitleTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    m_TitleTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    hr = m_DwFactory->CreateEllipsisTrimmingSign(m_TitleTextFormat.Get(), m_Ellipsis.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+    m_TitleTextFormat->SetTrimming(&trimming, m_Ellipsis.Get());
+
     D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties();
     ssp.dashStyle = D2D1_DASH_STYLE_DASH;
     hr = m_D2dFactory->CreateStrokeStyle(ssp, nullptr, 0, m_DashStyle.GetAddressOf());
@@ -76,6 +90,8 @@ void NodeGraphRenderer::Shutdown() {
     m_DashStyle.Reset();
     m_EdgeTextFormat.Reset();
     m_CodeTextFormat.Reset();
+    m_Ellipsis.Reset();
+    m_TitleTextFormat.Reset();
     m_TextFormat.Reset();
     m_DwFactory.Reset();
     m_D2dFactory.Reset();
@@ -187,7 +203,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
 
     for (const auto& n : model.Nodes()) {
         bool sel = std::find(selectedNodes.begin(), selectedNodes.end(), n.Id) != selectedNodes.end();
-        DrawNode(n, vt, sel);
+        DrawNode(model, n, vt, sel);
     }
 
     if (rubberBand.Active)
@@ -365,7 +381,11 @@ void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
     m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
 }
 
-void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool selected) {
+static COLORREF Darker(COLORREF cr, float factor = 0.72f) {
+    return RGB(GetRValue(cr) * factor, GetGValue(cr) * factor, GetBValue(cr) * factor);
+}
+
+void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, const ViewTransform& vt, bool selected) {
     auto center = vt.ToScreen(n.X, n.Y);
     float hw = n.Width  * vt.Scale * 0.5f;
     float hh = n.Height * vt.Scale * 0.5f;
@@ -375,10 +395,30 @@ void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool se
         { center.x - hw, center.y - hh, center.x + hw, center.y + hh },
         r, r
     };
+    const NodeContent& c = n.Content;
+    const NodeLayout layout = model.GetNodeLayout(n);
+    auto toScreen = [&](const Rect& part) -> D2D1_RECT_F {
+        return { rr.rect.left + part.Left * vt.Scale, rr.rect.top + part.Top * vt.Scale,
+                 rr.rect.left + part.Right * vt.Scale, rr.rect.top + part.Bottom * vt.Scale };
+    };
 
     // Fill
     m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
     m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+
+    if (!layout.Title.IsEmpty()) {
+        m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
+        FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
+    }
+
+    if (!layout.Image.IsEmpty())
+        DrawImage(model, c.Image, toScreen(layout.Image), &layout.ImageSource);
+
+    // a band for the label over the bottom of the image, so that it can be read whatever the image is
+    if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
+        m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.5f));
+        m_RenderTarget->FillRectangle(toScreen(layout.Label), m_Brush.Get());
+    }
 
     // Border
     float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
@@ -387,23 +427,118 @@ void NodeGraphRenderer::DrawNode(const Node& n, const ViewTransform& vt, bool se
         : ColorrefToD2D(n.Style.BorderColor));
     m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
 
+    if (!layout.Icon.IsEmpty())
+        DrawImage(model, c.Icon, toScreen(layout.Icon));
+
+    if (!layout.Title.IsEmpty())
+        DrawTitle(n, layout.Title, vt);
+
     // Label
+    if (layout.Label.IsEmpty() || n.Label.empty())
+        return;
     if (n.Style.Code) {
-        DrawCodeText(n, vt);
+        DrawCodeText(n, layout.Label, vt);
     }
-    else if (!n.Label.empty()) {
+    else if (n.Style.ScaleLabel) {
+        // drawn at its size in graph space, like the title; too small to read: not drawn
+        if (vt.Scale < 0.3f)
+            return;
+        const Rect& part = layout.Label;
+        m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(rr.rect.left, rr.rect.top));
         m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
         m_RenderTarget->DrawTextW(
             n.Label.c_str(), (UINT32)n.Label.size(),
             m_TextFormat.Get(),
-            rr.rect,
+            { part.Left, part.Top, part.Right, part.Bottom },
+            m_Brush.Get());
+        m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
+    else {
+        m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
+        m_RenderTarget->DrawTextW(
+            n.Label.c_str(), (UINT32)n.Label.size(),
+            m_TextFormat.Get(),
+            toScreen(layout.Label),
             m_Brush.Get());
     }
 }
 
+// A rectangle with its top and/or bottom corners rounded (a band across the top or the bottom of a node), in the brush's color.
+void NodeGraphRenderer::FillBand(const D2D1_RECT_F& rect, float radius, bool roundTop, bool roundBottom) {
+    radius = (std::min)({ radius, (rect.right - rect.left) * 0.5f, (rect.bottom - rect.top) * 0.5f });
+    if (radius <= 0.5f || (!roundTop && !roundBottom)) {
+        m_RenderTarget->FillRectangle(rect, m_Brush.Get());
+        return;
+    }
+    if (roundTop && roundBottom) {
+        m_RenderTarget->FillRoundedRectangle({ rect, radius, radius }, m_Brush.Get());
+        return;
+    }
+
+    ComPtr<ID2D1PathGeometry> path;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(m_D2dFactory->CreatePathGeometry(path.GetAddressOf())) || FAILED(path->Open(sink.GetAddressOf())))
+        return;
+    const float top = roundTop ? radius : 0, bottom = roundBottom ? radius : 0;
+    auto arc = [&](float x, float y) {
+        sink->AddArc(D2D1::ArcSegment({ x, y }, { radius, radius }, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    };
+    sink->BeginFigure({ rect.left, rect.top + top }, D2D1_FIGURE_BEGIN_FILLED);
+    if (top > 0) arc(rect.left + top, rect.top);
+    sink->AddLine({ rect.right - top, rect.top });
+    if (top > 0) arc(rect.right, rect.top + top);
+    sink->AddLine({ rect.right, rect.bottom - bottom });
+    if (bottom > 0) arc(rect.right - bottom, rect.bottom);
+    sink->AddLine({ rect.left + bottom, rect.bottom });
+    if (bottom > 0) arc(rect.left, rect.bottom - bottom);
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (SUCCEEDED(sink->Close()))
+        m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
+}
+
+// src: the part of the image, in its pixels (the bitmap may be smaller than the image, if it was too large for the device).
+void NodeGraphRenderer::DrawImage(const NodeGraphModel& model, ImageId id, const D2D1_RECT_F& dst, const Rect* src) {
+    ID2D1Bitmap* bitmap = GetBitmap(model, id);
+    if (!bitmap)
+        return;
+    D2D1_RECT_F source;
+    D2D1_RECT_F* sourcePtr = nullptr;
+    if (src) {
+        const Image* image = model.GetImage(id);
+        auto size = bitmap->GetSize();
+        float sx = size.width / image->Width, sy = size.height / image->Height;
+        source = { src->Left * sx, src->Top * sy, src->Right * sx, src->Bottom * sy };
+        sourcePtr = &source;
+    }
+    m_RenderTarget->DrawBitmap(bitmap, dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, sourcePtr);
+}
+
+// The text is drawn at its size in graph space and scaled with the zoom, so that it stays inside the band. When it would
+// be too small to read it is not drawn.
+void NodeGraphRenderer::DrawTitle(const Node& n, const Rect& area, const ViewTransform& vt) {
+    if (vt.Scale < 0.3f)
+        return;
+
+    auto center = vt.ToScreen(n.X, n.Y);
+    float left = center.x - n.Width * vt.Scale * 0.5f;
+    float top = center.y - n.Height * vt.Scale * 0.5f;
+    const float pad = 8.0f;
+    D2D1_RECT_F text = { area.Left + pad, area.Top, area.Right - pad, area.Bottom };
+    if (text.right <= text.left)
+        return;
+
+    const auto& title = n.Content.Title;
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(left, top));
+    m_RenderTarget->PushAxisAlignedClip(text, D2D1_ANTIALIAS_MODE_ALIASED);
+    m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
+    m_RenderTarget->DrawTextW(title.c_str(), (UINT32)title.size(), m_TitleTextFormat.Get(), text, m_Brush.Get());
+    m_RenderTarget->PopAxisAlignedClip();
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
 // The lines of the label in a monospaced font. The text is drawn at its size in graph space and scaled with the zoom, so
 // that it stays inside the node. When it would be too small to read it is not drawn.
-void NodeGraphRenderer::DrawCodeText(const Node& n, const ViewTransform& vt) {
+void NodeGraphRenderer::DrawCodeText(const Node& n, const Rect& area, const ViewTransform& vt) {
     if (n.Label.empty() || vt.Scale < 0.3f)
         return;
 
@@ -411,7 +546,9 @@ void NodeGraphRenderer::DrawCodeText(const Node& n, const ViewTransform& vt) {
     float left = center.x - n.Width * vt.Scale * 0.5f;
     float top = center.y - n.Height * vt.Scale * 0.5f;
     const float pad = 8.0f;
-    D2D1_RECT_F text = { pad, pad * 0.75f, n.Width - pad, n.Height - pad * 0.75f };
+    D2D1_RECT_F text = { area.Left + pad, area.Top + pad * 0.75f, area.Right - pad, area.Bottom - pad * 0.75f };
+    if (text.right <= text.left || text.bottom <= text.top)
+        return;
 
     m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(left, top));
     m_RenderTarget->PushAxisAlignedClip(text, D2D1_ANTIALIAS_MODE_ALIASED);

@@ -1,11 +1,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <cmath>
 #include "NodeGraphControl.h"
 
 #pragma comment(lib, "NodeGraphControl.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 #include <commdlg.h>
 
@@ -24,6 +28,7 @@ static constexpr int IDC_UNDO    = 109;
 static constexpr int IDC_REDO    = 110;
 static constexpr int IDC_MINIMAP = 111;
 static constexpr int IDC_SAMPLE  = 112;
+static constexpr int IDC_CONTENT = 113;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -67,6 +72,138 @@ static void PopulateSample(NodeGraphModel& m) {
     };
     for (const auto& l : links)
         m.AddEdge(n[l[0]], n[l[1]]);
+}
+
+// A stock shell icon at a size that stays sharp when zoomed in.
+static ImageId AddStockIcon(NodeGraphModel& m, SHSTOCKICONID id) {
+    SHSTOCKICONINFO info{ sizeof(info) };
+    if (FAILED(SHGetStockIconInfo(id, SHGSI_ICONLOCATION, &info)))
+        return InvalidImage;
+    HICON icon = nullptr;
+    if (FAILED(SHDefExtractIconW(info.szPath, info.iIcon, 0, &icon, nullptr, 64)) || !icon)
+        return InvalidImage;
+    ImageId image = m.AddImage(icon);
+    DestroyIcon(icon);
+    return image;
+}
+
+// A picture made up on the spot: color gradients with a few rings, w x h pixels.
+static ImageId AddPicture(NodeGraphModel& m, int w, int h, int seed) {
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bitmap)
+        return InvalidImage;
+    auto pixels = static_cast<DWORD*>(bits);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float dx = x - w * 0.5f, dy = y - h * 0.5f;
+            int ring = (int)(sqrtf(dx * dx + dy * dy) / 12) % 2;
+            BYTE r = (BYTE)(255 * x / w), g = (BYTE)(255 * y / h), b = (BYTE)(seed ? 200 : 90);
+            if (ring) { r = (BYTE)(r * 0.8f); g = (BYTE)(g * 0.8f); b = (BYTE)(b * 0.8f); }
+            pixels[y * w + x] = RGB(b, g, r);   // a DIB is BGR
+        }
+    }
+    ImageId image = m.AddImage(bitmap);
+    DeleteObject(bitmap);
+    return image;
+}
+
+// Nodes with icons, titles and images, in each of the ways they can be placed.
+static void PopulateContent(NodeGraphModel& m) {
+    m.Clear();
+    const ImageId folder = AddStockIcon(m, SIID_FOLDER);
+    const ImageId app = AddStockIcon(m, SIID_APPLICATION);
+    const ImageId warning = AddStockIcon(m, SIID_WARNING);
+    const ImageId info = AddStockIcon(m, SIID_INFO);
+    const ImageId wide = AddPicture(m, 240, 140, 0);
+    const ImageId square = AddPicture(m, 120, 120, 1);
+
+    // adds a node and sets it up (a Node& doesn't survive adding the next node)
+    auto node = [&](const wchar_t* label, float x, float y, float w, float h, auto setup) {
+        NodeId id = m.AddNode(label, x, y, w, h);
+        setup(*m.GetNode(id));
+        return id;
+    };
+
+    // icons
+    NodeId left = node(L"Icon left", 100, 60, 140, 0, [&](Node& n) {
+        n.Content.Icon = folder;
+    });
+    NodeId right = node(L"Icon right", 270, 60, 140, 0, [&](Node& n) {
+        n.Content.Icon = app;
+        n.Content.IconPos = IconPlacement::Right;
+    });
+    NodeId top = node(L"Icon on top", 440, 70, 120, 64, [&](Node& n) {
+        n.Content.Icon = info;
+        n.Content.IconPos = IconPlacement::Top;
+        n.Content.IconSize = 28;
+    });
+    node(L"", 570, 70, 48, 48, [&](Node& n) {
+        n.Content.Icon = warning;
+        n.Content.IconSize = 32;
+        n.Tooltip = L"An icon without a label";
+    });
+    node(L"Fixed size label", 700, 70, 130, 0, [&](Node& n) {
+        n.Style.ScaleLabel = false;
+        n.Tooltip = L"The label is the same size on the screen at any zoom";
+    });
+
+    // titles
+    NodeId process = node(L"notepad.exe\nPID 4242", 100, 200, 160, 70, [&](Node& n) {
+        n.Content.Title = L"Process";
+        n.Content.Icon = app;
+        n.Content.IconSize = 24;
+    });
+    NodeId module = node(L"kernel32.dll", 300, 200, 150, 60, [&](Node& n) {
+        n.Content.Title = L"Module with a long title";
+        n.Content.TitleFill = RGB(150, 80, 40);
+        n.Style.FillColor = RGB(200, 120, 70);
+        n.Style.BorderColor = RGB(120, 60, 30);
+    });
+    NodeId code = node(L"mov rax, [rcx]\nadd rax, 8\nret", 500, 210, 170, 90, [&](Node& n) {
+        n.Content.Title = L"Code";
+        n.Style.Code = true;
+        n.Style.FillColor = RGB(40, 44, 52);
+        n.Style.BorderColor = RGB(90, 96, 110);
+    });
+
+    // images
+    NodeId fit = node(L"Fit, caption below", 100, 400, 170, 140, [&](Node& n) {
+        n.Content.Image = wide;
+        n.Content.LabelPos = LabelPlacement::Below;
+    });
+    NodeId fill = node(L"Fill, label overlaid", 290, 400, 150, 140, [&](Node& n) {
+        n.Content.Image = wide;
+        n.Content.Fit = ImageFit::Fill;
+        n.Content.LabelPos = LabelPlacement::Overlay;
+    });
+    NodeId center = node(L"Center, no label", 460, 400, 150, 140, [&](Node& n) {
+        n.Content.Image = square;
+        n.Content.Fit = ImageFit::Center;
+        n.Content.LabelPos = LabelPlacement::Hidden;
+        n.Tooltip = L"An image at its size, without a label";
+    });
+    NodeId stretch = node(L"stretched", 630, 400, 150, 160, [&](Node& n) {
+        n.Content.Title = L"Title and image";
+        n.Content.Image = square;
+        n.Content.Fit = ImageFit::Stretch;
+        n.Content.LabelPos = LabelPlacement::Below;
+        n.Content.Icon = folder;
+    });
+
+    m.AddEdge(left, process);
+    m.AddEdge(right, module);
+    m.AddEdge(process, fit);
+    m.AddEdge(module, fill);
+    m.AddEdge(code, center);
+    m.AddEdge(code, stretch);
+    m.AddEdge(top, code);
 }
 
 static void UpdateStatus(HWND /*hwnd*/) {
@@ -166,6 +303,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDC_SAMPLE:
             PopulateSample(*g_graph.GetModel());
             g_graph.ApplyLayout(LayoutAlgorithm::Layered);
+            UpdateStatus(hwnd);
+            break;
+        case IDC_CONTENT:
+            PopulateContent(*g_graph.GetModel());
+            g_graph.FitInView();
             UpdateStatus(hwnd);
             break;
         case IDC_MINIMAP:
@@ -297,6 +439,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_STRING, IDC_MINIMAP, L"Toggle &Minimap\tM");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hGraph, MF_STRING, IDC_SAMPLE,  L"&Sample Graph");
+    AppendMenu(hGraph, MF_STRING, IDC_CONTENT, L"C&ontent Sample");
     AppendMenu(hGraph, MF_STRING, IDC_BTNCLR,  L"&Clear All");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hGraph, L"&Graph");
 

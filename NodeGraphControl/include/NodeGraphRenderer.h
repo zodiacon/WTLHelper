@@ -100,8 +100,11 @@ private:
     void DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, bool selected);
     void DrawEdgePreview(const EdgePreview& preview, const NodeGraphModel& model,
                          const ViewTransform& vt);
-    void DrawNode(const Node& n, const ViewTransform& vt, bool selected);
-    void DrawCodeText(const Node& n, const ViewTransform& vt);
+    void DrawNode(const NodeGraphModel& model, const Node& n, const ViewTransform& vt, bool selected);
+    void DrawCodeText(const Node& n, const Rect& area, const ViewTransform& vt);
+    void DrawTitle(const Node& n, const Rect& area, const ViewTransform& vt);
+    void FillBand(const D2D1_RECT_F& rect, float radius, bool roundTop, bool roundBottom);
+    void DrawImage(const NodeGraphModel& model, ImageId id, const D2D1_RECT_F& dst, const Rect* src = nullptr);
     void DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir);
     void DrawRubberBand(const RubberBand& rb);
     void DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
@@ -115,6 +118,8 @@ private:
     ComPtr<IDWriteTextFormat>   m_TextFormat;      // 13pt, used for node labels
     ComPtr<IDWriteTextFormat>   m_EdgeTextFormat;  // 11pt, used for edge labels
     ComPtr<IDWriteTextFormat>   m_CodeTextFormat;  // 12 units monospaced, left aligned, for nodes with NodeStyle::Code
+    ComPtr<IDWriteTextFormat>   m_TitleTextFormat; // 12 units bold, left aligned, one line with an ellipsis, for NodeContent::Title
+    ComPtr<IDWriteInlineObject> m_Ellipsis;
     ComPtr<ID2D1StrokeStyle>    m_DashStyle;
 
     // Device-dependent resources (recreated if device lost).
