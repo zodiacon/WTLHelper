@@ -22,6 +22,13 @@ struct ListViewHelper final {
 	static CString GetAllRowsAsString(CListViewCtrl const& lv, PCWSTR separator = L"\t", PCWSTR cr = L"\r\n");
 	static bool WriteColumnsState(ColumnsState const& state, IStream* stm);
 	static bool ReadColumnsState(ColumnsState& state, IStream* stm);
+	//
+	// a list view scales its font to a new DPI, but not its column widths: with this it does (a window subclass).
+	// Calling it again is harmless. ColumnManager calls it for its list view
+	//
+	static void EnableColumnDpiScaling(HWND hListView);
+	// the widths of all the columns (and their minimum widths), from one DPI to another
+	static void ScaleColumns(HWND hListView, UINT toDpi, UINT fromDpi);
 };
 
 struct SelectedItemsView : std::ranges::view_interface<SelectedItemsView> {

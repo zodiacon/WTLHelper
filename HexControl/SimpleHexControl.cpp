@@ -191,7 +191,7 @@ bool CHexControl::HasSelection() const {
 }
 
 LRESULT CHexControl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
-	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
+	CreateSolidCaret(GetCaretWidth(), m_CharHeight);
 	UpdateCaret();
 	ShowCaret();
 
@@ -490,7 +490,7 @@ void CHexControl::RedrawCaretLine() {
 
 LRESULT CHexControl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	InitFontMetrics();
-	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
+	CreateSolidCaret(GetCaretWidth(), m_CharHeight);
 	return 0;
 }
 
@@ -659,10 +659,17 @@ void CHexControl::RecalcLayout() {
 		m_EndOffset = m_Buffer->GetSize();
 }
 
+//
+// the font is created for the DPI of the control (CreatePointFont would use the DPI of the system)
+//
 void CHexControl::InitFontMetrics() {
 	if (m_Font)
 		m_Font.DeleteObject();
-	m_Font.CreatePointFont(m_FontPointSize, m_FontFaceName);
+	LOGFONT lf{};
+	::StringCchCopy(lf.lfFaceName, LF_FACESIZE, m_FontFaceName);
+	lf.lfHeight = -::MulDiv(m_FontPointSize, GetDpi(), 720);
+	lf.lfCharSet = DEFAULT_CHARSET;
+	m_Font.CreateFontIndirect(&lf);
 	CClientDC dc(*this);
 	dc.SelectFont(m_Font);
 	TEXTMETRIC tm;
@@ -720,7 +727,41 @@ int CHexControl::GetHScrollX() const {
 }
 
 int CHexControl::GetRulerHeight() const {
-	return m_ShowRuler ? m_CharHeight + 4 : 0;
+	return m_ShowRuler ? m_CharHeight + ScaleToDpi(4) : 0;
+}
+
+UINT CHexControl::GetDpi() const {
+	UINT dpi = m_hWnd ? ::GetDpiForWindow(m_hWnd) : 0;
+	return dpi ? dpi : ::GetDpiForSystem();
+}
+
+int CHexControl::ScaleToDpi(int value) const {
+	return ::MulDiv(value, GetDpi(), USER_DEFAULT_SCREEN_DPI);
+}
+
+// the insert caret is 2 pixels wide at 96 DPI; the overwrite caret covers a character
+int CHexControl::GetCaretWidth() const {
+	return m_InsertMode ? ScaleToDpi(2) : m_CharWidth;
+}
+
+//
+// the control moved to a monitor with another DPI (or the DPI of its monitor changed): the font and everything measured
+// from it are made again for the new DPI
+//
+LRESULT CHexControl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	bHandled = FALSE;
+	InitFontMetrics();
+	if (::GetFocus() == m_hWnd) {
+		DestroyCaret();
+		CreateSolidCaret(GetCaretWidth(), m_CharHeight);
+	}
+	RecalcLayout();
+	if (::GetFocus() == m_hWnd) {
+		UpdateCaret();
+		ShowCaret();
+	}
+	Invalidate();
+	return 0;
 }
 
 int CHexControl::GetSeparatorExtraX(int byteCol) const {
@@ -1189,7 +1230,7 @@ bool CHexControl::IsReadOnly() const {
 void CHexControl::SetInsertMode(bool insert) {
 	m_InsertMode = insert;
 	DestroyCaret();
-	CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
+	CreateSolidCaret(GetCaretWidth(), m_CharHeight);
 	UpdateCaret();
 }
 
@@ -1611,7 +1652,7 @@ void CHexControl::SetFont(PCWSTR faceName, int pointSizeTenths) {
 	if (m_hWnd) {
 		InitFontMetrics();
 		DestroyCaret();
-		CreateSolidCaret(m_InsertMode ? 2 : m_CharWidth, m_CharHeight);
+		CreateSolidCaret(GetCaretWidth(), m_CharHeight);
 		RecalcLayout();
 		RedrawWindow();
 	}

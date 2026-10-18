@@ -443,6 +443,7 @@
     <ClInclude Include="DarkMode\UAHMenuBar.h" />
     <ClInclude Include="DarkMode\Version.h" />
     <ClInclude Include="DialogHelper.h" />
+    <ClInclude Include="DpiHelper.h" />
     <ClInclude Include="IconHelper.h" />
     <ClInclude Include="IListView.h" />
     <ClInclude Include="IniDocument.h" />

@@ -2,6 +2,7 @@
 
 #include <map>
 #include <vector>
+#include "DpiHelper.h"
 
 enum class ColumnFlags {
 	None = 0,
@@ -14,10 +15,14 @@ enum class ColumnFlags {
 };
 DEFINE_ENUM_FLAG_OPERATORS(ColumnFlags);
 
+//
+// column widths are at 96 DPI: a column is inserted in the width for the DPI of the list view,
+// and the list view's columns follow its DPI when it changes (see ListViewHelper::EnableColumnDpiScaling)
+//
 class ColumnManager {
 public:
 	struct ColumnInfo {
-		int DefaultWidth;
+		int DefaultWidth;	// at 96 DPI
 		int Format;
 		CString Name;
 		ColumnFlags Flags;
@@ -78,6 +83,7 @@ public:
 
 protected:
 	void SetColumn(int i, const ColumnInfo& info);
+	void EnableDpiScaling();
 
 private:
 	CListViewCtrl m_ListView;
@@ -127,7 +133,8 @@ int ColumnManager::AddColumn(PCWSTR name, int format, int width, T tag, ColumnFl
 
 	if (m_ListView && ((flags & ColumnFlags::Visible) == ColumnFlags::Visible)) {
 		auto header = m_ListView.GetHeader();
-		int i = m_ListView.InsertColumn(header.GetItemCount(), name, format, width);
+		EnableDpiScaling();
+		int i = m_ListView.InsertColumn(header.GetItemCount(), name, format, DpiHelper::Scale(width, m_ListView));
 		HDITEM hdi;
 		hdi.mask = HDI_LPARAM;
 		hdi.lParam = m_Columns.size();

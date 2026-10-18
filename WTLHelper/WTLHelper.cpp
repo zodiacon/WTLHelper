@@ -11,6 +11,7 @@
 #include "CustomDateTimePicker.h"
 #include "CustomMonthCalendar.h"
 #include "IconHelper.h"
+#include "DpiHelper.h"
 #include "CustomCheckAclUI.h"
 
 static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
@@ -219,43 +220,39 @@ ColorTone WTLHelper::GetColorTone() noexcept {
 	return static_cast<ColorTone>(DarkMode::getColorTone());
 }
 
-bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count) {
+bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count, UINT dpi) {
 	ATLASSERT(::IsMenu(menu));
 
+	int size = DpiHelper::SmallIconSize(dpi ? dpi : ::GetDpiForSystem());
 	CDC mdc;
 	CClientDC dc(::GetDesktopWindow());
 	mdc.CreateCompatibleDC(dc);
-	CRect rc(0, 0, 16, 16);
+	CRect rc(0, 0, size, size);
 	for (int i = 0; i < count; i++) {
 		auto& cmd = items[i];
-		auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::Load(cmd.icon, 16);
+		// an icon loaded here is drawn into the bitmap and destroyed
+		CIcon loaded(cmd.hIcon ? nullptr : IconHelper::Load(cmd.icon, size));
+		auto hIcon = cmd.hIcon ? cmd.hIcon : loaded.m_hIcon;
 		ATLASSERT(hIcon);
 		CBitmap bmp;
-		bmp.CreateCompatibleBitmap(dc, 16, 16);
-		mdc.SelectBitmap(bmp);
+		bmp.CreateCompatibleBitmap(dc, size, size);
+		auto hOld = mdc.SelectBitmap(bmp);
 		mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
-		mdc.DrawIconEx(0, 0, hIcon, 16, 16);
+		mdc.DrawIconEx(0, 0, hIcon, size, size);
+		mdc.SelectBitmap(hOld);
+		// a bitmap set before (by an earlier call, e.g. for another DPI) is replaced
+		CMenuItemInfo mii;
+		mii.fMask = MIIM_CHECKMARKS;
+		if (menu.GetMenuItemInfo(cmd.id, FALSE, &mii) && mii.hbmpChecked)
+			::DeleteObject(mii.hbmpChecked);
 		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
 		bmp.Detach();
 	}
 	return true;
 }
 
-bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const& cmd) {
-	auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::Load(cmd.icon, 16);
-	ATLASSERT(hIcon);
-	CBitmap bmp;
-	CDC mdc;
-	CClientDC dc(::GetDesktopWindow());
-	mdc.CreateCompatibleDC(dc);
-	CRect rc(0, 0, 16, 16);
-	bmp.CreateCompatibleBitmap(dc, 16, 16);
-	mdc.SelectBitmap(bmp);
-	mdc.FillRect(&rc, WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush());
-	mdc.DrawIconEx(0, 0, hIcon, 16, 16);
-	menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, bmp, bmp);
-	bmp.Detach();
-	return true;
+bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const& cmd, UINT dpi) {
+	return InitMenu(menu, &cmd, 1, dpi);
 }
 
 bool WTLHelper::IsSystemInDarkMode() {

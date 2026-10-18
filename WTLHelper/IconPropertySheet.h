@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atldlgs.h>
+#include "DpiHelper.h"
 
 //
 // property sheet with full color tab icons.
@@ -49,12 +50,17 @@ public:
 		return TBase::RemovePage(page);
 	}
 
+	BEGIN_MSG_MAP(CIconPropertySheetImpl)
+		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
+		CHAIN_MSG_MAP(TBase)
+	END_MSG_MAP()
+
 	void OnSheetInitialized() {
 		TBase::OnSheetInitialized();
 		auto pT = static_cast<T*>(this);
 		CTabCtrl tabs(pT->GetTabControl());
 		CImageList sheetImages(tabs.GetImageList());
-		auto size = ::GetSystemMetrics(SM_CXSMICON);
+		auto size = DpiHelper::SmallIconSize(pT->m_hWnd);
 		auto count = tabs.GetItemCount();
 		m_Images.Create(size, size, ILC_COLOR32 | ILC_MASK, count, 4);
 		for (int i = 0; i < count; i++) {
@@ -67,14 +73,45 @@ public:
 			else if (item.iImage >= 0 && sheetImages)
 				hIcon = sheetImages.GetIcon(item.iImage);
 			item.iImage = hIcon ? m_Images.AddIcon(hIcon) : -1;
+			if (hIcon)
+				m_ImageIcons.push_back(icon);
 			tabs.SetItem(i, &item);
 		}
 		tabs.SetImageList(m_Images);
 		m_Icons.clear();
 	}
 
+protected:
+	//
+	// the images for the new DPI, at the same indices: icons from resources are loaded again in the new size,
+	// others (such as those the sheet adds for pages added later) are stretched from the current images
+	//
+	LRESULT OnDpiChanged(UINT, WPARAM wp, LPARAM, BOOL& bHandled) {
+		bHandled = FALSE;
+		if (!m_Images)
+			return 0;
+
+		auto pT = static_cast<T*>(this);
+		CTabCtrl tabs(pT->GetTabControl());
+		auto size = DpiHelper::SmallIconSize(LOWORD(wp));
+		auto count = m_Images.GetImageCount();
+		CImageListManaged images;
+		images.Create(size, size, ILC_COLOR32 | ILC_MASK, count, 4);
+		for (int i = 0; i < count; i++) {
+			auto icon = i < (int)m_ImageIcons.size() ? m_ImageIcons[i] : nullptr;
+			CIcon hIcon(icon ? AtlLoadIconImage(icon, LR_DEFAULTCOLOR, size, size) : nullptr);
+			if (!hIcon)
+				hIcon = m_Images.GetIcon(i);
+			images.AddIcon(hIcon);
+		}
+		tabs.SetImageList(images);
+		m_Images.Attach(images.Detach());
+		return 0;
+	}
+
 private:
 	std::vector<PCWSTR> m_Icons;
+	std::vector<PCWSTR> m_ImageIcons;	// the icon of each image of m_Images (nullptr: an image the sheet gave)
 	CImageListManaged m_Images;
 };
 
