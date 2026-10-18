@@ -312,6 +312,11 @@ public:
     // Arranges the nodes (and the bends of the edges) with one of the layout algorithms; can be undone.
     // fitInView: zoom so the whole graph is in view afterwards.
     void ApplyLayout(LayoutAlgorithm algorithm, const LayoutOptions& options = {}, bool fitInView = true);
+    // ApplyLayout moves the nodes (and the view, fitting it) to their new places in this time, on the screen: the model
+    // has the new places when it returns. 0: at once. 250 ms by default. Input, undo or another graph end it at once.
+    void SetLayoutAnimation(UINT milliseconds);
+    UINT GetLayoutAnimation() const;
+    bool IsAnimating() const;
 
     // Minimap overlay.
     void SetMinimapVisible(bool visible);
@@ -459,6 +464,19 @@ private:
     bool m_UpdatingScroll   = false;        // showing or hiding a bar resizes the window
     bool m_TrackingThumb    = false;        // the range isn't changed while a thumb is dragged
     bool m_AutoScrolling    = false;        // the timer runs
+    // the move to the places of a layout, drawn (the model has the new places)
+    struct LayoutAnimation {
+        bool          Active = false;
+        ULONGLONG     Start = 0;
+        std::vector<std::pair<NodeId, Point>>              From;        // the places before
+        std::vector<std::pair<EdgeId, std::vector<Point>>> FromBends;
+        ViewTransform FromView, ToView;
+    };
+    LayoutAnimation m_Animation;
+    UINT m_AnimationTime = 250;
+    void StopAnimation();
+    float AnimationProgress() const;   // 0..1, eased
+    static constexpr UINT_PTR k_AnimationTimer     = 2;
     static constexpr UINT_PTR k_AutoScrollTimer    = 1;
     static constexpr UINT     k_AutoScrollInterval = 20;    // ms
 };

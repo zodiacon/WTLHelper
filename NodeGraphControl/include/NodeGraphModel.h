@@ -196,8 +196,8 @@ public:
     // language compares it, ignoring case.
     std::vector<NodeId> FindNodes(const std::wstring& text, bool matchCase = false) const;
 
-    // What the graph covers, in graph units: the nodes, the bends of the edges and the loops of edges to their own
-    // node. Empty without nodes.
+    // What the graph covers, in graph units: the nodes, the bends of the edges, the loops of edges to their own node and
+    // the labels of the edges (the size they have at the zoom of 1). Empty without nodes.
     Rect GetBounds() const;
 
     void Clear();   // the nodes, edges and images

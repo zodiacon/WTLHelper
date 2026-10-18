@@ -644,6 +644,7 @@ namespace NodeGraphCtrl {
 	// The graph was replaced (Clear, Load, another model): what refers to the old one goes. Undo would apply its
 	// commands to the new graph, and the selection would pick nodes of it by the old ids.
 	void CNodeGraphControl::OnModelReset() {
+		StopAnimation();
 		if (m_LabelEdit) CancelLabelEdit();
 		m_DraggingNode = false;
 		m_DragPrimaryId = InvalidNode;
@@ -675,6 +676,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::Undo() {
+		StopAnimation();
 		m_KeyMove = nullptr;	// the next arrow key starts a new move
 		if (m_UndoStack.empty()) return;
 		auto cmd = std::move(m_UndoStack.back());
@@ -686,6 +688,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::Redo() {
+		StopAnimation();
 		m_KeyMove = nullptr;
 		if (m_RedoStack.empty()) return;
 		auto cmd = std::move(m_RedoStack.back());
@@ -917,9 +920,55 @@ namespace NodeGraphCtrl {
 			else focus = m_SelectedNodes;
 		}
 		m_Renderer.SetHighlight(std::move(focus));
+
+		// A layout moving: drawn with the places (and the view) between the old and the new; the model keeps the new
+		// ones outside the drawing. A bend that comes or goes can't move: such an edge is straight until the end.
+		std::vector<Point> finalPlaces;
+		std::vector<std::vector<Point>> finalBends;
+		const ViewTransform finalView = m_Vt;
+		const bool animating = m_Animation.Active && AnimationProgress() < 1.0f;
+		if (animating) {
+			const float t = AnimationProgress();
+			auto lerp = [t](float a, float b) { return a + (b - a) * t; };
+			finalPlaces.reserve(m_Animation.From.size());
+			for (const auto& [id, from] : m_Animation.From) {
+				Node* n = m_Model->GetNode(id);
+				finalPlaces.push_back(n ? Point{ n->X, n->Y } : Point{});
+				if (n) { n->X = lerp(from.X, n->X); n->Y = lerp(from.Y, n->Y); }
+			}
+			finalBends.reserve(m_Animation.FromBends.size());
+			for (const auto& [id, from] : m_Animation.FromBends) {
+				Edge* e = m_Model->GetEdge(id);
+				finalBends.push_back(e ? std::move(e->Waypoints) : std::vector<Point>{});
+				if (!e) continue;
+				const auto& to = finalBends.back();
+				e->Waypoints.clear();
+				if (from.size() == to.size()) {
+					e->Waypoints.reserve(to.size());
+					for (size_t i = 0; i < to.size(); i++)
+						e->Waypoints.push_back({ lerp(from[i].X, to[i].X), lerp(from[i].Y, to[i].Y) });
+				}
+			}
+			const auto& a = m_Animation.FromView;
+			const auto& b = m_Animation.ToView;
+			m_Vt.Scale = lerp(a.Scale, b.Scale);
+			m_Vt.OffsetX = lerp(a.OffsetX, b.OffsetX);
+			m_Vt.OffsetY = lerp(a.OffsetY, b.OffsetY);
+		}
+		else if (m_Animation.Active)
+			StopAnimation();
+
 		m_Renderer.Render(hdc, rc, *m_Model, m_Vt,
 			m_SelectedNodes, m_SelectedEdge,
 			m_DrawGrid, m_EdgePreview, m_RubberBand, mmcfg, ro);
+
+		if (animating) {
+			for (size_t i = 0; i < m_Animation.From.size(); i++)
+				if (Node* n = m_Model->GetNode(m_Animation.From[i].first)) { n->X = finalPlaces[i].X; n->Y = finalPlaces[i].Y; }
+			for (size_t i = 0; i < m_Animation.FromBends.size(); i++)
+				if (Edge* e = m_Model->GetEdge(m_Animation.FromBends[i].first)) e->Waypoints = std::move(finalBends[i]);
+			m_Vt = finalView;
+		}
 		EndPaint(&ps);
 	}
 
@@ -945,6 +994,7 @@ namespace NodeGraphCtrl {
 	}
 
 	BOOL CNodeGraphControl::OnMouseWheel(UINT nFlags, short zDelta, CPoint pt) {
+		StopAnimation();	// input ends a layout's move
 		if (m_WheelScrolls && !(nFlags & MK_CONTROL)) {
 			UINT lines = 3;
 			::SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
@@ -1011,6 +1061,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnRButtonDown(UINT /*nFlags*/, CPoint pt) {
+		StopAnimation();
 		CommitLabelEdit();
 		SetFocus();
 		m_RightDown = pt;
@@ -1084,6 +1135,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnMButtonDown(UINT /*nFlags*/, CPoint pt) {
+		StopAnimation();
 		m_Panning = true;
 		m_PanStart = { pt.x, pt.y };
 		m_PanStartX = m_Vt.OffsetX;
@@ -1099,6 +1151,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnLButtonDown(UINT nFlags, CPoint pt) {
+		StopAnimation();
 		CommitLabelEdit();
 		SetFocus();
 		int sx = pt.x, sy = pt.y;
@@ -1563,6 +1616,7 @@ namespace NodeGraphCtrl {
 	// Esc clears the selection, F2 renames, Delete deletes, Ctrl+A/C/X/V/Z/Y select all, copy, cut, paste, undo, redo,
 	// Ctrl+Plus/Minus/0 zoom in, out, to 100%. A read-only graph doesn't edit: moving nodes is all it does of it.
 	LRESULT CNodeGraphControl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+		StopAnimation();
 		const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
 		switch (wParam) {
 			case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN: {
@@ -2086,6 +2140,7 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnScroll(int bar, int code) {
+		StopAnimation();
 		SCROLLINFO si{ sizeof(si), SIF_ALL };
 		if (!GetScrollInfo(bar, &si))
 			return;
@@ -2126,6 +2181,7 @@ namespace NodeGraphCtrl {
 	}
 
 	LRESULT CNodeGraphControl::OnMouseHWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
+		StopAnimation();
 		UINT chars = 3;
 		::SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0, &chars, 0);
 		ScrollBy(GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA * chars * LineSize(), 0);
@@ -2164,6 +2220,13 @@ namespace NodeGraphCtrl {
 	}
 
 	void CNodeGraphControl::OnTimer(UINT_PTR id) {
+		if (id == k_AnimationTimer) {
+			if (m_Animation.Active && AnimationProgress() >= 1.0f)
+				StopAnimation();	// the last frame: the new places
+			else
+				Invalidate(FALSE);
+			return;
+		}
 		if (id != k_AutoScrollTimer) {
 			SetMsgHandled(FALSE);
 			return;
@@ -2419,14 +2482,64 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::ApplyLayout(LayoutAlgorithm algorithm, const LayoutOptions& options, bool fitInView) {
 		if (!m_Model || m_Model->Nodes().empty()) return;
 
+		StopAnimation();	// another one going on ends where it goes
 		auto cmd = std::make_unique<LayoutCmd>();
 		LayoutCmd::Capture(*m_Model, cmd->OldPlaces, cmd->OldRoutes);
 		Layout(*m_Model, algorithm, options);
 		LayoutCmd::Capture(*m_Model, cmd->NewPlaces, cmd->NewRoutes);
-		PushUndo(std::move(cmd));
 
+		const ViewTransform before = m_Vt;
 		if (fitInView) FitInView();
 		else RequestInvalidate();
+
+		// the drawing goes from the old places to the new ones; the model has the new ones already
+		if (m_AnimationTime > 0 && m_hWnd && IsWindowVisible()) {
+			m_Animation.From.clear();
+			m_Animation.From.reserve(cmd->OldPlaces.size());
+			for (const auto& p : cmd->OldPlaces)
+				m_Animation.From.push_back({ p.Id, { p.X, p.Y } });
+			m_Animation.FromBends.clear();
+			m_Animation.FromBends.reserve(cmd->OldRoutes.size());
+			for (auto& r : cmd->OldRoutes)
+				m_Animation.FromBends.push_back({ r.Id, r.Waypoints });
+			m_Animation.FromView = before;
+			m_Animation.ToView = m_Vt;
+			m_Animation.Start = ::GetTickCount64();
+			m_Animation.Active = true;
+			SetTimer(k_AnimationTimer, 15);
+		}
+		PushUndo(std::move(cmd));
+	}
+
+	void CNodeGraphControl::SetLayoutAnimation(UINT milliseconds) {
+		m_AnimationTime = milliseconds;
+		if (milliseconds == 0) StopAnimation();
+	}
+
+	UINT CNodeGraphControl::GetLayoutAnimation() const {
+		return m_AnimationTime;
+	}
+
+	bool CNodeGraphControl::IsAnimating() const {
+		return m_Animation.Active;
+	}
+
+	// The drawing jumps to the new places.
+	void CNodeGraphControl::StopAnimation() {
+		if (!m_Animation.Active) return;
+		m_Animation.Active = false;
+		m_Animation.From.clear();
+		m_Animation.FromBends.clear();
+		if (m_hWnd) {
+			KillTimer(k_AnimationTimer);
+			Invalidate(FALSE);
+		}
+	}
+
+	// Slow at the start and the end (cubic).
+	float CNodeGraphControl::AnimationProgress() const {
+		const float t = std::clamp((float)(::GetTickCount64() - m_Animation.Start) / std::max(m_AnimationTime, 1u), 0.0f, 1.0f);
+		return t < 0.5f ? 4 * t * t * t : 1 - std::pow(-2 * t + 2, 3.0f) / 2;
 	}
 
 	void CNodeGraphControl::SetMinimapVisible(bool visible) {
@@ -2619,12 +2732,32 @@ namespace NodeGraphCtrl {
 			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
 			extend(n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f);
 		}
+		// a label's box: 110 x 18 (the renderer's), around its point or right of it
+		const float labelWidth = 110.0f, labelHeight = 18.0f;
 		for (const auto& e : m_Edges) {
 			for (const auto& w : e.Waypoints)
 				extend(w.X, w.Y);
-			if (e.From == e.To)
-				if (const Node* n = GetNode(e.From))
-					extend(n->X + n->Width * 0.5f + 30.0f, n->Y);	// the loop goes 24 units to the right of the node
+			const Node* from = GetNode(e.From);
+			const Node* to = GetNode(e.To);
+			if (!from || !to) continue;
+			if (from == to) {
+				const float right = from->X + from->Width * 0.5f + 30.0f;	// the loop goes 24 units to the right of the node
+				extend(right, from->Y);
+				if (!e.Label.empty()) {
+					extend(right - 2.0f + labelWidth, from->Y - labelHeight * 0.5f);
+					extend(right - 2.0f + labelWidth, from->Y + labelHeight * 0.5f);
+				}
+			}
+			else if (!e.Label.empty()) {
+				// where EdgeLabelPoint puts it, near enough: the middle bend or the middle of the middle piece, through
+				// the centers (no path is made: this is on every paint with scroll bars)
+				const size_t count = e.Waypoints.size() + 2;
+				auto point = [&](size_t i) { return i == 0 ? Point{ from->X, from->Y } : i == count - 1 ? Point{ to->X, to->Y } : e.Waypoints[i - 1]; };
+				const Point a = point((count - 1) / 2), b = point(count / 2);
+				const float x = (a.X + b.X) * 0.5f, y = (a.Y + b.Y) * 0.5f;
+				extend(x - labelWidth * 0.5f, y - labelHeight * 0.5f);
+				extend(x + labelWidth * 0.5f, y + labelHeight * 0.5f);
+			}
 		}
 		return r;
 	}
