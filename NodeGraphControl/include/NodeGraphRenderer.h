@@ -89,7 +89,8 @@ struct NodeDrawContext {
     const NodeGraphModel& Model;
     const Node&           GraphNode;
     NodeLayout            Layout;         // where the default parts go, in the node's units (as the transform)
-    D2D1_ROUNDED_RECT     Shape;          // the node's outline, in its units
+    D2D1_ROUNDED_RECT     Shape;          // the node's outline, in its units (an ellipse's too; a diamond's box)
+    ID2D1Geometry*        Outline;        // the node's outline of any shape (NodeStyle::Shape), in its units
     D2D1_RECT_F           ScreenRect;     // the node on the target, without the transform
     float                 Scale;          // the zoom: target pixels (DIPs) per graph unit
     bool                  Selected;
@@ -165,6 +166,7 @@ private:
     void DrawLabel(const Node& n, const Rect& area, const D2D1_RECT_F& node, const ViewTransform& vt);
     void FillBand(const D2D1_RECT_F& rect, float radius, bool roundTop, bool roundBottom);
     void DrawImage(const NodeGraphModel& model, ImageId id, const D2D1_RECT_F& dst, const Rect* src = nullptr);
+    ComPtr<ID2D1Geometry> ShapeGeometry(NodeShape shape, const D2D1_ROUNDED_RECT& rr) const;
     void DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir);
     void DrawRubberBand(const RubberBand& rb);
     void DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
@@ -185,6 +187,7 @@ private:
     // Device-dependent resources (recreated if device lost).
     ComPtr<ID2D1DCRenderTarget>  m_RenderTarget;
     ComPtr<ID2D1SolidColorBrush> m_Brush;
+    ComPtr<ID2D1Layer>           m_Layer;      // clips the inside of a node to its shape
 
     // the (from, to) pairs of the edges of the model that is being drawn: edges that have one going the other way are drawn apart
     std::unordered_set<uint64_t> m_EdgePairs;

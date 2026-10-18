@@ -2,6 +2,7 @@
 #include "NodeGraphSerialization.h"
 #include <shlwapi.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -208,9 +209,53 @@ namespace NodeGraphCtrl {
         return std::erase_if(m_Images, [id](const Image& image) { return image.Id == id; }) > 0;
     }
 
+    size_t NodeGraphModel::RemoveUnusedImages(const std::vector<ImageId>& keep) {
+        std::vector<ImageId> used(keep);
+        for (const auto& n : m_Nodes) {
+            used.push_back(n.Content.Icon);
+            used.push_back(n.Content.Image);
+        }
+        std::sort(used.begin(), used.end());
+        return std::erase_if(m_Images, [&](const Image& image) { return !std::binary_search(used.begin(), used.end(), image.Id); });
+    }
+
     const Image* NodeGraphModel::GetImage(ImageId id) const {
         for (const auto& image : m_Images) if (image.Id == id) return &image;
         return nullptr;
+    }
+
+    // ---- Node shapes --------------------------------------------------------------------
+
+    bool NodeContains(const Node& n, float x, float y) {
+        const float a = n.Width * 0.5f, b = n.Height * 0.5f;
+        const float dx = std::fabs(x - n.X), dy = std::fabs(y - n.Y);
+        if (dx > a || dy > b) return false;
+        switch (n.Style.Shape) {
+            case NodeShape::Ellipse: return (dx / a) * (dx / a) + (dy / b) * (dy / b) <= 1.0f;
+            case NodeShape::Diamond: return dx / a + dy / b <= 1.0f;
+            default:                 return true;
+        }
+    }
+
+    float NodeBorderDistance(const Node& n, float dx, float dy) {
+        const float a = n.Width * 0.5f, b = n.Height * 0.5f;
+        dx = std::fabs(dx);
+        dy = std::fabs(dy);
+        switch (n.Style.Shape) {
+            case NodeShape::Ellipse: return 1.0f / std::sqrt((dx / a) * (dx / a) + (dy / b) * (dy / b));
+            case NodeShape::Diamond: return 1.0f / (dx / a + dy / b);
+            default:                 return (std::min)(dx > 0 ? a / dx : 1e9f, dy > 0 ? b / dy : 1e9f);
+        }
+    }
+
+    float NodeHalfWidthAt(const Node& n, float dy) {
+        const float a = n.Width * 0.5f, b = n.Height * 0.5f;
+        const float t = (std::min)(std::fabs(dy) / b, 1.0f);
+        switch (n.Style.Shape) {
+            case NodeShape::Ellipse: return a * std::sqrt(1.0f - t * t);
+            case NodeShape::Diamond: return a * (1.0f - t);
+            default:                 return a;
+        }
     }
 
     // ---- NodeGraphModel: node layout ----------------------------------------------

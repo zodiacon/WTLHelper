@@ -120,6 +120,7 @@ HRESULT NodeGraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/
 
 void NodeGraphRenderer::DiscardDeviceResources() {
     m_Bitmaps.clear();
+    m_Layer.Reset();
     m_Brush.Reset();
     m_RenderTarget.Reset();
 }
@@ -260,18 +261,45 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
 
     if (drawGrid) DrawGrid(clientRect, vt);
 
+    // Only what is in view is drawn. The view in graph units, with room for what goes past the shapes: borders,
+    // arrowheads and edge labels (a size on the screen) and the loops of edges to their own node (in graph units).
+    const float slack = 60.0f / vt.Scale + 30.0f;
+    const auto viewMin = vt.ToGraph((float)clientRect.left, (float)clientRect.top);
+    const auto viewMax = vt.ToGraph((float)clientRect.right, (float)clientRect.bottom);
+    const Rect view{ viewMin.x - slack, viewMin.y - slack, viewMax.x + slack, viewMax.y + slack };
+    auto inView = [&](float left, float top, float right, float bottom) {
+        return right >= view.Left && left <= view.Right && bottom >= view.Top && top <= view.Bottom;
+    };
+
     m_EdgePairs.clear();
     for (const auto& e : model.Edges())
         m_EdgePairs.insert((uint64_t)e.From << 32 | e.To);
-    for (const auto& e : model.Edges())
-        DrawEdge(e, model, vt, e.Id == selectedEdge);
+    for (const auto& e : model.Edges()) {
+        const Node* from = model.GetNode(e.From);
+        const Node* to = model.GetNode(e.To);
+        if (!from || !to) continue;
+        // the edge stays within the box of the centers of its nodes and its bends
+        float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
+        float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
+        if (from == to) {
+            left -= from->Width * 0.5f; right += from->Width * 0.5f;
+            top -= from->Height * 0.5f; bottom += from->Height * 0.5f;
+        }
+        for (const auto& w : e.Waypoints) {
+            left = std::min(left, w.X); right = std::max(right, w.X);
+            top = std::min(top, w.Y); bottom = std::max(bottom, w.Y);
+        }
+        if (inView(left, top, right, bottom))
+            DrawEdge(e, model, vt, e.Id == selectedEdge);
+    }
 
     if (preview.Active)
         DrawEdgePreview(preview, model, vt);
 
+    std::unordered_set<NodeId> selected(selectedNodes.begin(), selectedNodes.end());
     for (const auto& n : model.Nodes()) {
-        bool sel = std::find(selectedNodes.begin(), selectedNodes.end(), n.Id) != selectedNodes.end();
-        DrawNode(model, n, vt, sel);
+        if (inView(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f))
+            DrawNode(model, n, vt, selected.contains(n.Id));
     }
 
     if (rubberBand.Active)
@@ -304,11 +332,7 @@ void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGr
     float nx = dx / len, ny = dy / len;
 
     // Clip start to source node border
-    float hw = from->Width  * vt.Scale * 0.5f;
-    float hh = from->Height * vt.Scale * 0.5f;
-    float t0 = std::min(std::fabsf(nx) > 0.0f ? hw / std::fabsf(nx) : 1e9f,
-                        std::fabsf(ny) > 0.0f ? hh / std::fabsf(ny) : 1e9f);
-    t0 = std::min(t0, len);
+    float t0 = std::min(NodeBorderDistance(*from, nx, ny) * vt.Scale, len);
 
     D2D1_POINT_2F start = { p0.x + nx * t0, p0.y + ny * t0 };
 
@@ -372,10 +396,7 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
         float l = std::sqrtf(ddx * ddx + ddy * ddy);
         if (l < 1.0f) return { 0.0f, 0.0f };
         float nx = ddx / l, ny = ddy / l;
-        float hw = n.Width * vt.Scale * 0.5f, hh = n.Height * vt.Scale * 0.5f;
-        float t = std::min(std::fabsf(nx) > 0.0f ? hw / std::fabsf(nx) : 1e9f,
-                           std::fabsf(ny) > 0.0f ? hh / std::fabsf(ny) : 1e9f);
-        t = std::min(t, l * maxPart);
+        float t = std::min(NodeBorderDistance(n, nx, ny) * vt.Scale, l * maxPart);
         at.x += nx * t; at.y += ny * t;
         return { nx, ny };
     };
@@ -416,17 +437,19 @@ void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTra
     float hw = n.Width * vt.Scale * 0.5f;
     float hh = n.Height * vt.Scale * 0.5f;
     float reach = std::max(24.0f * vt.Scale, 10.0f);
-    float top = c.y - std::min(hh * 0.5f, 40.0f * vt.Scale);
-    float bottom = c.y + std::min(hh * 0.5f, 40.0f * vt.Scale);
+    float rise = std::min(hh * 0.5f, 40.0f * vt.Scale);
+    float top = c.y - rise, bottom = c.y + rise;
     float right = c.x + hw;
+    // the ends on the outline of the shape (the loop goes around the box)
+    float end = c.x + NodeHalfWidthAt(n, rise / vt.Scale) * vt.Scale;
 
     m_Brush->SetColor(selected ? SelectionColor() : ColorrefToD2D(e.Style.Color));
     float width = e.Style.Width * (selected ? 2.0f : 1.0f);
-    m_RenderTarget->DrawLine({ right, top }, { right + reach, top }, m_Brush.Get(), width);
+    m_RenderTarget->DrawLine({ end, top }, { right + reach, top }, m_Brush.Get(), width);
     m_RenderTarget->DrawLine({ right + reach, top }, { right + reach, bottom }, m_Brush.Get(), width);
-    m_RenderTarget->DrawLine({ right + reach, bottom }, { right + 8.0f, bottom }, m_Brush.Get(), width);
+    m_RenderTarget->DrawLine({ right + reach, bottom }, { end + 8.0f, bottom }, m_Brush.Get(), width);
     if (e.Style.Directed)
-        DrawArrowhead({ right, bottom }, { -1.0f, 0.0f });
+        DrawArrowhead({ end, bottom }, { -1.0f, 0.0f });
 }
 
 void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
@@ -477,14 +500,26 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
     const bool ownerDraw = n.Style.OwnerDraw && m_DrawHandler;
     const uint32_t flags = ownerDraw ? CallOwnerDraw(model, n, layout, rr, vt, selected, false) : NDF_DEFAULT;
 
+    // a shape other than the rounded rectangle is a geometry, and what fills the node (the title band, the image) is
+    // clipped to it
+    const bool rectangle = n.Style.Shape == NodeShape::Rectangle;
+    ComPtr<ID2D1Geometry> outline = rectangle ? nullptr : ShapeGeometry(n.Style.Shape, rr);
+    const bool clip = outline && ((!(flags & NDF_SKIPBACKGROUND) && !layout.Title.IsEmpty()) || (!(flags & NDF_SKIPCONTENT) && !layout.Image.IsEmpty()));
     if (!(flags & NDF_SKIPBACKGROUND)) {
         m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
-        m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+        if (outline) m_RenderTarget->FillGeometry(outline.Get(), m_Brush.Get());
+        else m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+    }
+    if (clip) {
+        if (!m_Layer)
+            m_RenderTarget->CreateLayer(m_Layer.GetAddressOf());
+        m_RenderTarget->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), outline.Get()), m_Layer.Get());
+    }
 
-        if (!layout.Title.IsEmpty()) {
-            m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
-            FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
-        }
+    if (!(flags & NDF_SKIPBACKGROUND) && !layout.Title.IsEmpty()) {
+        m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
+        if (rectangle) FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
+        else m_RenderTarget->FillRectangle(toScreen(layout.Title), m_Brush.Get());
     }
 
     if (!(flags & NDF_SKIPCONTENT)) {
@@ -497,13 +532,16 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
             m_RenderTarget->FillRectangle(toScreen(layout.Label), m_Brush.Get());
         }
     }
+    if (clip)
+        m_RenderTarget->PopLayer();
 
     if (!(flags & NDF_SKIPBORDER)) {
         float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
         m_Brush->SetColor(selected
             ? SelectionColor()
             : ColorrefToD2D(n.Style.BorderColor));
-        m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
+        if (outline) m_RenderTarget->DrawGeometry(outline.Get(), m_Brush.Get(), borderWidth);
+        else m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
     }
 
     if (!(flags & NDF_SKIPCONTENT)) {
@@ -519,6 +557,41 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
         CallOwnerDraw(model, n, layout, rr, vt, selected, true);
 }
 
+// The outline of a node in a rect (rounded for a rectangle), as a geometry.
+ComPtr<ID2D1Geometry> NodeGraphRenderer::ShapeGeometry(NodeShape shape, const D2D1_ROUNDED_RECT& rr) const {
+    const D2D1_RECT_F& b = rr.rect;
+    const float cx = (b.left + b.right) * 0.5f, cy = (b.top + b.bottom) * 0.5f;
+    ComPtr<ID2D1Geometry> geometry;
+    switch (shape) {
+        case NodeShape::Ellipse: {
+            ComPtr<ID2D1EllipseGeometry> ellipse;
+            if (SUCCEEDED(m_D2dFactory->CreateEllipseGeometry({ { cx, cy }, (b.right - b.left) * 0.5f, (b.bottom - b.top) * 0.5f }, ellipse.GetAddressOf())))
+                geometry = ellipse;
+            break;
+        }
+        case NodeShape::Diamond: {
+            ComPtr<ID2D1PathGeometry> path;
+            ComPtr<ID2D1GeometrySink> sink;
+            if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(path.GetAddressOf())) && SUCCEEDED(path->Open(sink.GetAddressOf()))) {
+                sink->BeginFigure({ cx, b.top }, D2D1_FIGURE_BEGIN_FILLED);
+                const D2D1_POINT_2F points[] = { { b.right, cy }, { cx, b.bottom }, { b.left, cy } };
+                sink->AddLines(points, 3);
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                if (SUCCEEDED(sink->Close()))
+                    geometry = path;
+            }
+            break;
+        }
+        default: {
+            ComPtr<ID2D1RoundedRectangleGeometry> rounded;
+            if (SUCCEEDED(m_D2dFactory->CreateRoundedRectangleGeometry(rr, rounded.GetAddressOf())))
+                geometry = rounded;
+            break;
+        }
+    }
+    return geometry;
+}
+
 // Calls the handler with the transform set to the node's units and the drawing clipped to it. Returns its flags (none
 // for PostPaint).
 uint32_t NodeGraphRenderer::CallOwnerDraw(const NodeGraphModel& model, const Node& n, const NodeLayout& layout,
@@ -528,9 +601,14 @@ uint32_t NodeGraphRenderer::CallOwnerDraw(const NodeGraphModel& model, const Nod
     m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(rr.rect.left, rr.rect.top));
     m_RenderTarget->PushAxisAlignedClip({ 0, 0, n.Width, n.Height }, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
+    // an ellipse is a rounded rectangle with the radii of its half sizes
+    const D2D1_ROUNDED_RECT shape = n.Style.Shape == NodeShape::Ellipse
+        ? D2D1_ROUNDED_RECT{ { 0, 0, n.Width, n.Height }, n.Width * 0.5f, n.Height * 0.5f }
+        : D2D1_ROUNDED_RECT{ { 0, 0, n.Width, n.Height }, n.Style.CornerRadius, n.Style.CornerRadius };
+    ComPtr<ID2D1Geometry> outline = ShapeGeometry(n.Style.Shape, shape);
     const NodeDrawContext context{
         m_RenderTarget.Get(), m_D2dFactory.Get(), m_DwFactory.Get(), *this, model, n, layout,
-        { { 0, 0, n.Width, n.Height }, n.Style.CornerRadius, n.Style.CornerRadius },
+        shape, outline.Get(),
         rr.rect, vt.Scale, selected, !m_Exporting && n.Id == m_HoveredNode, m_Exporting, m_DeviceGeneration
     };
     uint32_t flags = NDF_DEFAULT;
@@ -683,12 +761,9 @@ void NodeGraphRenderer::DrawRubberBand(const RubberBand& rb) {
 }
 
 NodeId NodeGraphRenderer::HitTestNode(const NodeGraphModel& model, float gx, float gy) const {
-    for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it) {
-        const auto& n = *it;
-        if (gx >= n.X - n.Width  * 0.5f && gx <= n.X + n.Width  * 0.5f &&
-            gy >= n.Y - n.Height * 0.5f && gy <= n.Y + n.Height * 0.5f)
-            return n.Id;
-    }
+    for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it)
+        if (NodeContains(*it, gx, gy))
+            return it->Id;
     return InvalidNode;
 }
 

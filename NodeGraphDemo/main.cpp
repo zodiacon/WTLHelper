@@ -316,6 +316,7 @@ static void PopulateContent(NodeGraphModel& m) {
     // owner drawn (DemoDrawHandler)
     NodeId start = node(L"Start", 100, 600, 70, 70, [&](Node& n) {
         n.Style.OwnerDraw = true;
+        n.Style.Shape = NodeShape::Ellipse;     // clicks and edges follow the circle
         n.UserData = (void*)DemoDraw::Circle;
     });
     NodeId download = node(L"setup.exe", 270, 600, 170, 70, [&](Node& n) {
@@ -333,7 +334,34 @@ static void PopulateContent(NodeGraphModel& m) {
     });
     m.AddEdge(start, download);
     m.AddEdge(download, cpu);
+
+    // shapes
+    NodeId decision = node(L"Done?", 270, 760, 120, 80, [&](Node& n) {
+        n.Style.Shape = NodeShape::Diamond;
+        n.Style.FillColor = RGB(150, 110, 40);
+        n.Style.BorderColor = RGB(100, 70, 20);
+    });
+    NodeId oval = node(L"Retry", 470, 760, 130, 60, [&](Node& n) {
+        n.Style.Shape = NodeShape::Ellipse;
+        n.Content.Title = L"Ellipse";
+    });
+    m.AddEdge(download, decision);
+    m.AddEdge(decision, oval, L"no");
+    m.AddEdge(oval, download);
+    m.AddEdge(decision, decision);
 }
+
+// The demo keeps which owner drawing a node gets in its UserData: saved (and copied) as one byte.
+struct DemoSerializer : IUserDataSerializer {
+    std::vector<uint8_t> SaveNode(const Node& n) override {
+        return n.UserData ? std::vector<uint8_t>{ (uint8_t)(intptr_t)n.UserData } : std::vector<uint8_t>{};
+    }
+    void LoadNode(Node& n, const uint8_t* data, size_t size) override {
+        if (size == 1 && data[0] <= (uint8_t)DemoDraw::Circle)
+            n.UserData = (void*)(intptr_t)data[0];
+    }
+};
+static DemoSerializer g_serializer;
 
 static void UpdateStatus(HWND /*hwnd*/) {
     NodeId node = g_graph.GetSelectedNode();
@@ -373,6 +401,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         g_graph.SetDlgCtrlID(IDC_GRAPH);    // the notifications carry it
         g_graph.SetNodeDrawHandler(&g_drawHandler);
+        g_graph.GetModel()->SetUserDataSerializer(&g_serializer);
         PopulateDemo(*g_graph.GetModel());
         g_graph.FitInView();
         g_graph.SetMinimapVisible(true);
@@ -402,9 +431,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 static const wchar_t* parts[] = { L"none", L"title", L"icon", L"image", L"label", L"content" };
                 const Node* n = g_graph.GetModel()->GetNode(gn->NodeId);
                 if (!n) break;
-                // the progress bar of the Download node is a button
-                if ((DemoDraw)(intptr_t)n->UserData == DemoDraw::Progress &&
-                    DemoDrawHandler::OnProgressBar(g_graph.GetModel()->GetNodeLayout(*n), gn->NodeX, gn->NodeY)) {
+                // the progress bar of the Download node is a button: it takes the click (the node isn't selected or dragged)
+                const bool button = (DemoDraw)(intptr_t)n->UserData == DemoDraw::Progress &&
+                    DemoDrawHandler::OnProgressBar(g_graph.GetModel()->GetNodeLayout(*n), gn->NodeX, gn->NodeY);
+                if (button) {
                     g_drawHandler.Progress = g_drawHandler.Progress >= 100 ? 0 : g_drawHandler.Progress + 10;
                     g_graph.Refresh();
                 }
@@ -412,7 +442,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 swprintf_s(buf, L"Clicked node %u at %.0f,%.0f (the %s)  |  progress %.0f%%", gn->NodeId, gn->NodeX, gn->NodeY,
                     parts[(int)gn->Part], g_drawHandler.Progress);
                 SetWindowText(g_status, buf);
-                break;
+                return button;
+            }
+            case NGCN_NODEDBLCLICK: {
+                // a double click on the progress bar is two clicks of the button, not a rename
+                auto* gn = reinterpret_cast<NODEGRAPHNOTIFY*>(lParam);
+                const Node* n = g_graph.GetModel()->GetNode(gn->NodeId);
+                return n && (DemoDraw)(intptr_t)n->UserData == DemoDraw::Progress &&
+                    DemoDrawHandler::OnProgressBar(g_graph.GetModel()->GetNodeLayout(*n), gn->NodeX, gn->NodeY);
             }
             case NGCN_LABELCHANGED: {
                 auto* gln = reinterpret_cast<NODEGRAPHLABELNOTIFY*>(lParam);

@@ -12,7 +12,24 @@ namespace NodeGraphCtrl {
                 NF_CODE       = 1,
                 NF_SCALELABEL = 2,
                 NF_OWNERDRAW  = 4,
+                NF_SHAPESHIFT = 3,          // bits 3-4: the NodeShape
+                NF_SHAPEMASK  = 3 << NF_SHAPESHIFT,
             };
+
+            // the UserData block of a record (version 4)
+            template<typename T, typename Save>
+            void WriteUserData(Writer& w, const T& item, IUserDataSerializer* serializer, Save save) {
+                w.WriteBytes(serializer ? (serializer->*save)(item) : std::vector<uint8_t>{});
+            }
+            template<typename T, typename Load>
+            bool ReadUserData(Reader& r, T& item, IUserDataSerializer* serializer, Load load) {
+                std::vector<uint8_t> data;
+                if (!r.ReadBytes(data))
+                    return false;
+                if (serializer && !data.empty())
+                    (serializer->*load)(item, data.data(), data.size());
+                return true;
+            }
         }
 
         uint64_t NewImageKey() {
@@ -20,7 +37,7 @@ namespace NodeGraphCtrl {
             return s_NextKey++;
         }
 
-        void WriteNode(Writer& w, const Node& n) {
+        void WriteNode(Writer& w, const Node& n, IUserDataSerializer* serializer) {
             w.Write(n.Id);
             w.Write(n.X); w.Write(n.Y);
             w.Write(n.Width); w.Write(n.Height);
@@ -30,7 +47,8 @@ namespace NodeGraphCtrl {
             w.Write(n.Style.BorderWidth);
             w.Write(n.Style.CornerRadius);
             w.WriteStr(n.Label);
-            w.Write((uint32_t)((n.Style.Code ? NF_CODE : 0) | (n.Style.ScaleLabel ? NF_SCALELABEL : 0) | (n.Style.OwnerDraw ? NF_OWNERDRAW : 0)));
+            w.Write((uint32_t)((n.Style.Code ? NF_CODE : 0) | (n.Style.ScaleLabel ? NF_SCALELABEL : 0) | (n.Style.OwnerDraw ? NF_OWNERDRAW : 0)
+                | (uint32_t)n.Style.Shape << NF_SHAPESHIFT));
             w.WriteStr(n.Tooltip);
 
             const NodeContent& c = n.Content;
@@ -42,9 +60,10 @@ namespace NodeGraphCtrl {
             w.Write((uint8_t)c.LabelPos);
             w.WriteStr(c.Title);
             w.Write(c.TitleFill);
+            WriteUserData(w, n, serializer, &IUserDataSerializer::SaveNode);
         }
 
-        bool ReadNode(Reader& r, Node& n, uint32_t version) {
+        bool ReadNode(Reader& r, Node& n, uint32_t version, IUserDataSerializer* serializer) {
             n = Node{};
             bool ok = r.Read(n.Id)
                 && r.Read(n.X) && r.Read(n.Y)
@@ -65,6 +84,10 @@ namespace NodeGraphCtrl {
                 return ok;      // ScaleLabel and OwnerDraw keep their defaults
             n.Style.ScaleLabel = (flags & NF_SCALELABEL) != 0;
             n.Style.OwnerDraw = (flags & NF_OWNERDRAW) != 0;
+            const uint32_t shape = (flags & NF_SHAPEMASK) >> NF_SHAPESHIFT;
+            if (shape > (uint32_t)NodeShape::Diamond)
+                return false;
+            n.Style.Shape = (NodeShape)shape;
 
             NodeContent& c = n.Content;
             uint8_t iconPos = 0, fit = 0, labelPos = 0;
@@ -77,10 +100,12 @@ namespace NodeGraphCtrl {
             c.IconPos = (IconPlacement)iconPos;
             c.Fit = (ImageFit)fit;
             c.LabelPos = (LabelPlacement)labelPos;
+            if (ok && version >= 4)
+                ok = ReadUserData(r, n, serializer, &IUserDataSerializer::LoadNode);
             return ok;
         }
 
-        void WriteEdge(Writer& w, const Edge& e) {
+        void WriteEdge(Writer& w, const Edge& e, IUserDataSerializer* serializer) {
             w.Write(e.Id);
             w.Write(e.From); w.Write(e.To);
             w.Write(e.Style.Color);
@@ -92,9 +117,10 @@ namespace NodeGraphCtrl {
             for (const auto& p : e.Waypoints) {
                 w.Write(p.X); w.Write(p.Y);
             }
+            WriteUserData(w, e, serializer, &IUserDataSerializer::SaveEdge);
         }
 
-        bool ReadEdge(Reader& r, Edge& e, uint32_t version) {
+        bool ReadEdge(Reader& r, Edge& e, uint32_t version, IUserDataSerializer* serializer) {
             e = Edge{};
             uint32_t directed = 1;
             bool ok = r.Read(e.Id)
@@ -114,6 +140,8 @@ namespace NodeGraphCtrl {
                 ok = r.Read(p.X) && r.Read(p.Y);
                 e.Waypoints.push_back(p);
             }
+            if (ok && version >= 4)
+                ok = ReadUserData(r, e, serializer, &IUserDataSerializer::LoadEdge);
             return ok;
         }
 
@@ -144,15 +172,20 @@ namespace NodeGraphCtrl {
         using namespace Serialization;
         Writer w;
         w.Write(k_Magic | Version << 24);
-        w.Write((uint32_t)m_Images.size());
+        // the images the nodes show (one left over, as after undoing a paste, isn't written)
+        std::vector<const Image*> images;
         for (const auto& image : m_Images)
-            WriteImage(w, image);
+            if (std::any_of(m_Nodes.begin(), m_Nodes.end(), [&](const Node& n) { return n.Content.Icon == image.Id || n.Content.Image == image.Id; }))
+                images.push_back(&image);
+        w.Write((uint32_t)images.size());
+        for (const Image* image : images)
+            WriteImage(w, *image);
         w.Write((uint32_t)m_Nodes.size());
         for (const auto& n : m_Nodes)
-            WriteNode(w, n);
+            WriteNode(w, n, m_Serializer);
         w.Write((uint32_t)m_Edges.size());
         for (const auto& e : m_Edges)
-            WriteEdge(w, e);
+            WriteEdge(w, e, m_Serializer);
         w.Write(m_NextNodeId);
         w.Write(m_NextEdgeId);
         w.Write(m_NextImageId);
@@ -208,7 +241,7 @@ namespace NodeGraphCtrl {
         ok = ok && r.Read(count);
         for (uint32_t i = 0; i < count && ok; ++i) {
             Node n;
-            ok = ReadNode(r, n, version);
+            ok = ReadNode(r, n, version, m_Serializer);
             nodes.push_back(std::move(n));
         }
 
@@ -216,7 +249,7 @@ namespace NodeGraphCtrl {
         ok = ok && r.Read(count);
         for (uint32_t i = 0; i < count && ok; ++i) {
             Edge e;
-            ok = ReadEdge(r, e, version);
+            ok = ReadEdge(r, e, version, m_Serializer);
             edges.push_back(std::move(e));
         }
 
@@ -234,6 +267,9 @@ namespace NodeGraphCtrl {
         m_Images = std::move(images);
         m_Nodes = std::move(nodes);
         m_Edges = std::move(edges);
+        NodesChanged();
+        EdgesChanged();
+        ++m_ResetCount;
         m_NextNodeId = nextNode;
         m_NextEdgeId = nextEdge;
         m_NextImageId = nextImage;

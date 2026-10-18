@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <functional>
+#include <unordered_map>
 
 namespace NodeGraphCtrl {
 
@@ -22,6 +23,10 @@ struct Image {
     uint32_t             Width = 0, Height = 0; // in pixels (the largest frame of an icon file)
 };
 
+// The outline of a node in its Width x Height box. Hit testing and the ends of edges follow it; a rectangle has the
+// CornerRadius (which they ignore).
+enum class NodeShape : uint8_t { Rectangle, Ellipse, Diamond };
+
 struct NodeStyle {
     COLORREF FillColor   = RGB(70, 130, 180);
     COLORREF BorderColor = RGB(30,  80, 130);
@@ -31,6 +36,7 @@ struct NodeStyle {
     bool     Code         = false;   // monospaced, left aligned text that scales with the zoom (a block of code)
     bool     ScaleLabel   = true;    // the label scales with the zoom (false: the same size on the screen at any zoom)
     bool     OwnerDraw    = false;   // drawn with the control's INodeDrawHandler as well (or instead)
+    NodeShape Shape       = NodeShape::Rectangle;
 };
 
 enum class IconPlacement  : uint8_t { Left, Top, Right };          // where the icon is, next to the label
@@ -96,6 +102,11 @@ struct Node {
     void*        UserData = nullptr;
 };
 
+// The shape of a node (NodeStyle::Shape), around its center, in graph units.
+bool  NodeContains(const Node& n, float x, float y);            // (x, y) in graph space
+float NodeBorderDistance(const Node& n, float dx, float dy);   // from the center to the outline along a unit direction
+float NodeHalfWidthAt(const Node& n, float dy);                // half the width of the shape dy above or below the center
+
 struct Point {
     float X = 0.0f, Y = 0.0f;
 };
@@ -109,6 +120,17 @@ struct Edge {
     std::wstring Tooltip;               // shown instead of "from -> to"
     std::vector<Point> Waypoints;       // in graph space: the edge goes from the center of From through these to the center of To
     void*        UserData = nullptr;
+};
+
+// Turns the UserData of nodes and edges into bytes and back, so that it is saved (Save/Load) and copied (the clipboard)
+// with them. The model doesn't own UserData: what Load makes is the host's, as before.
+struct IUserDataSerializer {
+    virtual std::vector<uint8_t> SaveNode(const Node& /*n*/) { return {}; }     // empty: nothing to keep
+    virtual void LoadNode(Node& /*n*/, const uint8_t* /*data*/, size_t /*size*/) {}   // n is being read: set n.UserData
+    virtual std::vector<uint8_t> SaveEdge(const Edge& /*e*/) { return {}; }
+    virtual void LoadEdge(Edge& /*e*/, const uint8_t* /*data*/, size_t /*size*/) {}
+protected:
+    ~IUserDataSerializer() = default;
 };
 
 class NodeGraphModel {
@@ -125,6 +147,7 @@ public:
     void   RestoreNode(const Node& n);
     void   RestoreEdge(const Edge& e);
 
+    // By id, in constant time. A node's or an edge's Id must not be changed through the pointer.
     Node*  GetNode(NodeId id);
     Edge*  GetEdge(EdgeId id);
     const Node* GetNode(NodeId id) const;
@@ -140,6 +163,8 @@ public:
     ImageId AddImage(HICON icon);                                // stored as PNG
     ImageId AddImage(HBITMAP bitmap, bool hasAlpha = false);     // stored as PNG; hasAlpha: a 32 bit DIB with straight alpha
     bool    RemoveImage(ImageId id);
+    // The images no node shows, but for those in keep. CNodeGraphControl::RemoveUnusedImages keeps those undo may need.
+    size_t  RemoveUnusedImages(const std::vector<ImageId>& keep = {});
     const Image* GetImage(ImageId id) const;
     const std::vector<Image>& Images() const { return m_Images; }
 
@@ -152,14 +177,22 @@ public:
 
     void Clear();   // the nodes, edges and images
 
+    // Saves and loads UserData (Save/Load, the clipboard). Not owned; null: UserData isn't kept.
+    void SetUserDataSerializer(IUserDataSerializer* serializer) { m_Serializer = serializer; }
+    IUserDataSerializer* GetUserDataSerializer() const { return m_Serializer; }
+
+    // Counts the times the graph was replaced (Clear, Load): CNodeGraphControl fits a new graph in view with it (NGCS_AUTOZOOM).
+    uint32_t GetResetCount() const { return m_ResetCount; }
+
     void  SetDefaultNodeSize(float w, float h);
     float GetDefaultNodeWidth()  const { return m_DefaultNodeWidth;  }
     float GetDefaultNodeHeight() const { return m_DefaultNodeHeight; }
 
     // Returns false on I/O or format error.
-    // A binary file of the images, and of the nodes and edges with their styles, content, tooltips and waypoints (not
-    // UserData). Load also reads the earlier versions of the file (version 2: no images or content, the labels scale;
-    // version 1: nor the Code style, tooltips and waypoints).
+    // A binary file of the images the nodes show, and of the nodes and edges with their styles, content, tooltips and
+    // waypoints, and their UserData if there is a serializer. Load also reads the earlier versions of the file
+    // (version 3: no UserData; version 2: nor images or content, the labels scale; version 1: nor the Code style,
+    // tooltips and waypoints).
     bool Save(const wchar_t* path) const;
     bool Load(const wchar_t* path);
 
@@ -182,9 +215,21 @@ private:
     std::vector<Node> m_Nodes;
     std::vector<Edge> m_Edges;
     std::vector<Image> m_Images;
+
+    // id -> index in m_Nodes / m_Edges, made again on the next lookup after a removal (the indices after it move)
+    mutable std::unordered_map<NodeId, uint32_t> m_NodeIndex;
+    mutable std::unordered_map<EdgeId, uint32_t> m_EdgeIndex;
+    mutable bool m_NodeIndexValid = false;
+    mutable bool m_EdgeIndexValid = false;
+    const Node* FindNode(NodeId id) const;
+    const Edge* FindEdge(EdgeId id) const;
+    void NodesChanged() { m_NodeIndexValid = false; }
+    void EdgesChanged() { m_EdgeIndexValid = false; }
     NodeId m_NextNodeId       = 0;
     EdgeId m_NextEdgeId       = 0;
     ImageId m_NextImageId     = 0;
+    uint32_t m_ResetCount     = 0;
+    IUserDataSerializer* m_Serializer = nullptr;
     float  m_DefaultNodeWidth  = 120.0f;
     float  m_DefaultNodeHeight = 40.0f;
 };

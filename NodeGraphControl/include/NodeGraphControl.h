@@ -16,8 +16,10 @@
 #include "NodeGraphLayout.h"
 
 // Notification codes sent via WM_NOTIFY to the parent window.
-#define NGCN_NODECLICK      1   // lParam -> NODEGRAPHNOTIFY*, node was left-clicked
-#define NGCN_NODEDBLCLICK   2   // lParam -> NODEGRAPHNOTIFY*, node was double-clicked (reserved)
+#define NGCN_NODECLICK      1   // lParam -> NODEGRAPHNOTIFY*, node was left-clicked; sent before the control selects it or
+                                //   starts dragging it: return nonzero to take the click (no selecting, no dragging)
+#define NGCN_NODEDBLCLICK   2   // lParam -> NODEGRAPHNOTIFY*, node was double-clicked; return nonzero to take it (in an
+                                //   editable graph the label isn't edited then)
 #define NGCN_EDGECLICK      3   // lParam -> NODEGRAPHNOTIFY*, edge was left-clicked
 #define NGCN_SELCHANGED     4   // lParam -> NODEGRAPHNOTIFY*, selection changed
 #define NGCN_EDGEADDED      5   // lParam -> NODEGRAPHEDGENOTIFY*, edge interactively created
@@ -69,11 +71,12 @@ constexpr wchar_t WC_NODEGRAPHCONTROL[] = L"NodeGraphControl";
 
 // Window styles supported as creation flags (pass in dwStyle):
 //   NGCS_GRID        draw a background grid
-//   NGCS_AUTOZOOM    fit graph in view on model change
+//   NGCS_AUTOZOOM    fit the graph in view when it is replaced: a new model (SetModel), or one that was loaded or
+//                    cleared (and filled again); not on edits
 #define NGCS_GRID      0x0001
 #define NGCS_AUTOZOOM  0x0002
 //   NGCS_READONLY    the graph can be looked at and nodes moved, but not edited: no new edges, deleting, renaming,
-//                    resizing or pasting. A double-click sends NGCN_NODEDBLCLICK.
+//                    resizing or pasting.
 #define NGCS_READONLY  0x0004
 //   NGCS_SCROLLBARS  scroll bars when the graph (at the zoom) doesn't fit in the view
 //   NGCS_WHEELSCROLL the mouse wheel scrolls (with Shift: sideways) and Ctrl+wheel zooms; without it the wheel zooms
@@ -89,6 +92,7 @@ constexpr UINT WM_NODEGRAPHEDIT = WM_APP + 1;
 struct UndoCmd {
     virtual void Apply(NodeGraphModel&)  = 0;
     virtual void Revert(NodeGraphModel&) = 0;
+    virtual void CollectImages(std::vector<ImageId>& /*images*/) const {}   // the images it may put back in the model
     virtual ~UndoCmd() = default;
 };
 
@@ -186,6 +190,14 @@ public:
 
     // Scroll bars when the graph doesn't fit in the view (NGCS_SCROLLBARS). They cover the graph and the view, so
     // the view can still be moved off the graph (by dragging it, or with the minimap).
+    // Removes the images of the model no node shows and no undo or redo can put back (as after undoing a paste of
+    // nodes with images). Returns how many.
+    size_t RemoveUnusedImages();
+
+    // Fit the graph in view when it is replaced (NGCS_AUTOZOOM).
+    void SetAutoZoom(bool autoZoom);
+    bool GetAutoZoom() const;
+
     void SetScrollBars(bool show);
     bool HasScrollBars() const;
     // The mouse wheel scrolls (Shift+wheel: sideways) and Ctrl+wheel zooms (NGCS_WHEELSCROLL); false: the wheel zooms.
@@ -292,7 +304,7 @@ private:
     LRESULT OnNodeGraphEdit(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
     // ---- Internal helpers ----
-    void Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at = nullptr);   // at: in graph space
+    LRESULT Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at = nullptr);   // at: in graph space; the parent's result
     void NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId);
     void NotifyUndoChanged();
     void PushUndo(std::unique_ptr<UndoCmd> cmd);
@@ -357,6 +369,9 @@ private:
 
     NodeId m_HoveredNode = InvalidNode;     // tracked only while there is a node draw handler
 
+    bool m_AutoZoom         = false;
+    const NodeGraphModel* m_FittedModel = nullptr;   // the graph AutoZoom fitted last (the model and its reset count)
+    uint32_t m_FittedResets = 0;
     bool m_ScrollBars       = false;
     bool m_WheelScrolls     = false;
     bool m_UpdatingScroll   = false;        // showing or hiding a bar resizes the window

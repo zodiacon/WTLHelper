@@ -28,6 +28,13 @@ namespace NodeGraphCtrl {
 
 	namespace {
 
+		void CollectNodeImages(const std::vector<Node>& nodes, std::vector<ImageId>& images) {
+			for (const auto& n : nodes) {
+				images.push_back(n.Content.Icon);
+				images.push_back(n.Content.Image);
+			}
+		}
+
 		struct MoveCmd : UndoCmd {
 			NodeId Id;
 			float  OldX, OldY, NewX, NewY;
@@ -73,6 +80,9 @@ namespace NodeGraphCtrl {
 				for (const auto& n : Nodes) m.RestoreNode(n);
 				for (const auto& e : Edges) m.RestoreEdge(e);
 			}
+			void CollectImages(std::vector<ImageId>& images) const override {
+				CollectNodeImages(Nodes, images);
+			}
 		};
 
 		struct CompoundCmd : UndoCmd {
@@ -83,6 +93,9 @@ namespace NodeGraphCtrl {
 			void Revert(NodeGraphModel& m) override {
 				for (auto it = Cmds.rbegin(); it != Cmds.rend(); ++it)
 					(*it)->Revert(m);
+			}
+			void CollectImages(std::vector<ImageId>& images) const override {
+				for (const auto& c : Cmds) c->CollectImages(images);
 			}
 		};
 
@@ -113,6 +126,14 @@ namespace NodeGraphCtrl {
 			void Revert(NodeGraphModel& m) override {
 				if (Node* n = m.GetNode(Id)) n->*Member = Old;
 			}
+			void CollectImages(std::vector<ImageId>& images) const override {
+				if constexpr (std::is_same_v<T, NodeContent>) {
+					for (const NodeContent* c : { &Old, &New }) {
+						images.push_back(c->Icon);
+						images.push_back(c->Image);
+					}
+				}
+			}
 		};
 
 		struct PasteCmd : UndoCmd {
@@ -125,6 +146,9 @@ namespace NodeGraphCtrl {
 			void Revert(NodeGraphModel& m) override {
 				for (const auto& e : PastedEdges) m.RemoveEdge(e.Id);
 				for (const auto& n : PastedNodes) m.RemoveNode(n.Id);
+			}
+			void CollectImages(std::vector<ImageId>& images) const override {
+				CollectNodeImages(PastedNodes, images);
 			}
 		};
 
@@ -194,6 +218,7 @@ namespace NodeGraphCtrl {
 		m_DrawGrid = (pcs->style & NGCS_GRID) != 0;
 		m_ReadOnly = (pcs->style & NGCS_READONLY) != 0;
 		m_ScrollBars = (pcs->style & NGCS_SCROLLBARS) != 0;
+		m_AutoZoom = (pcs->style & NGCS_AUTOZOOM) != 0;
 		m_WheelScrolls = (pcs->style & NGCS_WHEELSCROLL) != 0;
 		m_Model = std::make_unique<NodeGraphModel>();
 
@@ -227,9 +252,9 @@ namespace NodeGraphCtrl {
 
 	// ---- Notification helpers ------------------------------------------------
 
-	void CNodeGraphControl::Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at) {
+	LRESULT CNodeGraphControl::Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at) {
 		HWND parent = ::GetParent(m_hWnd);
-		if (!parent) return;
+		if (!parent) return 0;
 		NODEGRAPHNOTIFY gn{};
 		gn.Hdr.hwndFrom = m_hWnd;
 		gn.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
@@ -241,7 +266,7 @@ namespace NodeGraphCtrl {
 			gn.NodeY = at->y - (n->Y - n->Height * 0.5f);
 			gn.Part = m_Model->GetNodeLayout(*n).PartAt(gn.NodeX, gn.NodeY);
 		}
-		::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
+		return ::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
 	}
 
 	void CNodeGraphControl::NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId) {
@@ -612,10 +637,10 @@ namespace NodeGraphCtrl {
 			Serialization::WriteImage(w, *image);
 		w.Write((uint32_t)nodes.size());
 		for (const Node* n : nodes)
-			Serialization::WriteNode(w, *n);
+			Serialization::WriteNode(w, *n, m_Model->GetUserDataSerializer());
 		w.Write((uint32_t)edges.size());
 		for (const Edge* e : edges)
-			Serialization::WriteEdge(w, *e);
+			Serialization::WriteEdge(w, *e, m_Model->GetUserDataSerializer());
 
 		if (!::OpenClipboard(m_hWnd)) return;
 		::EmptyClipboard();
@@ -661,13 +686,13 @@ namespace NodeGraphCtrl {
 		ok = ok && r.Read(count);
 		for (uint32_t i = 0; i < count && ok; ++i) {
 			Node n;
-			ok = Serialization::ReadNode(r, n, version);
+			ok = Serialization::ReadNode(r, n, version, m_Model->GetUserDataSerializer());
 			nodes.push_back(std::move(n));
 		}
 		ok = ok && r.Read(count);
 		for (uint32_t i = 0; i < count && ok; ++i) {
 			Edge e;
-			ok = Serialization::ReadEdge(r, e, version);
+			ok = Serialization::ReadEdge(r, e, version, m_Model->GetUserDataSerializer());
 			edges.push_back(std::move(e));
 		}
 
@@ -755,6 +780,13 @@ namespace NodeGraphCtrl {
 	// ---- Message handlers ----------------------------------------------------
 
 	void CNodeGraphControl::OnPaint(HDC /*unused*/) {
+		// a graph that was replaced is fitted once it has nodes
+		if (m_AutoZoom && m_Model && !m_Model->Nodes().empty() &&
+			(m_Model.get() != m_FittedModel || m_Model->GetResetCount() != m_FittedResets)) {
+			m_FittedModel = m_Model.get();
+			m_FittedResets = m_Model->GetResetCount();
+			FitInView();
+		}
 		// whatever changed the graph or the view ends here: the bars follow (before painting, as they may resize the view)
 		if (m_ScrollBars || (GetStyle() & (WS_HSCROLL | WS_VSCROLL)))
 			UpdateScrollBars();
@@ -992,6 +1024,10 @@ namespace NodeGraphCtrl {
 
 		bool shiftHeld = (nFlags & MK_SHIFT) != 0;
 
+		// the parent may take the click (a button drawn on the node): then it doesn't select or drag
+		if (hitNode != InvalidNode && Notify(NGCN_NODECLICK, hitNode, InvalidEdge, &gp))
+			return;
+
 		if (hitNode != InvalidNode) {
 			if (shiftHeld) {
 				auto it = std::find(m_SelectedNodes.begin(), m_SelectedNodes.end(), hitNode);
@@ -1023,7 +1059,6 @@ namespace NodeGraphCtrl {
 				m_DragOffsetY = gp.y - clicked->Y;
 			}
 			SetCapture();
-			Notify(NGCN_NODECLICK, hitNode, InvalidEdge, &gp);
 		}
 		else if (hitEdge != InvalidEdge) {
 			bool selChanged = (m_SelectedEdge != hitEdge || !m_SelectedNodes.empty());
@@ -1063,9 +1098,8 @@ namespace NodeGraphCtrl {
 		NodeId hitNode = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 		if (hitNode == InvalidNode)
 			return;
-		if (m_ReadOnly)
-			Notify(NGCN_NODEDBLCLICK, hitNode, InvalidEdge, &gp);
-		else
+		// the parent may take the double click; if not, in an editable graph the label is edited
+		if (!Notify(NGCN_NODEDBLCLICK, hitNode, InvalidEdge, &gp) && !m_ReadOnly)
 			BeginEditLabel(hitNode);
 	}
 
@@ -1409,6 +1443,7 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::SetModel(NodeGraphModel* model) {
 		m_Model.reset(model);
+		m_FittedModel = nullptr;	// a new model at the address of the old one is still new
 		RequestInvalidate();
 	}
 
@@ -1482,6 +1517,22 @@ namespace NodeGraphCtrl {
 
 	// ---- Scrolling ------------------------------------------------------------------
 
+	size_t CNodeGraphControl::RemoveUnusedImages() {
+		if (!m_Model) return 0;
+		std::vector<ImageId> keep;
+		for (const auto& cmd : m_UndoStack) cmd->CollectImages(keep);
+		for (const auto& cmd : m_RedoStack) cmd->CollectImages(keep);
+		return m_Model->RemoveUnusedImages(keep);
+	}
+
+	void CNodeGraphControl::SetAutoZoom(bool autoZoom) {
+		m_AutoZoom = autoZoom;
+	}
+
+	bool CNodeGraphControl::GetAutoZoom() const {
+		return m_AutoZoom;
+	}
+
 	void CNodeGraphControl::SetScrollBars(bool show) {
 		m_ScrollBars = show;
 		if (m_hWnd) {
@@ -1531,10 +1582,11 @@ namespace NodeGraphCtrl {
 				lo -= k_ViewMargin;
 				hi += k_ViewMargin;
 				if (!bounds.IsEmpty() && (lo < -0.5f || hi > page + 0.5f)) {
-					const float start = std::min(lo, 0.0f), end = std::max(hi, (float)page);
-					si.nMax = std::max((int)std::ceil(end - start) - 1, page);
+					// whole pixels outward: the view starts at a whole position, and at the end it sees the end
+					const float start = std::floor(std::min(lo, 0.0f)), end = std::ceil(std::max(hi, (float)page));
+					si.nMax = std::max((int)(end - start) - 1, page);
 					si.nPage = page;
-					si.nPos = (int)std::lround(-start);
+					si.nPos = (int)-start;
 				}
 				SCROLLINFO now{ sizeof(now), SIF_RANGE | SIF_PAGE | SIF_POS };
 				if (!GetScrollInfo(bar, &now) || now.nMin != si.nMin || now.nMax != si.nMax || now.nPage != si.nPage || now.nPos != si.nPos)
@@ -1874,6 +1926,8 @@ namespace NodeGraphCtrl {
 		n.Width = (w > 0.0f) ? w : m_DefaultNodeWidth;
 		n.Height = (h > 0.0f) ? h : m_DefaultNodeHeight;
 		m_Nodes.push_back(std::move(n));
+		if (m_NodeIndexValid)
+			m_NodeIndex[m_Nodes.back().Id] = (uint32_t)m_Nodes.size() - 1;
 		return m_Nodes.back().Id;
 	}
 
@@ -1889,50 +1943,77 @@ namespace NodeGraphCtrl {
 		e.To = to;
 		e.Label = std::move(label);
 		m_Edges.push_back(std::move(e));
+		if (m_EdgeIndexValid)
+			m_EdgeIndex[m_Edges.back().Id] = (uint32_t)m_Edges.size() - 1;
 		return m_Edges.back().Id;
 	}
 
 	bool NodeGraphModel::RemoveNode(NodeId id) {
-		auto it = std::find_if(m_Nodes.begin(), m_Nodes.end(), [id](const Node& n) { return n.Id == id; });
-		if (it == m_Nodes.end()) return false;
-		m_Nodes.erase(it);
-		std::erase_if(m_Edges, [id](const Edge& e) { return e.From == id || e.To == id; });
+		const Node* n = FindNode(id);
+		if (!n) return false;
+		m_Nodes.erase(m_Nodes.begin() + (n - m_Nodes.data()));
+		NodesChanged();
+		if (std::erase_if(m_Edges, [id](const Edge& e) { return e.From == id || e.To == id; }))
+			EdgesChanged();
 		return true;
 	}
 
 	bool NodeGraphModel::RemoveEdge(EdgeId id) {
-		auto it = std::find_if(m_Edges.begin(), m_Edges.end(), [id](const Edge& e) { return e.Id == id; });
-		if (it == m_Edges.end()) return false;
-		m_Edges.erase(it);
+		const Edge* e = FindEdge(id);
+		if (!e) return false;
+		m_Edges.erase(m_Edges.begin() + (e - m_Edges.data()));
+		EdgesChanged();
 		return true;
 	}
 
 	void NodeGraphModel::RestoreNode(const Node& n) {
 		m_Nodes.push_back(n);
+		NodesChanged();
 	}
 
 	void NodeGraphModel::RestoreEdge(const Edge& e) {
 		m_Edges.push_back(e);
+		EdgesChanged();
+	}
+
+	const Node* NodeGraphModel::FindNode(NodeId id) const {
+		if (!m_NodeIndexValid) {
+			m_NodeIndex.clear();
+			m_NodeIndex.reserve(m_Nodes.size());
+			for (uint32_t i = 0; i < m_Nodes.size(); i++)
+				m_NodeIndex[m_Nodes[i].Id] = i;
+			m_NodeIndexValid = true;
+		}
+		auto it = m_NodeIndex.find(id);
+		return it == m_NodeIndex.end() ? nullptr : &m_Nodes[it->second];
+	}
+
+	const Edge* NodeGraphModel::FindEdge(EdgeId id) const {
+		if (!m_EdgeIndexValid) {
+			m_EdgeIndex.clear();
+			m_EdgeIndex.reserve(m_Edges.size());
+			for (uint32_t i = 0; i < m_Edges.size(); i++)
+				m_EdgeIndex[m_Edges[i].Id] = i;
+			m_EdgeIndexValid = true;
+		}
+		auto it = m_EdgeIndex.find(id);
+		return it == m_EdgeIndex.end() ? nullptr : &m_Edges[it->second];
 	}
 
 	Node* NodeGraphModel::GetNode(NodeId id) {
-		for (auto& n : m_Nodes) if (n.Id == id) return &n;
-		return nullptr;
+		return const_cast<Node*>(FindNode(id));
 	}
 
 	Edge* NodeGraphModel::GetEdge(EdgeId id) {
-		for (auto& e : m_Edges) if (e.Id == id) return &e;
-		return nullptr;
+		return const_cast<Edge*>(FindEdge(id));
 	}
 
 	const Node* NodeGraphModel::GetNode(NodeId id) const {
-		for (const auto& n : m_Nodes) if (n.Id == id) return &n;
-		return nullptr;
+		return FindNode(id);
 	}
 
 	const Edge* NodeGraphModel::GetEdge(EdgeId id) const {
-		for (const auto& e : m_Edges) if (e.Id == id) return &e;
-		return nullptr;
+		return FindEdge(id);
 	}
 
 	Rect NodeGraphModel::GetBounds() const {
@@ -1960,6 +2041,9 @@ namespace NodeGraphCtrl {
 	void NodeGraphModel::Clear() {
 		m_Nodes.clear();
 		m_Edges.clear();
+		NodesChanged();
+		EdgesChanged();
+		++m_ResetCount;
 		m_Images.clear();
 		m_NextNodeId = 0;
 		m_NextEdgeId = 0;
@@ -2015,11 +2099,19 @@ namespace NodeGraphCtrl {
 			return lines;
 		}
 
-		// the distance from the center of a node to its border in a direction
-		float BorderDistance(const Node& n, float nx, float ny) {
-			float hw = n.Width * 0.5f, hh = n.Height * 0.5f;
-			return std::min(std::fabs(nx) > 0.0f ? hw / std::fabs(nx) : 1e9f,
-			                std::fabs(ny) > 0.0f ? hh / std::fabs(ny) : 1e9f);
+		// The SVG element of a node's shape, with these attributes (fill, stroke).
+		std::string ShapeElement(const Node& n, const std::string& attributes) {
+			const float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
+			switch (n.Style.Shape) {
+				case NodeShape::Ellipse:
+					return "<ellipse cx=\"" + Num(n.X) + "\" cy=\"" + Num(n.Y) + "\" rx=\"" + Num(n.Width * 0.5f) + "\" ry=\"" + Num(n.Height * 0.5f) + "\" " + attributes + "/>";
+				case NodeShape::Diamond:
+					return "<polygon points=\"" + Num(n.X) + "," + Num(top) + " " + Num(left + n.Width) + "," + Num(n.Y) + " " + Num(n.X) + "," + Num(top + n.Height) +
+						" " + Num(left) + "," + Num(n.Y) + "\" " + attributes + "/>";
+				default:
+					return "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(n.Width) + "\" height=\"" + Num(n.Height) + "\" rx=\"" +
+						Num(n.Style.CornerRadius) + "\" " + attributes + "/>";
+			}
 		}
 
 		std::string Base64(const uint8_t* data, size_t size) {
@@ -2130,11 +2222,13 @@ namespace NodeGraphCtrl {
 
 			if (from == to) {
 				float right = from->X + from->Width * 0.5f;
-				float top = from->Y - std::min(from->Height * 0.25f, 40.0f), bottom = from->Y + std::min(from->Height * 0.25f, 40.0f);
-				svg += "<path d=\"M" + Num(right) + " " + Num(top) + " L" + Num(right + 24) + " " + Num(top) + " L" + Num(right + 24) + " " +
-					Num(bottom) + " L" + Num(right + 8) + " " + Num(bottom) + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + stroke + "\"/>\n";
+				float rise = std::min(from->Height * 0.25f, 40.0f);
+				float top = from->Y - rise, bottom = from->Y + rise;
+				float end = from->X + NodeHalfWidthAt(*from, rise);		// the ends on the outline of the shape
+				svg += "<path d=\"M" + Num(end) + " " + Num(top) + " L" + Num(right + 24) + " " + Num(top) + " L" + Num(right + 24) + " " +
+					Num(bottom) + " L" + Num(end + 8) + " " + Num(bottom) + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + stroke + "\"/>\n";
 				if (e.Style.Directed)
-					svg += "<polygon points=\"" + Num(right) + "," + Num(bottom) + " " + Num(right + 10) + "," + Num(bottom - 4) + " " + Num(right + 10) + "," + Num(bottom + 4) + "\" fill=\"" + color + "\"/>\n";
+					svg += "<polygon points=\"" + Num(end) + "," + Num(bottom) + " " + Num(end + 10) + "," + Num(bottom - 4) + " " + Num(end + 10) + "," + Num(bottom + 4) + "\" fill=\"" + color + "\"/>\n";
 				continue;
 			}
 
@@ -2163,7 +2257,7 @@ namespace NodeGraphCtrl {
 				float l = std::sqrt(ddx * ddx + ddy * ddy);
 				if (l < 1.0f) return Point{};
 				float nx = ddx / l, ny = ddy / l;
-				float t = std::min(BorderDistance(n, nx, ny), l * maxPart);
+				float t = std::min(NodeBorderDistance(n, nx, ny), l * maxPart);
 				at.X += nx * t; at.Y += ny * t;
 				return Point{ nx, ny };
 			};
@@ -2207,14 +2301,23 @@ namespace NodeGraphCtrl {
 
 			const NodeContent& c = n.Content;
 			const NodeLayout layout = GetNodeLayout(n);
-			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(n.Width) + "\" height=\"" + Num(n.Height) + "\" rx=\"" + Num(n.Style.CornerRadius) +
-				"\" fill=\"" + Hex(n.Style.FillColor) + "\"/>\n";
+			const bool rectangle = n.Style.Shape == NodeShape::Rectangle;
+			svg += ShapeElement(n, "fill=\"" + Hex(n.Style.FillColor) + "\"") + "\n";
 
+			// what fills the node is clipped to a shape other than the rectangle
+			const bool clip = !rectangle && (!layout.Title.IsEmpty() || (!layout.Image.IsEmpty() && isWritten(c.Image)));
+			if (clip) {
+				const std::string id = "shape" + std::to_string(n.Id);
+				svg += "<clipPath id=\"" + id + "\">" + ShapeElement(n, "") + "</clipPath>\n<g clip-path=\"url(#" + id + ")\">\n";
+			}
 			if (!layout.Title.IsEmpty()) {
 				Rect t = at(layout.Title);
 				COLORREF fill = c.TitleFill != CLR_INVALID ? c.TitleFill
 					: RGB(GetRValue(n.Style.FillColor) * 0.72f, GetGValue(n.Style.FillColor) * 0.72f, GetBValue(n.Style.FillColor) * 0.72f);
-				svg += "<path d=\"" + BandPath(t.Left, t.Top, t.Width(), t.Height(), n.Style.CornerRadius, layout.Content.IsEmpty()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
+				if (rectangle)
+					svg += "<path d=\"" + BandPath(t.Left, t.Top, t.Width(), t.Height(), n.Style.CornerRadius, layout.Content.IsEmpty()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
+				else
+					svg += "<rect x=\"" + Num(t.Left) + "\" y=\"" + Num(t.Top) + "\" width=\"" + Num(t.Width()) + "\" height=\"" + Num(t.Height()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
 			}
 			if (!layout.Image.IsEmpty() && isWritten(c.Image))
 				svg += PlaceImage(c.Image, at(layout.Image), layout.ImageSource);
@@ -2222,9 +2325,10 @@ namespace NodeGraphCtrl {
 				Rect b = at(layout.Label);
 				svg += "<rect x=\"" + Num(b.Left) + "\" y=\"" + Num(b.Top) + "\" width=\"" + Num(b.Width()) + "\" height=\"" + Num(b.Height()) + "\" fill=\"#000000\" fill-opacity=\"0.5\"/>\n";
 			}
+			if (clip)
+				svg += "</g>\n";
 
-			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(n.Width) + "\" height=\"" + Num(n.Height) + "\" rx=\"" + Num(n.Style.CornerRadius) +
-				"\" fill=\"none\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"/>\n";
+			svg += ShapeElement(n, "fill=\"none\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"") + "\n";
 
 			if (!layout.Icon.IsEmpty() && isWritten(c.Icon)) {
 				const Image* icon = GetImage(c.Icon);

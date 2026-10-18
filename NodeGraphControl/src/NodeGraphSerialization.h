@@ -14,8 +14,10 @@
 namespace NodeGraphCtrl::Serialization {
 
     // version 2 adds a node's Code style and tooltip, and an edge's tooltip and waypoints;
-    // version 3 adds images, a node's content and its ScaleLabel and OwnerDraw styles
-    constexpr uint32_t Version = 3;
+    // version 3 adds images, a node's content and its ScaleLabel and OwnerDraw styles (and its Shape, in bits of the
+    // same flags: version 3 readers take it for a rectangle);
+    // version 4 adds the UserData of nodes and edges (as their serializer makes it; empty without one)
+    constexpr uint32_t Version = 4;
 
     struct Writer {
         std::vector<uint8_t> Data;
@@ -66,10 +68,11 @@ namespace NodeGraphCtrl::Serialization {
         bool AtEnd() const { return Pos == Size; }
     };
 
-    void WriteNode(Writer& w, const Node& n);
-    bool ReadNode(Reader& r, Node& n, uint32_t version);
-    void WriteEdge(Writer& w, const Edge& e);
-    bool ReadEdge(Reader& r, Edge& e, uint32_t version);
+    // serializer: for UserData (may be null)
+    void WriteNode(Writer& w, const Node& n, IUserDataSerializer* serializer);
+    bool ReadNode(Reader& r, Node& n, uint32_t version, IUserDataSerializer* serializer);
+    void WriteEdge(Writer& w, const Edge& e, IUserDataSerializer* serializer);
+    bool ReadEdge(Reader& r, Edge& e, uint32_t version, IUserDataSerializer* serializer);
     void WriteImage(Writer& w, const Image& image);     // the id, the size and the encoded bytes (not the key)
     bool ReadImage(Reader& r, Image& image);
 
