@@ -210,7 +210,9 @@ namespace NodeGraphCtrl {
     }
 
     size_t NodeGraphModel::RemoveUnusedImages(const std::vector<ImageId>& keep) {
-        std::vector<ImageId> used(keep);
+        std::vector<ImageId> used;
+        used.reserve(keep.size() + m_Nodes.size() * 2);
+        used.insert(used.end(), keep.begin(), keep.end());
         for (const auto& n : m_Nodes) {
             used.push_back(n.Content.Icon);
             used.push_back(n.Content.Image);
@@ -256,6 +258,90 @@ namespace NodeGraphCtrl {
             case NodeShape::Diamond: return a * (1.0f - t);
             default:                 return a;
         }
+    }
+
+    // ---- Edge paths -------------------------------------------------------------------
+
+    std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, float lane) {
+        std::vector<Point> path;
+        path.reserve(e.Waypoints.size() + 2);
+        path.push_back({ from.X, from.Y });
+        path.insert(path.end(), e.Waypoints.begin(), e.Waypoints.end());
+        path.push_back({ to.X, to.Y });
+
+        const float dx = path[1].X - path[0].X, dy = path[1].Y - path[0].Y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (path.size() == 2 && len < 1e-3f)
+            return {};
+        if (path.size() == 2 && lane != 0) {
+            const float nx = dx / len, ny = dy / len;
+            for (auto& p : path) { p.X -= ny * lane; p.Y += nx * lane; }
+        }
+
+        // The ends on the outlines of the nodes. A straight edge is clipped at both ends of the same segment, so neither
+        // end may go past its middle (the nodes may overlap); next to a bend an end may take the whole segment, or a
+        // bend close to a node would leave the end, and its arrowhead, inside (under) the node. Both ends are measured
+        // against the points before clipping.
+        const float maxPart = path.size() == 2 ? 0.5f : 1.0f;
+        auto clip = [&](const Node& n, Point& at, Point other) {
+            const float ddx = other.X - at.X, ddy = other.Y - at.Y;
+            const float l = std::sqrt(ddx * ddx + ddy * ddy);
+            if (l < 1e-3f) return;
+            const float nx = ddx / l, ny = ddy / l;
+            const float t = (std::min)(NodeBorderDistance(n, nx, ny), l * maxPart);
+            at.X += nx * t;
+            at.Y += ny * t;
+        };
+        const Point beforeLast = path[path.size() - 2];
+        clip(from, path.front(), path[1]);
+        clip(to, path.back(), beforeLast);
+        return path;
+    }
+
+    std::vector<Point> CurveControls(const std::vector<Point>& p) {
+        std::vector<Point> controls;
+        const size_t n = p.size();
+        if (n < 2) return controls;
+        controls.reserve((n - 1) * 2);
+        for (size_t i = 0; i + 1 < n; i++) {
+            // the tangents at the ends of the piece: along the neighbors of its points (the ends are their own)
+            const Point& prev = p[i == 0 ? 0 : i - 1];
+            const Point& next = p[i + 2 < n ? i + 2 : n - 1];
+            controls.push_back({ p[i].X + (p[i + 1].X - prev.X) / 6, p[i].Y + (p[i + 1].Y - prev.Y) / 6 });
+            controls.push_back({ p[i + 1].X - (next.X - p[i].X) / 6, p[i + 1].Y - (next.Y - p[i].Y) / 6 });
+        }
+        return controls;
+    }
+
+    Point EdgeLabelPoint(const std::vector<Point>& path, const std::vector<Point>& controls) {
+        if (path.size() < 2) return path.empty() ? Point{} : path[0];
+        // the middle point of an odd number of points (a bend) or the middle of the middle piece
+        const size_t a = (path.size() - 1) / 2, b = path.size() / 2;
+        if (a != b) {
+            if (controls.empty())
+                return { (path[a].X + path[b].X) * 0.5f, (path[a].Y + path[b].Y) * 0.5f };
+            const Point& c1 = controls[a * 2];
+            const Point& c2 = controls[a * 2 + 1];
+            return { (path[a].X + 3 * c1.X + 3 * c2.X + path[b].X) / 8, (path[a].Y + 3 * c1.Y + 3 * c2.Y + path[b].Y) / 8 };
+        }
+        return path[a];
+    }
+
+    // ---- NodeGraphModel: search ---------------------------------------------------------
+
+    std::vector<NodeId> NodeGraphModel::FindNodes(const std::wstring& text, bool matchCase) const {
+        std::vector<NodeId> found;
+        if (text.empty())
+            return found;
+        const DWORD flags = FIND_FROMSTART | (matchCase ? 0 : LINGUISTIC_IGNORECASE);
+        auto has = [&](const std::wstring& s) {
+            return !s.empty() && ::FindNLSStringEx(LOCALE_NAME_USER_DEFAULT, flags, s.c_str(), (int)s.size(),
+                text.c_str(), (int)text.size(), nullptr, nullptr, nullptr, 0) >= 0;
+        };
+        for (const auto& n : m_Nodes)
+            if (has(n.Label) || has(n.Content.Title) || has(n.Tooltip))
+                found.push_back(n.Id);
+        return found;
     }
 
     // ---- NodeGraphModel: node layout ----------------------------------------------

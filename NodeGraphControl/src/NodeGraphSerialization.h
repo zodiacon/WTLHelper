@@ -9,6 +9,7 @@
 #include <string>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include "../include/NodeGraphModel.h"
 
 namespace NodeGraphCtrl::Serialization {
@@ -16,8 +17,14 @@ namespace NodeGraphCtrl::Serialization {
     // version 2 adds a node's Code style and tooltip, and an edge's tooltip and waypoints;
     // version 3 adds images, a node's content and its ScaleLabel and OwnerDraw styles (and its Shape, in bits of the
     // same flags: version 3 readers take it for a rectangle);
-    // version 4 adds the UserData of nodes and edges (as their serializer makes it; empty without one)
-    constexpr uint32_t Version = 4;
+    // version 4 adds the UserData of nodes and edges (as their serializer makes it; empty without one);
+    // version 5 adds an edge's line, arrowhead, Curved and ScaleLabel
+    constexpr uint32_t Version = 5;
+
+    // the fewest bytes a record takes (its first version, empty strings and data): to cap counts read from the input
+    constexpr size_t MinImageRecord = 4 * 4 + 1;                    // id, width, height, data size, a byte of data
+    constexpr size_t MinNodeRecord  = 4 + 4 * 4 + 3 * 4 + 2 * 4 + 4; // id, place and size, colors, border, label size
+    constexpr size_t MinEdgeRecord  = 3 * 4 + 4 + 4 + 4 + 4;         // id, from, to, color, width, directed, label size
 
     struct Writer {
         std::vector<uint8_t> Data;
@@ -66,6 +73,9 @@ namespace NodeGraphCtrl::Serialization {
             return true;
         }
         bool AtEnd() const { return Pos == Size; }
+        // a count read from the input, for reserving: no more records than the bytes left can hold (a corrupt count
+        // doesn't allocate much before the reads fail)
+        size_t Capped(uint32_t count, size_t minRecordSize) const { return (std::min)((size_t)count, (Size - Pos) / minRecordSize); }
     };
 
     // serializer: for UserData (may be null)

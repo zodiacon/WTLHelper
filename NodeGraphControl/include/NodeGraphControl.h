@@ -93,6 +93,9 @@ constexpr wchar_t WC_NODEGRAPHCONTROL[] = L"NodeGraphControl";
 //   NGCS_WHEELSCROLL the mouse wheel scrolls (with Shift: sideways) and Ctrl+wheel zooms; without it the wheel zooms
 #define NGCS_SCROLLBARS  0x0008
 #define NGCS_WHEELSCROLL 0x0010
+//   NGCS_HIGHLIGHT   the node under the mouse (or else the selected nodes), its neighbors and its edges are drawn in
+//                    front, the rest of the graph dimmed
+#define NGCS_HIGHLIGHT   0x0020
 
 // Internal message used to commit/cancel the inline label editor.
 constexpr UINT WM_NODEGRAPHEDIT = WM_APP + 1;
@@ -207,6 +210,15 @@ public:
     // nodes with images). Returns how many.
     size_t RemoveUnusedImages();
 
+    // The highlight of a node's neighborhood (NGCS_HIGHLIGHT).
+    void SetHighlight(bool highlight);
+    bool GetHighlight() const;
+
+    // The nodes whose label, title or tooltip has the text (NodeGraphModel::FindNodes), then: the next (previous) one
+    // after the selected node, around, selected and brought into view. False if no node has it.
+    bool FindNext(const std::wstring& text, bool backwards = false, bool matchCase = false);
+    void SelectNodes(const std::vector<NodeId>& ids);
+
     // Fit the graph in view when it is replaced (NGCS_AUTOZOOM).
     void SetAutoZoom(bool autoZoom);
     bool GetAutoZoom() const;
@@ -244,6 +256,13 @@ public:
     void Redo();
     bool CanUndo() const;
     bool CanRedo() const;
+    // How many steps undo keeps (the oldest go first); 0, the default: all of them.
+    void   SetUndoLimit(size_t steps);
+    size_t GetUndoLimit() const;
+
+    // NGCS_READONLY at any time. Going read-only ends a label edit, and the making of an edge or a resize.
+    void SetReadOnly(bool readOnly);
+    bool IsReadOnly() const;
 
     // Update batching — suppress repaints during bulk programmatic changes.
     void BeginUpdate();
@@ -328,6 +347,7 @@ private:
     void NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId);
     void NotifyUndoChanged();
     void PushUndo(std::unique_ptr<UndoCmd> cmd);
+    void TrimUndo();
     void RequestInvalidate();
     bool IsSelected(NodeId id) const;
     void FireSelChanged();
@@ -393,6 +413,9 @@ private:
 
     NodeId m_HoveredNode = InvalidNode;     // tracked only while there is a node draw handler
 
+    size_t m_UndoLimit      = 0;
+    bool m_Highlight        = false;
+    bool TracksHover() const { return m_Highlight || m_Renderer.GetNodeDrawHandler(); }
     UndoCmd* m_KeyMove      = nullptr;       // the move by arrow keys on top of the undo stack, which more presses extend
     POINT m_RightDown       = {};            // where the right button went down (a click without a drag: the context menu)
     bool m_AutoZoom         = false;

@@ -85,10 +85,17 @@ struct NodeLayout {
     }
 };
 
+enum class EdgeLine  : uint8_t { Solid, Dash, Dot, DashDot };
+enum class ArrowHead : uint8_t { Filled, Open, Diamond, Circle };
+
 struct EdgeStyle {
-    COLORREF Color    = RGB(80, 80, 80);
-    float    Width    = 1.5f;
-    bool     Directed = true;  // draw arrowhead
+    COLORREF  Color      = RGB(80, 80, 80);
+    float     Width      = 1.5f;
+    bool      Directed   = true;              // draw arrowhead
+    EdgeLine  Line       = EdgeLine::Solid;
+    ArrowHead Arrow      = ArrowHead::Filled;
+    bool      Curved     = false;             // a smooth curve through the bends (a straight edge stays straight)
+    bool      ScaleLabel = true;              // the label scales with the zoom (false: the same size on the screen)
 };
 
 struct Node {
@@ -121,6 +128,16 @@ struct Edge {
     std::vector<Point> Waypoints;       // in graph space: the edge goes from the center of From through these to the center of To
     void*        UserData = nullptr;
 };
+
+// Where an edge between two different nodes goes, in graph units: from the outline of one through the bends to the
+// outline of the other. lane moves a straight edge to its right (an edge with one going the other way is drawn apart
+// from it). Empty if it has no length. The renderer, hit testing and SVG export all use it.
+std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, float lane = 0.0f);
+// For a curved edge (EdgeStyle::Curved): the two control points of each cubic Bezier piece between the points of its
+// path (a Catmull-Rom curve, so it goes through every bend).
+std::vector<Point> CurveControls(const std::vector<Point>& path);
+// The point halfway along a piece of a path (the curve's, for a curved one): where the label goes.
+Point EdgeLabelPoint(const std::vector<Point>& path, const std::vector<Point>& controls);
 
 // Turns the UserData of nodes and edges into bytes and back, so that it is saved (Save/Load) and copied (the clipboard)
 // with them. The model doesn't own UserData: what Load makes is the host's, as before.
@@ -171,6 +188,10 @@ public:
     // Where the title, image, icon and label of the node go (the same for drawing, exporting and editing).
     NodeLayout GetNodeLayout(const Node& n) const;
 
+    // The nodes whose label, title or tooltip has the text, in the order of the model. Not matchCase: as the user's
+    // language compares it, ignoring case.
+    std::vector<NodeId> FindNodes(const std::wstring& text, bool matchCase = false) const;
+
     // What the graph covers, in graph units: the nodes, the bends of the edges and the loops of edges to their own
     // node. Empty without nodes.
     Rect GetBounds() const;
@@ -194,8 +215,8 @@ public:
     // Returns false on I/O or format error.
     // A binary file of the images the nodes show, and of the nodes and edges with their styles, content, tooltips and
     // waypoints, and their UserData if there is a serializer. Load also reads the earlier versions of the file
-    // (version 3: no UserData; version 2: nor images or content, the labels scale; version 1: nor the Code style,
-    // tooltips and waypoints).
+    // (version 4: no edge line, arrowhead, curve, the edge labels scale; version 3: nor UserData; version 2: nor images
+    // or content, the labels scale; version 1: nor the Code style, tooltips and waypoints).
     bool Save(const wchar_t* path) const;
     bool Load(const wchar_t* path);
 

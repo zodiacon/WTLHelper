@@ -148,6 +148,9 @@ public:
     void SetNodeDrawHandler(INodeDrawHandler* handler) { m_DrawHandler = handler; }
     INodeDrawHandler* GetNodeDrawHandler() const { return m_DrawHandler; }
     void SetHoveredNode(NodeId id) { m_HoveredNode = id; }
+    // Draws these nodes, their neighbors and the edges between them in front, and the rest of the graph dimmed behind.
+    // Empty: no highlight.
+    void SetHighlight(std::vector<NodeId> focus) { m_Highlight = std::move(focus); }
     void SetExporting(bool exporting) { m_Exporting = exporting; }
 
 private:
@@ -155,9 +158,13 @@ private:
     void    DiscardDeviceResources();
 
     void DrawGrid(const RECT& clientRect, const ViewTransform& vt);
+    enum class EdgeEmphasis { Normal, Selected, Highlighted };
     void DrawEdge(const Edge& e, const NodeGraphModel& model,
-                  const ViewTransform& vt, bool selected);
-    void DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, bool selected);
+                  const ViewTransform& vt, EdgeEmphasis emphasis);
+    void DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, EdgeEmphasis emphasis);
+    void DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis);
+    void SetEdgeBrush(const Edge& e, EdgeEmphasis emphasis);
+    float EdgeWidth(const Edge& e, EdgeEmphasis emphasis) const;
     void DrawEdgePreview(const EdgePreview& preview, const NodeGraphModel& model,
                          const ViewTransform& vt);
     void DrawNode(const NodeGraphModel& model, const Node& n, const ViewTransform& vt, bool selected);
@@ -167,7 +174,7 @@ private:
     void FillBand(const D2D1_RECT_F& rect, float radius, bool roundTop, bool roundBottom);
     void DrawImage(const NodeGraphModel& model, ImageId id, const D2D1_RECT_F& dst, const Rect* src = nullptr);
     ComPtr<ID2D1Geometry> ShapeGeometry(NodeShape shape, const D2D1_ROUNDED_RECT& rr) const;
-    void DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir);
+    void DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir, ArrowHead style = ArrowHead::Filled);
     void DrawRubberBand(const RubberBand& rb);
     void DrawMinimap(const MinimapConfig& cfg, const RECT& clientRect,
                      const NodeGraphModel& model, const ViewTransform& vt);
@@ -183,6 +190,7 @@ private:
     ComPtr<IDWriteTextFormat>   m_TitleTextFormat; // 12 units bold, left aligned, one line with an ellipsis, for NodeContent::Title
     ComPtr<IDWriteInlineObject> m_Ellipsis;
     ComPtr<ID2D1StrokeStyle>    m_DashStyle;
+    ComPtr<ID2D1StrokeStyle>    m_LineStyles[4];   // by EdgeLine (null: solid)
 
     // Device-dependent resources (recreated if device lost).
     ComPtr<ID2D1DCRenderTarget>  m_RenderTarget;
@@ -199,6 +207,7 @@ private:
 
     INodeDrawHandler* m_DrawHandler = nullptr;
     NodeId   m_HoveredNode = InvalidNode;
+    std::vector<NodeId> m_Highlight;
     bool     m_Exporting = false;
     uint32_t m_DeviceGeneration = 0;    // of the current render target, unique in the process
     uint32_t CallOwnerDraw(const NodeGraphModel& model, const Node& n, const NodeLayout& layout,

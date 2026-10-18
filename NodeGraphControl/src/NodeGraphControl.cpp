@@ -7,6 +7,7 @@
 #include "NodeGraphImaging.h"
 #include "NodeGraphSerialization.h"
 #include <unordered_map>
+#include <unordered_set>
 
 #include <commctrl.h>
 #include <memory>
@@ -29,6 +30,7 @@ namespace NodeGraphCtrl {
 	namespace {
 
 		void CollectNodeImages(const std::vector<Node>& nodes, std::vector<ImageId>& images) {
+			images.reserve(images.size() + nodes.size() * 2);
 			for (const auto& n : nodes) {
 				images.push_back(n.Content.Icon);
 				images.push_back(n.Content.Image);
@@ -173,6 +175,8 @@ namespace NodeGraphCtrl {
 			static void Capture(const NodeGraphModel& m, std::vector<Place>& places, std::vector<Route>& routes) {
 				places.clear();
 				routes.clear();
+				places.reserve(m.Nodes().size());
+				routes.reserve(m.Edges().size());
 				for (const auto& n : m.Nodes()) places.push_back({ n.Id, n.X, n.Y });
 				for (const auto& e : m.Edges()) routes.push_back({ e.Id, e.Waypoints });
 			}
@@ -232,6 +236,7 @@ namespace NodeGraphCtrl {
 		m_ScrollBars = (pcs->style & NGCS_SCROLLBARS) != 0;
 		m_AutoZoom = (pcs->style & NGCS_AUTOZOOM) != 0;
 		m_WheelScrolls = (pcs->style & NGCS_WHEELSCROLL) != 0;
+		m_Highlight = (pcs->style & NGCS_HIGHLIGHT) != 0;
 		m_Model = std::make_unique<NodeGraphModel>();
 		m_Model->SetResetCallback([this] { OnModelReset(); });
 
@@ -310,7 +315,52 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::PushUndo(std::unique_ptr<UndoCmd> cmd) {
 		m_UndoStack.push_back(std::move(cmd));
 		m_RedoStack.clear();
+		TrimUndo();
 		NotifyUndoChanged();
+	}
+
+	// The oldest steps over the limit go.
+	void CNodeGraphControl::TrimUndo() {
+		if (m_UndoLimit == 0 || m_UndoStack.size() <= m_UndoLimit)
+			return;
+		const size_t extra = m_UndoStack.size() - m_UndoLimit;
+		for (size_t i = 0; i < extra; i++)
+			if (m_UndoStack[i].get() == m_KeyMove) m_KeyMove = nullptr;
+		m_UndoStack.erase(m_UndoStack.begin(), m_UndoStack.begin() + extra);
+	}
+
+	void CNodeGraphControl::SetUndoLimit(size_t steps) {
+		m_UndoLimit = steps;
+		TrimUndo();
+		if (m_RedoStack.size() > steps && steps > 0)	// redo is limited the same (its oldest step is the deepest)
+			m_RedoStack.erase(m_RedoStack.begin(), m_RedoStack.begin() + (m_RedoStack.size() - steps));
+		if (m_hWnd) NotifyUndoChanged();
+	}
+
+	size_t CNodeGraphControl::GetUndoLimit() const {
+		return m_UndoLimit;
+	}
+
+	void CNodeGraphControl::SetReadOnly(bool readOnly) {
+		if (readOnly == m_ReadOnly) return;
+		m_ReadOnly = readOnly;
+		if (readOnly && m_hWnd) {
+			// what a read-only graph doesn't do: editing a label, making an edge, resizing
+			if (m_LabelEdit) CancelLabelEdit();
+			if (m_EdgePreview.Active || m_Resize.Active) {
+				m_EdgePreview.Active = false;
+				m_EdgePreview.FromNode = InvalidNode;
+				m_Resize.Active = false;
+				m_Resize.NodeId = InvalidNode;
+				if (::GetCapture() == m_hWnd) ::ReleaseCapture();
+			}
+			m_Resize.Hovered = ResizeHandle::None;
+		}
+		if (m_hWnd) Invalidate(FALSE);	// the resize handles come or go
+	}
+
+	bool CNodeGraphControl::IsReadOnly() const {
+		return m_ReadOnly;
 	}
 
 	void CNodeGraphControl::RequestInvalidate() {
@@ -553,6 +603,7 @@ namespace NodeGraphCtrl {
 
 		if (!m_SelectedNodes.empty()) {
 			auto cmd = std::make_unique<DeleteSelectionCmd>();
+			cmd->Nodes.reserve(m_SelectedNodes.size());
 			for (NodeId nid : m_SelectedNodes) {
 				Node* n = m_Model->GetNode(nid);
 				if (n) cmd->Nodes.push_back(*n);
@@ -656,10 +707,12 @@ namespace NodeGraphCtrl {
 		if (m_SelectedNodes.empty()) return;
 
 		std::vector<const Node*> nodes;
+		nodes.reserve(m_SelectedNodes.size());
 		for (NodeId id : m_SelectedNodes)
 			if (const Node* n = m_Model->GetNode(id)) nodes.push_back(n);
 
 		std::vector<const Image*> images;
+		images.reserve(std::min(nodes.size() * 2, m_Model->Images().size()));
 		auto addImage = [&](ImageId id) {
 			const Image* image = m_Model->GetImage(id);
 			if (image && std::find(images.begin(), images.end(), image) == images.end())
@@ -725,18 +778,21 @@ namespace NodeGraphCtrl {
 		std::vector<Edge> edges;
 		uint32_t version = 0, count = 0;
 		bool ok = r.Read(version) && version >= 3 && version <= Serialization::Version && r.Read(count);
+		if (ok) images.reserve(r.Capped(count, Serialization::MinImageRecord));
 		for (uint32_t i = 0; i < count && ok; ++i) {
 			Image image;
 			ok = Serialization::ReadImage(r, image);
 			images.push_back(std::move(image));
 		}
 		ok = ok && r.Read(count);
+		if (ok) nodes.reserve(r.Capped(count, Serialization::MinNodeRecord));
 		for (uint32_t i = 0; i < count && ok; ++i) {
 			Node n;
 			ok = Serialization::ReadNode(r, n, version, m_Model->GetUserDataSerializer());
 			nodes.push_back(std::move(n));
 		}
 		ok = ok && r.Read(count);
+		if (ok) edges.reserve(r.Capped(count, Serialization::MinEdgeRecord));
 		for (uint32_t i = 0; i < count && ok; ++i) {
 			Edge e;
 			ok = Serialization::ReadEdge(r, e, version, m_Model->GetUserDataSerializer());
@@ -750,6 +806,7 @@ namespace NodeGraphCtrl {
 
 		// the images are added to this model (an image it has already isn't added again): their ids here
 		std::unordered_map<ImageId, ImageId> imageIds;
+		imageIds.reserve(images.size());
 		for (const auto& image : images)
 			imageIds[image.Id] = m_Model->AddImage(image.Data.data(), image.Data.size());
 		auto mapImage = [&](ImageId id) {
@@ -759,7 +816,10 @@ namespace NodeGraphCtrl {
 
 		const float offset = 20.0f;
 		auto cmd = std::make_unique<PasteCmd>();
+		cmd->PastedNodes.reserve(nodes.size());
+		cmd->PastedEdges.reserve(edges.size());
 		std::unordered_map<NodeId, NodeId> nodeIds;
+		nodeIds.reserve(nodes.size());
 		std::vector<NodeId> newIds;
 		newIds.reserve(nodes.size());
 
@@ -846,6 +906,14 @@ namespace NodeGraphCtrl {
 			ro.Node = m_SelectedNodes[0];
 			ro.HoveredHandle = m_Resize.Active ? m_Resize.Handle : m_Resize.Hovered;
 		}
+		// the highlight is about the node under the mouse, or else the selected nodes (not while dragging: the
+		// dragged node would be all there is)
+		std::vector<NodeId> focus;
+		if (m_Highlight && !m_DraggingNode && !m_Resize.Active && !m_RubberBand.Active) {
+			if (m_HoveredNode != InvalidNode && m_Model->GetNode(m_HoveredNode)) focus = { m_HoveredNode };
+			else focus = m_SelectedNodes;
+		}
+		m_Renderer.SetHighlight(std::move(focus));
 		m_Renderer.Render(hdc, rc, *m_Model, m_Vt,
 			m_SelectedNodes, m_SelectedEdge,
 			m_DrawGrid, m_EdgePreview, m_RubberBand, mmcfg, ro);
@@ -1107,6 +1175,7 @@ namespace NodeGraphCtrl {
 			m_DraggingNode = true;
 			m_DragPrimaryId = hitNode;
 			m_DragOrigins.clear();
+			m_DragOrigins.reserve(m_SelectedNodes.size());
 			for (NodeId nid : m_SelectedNodes) {
 				Node* n = m_Model->GetNode(nid);
 				if (n) m_DragOrigins.push_back({ nid, n->X, n->Y });
@@ -1202,6 +1271,7 @@ namespace NodeGraphCtrl {
 			::ReleaseCapture();
 
 			std::vector<std::unique_ptr<UndoCmd>> moves;
+			moves.reserve(m_DragOrigins.size());
 			for (const auto& orig : m_DragOrigins) {
 				Node* n = m_Model->GetNode(orig.Id);
 				if (n && (n->X != orig.StartX || n->Y != orig.StartY)) {
@@ -1239,7 +1309,7 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::OnMouseMove(UINT /*nFlags*/, CPoint pt) {
 		int sx = pt.x, sy = pt.y;
 
-		if (m_Renderer.GetNodeDrawHandler()) {
+		if (TracksHover()) {
 			auto gp = m_Vt.ToGraph((float)sx, (float)sy);
 			SetHoveredNode(m_Renderer.HitTestNode(*m_Model, gp.x, gp.y));
 		}
@@ -1388,7 +1458,7 @@ namespace NodeGraphCtrl {
 			const Node* n = m_Model->GetNode(nid);
 			return n && n->Style.OwnerDraw;
 		};
-		const bool repaint = ownerDrawn(m_HoveredNode) || ownerDrawn(id);
+		const bool repaint = m_Highlight || ownerDrawn(m_HoveredNode) || ownerDrawn(id);
 		m_HoveredNode = id;
 		m_Renderer.SetHoveredNode(id);
 		if (repaint)
@@ -1714,6 +1784,52 @@ namespace NodeGraphCtrl {
 		return m_Model->RemoveUnusedImages(keep);
 	}
 
+	void CNodeGraphControl::SetHighlight(bool highlight) {
+		m_Highlight = highlight;
+		if (!TracksHover())
+			SetHoveredNode(InvalidNode);
+		if (m_hWnd) Invalidate(FALSE);
+	}
+
+	bool CNodeGraphControl::GetHighlight() const {
+		return m_Highlight;
+	}
+
+	void CNodeGraphControl::SelectNodes(const std::vector<NodeId>& ids) {
+		m_SelectedNodes.clear();
+		m_SelectedNodes.reserve(ids.size());
+		std::unordered_set<NodeId> added;		// once each (thousands of found nodes: not a search of the selection each)
+		added.reserve(ids.size());
+		for (NodeId id : ids)
+			if (m_Model->GetNode(id) && added.insert(id).second)
+				m_SelectedNodes.push_back(id);
+		m_SelectedEdge = InvalidEdge;
+		FireSelChanged();
+		RequestInvalidate();
+	}
+
+	bool CNodeGraphControl::FindNext(const std::wstring& text, bool backwards, bool matchCase) {
+		const std::vector<NodeId> found = m_Model->FindNodes(text, matchCase);
+		if (found.empty())
+			return false;
+		// the first one after (before) the selected node, in the order of the model
+		const Node* current = m_Model->GetNode(GetSelectedNode());
+		const size_t at = current ? current - m_Model->Nodes().data() : (backwards ? m_Model->Nodes().size() : SIZE_MAX);
+		auto index = [&](NodeId id) { return (size_t)(m_Model->GetNode(id) - m_Model->Nodes().data()); };
+		NodeId next = backwards ? found.back() : found.front();		// around
+		if (backwards) {
+			for (auto it = found.rbegin(); it != found.rend(); ++it)
+				if (index(*it) < at) { next = *it; break; }
+		}
+		else {
+			for (NodeId id : found)
+				if (at == SIZE_MAX || index(id) > at) { next = id; break; }
+		}
+		SelectNode(next);
+		EnsureVisible(next);
+		return true;
+	}
+
 	void CNodeGraphControl::SetAutoZoom(bool autoZoom) {
 		m_AutoZoom = autoZoom;
 	}
@@ -1935,6 +2051,7 @@ namespace NodeGraphCtrl {
 
 	void CNodeGraphControl::SelectAll() {
 		m_SelectedNodes.clear();
+		m_SelectedNodes.reserve(m_Model->Nodes().size());
 		for (const auto& n : m_Model->Nodes())
 			m_SelectedNodes.push_back(n.Id);
 		m_SelectedEdge = InvalidEdge;
@@ -1972,6 +2089,7 @@ namespace NodeGraphCtrl {
 		if (!cmd || cmd != m_KeyMove || cmd->Ids != m_SelectedNodes) {
 			auto move = std::make_unique<KeyMoveCmd>();
 			move->Ids = m_SelectedNodes;
+			move->Old.reserve(m_SelectedNodes.size());
 			for (NodeId id : m_SelectedNodes) {
 				const Node* n = m_Model->GetNode(id);
 				move->Old.push_back(n ? Point{ n->X, n->Y } : Point{});
@@ -2064,6 +2182,7 @@ namespace NodeGraphCtrl {
 		vt.OffsetX = -minX * scale;
 		vt.OffsetY = -minY * scale;
 		RECT rc{ 0, 0, cx, cy };
+		m_Renderer.SetHighlight({});	// an image of the graph, not of what the mouse is on
 		m_Renderer.SetExporting(true);
 		m_Renderer.Render(hdc, rc, *m_Model, vt, {}, InvalidEdge, false);
 		m_Renderer.SetExporting(false);
@@ -2373,6 +2492,7 @@ namespace NodeGraphCtrl {
 
 		std::vector<std::wstring> SplitLines(const std::wstring& s) {
 			std::vector<std::wstring> lines;
+			lines.reserve(std::count(s.begin(), s.end(), L'\n') + 1);
 			size_t start = 0;
 			for (;;) {
 				auto end = s.find(L'\n', start);
@@ -2381,6 +2501,42 @@ namespace NodeGraphCtrl {
 				start = end + 1;
 			}
 			return lines;
+		}
+
+		// The dashes of an edge's line, as Direct2D has them: in widths of the line, dots round.
+		std::string DashArray(const EdgeStyle& style) {
+			const float w = style.Width;
+			switch (style.Line) {
+				case EdgeLine::Dash:    return " stroke-dasharray=\"" + Num(2 * w) + " " + Num(2 * w) + "\"";
+				case EdgeLine::Dot:     return " stroke-dasharray=\"0 " + Num(2 * w) + "\" stroke-linecap=\"round\"";
+				case EdgeLine::DashDot: return " stroke-dasharray=\"" + Num(2 * w) + " " + Num(2 * w) + " 0 " + Num(2 * w) + "\" stroke-linecap=\"round\"";
+				default:                return {};
+			}
+		}
+
+		// An arrowhead as the renderer draws it, at a tip pointing along dir (a unit vector).
+		std::string SvgArrowhead(Point tip, Point dir, ArrowHead style, const std::string& color) {
+			const float size = 10.0f, c = std::cos(0.4f), s = std::sin(0.4f);
+			const float bx = -dir.X * size, by = -dir.Y * size;
+			const Point l{ tip.X + bx * c - by * s, tip.Y + bx * s + by * c };
+			const Point r{ tip.X + bx * c + by * s, tip.Y - bx * s + by * c };
+			switch (style) {
+				case ArrowHead::Open:
+					return "<polyline points=\"" + Num(l.X) + "," + Num(l.Y) + " " + Num(tip.X) + "," + Num(tip.Y) + " " + Num(r.X) + "," + Num(r.Y) +
+						"\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"1.5\"/>\n";
+				case ArrowHead::Circle:
+					return "<circle cx=\"" + Num(tip.X - dir.X * 4) + "\" cy=\"" + Num(tip.Y - dir.Y * 4) + "\" r=\"4\" fill=\"" + color + "\"/>\n";
+				case ArrowHead::Diamond: {
+					const float half = size * 0.5f, side = size * 0.3f;
+					const Point mid{ tip.X - dir.X * half, tip.Y - dir.Y * half };
+					return "<polygon points=\"" + Num(tip.X) + "," + Num(tip.Y) + " " + Num(mid.X - dir.Y * side) + "," + Num(mid.Y + dir.X * side) + " " +
+						Num(tip.X - dir.X * size) + "," + Num(tip.Y - dir.Y * size) + " " + Num(mid.X + dir.Y * side) + "," + Num(mid.Y - dir.X * side) +
+						"\" fill=\"" + color + "\"/>\n";
+				}
+				default:
+					return "<polygon points=\"" + Num(tip.X) + "," + Num(tip.Y) + " " + Num(l.X) + "," + Num(l.Y) + " " + Num(r.X) + "," + Num(r.Y) +
+						"\" fill=\"" + color + "\"/>\n";
+			}
 		}
 
 		// The SVG element of a node's shape, with these attributes (fill, stroke).
@@ -2469,6 +2625,7 @@ namespace NodeGraphCtrl {
 		// the pictures of the nodes that have one, and the images the others show (each written once)
 		std::vector<NodePicture> pictures(m_Nodes.size());
 		std::vector<ImageId> used;
+		used.reserve(m_Nodes.size() * 2);
 		for (size_t i = 0; i < m_Nodes.size(); i++) {
 			if (picture)
 				pictures[i] = picture(m_Nodes[i]);
@@ -2481,6 +2638,7 @@ namespace NodeGraphCtrl {
 		std::sort(used.begin(), used.end());
 		used.erase(std::unique(used.begin(), used.end()), used.end());
 		std::vector<ImageId> written;
+		written.reserve(used.size());
 		if (!used.empty()) {
 			svg += "<defs>\n";
 			for (ImageId id : used) {
@@ -2497,76 +2655,58 @@ namespace NodeGraphCtrl {
 
 		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"" + Hex(background) + "\"/>\n";
 
-		// edges first, so that the nodes are on top
+		// edges first, so that the nodes are on top; as the renderer draws them (EdgePath), at the zoom of 1
+		std::unordered_set<uint64_t> pairs;
+		pairs.reserve(m_Edges.size());
+		for (const auto& e : m_Edges)
+			pairs.insert((uint64_t)e.From << 32 | e.To);
 		for (const auto& e : m_Edges) {
 			const Node* from = GetNode(e.From);
 			const Node* to = GetNode(e.To);
 			if (!from || !to) continue;
-			std::string color = Hex(e.Style.Color), stroke = Num(e.Style.Width);
+			const std::string color = Hex(e.Style.Color);
+			const std::string stroke = "fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(e.Style.Width) + "\" stroke-linejoin=\"round\"" + DashArray(e.Style);
 
 			if (from == to) {
 				float right = from->X + from->Width * 0.5f;
 				float rise = std::min(from->Height * 0.25f, 40.0f);
 				float top = from->Y - rise, bottom = from->Y + rise;
 				float end = from->X + NodeHalfWidthAt(*from, rise);		// the ends on the outline of the shape
+				const bool solidHead = e.Style.Directed && (e.Style.Arrow == ArrowHead::Filled || e.Style.Arrow == ArrowHead::Diamond);
 				svg += "<path d=\"M" + Num(end) + " " + Num(top) + " L" + Num(right + 24) + " " + Num(top) + " L" + Num(right + 24) + " " +
-					Num(bottom) + " L" + Num(end + 8) + " " + Num(bottom) + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + stroke + "\"/>\n";
+					Num(bottom) + " L" + Num(end + (solidHead ? 8 : 0)) + " " + Num(bottom) + "\" " + stroke + "/>\n";
 				if (e.Style.Directed)
-					svg += "<polygon points=\"" + Num(end) + "," + Num(bottom) + " " + Num(end + 10) + "," + Num(bottom - 4) + " " + Num(end + 10) + "," + Num(bottom + 4) + "\" fill=\"" + color + "\"/>\n";
+					svg += SvgArrowhead({ end, bottom }, { -1, 0 }, e.Style.Arrow, color);
 				continue;
 			}
 
-			std::vector<Point> pts;
-			pts.push_back({ from->X, from->Y });
-			pts.insert(pts.end(), e.Waypoints.begin(), e.Waypoints.end());
-			pts.push_back({ to->X, to->Y });
+			const float lane = pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f;
+			const std::vector<Point> points = EdgePath(e, *from, *to, lane);
+			if (points.size() < 2) continue;
+			const std::vector<Point> controls = e.Style.Curved && points.size() > 2 ? CurveControls(points) : std::vector<Point>{};
 
-			float dx = pts[1].X - pts[0].X, dy = pts[1].Y - pts[0].Y;
-			float len = std::sqrt(dx * dx + dy * dy);
-			if (pts.size() == 2 && len < 1.0f) continue;
-			if (pts.size() == 2) {
-				// an edge with one going the other way is moved to its right
-				for (const auto& o : m_Edges)
-					if (o.From == e.To && o.To == e.From) {
-						float nx = dx / len, ny = dy / len;
-						for (auto& p : pts) { p.X -= ny * 7.0f; p.Y += nx * 7.0f; }
-						break;
-					}
+			svg += "<path d=\"M" + Num(points[0].X) + " " + Num(points[0].Y);
+			for (size_t i = 0; i + 1 < points.size(); i++) {
+				if (controls.empty())
+					svg += " L" + Num(points[i + 1].X) + " " + Num(points[i + 1].Y);
+				else
+					svg += " C" + Num(controls[i * 2].X) + " " + Num(controls[i * 2].Y) + " " + Num(controls[i * 2 + 1].X) + " " + Num(controls[i * 2 + 1].Y) +
+						" " + Num(points[i + 1].X) + " " + Num(points[i + 1].Y);
 			}
-
-			// as the renderer clips: half the segment at most for a straight edge, the whole segment next to a waypoint
-			const float maxPart = pts.size() == 2 ? 0.5f : 1.0f;
-			auto clip = [&](const Node& n, Point& at, Point other) {
-				float ddx = other.X - at.X, ddy = other.Y - at.Y;
-				float l = std::sqrt(ddx * ddx + ddy * ddy);
-				if (l < 1.0f) return Point{};
-				float nx = ddx / l, ny = ddy / l;
-				float t = std::min(NodeBorderDistance(n, nx, ny), l * maxPart);
-				at.X += nx * t; at.Y += ny * t;
-				return Point{ nx, ny };
-			};
-			// both ends against the points before clipping (of a straight edge, the from end is the other point of the to end)
-			const Point beforeLast = pts[pts.size() - 2];
-			clip(*from, pts.front(), pts[1]);
-			Point dir = clip(*to, pts.back(), beforeLast);
-			dir.X = -dir.X; dir.Y = -dir.Y;
-
-			svg += "<polyline points=\"";
-			for (size_t i = 0; i < pts.size(); i++)
-				svg += (i ? " " : "") + Num(pts[i].X) + "," + Num(pts[i].Y);
-			svg += "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + stroke + "\" stroke-linejoin=\"round\"/>\n";
+			svg += "\" " + stroke + "/>\n";
 
 			if (e.Style.Directed) {
-				Point tip = pts.back();
-				float bx = -dir.X * 10.0f, by = -dir.Y * 10.0f, c = std::cos(0.4f), s = std::sin(0.4f);
-				Point l{ tip.X + bx * c - by * s, tip.Y + bx * s + by * c };
-				Point r{ tip.X + bx * c + by * s, tip.Y - bx * s + by * c };
-				svg += "<polygon points=\"" + Num(tip.X) + "," + Num(tip.Y) + " " + Num(l.X) + "," + Num(l.Y) + " " + Num(r.X) + "," + Num(r.Y) + "\" fill=\"" + color + "\"/>\n";
+				const Point& end = points.back();
+				Point before = controls.empty() ? points[points.size() - 2] : controls.back();
+				float dx = end.X - before.X, dy = end.Y - before.Y;
+				if (dx * dx + dy * dy < 1e-6f) { before = points[points.size() - 2]; dx = end.X - before.X; dy = end.Y - before.Y; }
+				const float l = std::sqrt(dx * dx + dy * dy);
+				if (l > 0)
+					svg += SvgArrowhead(end, { dx / l, dy / l }, e.Style.Arrow, color);
 			}
 			if (!e.Label.empty()) {
-				const Point& a = pts[(pts.size() - 1) / 2];
-				const Point& b = pts[pts.size() / 2];
-				svg += "<text x=\"" + Num((a.X + b.X) * 0.5f) + "\" y=\"" + Num((a.Y + b.Y) * 0.5f) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" text-anchor=\"middle\">" +
+				const Point at = EdgeLabelPoint(points, controls);
+				svg += "<text x=\"" + Num(at.X) + "\" y=\"" + Num(at.Y) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
 					XmlEscape(Utf8(e.Label)) + "</text>\n";
 			}
 		}

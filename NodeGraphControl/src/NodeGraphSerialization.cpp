@@ -15,6 +15,10 @@ namespace NodeGraphCtrl {
                 NF_SHAPESHIFT = 3,          // bits 3-4: the NodeShape
                 NF_SHAPEMASK  = 3 << NF_SHAPESHIFT,
             };
+            enum EdgeFlags : uint8_t {      // version 5
+                EF_CURVED     = 1,
+                EF_SCALELABEL = 2,
+            };
 
             // the UserData block of a record (version 4)
             template<typename T, typename Save>
@@ -117,6 +121,9 @@ namespace NodeGraphCtrl {
             for (const auto& p : e.Waypoints) {
                 w.Write(p.X); w.Write(p.Y);
             }
+            w.Write((uint8_t)e.Style.Line);
+            w.Write((uint8_t)e.Style.Arrow);
+            w.Write((uint8_t)((e.Style.Curved ? EF_CURVED : 0) | (e.Style.ScaleLabel ? EF_SCALELABEL : 0)));
             WriteUserData(w, e, serializer, &IUserDataSerializer::SaveEdge);
         }
 
@@ -135,10 +142,20 @@ namespace NodeGraphCtrl {
 
             uint32_t count = 0;
             ok = r.ReadStr(e.Tooltip) && r.Read(count) && count <= (r.Size - r.Pos) / (2 * sizeof(float));
+            if (ok) e.Waypoints.reserve(count);
             for (uint32_t i = 0; i < count && ok; ++i) {
                 Point p;
                 ok = r.Read(p.X) && r.Read(p.Y);
                 e.Waypoints.push_back(p);
+            }
+            if (ok && version >= 5) {
+                uint8_t line = 0, arrow = 0, flags = 0;
+                ok = r.Read(line) && r.Read(arrow) && r.Read(flags)
+                    && line <= (uint8_t)EdgeLine::DashDot && arrow <= (uint8_t)ArrowHead::Circle;
+                e.Style.Line = (EdgeLine)line;
+                e.Style.Arrow = (ArrowHead)arrow;
+                e.Style.Curved = (flags & EF_CURVED) != 0;
+                e.Style.ScaleLabel = (flags & EF_SCALELABEL) != 0;
             }
             if (ok && version >= 4)
                 ok = ReadUserData(r, e, serializer, &IUserDataSerializer::LoadEdge);
@@ -174,6 +191,7 @@ namespace NodeGraphCtrl {
         w.Write(k_Magic | Version << 24);
         // the images the nodes show (one left over, as after undoing a paste, isn't written)
         std::vector<const Image*> images;
+        images.reserve(m_Images.size());
         for (const auto& image : m_Images)
             if (std::any_of(m_Nodes.begin(), m_Nodes.end(), [&](const Node& n) { return n.Content.Icon == image.Id || n.Content.Image == image.Id; }))
                 images.push_back(&image);
@@ -229,6 +247,7 @@ namespace NodeGraphCtrl {
         std::vector<Image> images;
         if (version >= 3) {
             ok = r.Read(count);
+            if (ok) images.reserve(r.Capped(count, MinImageRecord));
             for (uint32_t i = 0; i < count && ok; ++i) {
                 Image image;
                 ok = ReadImage(r, image);
@@ -239,6 +258,7 @@ namespace NodeGraphCtrl {
 
         std::vector<Node> nodes;
         ok = ok && r.Read(count);
+        if (ok) nodes.reserve(r.Capped(count, MinNodeRecord));
         for (uint32_t i = 0; i < count && ok; ++i) {
             Node n;
             ok = ReadNode(r, n, version, m_Serializer);
@@ -247,6 +267,7 @@ namespace NodeGraphCtrl {
 
         std::vector<Edge> edges;
         ok = ok && r.Read(count);
+        if (ok) edges.reserve(r.Capped(count, MinEdgeRecord));
         for (uint32_t i = 0; i < count && ok; ++i) {
             Edge e;
             ok = ReadEdge(r, e, version, m_Serializer);

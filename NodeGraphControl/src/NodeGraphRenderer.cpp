@@ -83,12 +83,23 @@ HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties();
     ssp.dashStyle = D2D1_DASH_STYLE_DASH;
     hr = m_D2dFactory->CreateStrokeStyle(ssp, nullptr, 0, m_DashStyle.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    // the lines of edges (EdgeLine); round dots
+    const D2D1_DASH_STYLE dashes[] = { D2D1_DASH_STYLE_SOLID, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT, D2D1_DASH_STYLE_DASH_DOT };
+    for (int i = 1; i < 4; i++) {
+        const D2D1_CAP_STYLE cap = dashes[i] == D2D1_DASH_STYLE_DASH ? D2D1_CAP_STYLE_FLAT : D2D1_CAP_STYLE_ROUND;
+        auto props = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, cap, D2D1_LINE_JOIN_ROUND, 10.0f, dashes[i]);
+        hr = m_D2dFactory->CreateStrokeStyle(props, nullptr, 0, m_LineStyles[i].GetAddressOf());
+        if (FAILED(hr)) return hr;
+    }
     return hr;
 }
 
 void NodeGraphRenderer::Shutdown() {
     DiscardDeviceResources();
     m_DashStyle.Reset();
+    for (auto& style : m_LineStyles) style.Reset();
     m_EdgeTextFormat.Reset();
     m_CodeTextFormat.Reset();
     m_Ellipsis.Reset();
@@ -234,6 +245,7 @@ void NodeGraphRenderer::PruneBitmaps(const NodeGraphModel& model) {
     if (m_Bitmaps.size() <= model.Images().size())
         return;
     std::unordered_set<uint64_t> keys;
+    keys.reserve(model.Images().size());
     for (const auto& image : model.Images())
         keys.insert(image.Key);
     std::erase_if(m_Bitmaps, [&](const auto& entry) { return !keys.contains(entry.first); });
@@ -272,34 +284,73 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     };
 
     m_EdgePairs.clear();
+    m_EdgePairs.reserve(model.Edges().size());     // (kept from frame to frame: grows once)
     for (const auto& e : model.Edges())
         m_EdgePairs.insert((uint64_t)e.From << 32 | e.To);
-    for (const auto& e : model.Edges()) {
-        const Node* from = model.GetNode(e.From);
-        const Node* to = model.GetNode(e.To);
-        if (!from || !to) continue;
-        // the edge stays within the box of the centers of its nodes and its bends
-        float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
-        float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
-        if (from == to) {
-            left -= from->Width * 0.5f; right += from->Width * 0.5f;
-            top -= from->Height * 0.5f; bottom += from->Height * 0.5f;
-        }
-        for (const auto& w : e.Waypoints) {
-            left = std::min(left, w.X); right = std::max(right, w.X);
-            top = std::min(top, w.Y); bottom = std::max(bottom, w.Y);
-        }
-        if (inView(left, top, right, bottom))
-            DrawEdge(e, model, vt, e.Id == selectedEdge);
-    }
 
-    if (preview.Active)
-        DrawEdgePreview(preview, model, vt);
+    // The highlight: the focus nodes, their neighbors and the edges of the focus are drawn last, over a veil that dims
+    // the rest. Nothing is dimmed if it is all in the highlight.
+    std::unordered_set<NodeId> related;
+    std::unordered_set<EdgeId> relatedEdges;
+    if (!m_Highlight.empty()) {
+        const std::unordered_set<NodeId> focus(m_Highlight.begin(), m_Highlight.end());
+        related = focus;
+        for (const auto& e : model.Edges())
+            if (focus.contains(e.From) || focus.contains(e.To)) {
+                relatedEdges.insert(e.Id);
+                related.insert(e.From);
+                related.insert(e.To);
+            }
+        if (related.size() >= model.Nodes().size() && relatedEdges.size() >= model.Edges().size()) {
+            related.clear();
+            relatedEdges.clear();
+        }
+    }
+    const bool highlight = !related.empty();
 
     std::unordered_set<NodeId> selected(selectedNodes.begin(), selectedNodes.end());
-    for (const auto& n : model.Nodes()) {
-        if (inView(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f))
-            DrawNode(model, n, vt, selected.contains(n.Id));
+    auto drawEdges = [&](bool inHighlight) {
+        for (const auto& e : model.Edges()) {
+            if (highlight && relatedEdges.contains(e.Id) != inHighlight) continue;
+            const Node* from = model.GetNode(e.From);
+            const Node* to = model.GetNode(e.To);
+            if (!from || !to) continue;
+            // the edge stays within the box of the centers of its nodes and its bends (a curve a little past it)
+            float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
+            float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
+            if (from == to) {
+                left -= from->Width * 0.5f; right += from->Width * 0.5f;
+                top -= from->Height * 0.5f; bottom += from->Height * 0.5f;
+            }
+            for (const auto& w : e.Waypoints) {
+                left = std::min(left, w.X); right = std::max(right, w.X);
+                top = std::min(top, w.Y); bottom = std::max(bottom, w.Y);
+            }
+            if (inView(left, top, right, bottom))
+                DrawEdge(e, model, vt, e.Id == selectedEdge ? EdgeEmphasis::Selected : inHighlight && highlight ? EdgeEmphasis::Highlighted : EdgeEmphasis::Normal);
+        }
+    };
+    auto drawNodes = [&](bool inHighlight) {
+        for (const auto& n : model.Nodes()) {
+            if (highlight && related.contains(n.Id) != inHighlight) continue;
+            if (inView(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f))
+                DrawNode(model, n, vt, selected.contains(n.Id));
+        }
+    };
+
+    drawEdges(false);
+    if (preview.Active && !highlight)
+        DrawEdgePreview(preview, model, vt);
+    drawNodes(false);
+    if (highlight) {
+        D2D1_COLOR_F veil = ColorrefToD2D(m_Background);
+        veil.a = 0.65f;
+        m_Brush->SetColor(veil);
+        m_RenderTarget->FillRectangle(D2D1::RectF((float)clientRect.left, (float)clientRect.top, (float)clientRect.right, (float)clientRect.bottom), m_Brush.Get());
+        drawEdges(true);
+        if (preview.Active)
+            DrawEdgePreview(preview, model, vt);
+        drawNodes(true);
     }
 
     if (rubberBand.Active)
@@ -359,80 +410,94 @@ void NodeGraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
 }
 
 void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
-                             const ViewTransform& vt, bool selected) {
+                             const ViewTransform& vt, EdgeEmphasis emphasis) {
     const Node* from = model.GetNode(e.From);
     const Node* to   = model.GetNode(e.To);
     if (!from || !to) return;
 
     if (from == to) {
-        DrawSelfLoop(e, *from, vt, selected);
+        DrawSelfLoop(e, *from, vt, emphasis);
         return;
     }
 
-    // The path: from the center of one node through the waypoints to the center of the other.
-    std::vector<D2D1_POINT_2F> pts;
-    pts.push_back(vt.ToScreen(from->X, from->Y));
-    for (const auto& w : e.Waypoints)
-        pts.push_back(vt.ToScreen(w.X, w.Y));
-    pts.push_back(vt.ToScreen(to->X, to->Y));
+    // An edge that has one going the other way is moved to its right (7 pixels), so that the two can be told apart.
+    const float lane = m_EdgePairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f / vt.Scale : 0.0f;
+    const std::vector<Point> path = EdgePath(e, *from, *to, lane);
+    if (path.size() < 2) return;
+    const std::vector<Point> controls = e.Style.Curved && path.size() > 2 ? CurveControls(path) : std::vector<Point>{};
+    auto screen = [&](const Point& p) { return vt.ToScreen(p.X, p.Y); };
 
-    float dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
-    float len = std::sqrtf(dx * dx + dy * dy);
-    if (pts.size() == 2 && len < 1.0f) return;
-
-    // An edge that has one going the other way is moved to its right, so that the two can be told apart.
-    if (pts.size() == 2 && m_EdgePairs.contains((uint64_t)e.To << 32 | e.From)) {
-        const float lane = 7.0f;
-        float nx = dx / len, ny = dy / len;
-        for (auto& p : pts) { p.x -= ny * lane; p.y += nx * lane; }
+    SetEdgeBrush(e, emphasis);
+    const float width = EdgeWidth(e, emphasis);
+    ID2D1StrokeStyle* stroke = m_LineStyles[(int)e.Style.Line].Get();
+    if (controls.empty() && !stroke) {
+        for (size_t i = 0; i + 1 < path.size(); i++)
+            m_RenderTarget->DrawLine(screen(path[i]), screen(path[i + 1]), m_Brush.Get(), width);
+    }
+    else {
+        // one figure, so that the dashes go on around the bends
+        ComPtr<ID2D1PathGeometry> geometry;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) && SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
+            sink->BeginFigure(screen(path[0]), D2D1_FIGURE_BEGIN_HOLLOW);
+            for (size_t i = 0; i + 1 < path.size(); i++) {
+                if (controls.empty())
+                    sink->AddLine(screen(path[i + 1]));
+                else
+                    sink->AddBezier({ screen(controls[i * 2]), screen(controls[i * 2 + 1]), screen(path[i + 1]) });
+            }
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            if (SUCCEEDED(sink->Close()))
+                m_RenderTarget->DrawGeometry(geometry.Get(), m_Brush.Get(), width, stroke);
+        }
     }
 
-    // Clip the ends to the borders of the nodes. A straight edge is clipped at both ends of the same segment, so neither
-    // end may go past its middle (the nodes may overlap); next to a waypoint the end may take the whole segment, or
-    // a waypoint close to a node would leave the end, and its arrowhead, inside (under) the node.
-    const float maxPart = pts.size() == 2 ? 0.5f : 1.0f;
-    auto clip = [&](const Node& n, D2D1_POINT_2F& at, D2D1_POINT_2F other) -> D2D1_POINT_2F {
-        float ddx = other.x - at.x, ddy = other.y - at.y;
-        float l = std::sqrtf(ddx * ddx + ddy * ddy);
-        if (l < 1.0f) return { 0.0f, 0.0f };
-        float nx = ddx / l, ny = ddy / l;
-        float t = std::min(NodeBorderDistance(n, nx, ny) * vt.Scale, l * maxPart);
-        at.x += nx * t; at.y += ny * t;
-        return { nx, ny };
-    };
-    // both ends against the points before clipping (of a straight edge, the from end is the other point of the to end)
-    const auto beforeLast = pts[pts.size() - 2];
-    clip(*from, pts.front(), pts[1]);
-    auto dir = clip(*to, pts.back(), beforeLast);
-    dir = { -dir.x, -dir.y };	// from the last bend towards the node
-
-    float strokeWidth = e.Style.Width * (selected ? 2.0f : 1.0f);
-    m_Brush->SetColor(selected
-        ? SelectionColor()
-        : ColorrefToD2D(e.Style.Color));
-    for (size_t i = 0; i + 1 < pts.size(); i++)
-        m_RenderTarget->DrawLine(pts[i], pts[i + 1], m_Brush.Get(), strokeWidth);
-
-    if (e.Style.Directed)
-        DrawArrowhead(pts.back(), dir);
-
-    D2D1_POINT_2F start = pts[(pts.size() - 1) / 2], end = pts[pts.size() / 2];
-    if (!e.Label.empty()) {
-        D2D1_POINT_2F mid = { (start.x + end.x) * 0.5f, (start.y + end.y) * 0.5f };
-        const float lw = 110.0f, lh = 18.0f;
-        D2D1_RECT_F lr = { mid.x - lw * 0.5f, mid.y - lh * 0.5f,
-                           mid.x + lw * 0.5f, mid.y + lh * 0.5f };
-        m_Brush->SetColor(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.88f));
-        m_RenderTarget->FillRectangle(lr, m_Brush.Get());
-        m_Brush->SetColor(selected ? SelectionColor()
-                                   : D2D1::ColorF(0.85f, 0.85f, 0.85f));
-        m_RenderTarget->DrawTextW(e.Label.c_str(), (UINT32)e.Label.size(),
-            m_EdgeTextFormat.Get(), lr, m_Brush.Get());
+    if (e.Style.Directed) {
+        // along the last piece (the curve's tangent at its end)
+        const Point& end = path.back();
+        Point before = controls.empty() ? path[path.size() - 2] : controls.back();
+        float dx = end.X - before.X, dy = end.Y - before.Y;
+        if (dx * dx + dy * dy < 1e-6f) { before = path[path.size() - 2]; dx = end.X - before.X; dy = end.Y - before.Y; }
+        const float l = std::sqrtf(dx * dx + dy * dy);
+        if (l > 0)
+            DrawArrowhead(screen(end), { dx / l, dy / l }, e.Style.Arrow);
     }
+
+    if (!e.Label.empty())
+        DrawEdgeLabel(e, EdgeLabelPoint(path, controls), vt, emphasis);
+}
+
+void NodeGraphRenderer::SetEdgeBrush(const Edge& e, EdgeEmphasis emphasis) {
+    m_Brush->SetColor(emphasis == EdgeEmphasis::Normal ? ColorrefToD2D(e.Style.Color) : SelectionColor());
+}
+
+float NodeGraphRenderer::EdgeWidth(const Edge& e, EdgeEmphasis emphasis) const {
+    return e.Style.Width * (emphasis == EdgeEmphasis::Selected ? 2.0f : emphasis == EdgeEmphasis::Highlighted ? 1.6f : 1.0f);
+}
+
+// On a dark box at a point of the graph: as large as the zoom makes it (ScaleLabel; not drawn when too small to read),
+// or the same size at any zoom.
+void NodeGraphRenderer::DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis) {
+    const float lw = 110.0f, lh = 18.0f;
+    D2D1_RECT_F box;
+    if (e.Style.ScaleLabel) {
+        if (vt.Scale < 0.3f) return;
+        m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(vt.OffsetX, vt.OffsetY));
+        box = { at.X - lw * 0.5f, at.Y - lh * 0.5f, at.X + lw * 0.5f, at.Y + lh * 0.5f };
+    }
+    else {
+        auto mid = vt.ToScreen(at.X, at.Y);
+        box = { mid.x - lw * 0.5f, mid.y - lh * 0.5f, mid.x + lw * 0.5f, mid.y + lh * 0.5f };
+    }
+    m_Brush->SetColor(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.88f));
+    m_RenderTarget->FillRectangle(box, m_Brush.Get());
+    m_Brush->SetColor(emphasis != EdgeEmphasis::Normal ? SelectionColor() : D2D1::ColorF(0.85f, 0.85f, 0.85f));
+    m_RenderTarget->DrawTextW(e.Label.c_str(), (UINT32)e.Label.size(), m_EdgeTextFormat.Get(), box, m_Brush.Get());
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
 }
 
 // A jump to its own block: a loop on the right side of the node.
-void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, bool selected) {
+void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTransform& vt, EdgeEmphasis emphasis) {
     auto c = vt.ToScreen(n.X, n.Y);
     float hw = n.Width * vt.Scale * 0.5f;
     float hh = n.Height * vt.Scale * 0.5f;
@@ -443,35 +508,70 @@ void NodeGraphRenderer::DrawSelfLoop(const Edge& e, const Node& n, const ViewTra
     // the ends on the outline of the shape (the loop goes around the box)
     float end = c.x + NodeHalfWidthAt(n, rise / vt.Scale) * vt.Scale;
 
-    m_Brush->SetColor(selected ? SelectionColor() : ColorrefToD2D(e.Style.Color));
-    float width = e.Style.Width * (selected ? 2.0f : 1.0f);
-    m_RenderTarget->DrawLine({ end, top }, { right + reach, top }, m_Brush.Get(), width);
-    m_RenderTarget->DrawLine({ right + reach, top }, { right + reach, bottom }, m_Brush.Get(), width);
-    m_RenderTarget->DrawLine({ right + reach, bottom }, { end + 8.0f, bottom }, m_Brush.Get(), width);
+    SetEdgeBrush(e, emphasis);
+    const float width = EdgeWidth(e, emphasis);
+    ID2D1StrokeStyle* stroke = m_LineStyles[(int)e.Style.Line].Get();
+    // the line stops at the base of a solid arrowhead
+    const bool solidHead = e.Style.Directed && (e.Style.Arrow == ArrowHead::Filled || e.Style.Arrow == ArrowHead::Diamond);
+    const D2D1_POINT_2F points[] = { { end, top }, { right + reach, top }, { right + reach, bottom }, { end + (solidHead ? 8.0f : 0.0f), bottom } };
+    ComPtr<ID2D1PathGeometry> geometry;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) && SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
+        sink->BeginFigure(points[0], D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddLines(points + 1, 3);
+        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+        if (SUCCEEDED(sink->Close()))
+            m_RenderTarget->DrawGeometry(geometry.Get(), m_Brush.Get(), width, stroke);
+    }
     if (e.Style.Directed)
-        DrawArrowhead({ end, bottom }, { -1.0f, 0.0f });
+        DrawArrowhead({ end, bottom }, { -1.0f, 0.0f }, e.Style.Arrow);
 }
 
-void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir) {
+// At the end of an edge, pointing along dir (a unit vector), 10 pixels long at any zoom, in the brush's color.
+void NodeGraphRenderer::DrawArrowhead(D2D1_POINT_2F tip, D2D1_POINT_2F dir, ArrowHead style) {
     const float size = 10.0f;
     const float angle = 0.4f; // radians half-angle
     float cosA = std::cosf(angle), sinA = std::sinf(angle);
 
     float bx = -dir.x * size, by = -dir.y * size;
     // Rotate back-vector by +angle and -angle
-    D2D1_POINT_2F l = { bx * cosA - by * sinA,  bx * sinA + by * cosA };
-    D2D1_POINT_2F r = { bx * cosA + by * sinA, -bx * sinA + by * cosA };
+    D2D1_POINT_2F l = { tip.x + bx * cosA - by * sinA, tip.y + bx * sinA + by * cosA };
+    D2D1_POINT_2F r = { tip.x + bx * cosA + by * sinA, tip.y - bx * sinA + by * cosA };
+
+    switch (style) {
+        case ArrowHead::Open:
+            m_RenderTarget->DrawLine(l, tip, m_Brush.Get(), 1.5f);
+            m_RenderTarget->DrawLine(r, tip, m_Brush.Get(), 1.5f);
+            return;
+        case ArrowHead::Circle: {
+            const float radius = 4.0f;
+            m_RenderTarget->FillEllipse({ { tip.x - dir.x * radius, tip.y - dir.y * radius }, radius, radius }, m_Brush.Get());
+            return;
+        }
+        default:
+            break;
+    }
 
     ComPtr<ID2D1PathGeometry> path;
     ComPtr<ID2D1GeometrySink> sink;
-    m_D2dFactory->CreatePathGeometry(path.GetAddressOf());
-    path->Open(sink.GetAddressOf());
+    if (FAILED(m_D2dFactory->CreatePathGeometry(path.GetAddressOf())) || FAILED(path->Open(sink.GetAddressOf())))
+        return;
     sink->BeginFigure(tip, D2D1_FIGURE_BEGIN_FILLED);
-    sink->AddLine({ tip.x + l.x, tip.y + l.y });
-    sink->AddLine({ tip.x + r.x, tip.y + r.y });
+    if (style == ArrowHead::Diamond) {
+        // as long as the triangle, narrower, and its back half too
+        const float half = size * 0.5f, side = size * 0.3f;
+        const D2D1_POINT_2F mid{ tip.x - dir.x * half, tip.y - dir.y * half };
+        sink->AddLine({ mid.x - dir.y * side, mid.y + dir.x * side });
+        sink->AddLine({ tip.x - dir.x * size, tip.y - dir.y * size });
+        sink->AddLine({ mid.x + dir.y * side, mid.y - dir.x * side });
+    }
+    else {
+        sink->AddLine(l);
+        sink->AddLine(r);
+    }
     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-    sink->Close();
-    m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
+    if (SUCCEEDED(sink->Close()))
+        m_RenderTarget->FillGeometry(path.Get(), m_Brush.Get());
 }
 
 constexpr float k_MinIconPixels = 6.0f;    // a smaller icon (on the target) isn't drawn
@@ -904,13 +1004,27 @@ EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, flo
     for (const auto& e : model.Edges()) {
         const Node* from = model.GetNode(e.From);
         const Node* to   = model.GetNode(e.To);
-        if (!from || !to) continue;
+        if (!from || !to || from == to) continue;
 
-        // every piece of the path from one node to the other
-        std::vector<Point> path;
-        path.push_back({ from->X, from->Y });
-        path.insert(path.end(), e.Waypoints.begin(), e.Waypoints.end());
-        path.push_back({ to->X, to->Y });
+        // every piece of the path from one node to the other; a curve as short lines
+        std::vector<Point> path = EdgePath(e, *from, *to);
+        if (path.size() < 2) continue;
+        if (e.Style.Curved && path.size() > 2) {
+            const auto controls = CurveControls(path);
+            const int steps = 12;
+            std::vector<Point> flat;
+            flat.reserve((path.size() - 1) * steps + 1);
+            flat.push_back(path[0]);
+            for (size_t i = 0; i + 1 < path.size(); i++) {
+                const Point &p0 = path[i], &c1 = controls[i * 2], &c2 = controls[i * 2 + 1], &p1 = path[i + 1];
+                for (int s = 1; s <= steps; s++) {
+                    const float t = (float)s / steps, u = 1 - t;
+                    flat.push_back({ u * u * u * p0.X + 3 * u * u * t * c1.X + 3 * u * t * t * c2.X + t * t * t * p1.X,
+                                     u * u * u * p0.Y + 3 * u * u * t * c1.Y + 3 * u * t * t * c2.Y + t * t * t * p1.Y });
+                }
+            }
+            path = std::move(flat);
+        }
 
         for (size_t i = 0; i + 1 < path.size(); i++) {
             float dx = path[i + 1].X - path[i].X, dy = path[i + 1].Y - path[i].Y;

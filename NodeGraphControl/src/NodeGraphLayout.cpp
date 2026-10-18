@@ -37,6 +37,15 @@ namespace NodeGraphCtrl {
 			void Link() {
 				Out.assign(Size(), {});
 				In.assign(Size(), {});
+				std::vector<int> outDegree(Size()), inDegree(Size());
+				for (const auto& e : Edges) {
+					outDegree[e.From]++;
+					inDegree[e.To]++;
+				}
+				for (int v = 0; v < Size(); v++) {
+					Out[v].reserve(outDegree[v]);
+					In[v].reserve(inDegree[v]);
+				}
 				for (int e = 0; e < (int)Edges.size(); e++) {
 					Out[Edges[e].From].push_back(e);
 					In[Edges[e].To].push_back(e);
@@ -84,6 +93,7 @@ namespace NodeGraphCtrl {
 
 			struct Block { double SumW, SumWY; size_t Count; double Mean() const { return SumWY / SumW; } };
 			std::vector<Block> blocks;
+			blocks.reserve(m);
 			for (size_t i = 0; i < m; i++) {
 				double w = std::max(weight[i], 1e-4f);
 				blocks.push_back({ w, w * (want[i] - offset[i]), 1 });
@@ -154,6 +164,7 @@ namespace NodeGraphCtrl {
 				pred[head(e)].push_back(tail(e));
 			}
 			std::vector<int> topo, inDegree(n);
+			topo.reserve(n);
 			for (int v = 0; v < n; v++) {
 				inDegree[v] = (int)pred[v].size();
 				if (inDegree[v] == 0) topo.push_back(v);
@@ -180,10 +191,23 @@ namespace NodeGraphCtrl {
 
 			// 3. An edge that crosses layers goes through a dummy node in each layer in between.
 			struct Link { int To; float Weight; };
-			std::vector<int> vLayer(layer);
-			std::vector<float> vWidth(g.W);
-			std::vector<std::vector<Link>> up(n), down(n);
+			int dummies = 0;
+			for (int e = 0; e < edgeCount; e++)
+				dummies += std::max(layer[head(e)] - layer[tail(e)] - 1, 0);
+			std::vector<int> vLayer;
+			vLayer.reserve(n + dummies);
+			vLayer.assign(layer.begin(), layer.end());
+			std::vector<float> vWidth;
+			vWidth.reserve(n + dummies);
+			vWidth.assign(g.W.begin(), g.W.end());
+			std::vector<std::vector<Link>> up, down;
+			up.reserve(n + dummies);
+			down.reserve(n + dummies);
+			up.resize(n);
+			down.resize(n);
 			std::vector<std::vector<int>> chain(edgeCount);		// the dummies of each edge, from tail to head
+			for (int e = 0; e < edgeCount; e++)
+				chain[e].reserve(std::max(layer[head(e)] - layer[tail(e)] - 1, 0));
 			auto addVertex = [&](int l) {
 				vLayer.push_back(l);
 				vWidth.push_back(0.0f);
@@ -212,6 +236,11 @@ namespace NodeGraphCtrl {
 			// 4. The order in each layer. First the order of a DFS down the layers, then barycenter sweeps,
 			// keeping the order with the fewest crossings.
 			std::vector<std::vector<int>> layers(layerCount);
+			{
+				std::vector<int> counts(layerCount);
+				for (int v = 0; v < vertexCount; v++) counts[vLayer[v]]++;
+				for (int l = 0; l < layerCount; l++) layers[l].reserve(counts[l]);
+			}
 			{
 				std::vector<int> seen(vertexCount, -1), stack;
 				int counter = 0;
@@ -384,6 +413,7 @@ namespace NodeGraphCtrl {
 			t.Depth.assign(n + 1, 0);
 			std::vector<char> seen(n + 1);
 			seen[t.Root] = 1;
+			t.Order.reserve(n + 1);
 			t.Order.push_back(t.Root);
 			if (t.Root == n)
 				for (int r : roots) {
@@ -552,6 +582,11 @@ namespace NodeGraphCtrl {
 			int maxDepth = 0;
 			for (int v = 0; v < n; v++) maxDepth = std::max(maxDepth, t.Depth[v]);
 			std::vector<std::vector<int>> rings(maxDepth + 1);
+			{
+				std::vector<int> counts(maxDepth + 1);
+				for (int v = 0; v < n; v++) counts[t.Depth[v]]++;
+				for (int d = 0; d <= maxDepth; d++) rings[d].reserve(counts[d]);
+			}
 			for (int v = 0; v < n; v++) rings[t.Depth[v]].push_back(v);
 			std::vector<float> radius(maxDepth + 1), size(maxDepth + 1);
 			for (int d = 0; d <= maxDepth; d++)
@@ -589,6 +624,7 @@ namespace NodeGraphCtrl {
 			for (int v = 1; v < n; v++)
 				if (g.Out[v].size() + g.In[v].size() > g.Out[start].size() + g.In[start].size()) start = v;
 			std::vector<int> order, stack{ start };
+			order.reserve(n);
 			std::vector<char> seen(n);
 			while (!stack.empty()) {
 				int v = stack.back();
@@ -757,6 +793,19 @@ namespace NodeGraphCtrl {
 			std::vector<Graph> parts(partCount);
 			std::vector<std::vector<int>> nodesOf(partCount), edgesOf(partCount);
 			std::vector<int> local(n);
+			{	// how many nodes and edges each part gets
+				std::vector<int> nodeCount(partCount), edgeCount(partCount);
+				for (int v = 0; v < n; v++) nodeCount[part[v]]++;
+				for (const auto& le : g.Edges) edgeCount[part[le.From]]++;
+				for (int pi = 0; pi < partCount; pi++) {
+					Graph& p = parts[pi];
+					p.W.reserve(nodeCount[pi]); p.H.reserve(nodeCount[pi]);
+					p.X.reserve(nodeCount[pi]); p.Y.reserve(nodeCount[pi]);
+					nodesOf[pi].reserve(nodeCount[pi]);
+					p.Edges.reserve(edgeCount[pi]);
+					edgesOf[pi].reserve(edgeCount[pi]);
+				}
+			}
 			for (int v = 0; v < n; v++) {
 				Graph& p = parts[part[v]];
 				local[v] = p.Size();
@@ -823,7 +872,11 @@ namespace NodeGraphCtrl {
 		if (n == 0) return;
 
 		std::unordered_map<NodeId, int> index;
+		index.reserve(n);
 		Graph g;
+		g.W.reserve(n); g.H.reserve(n);
+		g.X.reserve(n); g.Y.reserve(n);
+		g.Edges.reserve(model.Edges().size());
 		Box before;
 		for (int v = 0; v < n; v++) {
 			const Node& node = nodes[v];

@@ -32,6 +32,12 @@ static constexpr int IDC_CONTENT = 113;
 static constexpr int IDC_EXPORTSVG = 114;
 static constexpr int IDC_SCROLLBARS = 115;
 static constexpr int IDC_WHEELSCROLL = 116;
+static constexpr int IDC_HIGHLIGHT = 117;
+static constexpr int IDC_CURVED = 118;
+static constexpr int IDC_READONLY = 119;
+static constexpr int IDC_FIND = 120;
+static constexpr int IDC_FINDNEXT = 121;
+static constexpr int IDC_FINDPREV = 122;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -349,6 +355,26 @@ static void PopulateContent(NodeGraphModel& m) {
     m.AddEdge(decision, oval, L"no");
     m.AddEdge(oval, download);
     m.AddEdge(decision, decision);
+
+    // edge styles: lines, arrowheads, a curve, a label of a fixed size
+    const struct { const wchar_t* label; EdgeLine line; ArrowHead arrow; } styles[] = {
+        { L"dash", EdgeLine::Dash, ArrowHead::Filled }, { L"dot", EdgeLine::Dot, ArrowHead::Open },
+        { L"dash dot", EdgeLine::DashDot, ArrowHead::Diamond }, { L"circle", EdgeLine::Solid, ArrowHead::Circle },
+    };
+    for (int i = 0; i < 4; i++) {
+        NodeId a = node(styles[i].label, 100 + i * 170.0f, 900, 100, 36, [](Node&) {});
+        NodeId b = node(L"", 100 + i * 170.0f, 1010, 60, 30, [](Node&) {});
+        Edge& e = *m.GetEdge(m.AddEdge(a, b));
+        e.Style.Line = styles[i].line;
+        e.Style.Arrow = styles[i].arrow;
+        e.Style.Width = 2;
+    }
+    NodeId c1 = node(L"curved", 770, 880, 100, 36, [](Node&) {});
+    NodeId c2 = node(L"", 900, 1030, 60, 30, [](Node&) {});
+    Edge& curved = *m.GetEdge(m.AddEdge(c1, c2, L"through 2 bends"));
+    curved.Waypoints = { { 900, 900 }, { 790, 990 } };
+    curved.Style.Curved = true;
+    curved.Style.ScaleLabel = false;   // the same size at any zoom
 }
 
 // The demo keeps which owner drawing a node gets in its UserData: saved (and copied) as one byte.
@@ -386,6 +412,97 @@ static void UpdateStatus(HWND /*hwnd*/) {
     SetWindowText(g_status, L"Ready  |  scroll=zoom  |  middle-drag=pan  |  left-drag=move node  |  dbl-click=rename");
 }
 
+// ---- The find bar: a small tool window with an edit box. Enter: the next node with the text, Shift+Enter: the
+// previous one, Ctrl+Enter: all of them; Esc closes it.
+
+static HWND g_findWnd = nullptr, g_findEdit = nullptr;
+static std::wstring g_findText;
+
+static void FindAndReport(bool backwards) {
+    wchar_t buf[200];
+    const size_t count = g_graph.GetModel()->FindNodes(g_findText).size();
+    if (g_graph.FindNext(g_findText, backwards))
+        swprintf_s(buf, L"\"%s\": %zu node(s)  |  F3: next, Shift+F3: previous", g_findText.c_str(), count);
+    else
+        swprintf_s(buf, L"\"%s\": not found", g_findText.c_str());
+    SetWindowText(g_status, buf);
+}
+
+static LRESULT CALLBACK FindEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_KEYDOWN && (wParam == VK_RETURN || wParam == VK_ESCAPE)) {
+        if (wParam == VK_ESCAPE) {
+            ShowWindow(g_findWnd, SW_HIDE);
+            SetFocus(g_graph);
+            return 0;
+        }
+        wchar_t text[256];
+        GetWindowText(hwnd, text, (int)std::size(text));
+        g_findText = text;
+        if (GetKeyState(VK_CONTROL) < 0) {
+            auto found = g_graph.GetModel()->FindNodes(g_findText);
+            g_graph.SelectNodes(found);
+            if (!found.empty()) g_graph.FitSelected();
+            wchar_t buf[200];
+            swprintf_s(buf, L"\"%s\": %zu node(s) selected", g_findText.c_str(), found.size());
+            SetWindowText(g_status, buf);
+        }
+        else
+            FindAndReport(GetKeyState(VK_SHIFT) < 0);
+        return 0;
+    }
+    if (msg == WM_CHAR && (wParam == L'\r' || wParam == 27))
+        return 0;   // no beep
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK FindWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);
+            SetFocus(g_graph);
+            return 0;
+        case WM_SIZE:
+            if (g_findEdit) MoveWindow(g_findEdit, 4, 4, LOWORD(lParam) - 8, HIWORD(lParam) - 8, TRUE);
+            return 0;
+        case WM_SETFOCUS:
+            SetFocus(g_findEdit);
+            return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static void ShowFindBar(HWND owner) {
+    if (!g_findWnd) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = FindWndProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = L"NodeGraphDemoFind";
+        RegisterClassW(&wc);
+        const UINT dpi = GetDpiForWindow(owner);
+        g_findWnd = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"Find (Enter: next, Shift+Enter: previous, Ctrl+Enter: all)",
+            WS_POPUP | WS_CAPTION | WS_SYSMENU, 0, 0, MulDiv(420, dpi, 96), MulDiv(64, dpi, 96), owner, nullptr, wc.hInstance, nullptr);
+        g_findEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 0, 0, g_findWnd, nullptr, wc.hInstance, nullptr);
+        SendMessage(g_findEdit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+        SetWindowSubclass(g_findEdit, FindEditProc, 1, 0);
+        RECT rc;
+        GetClientRect(g_findWnd, &rc);
+        SendMessage(g_findWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+        // at the top right of the graph
+        RECT gr;
+        GetWindowRect(g_graph, &gr);
+        RECT fr;
+        GetWindowRect(g_findWnd, &fr);
+        SetWindowPos(g_findWnd, nullptr, gr.right - (fr.right - fr.left) - 24, gr.top + 24, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+    SetWindowText(g_findEdit, g_findText.c_str());
+    SendMessage(g_findEdit, EM_SETSEL, 0, -1);
+    ShowWindow(g_findWnd, SW_SHOW);
+    SetFocus(g_findEdit);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -402,6 +519,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_graph.SetDlgCtrlID(IDC_GRAPH);    // the notifications carry it
         g_graph.SetNodeDrawHandler(&g_drawHandler);
         g_graph.GetModel()->SetUserDataSerializer(&g_serializer);
+        g_graph.SetUndoLimit(500);
         PopulateDemo(*g_graph.GetModel());
         g_graph.FitInView();
         g_graph.SetMinimapVisible(true);
@@ -546,6 +664,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_graph.SetScrollBars(!g_graph.HasScrollBars());
             CheckMenuItem(GetMenu(hwnd), IDC_SCROLLBARS, g_graph.HasScrollBars() ? MF_CHECKED : MF_UNCHECKED);
             break;
+        case IDC_HIGHLIGHT:
+            g_graph.SetHighlight(!g_graph.GetHighlight());
+            CheckMenuItem(GetMenu(hwnd), IDC_HIGHLIGHT, g_graph.GetHighlight() ? MF_CHECKED : MF_UNCHECKED);
+            break;
+        case IDC_READONLY:
+            g_graph.SetReadOnly(!g_graph.IsReadOnly());
+            CheckMenuItem(GetMenu(hwnd), IDC_READONLY, g_graph.IsReadOnly() ? MF_CHECKED : MF_UNCHECKED);
+            break;
+        case IDC_CURVED: {
+            // all the edges, as the menu item is
+            const bool curved = !(GetMenuState(GetMenu(hwnd), IDC_CURVED, MF_BYCOMMAND) & MF_CHECKED);
+            NodeGraphModel& m = *g_graph.GetModel();
+            for (const auto& e : m.Edges())
+                m.GetEdge(e.Id)->Style.Curved = curved;
+            CheckMenuItem(GetMenu(hwnd), IDC_CURVED, curved ? MF_CHECKED : MF_UNCHECKED);
+            g_graph.Refresh();
+            break;
+        }
+        case IDC_FIND:
+            ShowFindBar(hwnd);
+            break;
+        case IDC_FINDNEXT:
+        case IDC_FINDPREV:
+            if (g_findText.empty()) ShowFindBar(hwnd);
+            else FindAndReport(LOWORD(wParam) == IDC_FINDPREV);
+            break;
         case IDC_WHEELSCROLL:
             g_graph.SetWheelScrolls(!g_graph.GetWheelScrolls());
             CheckMenuItem(GetMenu(hwnd), IDC_WHEELSCROLL, g_graph.GetWheelScrolls() ? MF_CHECKED : MF_UNCHECKED);
@@ -685,6 +829,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     HMENU hEdit = CreatePopupMenu();
     AppendMenu(hEdit, MF_STRING, IDC_UNDO, L"&Undo\tCtrl+Z");
     AppendMenu(hEdit, MF_STRING, IDC_REDO, L"&Redo\tCtrl+Y");
+    AppendMenu(hEdit, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hEdit, MF_STRING, IDC_FIND, L"&Find...\tCtrl+F");
+    AppendMenu(hEdit, MF_STRING, IDC_FINDNEXT, L"Find &Next\tF3");
+    AppendMenu(hEdit, MF_STRING, IDC_FINDPREV, L"Find &Previous\tShift+F3");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
 
     HMENU hGraph = CreatePopupMenu();
@@ -695,6 +843,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_STRING, IDC_MINIMAP, L"Toggle &Minimap\tM");
     AppendMenu(hGraph, MF_STRING | MF_CHECKED, IDC_SCROLLBARS, L"Scroll &Bars");
     AppendMenu(hGraph, MF_STRING, IDC_WHEELSCROLL, L"&Wheel Scrolls (Ctrl+Wheel Zooms)");
+    AppendMenu(hGraph, MF_STRING, IDC_HIGHLIGHT, L"&Highlight Neighbors");
+    AppendMenu(hGraph, MF_STRING, IDC_CURVED, L"C&urved Edges");
+    AppendMenu(hGraph, MF_STRING, IDC_READONLY, L"&Read Only");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hGraph, MF_STRING, IDC_SAMPLE,  L"&Sample Graph");
     AppendMenu(hGraph, MF_STRING, IDC_CONTENT, L"C&ontent Sample");
@@ -729,6 +880,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         { FVIRTKEY | FCONTROL,    'O', IDC_LOAD   },
         { FVIRTKEY | FCONTROL,    'Z', IDC_UNDO   },
         { FVIRTKEY | FCONTROL,    'Y', IDC_REDO   },
+        { FVIRTKEY | FCONTROL,    'F', IDC_FIND   },
+        { FVIRTKEY,             VK_F3, IDC_FINDNEXT },
+        { FVIRTKEY | FSHIFT,    VK_F3, IDC_FINDPREV },
         { FVIRTKEY | FCONTROL,    '1', IDC_LAYOUT + (int)LayoutAlgorithm::Layered },
         { FVIRTKEY | FCONTROL,    '2', IDC_LAYOUT + (int)LayoutAlgorithm::Tree },
         { FVIRTKEY | FCONTROL,    '3', IDC_LAYOUT + (int)LayoutAlgorithm::Radial },
@@ -743,7 +897,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (g_graph.IsEditingLabel() || !TranslateAccelerator(hwnd, hAccel, &msg)) {
+        // an edit box (the label being edited, the find bar) gets its keys
+        if (g_graph.IsEditingLabel() || (g_findEdit && msg.hwnd == g_findEdit) || !TranslateAccelerator(hwnd, hAccel, &msg)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
