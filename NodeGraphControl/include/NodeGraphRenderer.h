@@ -139,6 +139,10 @@ public:
     // model or can't be decoded.
     ID2D1Bitmap* GetBitmap(const NodeGraphModel& model, ImageId id);
 
+    // A PNG of one node as it is drawn (exporting: not selected or hovered), on a transparent background, scale pixels
+    // per graph unit. bounds: the part of the graph it covers (the node and a margin for its border).
+    bool RenderNodePicture(const NodeGraphModel& model, const Node& n, float scale, std::vector<uint8_t>& png, Rect& bounds);
+
     // Owner draw (see INodeDrawHandler). The handler isn't owned.
     void SetNodeDrawHandler(INodeDrawHandler* handler) { m_DrawHandler = handler; }
     INodeDrawHandler* GetNodeDrawHandler() const { return m_DrawHandler; }

@@ -164,6 +164,70 @@ ComPtr<ID2D1Bitmap> NodeGraphRenderer::CreateBitmap(const Image& image) {
     return bitmap;
 }
 
+bool NodeGraphRenderer::RenderNodePicture(const NodeGraphModel& model, const Node& n, float scale, std::vector<uint8_t>& png, Rect& bounds) {
+    const float margin = (std::max)(n.Style.BorderWidth * 2.5f, 2.0f);
+    bounds = { n.X - n.Width * 0.5f - margin, n.Y - n.Height * 0.5f - margin, n.X + n.Width * 0.5f + margin, n.Y + n.Height * 0.5f + margin };
+    const int cx = (std::max)(1, (int)std::ceil(bounds.Width() * scale)), cy = (std::max)(1, (int)std::ceil(bounds.Height() * scale));
+    if (cx > 16384 || cy > 16384)
+        return false;
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = cx;
+    bmi.bmiHeader.biHeight = -cy;   // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = ::CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bitmap)
+        return false;
+    HDC hdc = ::CreateCompatibleDC(nullptr);
+    auto old = ::SelectObject(hdc, bitmap);
+
+    RECT rc{ 0, 0, cx, cy };
+    bool ok = SUCCEEDED(EnsureDeviceResources(hdc, rc));
+    if (ok) {
+        HRESULT hr = m_RenderTarget->BindDC(hdc, &rc);
+        if (hr == D2DERR_RECREATE_TARGET) {
+            DiscardDeviceResources();
+            hr = EnsureDeviceResources(hdc, rc);
+            if (SUCCEEDED(hr))
+                hr = m_RenderTarget->BindDC(hdc, &rc);
+        }
+        ok = SUCCEEDED(hr);
+    }
+    if (ok) {
+        ViewTransform vt;
+        vt.Scale = scale;
+        vt.OffsetX = -bounds.Left * scale;
+        vt.OffsetY = -bounds.Top * scale;
+        const bool exporting = m_Exporting;
+        m_Exporting = true;
+        m_RenderTarget->BeginDraw();
+        m_RenderTarget->Clear(D2D1::ColorF(0, 0, 0, 0));
+        m_EdgePairs.clear();
+        DrawNode(model, n, vt, false);
+        ok = SUCCEEDED(m_RenderTarget->EndDraw());
+        m_Exporting = exporting;
+    }
+    ::GdiFlush();
+
+    if (ok) {
+        // the DIB has the target's premultiplied alpha
+        Imaging::ComScope com;
+        ComPtr<IWICImagingFactory> factory;
+        ComPtr<IWICBitmap> wic;
+        ok = SUCCEEDED(Imaging::CreateFactory(factory.GetAddressOf()))
+            && SUCCEEDED(factory->CreateBitmapFromMemory(cx, cy, GUID_WICPixelFormat32bppPBGRA, cx * 4, cx * 4 * cy, static_cast<BYTE*>(bits), wic.GetAddressOf()))
+            && SUCCEEDED(Imaging::EncodePng(factory.Get(), wic.Get(), png));
+    }
+    ::SelectObject(hdc, old);
+    ::DeleteDC(hdc);
+    ::DeleteObject(bitmap);
+    return ok;
+}
+
 // The bitmaps of images the model no longer has (removed, or of another model the renderer drew before).
 void NodeGraphRenderer::PruneBitmaps(const NodeGraphModel& model) {
     if (m_Bitmaps.size() <= model.Images().size())
@@ -315,8 +379,10 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
         at.x += nx * t; at.y += ny * t;
         return { nx, ny };
     };
+    // both ends against the points before clipping (of a straight edge, the from end is the other point of the to end)
+    const auto beforeLast = pts[pts.size() - 2];
     clip(*from, pts.front(), pts[1]);
-    auto dir = clip(*to, pts.back(), pts[pts.size() - 2]);
+    auto dir = clip(*to, pts.back(), beforeLast);
     dir = { -dir.x, -dir.y };	// from the last bend towards the node
 
     float strokeWidth = e.Style.Width * (selected ? 2.0f : 1.0f);

@@ -29,6 +29,7 @@ static constexpr int IDC_REDO    = 110;
 static constexpr int IDC_MINIMAP = 111;
 static constexpr int IDC_SAMPLE  = 112;
 static constexpr int IDC_CONTENT = 113;
+static constexpr int IDC_EXPORTSVG = 114;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -478,6 +479,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 m->Save(path);
             break;
         }
+        case IDC_EXPORTSVG: {
+            OPENFILENAMEW ofn{};
+            wchar_t path[MAX_PATH] = L"graph.svg";
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner   = hwnd;
+            ofn.lpstrFilter = L"SVG Image\0*.svg\0All Files\0*.*\0";
+            ofn.lpstrFile   = path;
+            ofn.nMaxFile    = MAX_PATH;
+            ofn.lpstrDefExt = L"svg";
+            ofn.Flags       = OFN_OVERWRITEPROMPT;
+            if (GetSaveFileNameW(&ofn) && !g_graph.SaveSvg(path))
+                MessageBox(hwnd, L"Failed to export the graph.", L"Error", MB_ICONERROR);
+            break;
+        }
         case IDC_LOAD: {
             NodeGraphModel* m = g_graph.GetModel();
             if (!m) break;
@@ -538,6 +553,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     HMENU hFile = CreatePopupMenu();
     AppendMenu(hFile, MF_STRING, IDC_SAVE, L"&Save...\tCtrl+S");
     AppendMenu(hFile, MF_STRING, IDC_LOAD, L"&Load...\tCtrl+O");
+    AppendMenu(hFile, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hFile, MF_STRING, IDC_EXPORTSVG, L"Export S&VG...");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
 
     HMENU hEdit = CreatePopupMenu();

@@ -1583,6 +1583,21 @@ namespace NodeGraphCtrl {
 		return ok;
 	}
 
+	bool CNodeGraphControl::SaveSvg(const wchar_t* path, float pictureScale) {
+		if (!m_Model)
+			return false;
+		NodeGraphModel::NodePictureFunc picture;
+		if (m_Renderer.GetNodeDrawHandler() && pictureScale > 0) {
+			picture = [&](const Node& n) {
+				NodeGraphModel::NodePicture pic;
+				if (n.Style.OwnerDraw && !m_Renderer.RenderNodePicture(*m_Model, n, pictureScale, pic.Png, pic.Bounds))
+					pic.Png.clear();	// drawn as SVG then, without the owner drawing
+				return pic;
+			};
+		}
+		return m_Model->SaveSvg(path, GetBackgroundColor(), picture);
+	}
+
 	void CNodeGraphControl::ApplyLayout(LayoutAlgorithm algorithm, const LayoutOptions& options, bool fitInView) {
 		if (!m_Model || m_Model->Nodes().empty()) return;
 
@@ -1798,9 +1813,64 @@ namespace NodeGraphCtrl {
 			return std::min(std::fabs(nx) > 0.0f ? hw / std::fabs(nx) : 1e9f,
 			                std::fabs(ny) > 0.0f ? hh / std::fabs(ny) : 1e9f);
 		}
+
+		std::string Base64(const uint8_t* data, size_t size) {
+			static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+			std::string r;
+			r.reserve((size + 2) / 3 * 4);
+			for (size_t i = 0; i < size; i += 3) {
+				uint32_t v = data[i] << 16 | (i + 1 < size ? data[i + 1] << 8 : 0) | (i + 2 < size ? data[i + 2] : 0);
+				r += digits[v >> 18 & 63];
+				r += digits[v >> 12 & 63];
+				r += i + 1 < size ? digits[v >> 6 & 63] : '=';
+				r += i + 2 < size ? digits[v & 63] : '=';
+			}
+			return r;
+		}
+
+		// A data URI of an image. PNG, JPEG and GIF go as they are; anything else (BMP, ICO, ...) as a PNG, as viewers
+		// may not show it. Empty if it can't be decoded.
+		std::string ImageDataUri(const std::vector<uint8_t>& data) {
+			auto starts = [&](std::initializer_list<uint8_t> sig) {
+				return data.size() >= sig.size() && std::equal(sig.begin(), sig.end(), data.begin());
+			};
+			if (starts({ 0x89, 'P', 'N', 'G' }))
+				return "data:image/png;base64," + Base64(data.data(), data.size());
+			if (starts({ 0xFF, 0xD8, 0xFF }))
+				return "data:image/jpeg;base64," + Base64(data.data(), data.size());
+			if (starts({ 'G', 'I', 'F', '8' }))
+				return "data:image/gif;base64," + Base64(data.data(), data.size());
+
+			Imaging::ComScope com;
+			ComPtr<IWICImagingFactory> factory;
+			ComPtr<IWICBitmapSource> decoded;
+			std::vector<uint8_t> png;
+			if (FAILED(Imaging::CreateFactory(factory.GetAddressOf())) ||
+				FAILED(Imaging::Decode(factory.Get(), data.data(), data.size(), decoded.GetAddressOf())) ||
+				FAILED(Imaging::EncodePng(factory.Get(), decoded.Get(), png)))
+				return {};
+			return "data:image/png;base64," + Base64(png.data(), png.size());
+		}
+
+		// A rectangle with its top corners rounded (and the bottom ones too if both).
+		std::string BandPath(float x, float y, float w, float h, float r, bool roundBottom) {
+			r = std::min({ r, w * 0.5f, h * 0.5f });
+			const float b = roundBottom ? r : 0;
+			return "M" + Num(x) + " " + Num(y + r) + " A" + Num(r) + " " + Num(r) + " 0 0 1 " + Num(x + r) + " " + Num(y) +
+				" L" + Num(x + w - r) + " " + Num(y) + " A" + Num(r) + " " + Num(r) + " 0 0 1 " + Num(x + w) + " " + Num(y + r) +
+				" L" + Num(x + w) + " " + Num(y + h - b) + (b > 0 ? " A" + Num(b) + " " + Num(b) + " 0 0 1 " + Num(x + w - b) + " " + Num(y + h) : "") +
+				" L" + Num(x + b) + " " + Num(y + h) + (b > 0 ? " A" + Num(b) + " " + Num(b) + " 0 0 1 " + Num(x) + " " + Num(y + h - b) : "") + " Z";
+		}
+
+		// A part of an image of the model (in its pixels) in a rect of the graph: a nested viewport crops it.
+		std::string PlaceImage(ImageId id, const Rect& dst, const Rect& src) {
+			return "<svg x=\"" + Num(dst.Left) + "\" y=\"" + Num(dst.Top) + "\" width=\"" + Num(dst.Width()) + "\" height=\"" + Num(dst.Height()) +
+				"\" viewBox=\"" + Num(src.Left) + " " + Num(src.Top) + " " + Num(src.Width()) + " " + Num(src.Height()) +
+				"\" preserveAspectRatio=\"none\"><use xlink:href=\"#image" + std::to_string(id) + "\"/></svg>\n";
+		}
 	}
 
-	bool NodeGraphModel::SaveSvg(const wchar_t* path, COLORREF background) const {
+	bool NodeGraphModel::SaveSvg(const wchar_t* path, COLORREF background, const NodePictureFunc& picture) const {
 		if (m_Nodes.empty()) return false;
 
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
@@ -1820,8 +1890,38 @@ namespace NodeGraphCtrl {
 
 		std::string svg;
 		svg += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-		svg += "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) +
+		svg += "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) +
 			"\" viewBox=\"" + Num(minX) + " " + Num(minY) + " " + Num(maxX - minX) + " " + Num(maxY - minY) + "\">\n";
+
+		// the pictures of the nodes that have one, and the images the others show (each written once)
+		std::vector<NodePicture> pictures(m_Nodes.size());
+		std::vector<ImageId> used;
+		for (size_t i = 0; i < m_Nodes.size(); i++) {
+			if (picture)
+				pictures[i] = picture(m_Nodes[i]);
+			if (!pictures[i].Png.empty())
+				continue;
+			NodeLayout layout = GetNodeLayout(m_Nodes[i]);
+			if (!layout.Image.IsEmpty()) used.push_back(m_Nodes[i].Content.Image);
+			if (!layout.Icon.IsEmpty()) used.push_back(m_Nodes[i].Content.Icon);
+		}
+		std::sort(used.begin(), used.end());
+		used.erase(std::unique(used.begin(), used.end()), used.end());
+		std::vector<ImageId> written;
+		if (!used.empty()) {
+			svg += "<defs>\n";
+			for (ImageId id : used) {
+				const Image* image = GetImage(id);
+				std::string uri = ImageDataUri(image->Data);
+				if (uri.empty()) continue;
+				svg += "<image id=\"image" + std::to_string(id) + "\" width=\"" + std::to_string(image->Width) + "\" height=\"" + std::to_string(image->Height) +
+					"\" preserveAspectRatio=\"none\" xlink:href=\"" + uri + "\"/>\n";
+				written.push_back(id);
+			}
+			svg += "</defs>\n";
+		}
+		auto isWritten = [&](ImageId id) { return std::find(written.begin(), written.end(), id) != written.end(); };
+
 		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"" + Hex(background) + "\"/>\n";
 
 		// edges first, so that the nodes are on top
@@ -1870,8 +1970,10 @@ namespace NodeGraphCtrl {
 				at.X += nx * t; at.Y += ny * t;
 				return Point{ nx, ny };
 			};
+			// both ends against the points before clipping (of a straight edge, the from end is the other point of the to end)
+			const Point beforeLast = pts[pts.size() - 2];
 			clip(*from, pts.front(), pts[1]);
-			Point dir = clip(*to, pts.back(), pts[pts.size() - 2]);
+			Point dir = clip(*to, pts.back(), beforeLast);
 			dir.X = -dir.X; dir.Y = -dir.Y;
 
 			svg += "<polyline points=\"";
@@ -1894,25 +1996,75 @@ namespace NodeGraphCtrl {
 			}
 		}
 
-		for (const auto& n : m_Nodes) {
-			float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
+		// the parts of the nodes as the renderer draws them (the layout is in the node's units: moved to its top-left corner)
+		for (size_t i = 0; i < m_Nodes.size(); i++) {
+			const Node& n = m_Nodes[i];
+			const float left = n.X - n.Width * 0.5f, top = n.Y - n.Height * 0.5f;
+			auto at = [&](const Rect& r) { return Rect{ left + r.Left, top + r.Top, left + r.Right, top + r.Bottom }; };
+
+			if (const auto& pic = pictures[i]; !pic.Png.empty()) {
+				svg += "<image x=\"" + Num(pic.Bounds.Left) + "\" y=\"" + Num(pic.Bounds.Top) + "\" width=\"" + Num(pic.Bounds.Width()) + "\" height=\"" + Num(pic.Bounds.Height()) +
+					"\" preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64," + Base64(pic.Png.data(), pic.Png.size()) + "\"/>\n";
+				continue;
+			}
+
+			const NodeContent& c = n.Content;
+			const NodeLayout layout = GetNodeLayout(n);
 			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(n.Width) + "\" height=\"" + Num(n.Height) + "\" rx=\"" + Num(n.Style.CornerRadius) +
-				"\" fill=\"" + Hex(n.Style.FillColor) + "\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"/>\n";
-			if (n.Label.empty()) continue;
+				"\" fill=\"" + Hex(n.Style.FillColor) + "\"/>\n";
+
+			if (!layout.Title.IsEmpty()) {
+				Rect t = at(layout.Title);
+				COLORREF fill = c.TitleFill != CLR_INVALID ? c.TitleFill
+					: RGB(GetRValue(n.Style.FillColor) * 0.72f, GetGValue(n.Style.FillColor) * 0.72f, GetBValue(n.Style.FillColor) * 0.72f);
+				svg += "<path d=\"" + BandPath(t.Left, t.Top, t.Width(), t.Height(), n.Style.CornerRadius, layout.Content.IsEmpty()) + "\" fill=\"" + Hex(fill) + "\"/>\n";
+			}
+			if (!layout.Image.IsEmpty() && isWritten(c.Image))
+				svg += PlaceImage(c.Image, at(layout.Image), layout.ImageSource);
+			if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
+				Rect b = at(layout.Label);
+				svg += "<rect x=\"" + Num(b.Left) + "\" y=\"" + Num(b.Top) + "\" width=\"" + Num(b.Width()) + "\" height=\"" + Num(b.Height()) + "\" fill=\"#000000\" fill-opacity=\"0.5\"/>\n";
+			}
+
+			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(n.Width) + "\" height=\"" + Num(n.Height) + "\" rx=\"" + Num(n.Style.CornerRadius) +
+				"\" fill=\"none\" stroke=\"" + Hex(n.Style.BorderColor) + "\" stroke-width=\"" + Num(n.Style.BorderWidth) + "\"/>\n";
+
+			if (!layout.Icon.IsEmpty() && isWritten(c.Icon)) {
+				const Image* icon = GetImage(c.Icon);
+				svg += PlaceImage(c.Icon, at(layout.Icon), Rect{ 0, 0, (float)icon->Width, (float)icon->Height });
+			}
 
 			std::string text = "fill=\"" + Hex(n.Style.TextColor) + "\"";
+			if (!layout.Title.IsEmpty()) {
+				// a nested viewport clips the title to its band
+				Rect t = at(layout.Title);
+				svg += "<svg x=\"" + Num(t.Left + 8) + "\" y=\"" + Num(t.Top) + "\" width=\"" + Num(std::max(t.Width() - 16, 0.0f)) + "\" height=\"" + Num(t.Height()) + "\">" +
+					"<text " + text + " x=\"0\" y=\"" + Num(t.Height() * 0.5f) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"12\" font-weight=\"600\" dominant-baseline=\"central\">" +
+					XmlEscape(Utf8(c.Title)) + "</text></svg>\n";
+			}
+
+			if (n.Label.empty() || layout.Label.IsEmpty()) continue;
+			Rect l = at(layout.Label);
 			if (n.Style.Code) {
 				svg += "<text xml:space=\"preserve\" " + text + " font-family=\"Consolas,'Cascadia Mono',monospace\" font-size=\"12\">";
-				float y = top + 4.5f + 12.0f;
+				float y = l.Top + 4.5f + 12.0f;
 				for (const auto& line : SplitLines(n.Label)) {
-					svg += "<tspan x=\"" + Num(left + 8.0f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
+					svg += "<tspan x=\"" + Num(l.Left + 8.0f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
 					y += 14.5f;
 				}
 				svg += "</text>\n";
 			}
 			else {
-				svg += "<text " + text + " x=\"" + Num(n.X) + "\" y=\"" + Num(n.Y) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
-					XmlEscape(Utf8(n.Label)) + "</text>\n";
+				// the lines centered in the label's area, as DirectWrite does
+				const auto lines = SplitLines(n.Label);
+				const float lineHeight = 17.3f;
+				float y = (l.Top + l.Bottom) * 0.5f - (lines.size() - 1) * lineHeight * 0.5f;
+				svg += "<text " + text + " font-family=\"Segoe UI,sans-serif\" font-size=\"13\" text-anchor=\"middle\" dominant-baseline=\"central\">";
+				for (const auto& line : lines) {
+					svg += "<tspan x=\"" + Num((l.Left + l.Right) * 0.5f) + "\" y=\"" + Num(y) + "\">" + XmlEscape(Utf8(line)) + "</tspan>";
+					y += lineHeight;
+				}
+				svg += "</text>\n";
 			}
 		}
 		svg += "</svg>\n";

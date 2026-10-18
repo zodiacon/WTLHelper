@@ -234,6 +234,10 @@ public:
     // False for an empty graph or on error.
     bool SaveImage(const wchar_t* path, float scale = 1.0f);
 
+    // NodeGraphModel::SaveSvg with the control's background, and with the owner drawn nodes (when there is a node
+    // draw handler) as pictures of them, drawn at pictureScale pixels per graph unit.
+    bool SaveSvg(const wchar_t* path, float pictureScale = 2.0f);
+
     // Draws the nodes that have NodeStyle::OwnerDraw (see INodeDrawHandler). Not owned: it must outlive the control,
     // or be set to null before it goes. Repaints.
     void SetNodeDrawHandler(INodeDrawHandler* handler);

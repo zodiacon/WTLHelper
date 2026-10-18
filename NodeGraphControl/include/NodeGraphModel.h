@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 
 namespace NodeGraphCtrl {
 
@@ -145,9 +146,20 @@ public:
     bool Save(const wchar_t* path) const;
     bool Load(const wchar_t* path);
 
-    // Writes the graph as it is drawn (the colors, the bends of the edges) to a vector image. False for an empty graph or on error.
+    // A picture of a node as it is drawn, for SaveSvg: a PNG and the part of the graph it covers. No PNG: the node is
+    // written as SVG.
+    struct NodePicture {
+        std::vector<uint8_t> Png;
+        Rect                 Bounds;
+    };
+    using NodePictureFunc = std::function<NodePicture(const Node&)>;
+
+    // Writes the graph as it is drawn (the colors, the bends of the edges, the content of the nodes, with its images
+    // embedded) to a vector image. False for an empty graph or on error.
     // background: the canvas color (CNodeGraphControl::GetBackgroundColor for the control's).
-    bool SaveSvg(const wchar_t* path, COLORREF background = RGB(38, 38, 38)) const;
+    // picture: called for every node; the nodes it returns a picture of are written as that picture (it is how
+    // CNodeGraphControl::SaveSvg writes owner drawn nodes).
+    bool SaveSvg(const wchar_t* path, COLORREF background = RGB(38, 38, 38), const NodePictureFunc& picture = {}) const;
 
 private:
     std::vector<Node> m_Nodes;
