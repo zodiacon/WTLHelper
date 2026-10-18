@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cfloat>
+#include <atomic>
 
 namespace NodeGraphCtrl {
 
@@ -109,6 +110,9 @@ HRESULT NodeGraphRenderer::EnsureDeviceResources(HDC /*hdc*/, const RECT& /*rc*/
 
     HRESULT hr = m_D2dFactory->CreateDCRenderTarget(&props, m_RenderTarget.GetAddressOf());
     if (FAILED(hr)) return hr;
+    // unique in the process, so that a draw handler shared by several controls can tell their targets apart
+    static std::atomic<uint32_t> s_NextGeneration = 1;
+    m_DeviceGeneration = s_NextGeneration++;
 
     hr = m_RenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), m_Brush.GetAddressOf());
     return hr;
@@ -402,54 +406,92 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
                  rr.rect.left + part.Right * vt.Scale, rr.rect.top + part.Bottom * vt.Scale };
     };
 
-    // Fill
-    m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
-    m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+    const bool ownerDraw = n.Style.OwnerDraw && m_DrawHandler;
+    const uint32_t flags = ownerDraw ? CallOwnerDraw(model, n, layout, rr, vt, selected, false) : NDF_DEFAULT;
 
-    if (!layout.Title.IsEmpty()) {
-        m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
-        FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
+    if (!(flags & NDF_SKIPBACKGROUND)) {
+        m_Brush->SetColor(ColorrefToD2D(n.Style.FillColor));
+        m_RenderTarget->FillRoundedRectangle(rr, m_Brush.Get());
+
+        if (!layout.Title.IsEmpty()) {
+            m_Brush->SetColor(ColorrefToD2D(c.TitleFill != CLR_INVALID ? c.TitleFill : Darker(n.Style.FillColor)));
+            FillBand(toScreen(layout.Title), r, true, layout.Content.IsEmpty());
+        }
     }
 
-    if (!layout.Image.IsEmpty())
-        DrawImage(model, c.Image, toScreen(layout.Image), &layout.ImageSource);
+    if (!(flags & NDF_SKIPCONTENT)) {
+        if (!layout.Image.IsEmpty())
+            DrawImage(model, c.Image, toScreen(layout.Image), &layout.ImageSource);
 
-    // a band for the label over the bottom of the image, so that it can be read whatever the image is
-    if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
-        m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.5f));
-        m_RenderTarget->FillRectangle(toScreen(layout.Label), m_Brush.Get());
+        // a band for the label over the bottom of the image, so that it can be read whatever the image is
+        if (c.LabelPos == LabelPlacement::Overlay && !layout.Image.IsEmpty() && !layout.Label.IsEmpty() && !n.Label.empty()) {
+            m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.5f));
+            m_RenderTarget->FillRectangle(toScreen(layout.Label), m_Brush.Get());
+        }
     }
 
-    // Border
-    float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
-    m_Brush->SetColor(selected
-        ? SelectionColor()
-        : ColorrefToD2D(n.Style.BorderColor));
-    m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
+    if (!(flags & NDF_SKIPBORDER)) {
+        float borderWidth = n.Style.BorderWidth * (selected ? 2.5f : 1.0f);
+        m_Brush->SetColor(selected
+            ? SelectionColor()
+            : ColorrefToD2D(n.Style.BorderColor));
+        m_RenderTarget->DrawRoundedRectangle(rr, m_Brush.Get(), borderWidth);
+    }
 
-    if (!layout.Icon.IsEmpty())
-        DrawImage(model, c.Icon, toScreen(layout.Icon));
+    if (!(flags & NDF_SKIPCONTENT)) {
+        if (!layout.Icon.IsEmpty())
+            DrawImage(model, c.Icon, toScreen(layout.Icon));
+        if (!layout.Title.IsEmpty())
+            DrawTitle(n, layout.Title, vt);
+        DrawLabel(n, layout.Label, rr.rect, vt);
+    }
 
-    if (!layout.Title.IsEmpty())
-        DrawTitle(n, layout.Title, vt);
+    if (ownerDraw && (flags & NDF_POSTPAINT))
+        CallOwnerDraw(model, n, layout, rr, vt, selected, true);
+}
 
-    // Label
-    if (layout.Label.IsEmpty() || n.Label.empty())
+// Calls the handler with the transform set to the node's units and the drawing clipped to it. Returns its flags (none
+// for PostPaint).
+uint32_t NodeGraphRenderer::CallOwnerDraw(const NodeGraphModel& model, const Node& n, const NodeLayout& layout,
+                                          const D2D1_ROUNDED_RECT& rr, const ViewTransform& vt, bool selected, bool post) {
+    D2D1_MATRIX_3X2_F transform;
+    m_RenderTarget->GetTransform(&transform);
+    m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(rr.rect.left, rr.rect.top));
+    m_RenderTarget->PushAxisAlignedClip({ 0, 0, n.Width, n.Height }, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    const NodeDrawContext context{
+        m_RenderTarget.Get(), m_D2dFactory.Get(), m_DwFactory.Get(), *this, model, n, layout,
+        { { 0, 0, n.Width, n.Height }, n.Style.CornerRadius, n.Style.CornerRadius },
+        rr.rect, vt.Scale, selected, !m_Exporting && n.Id == m_HoveredNode, m_Exporting, m_DeviceGeneration
+    };
+    uint32_t flags = NDF_DEFAULT;
+    if (post)
+        m_DrawHandler->PostPaint(context);
+    else
+        flags = m_DrawHandler->PrePaint(context);
+
+    m_RenderTarget->PopAxisAlignedClip();
+    m_RenderTarget->SetTransform(transform);
+    return flags;
+}
+
+// node: the node's rect on the target.
+void NodeGraphRenderer::DrawLabel(const Node& n, const Rect& area, const D2D1_RECT_F& node, const ViewTransform& vt) {
+    if (area.IsEmpty() || n.Label.empty())
         return;
     if (n.Style.Code) {
-        DrawCodeText(n, layout.Label, vt);
+        DrawCodeText(n, area, vt);
     }
     else if (n.Style.ScaleLabel) {
         // drawn at its size in graph space, like the title; too small to read: not drawn
         if (vt.Scale < 0.3f)
             return;
-        const Rect& part = layout.Label;
-        m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(rr.rect.left, rr.rect.top));
+        m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(node.left, node.top));
         m_Brush->SetColor(ColorrefToD2D(n.Style.TextColor));
         m_RenderTarget->DrawTextW(
             n.Label.c_str(), (UINT32)n.Label.size(),
             m_TextFormat.Get(),
-            { part.Left, part.Top, part.Right, part.Bottom },
+            { area.Left, area.Top, area.Right, area.Bottom },
             m_Brush.Get());
         m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
     }
@@ -458,7 +500,8 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
         m_RenderTarget->DrawTextW(
             n.Label.c_str(), (UINT32)n.Label.size(),
             m_TextFormat.Get(),
-            toScreen(layout.Label),
+            { node.left + area.Left * vt.Scale, node.top + area.Top * vt.Scale,
+              node.left + area.Right * vt.Scale, node.top + area.Bottom * vt.Scale },
             m_Brush.Get());
     }
 }

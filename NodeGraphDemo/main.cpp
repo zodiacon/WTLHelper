@@ -114,6 +114,98 @@ static ImageId AddPicture(NodeGraphModel& m, int w, int h, int seed) {
     return image;
 }
 
+// Draws the owner drawn nodes of the content sample. Which one a node is goes in its UserData.
+enum class DemoDraw : intptr_t { None, Progress, Sparkline, Circle };
+
+class DemoDrawHandler : public INodeDrawHandler {
+public:
+    uint32_t PrePaint(const NodeDrawContext& ctx) override {
+        Prepare(ctx);
+        switch ((DemoDraw)(intptr_t)ctx.GraphNode.UserData) {
+            case DemoDraw::Progress:
+            case DemoDraw::Sparkline:
+                return NDF_POSTPAINT;           // over the default node
+            case DemoDraw::Circle:
+                DrawCircle(ctx);
+                return NDF_SKIPBACKGROUND | NDF_SKIPBORDER;     // the default label on it
+            default:
+                return NDF_DEFAULT;
+        }
+    }
+
+    void PostPaint(const NodeDrawContext& ctx) override {
+        switch ((DemoDraw)(intptr_t)ctx.GraphNode.UserData) {
+            case DemoDraw::Progress:  DrawProgress(ctx); break;
+            case DemoDraw::Sparkline: DrawSparkline(ctx); break;
+            default: break;
+        }
+    }
+
+private:
+    // the brush belongs to the target: made again when it is
+    void Prepare(const NodeDrawContext& ctx) {
+        if (!m_Brush || m_Generation != ctx.DeviceGeneration) {
+            m_Brush.Reset();
+            ctx.Target->CreateSolidColorBrush(D2D1::ColorF(0), m_Brush.GetAddressOf());
+            m_Generation = ctx.DeviceGeneration;
+        }
+    }
+
+    // a bar along the bottom of the node
+    void DrawProgress(const NodeDrawContext& ctx) {
+        const float percent = 65;
+        const Rect& c = ctx.Layout.Content;
+        D2D1_RECT_F bar{ c.Left + 8, c.Bottom - 12, c.Right - 8, c.Bottom - 6 };
+        m_Brush->SetColor(D2D1::ColorF(0, 0, 0, 0.35f));
+        ctx.Target->FillRoundedRectangle({ bar, 3, 3 }, m_Brush.Get());
+        bar.right = bar.left + (bar.right - bar.left) * percent / 100;
+        m_Brush->SetColor(ctx.Hovered ? D2D1::ColorF(0.55f, 1.0f, 0.55f) : D2D1::ColorF(0.3f, 0.85f, 0.4f));
+        ctx.Target->FillRoundedRectangle({ bar, 3, 3 }, m_Brush.Get());
+    }
+
+    // a line chart under the title
+    void DrawSparkline(const NodeDrawContext& ctx) {
+        static const float values[] = { 12, 30, 22, 45, 38, 60, 52, 75, 40, 55, 68, 90, 70, 62, 80 };
+        const Rect& c = ctx.Layout.Content;
+        const float left = c.Left + 8, right = c.Right - 8, top = c.Top + 8, bottom = c.Bottom - 8;
+        if (right <= left || bottom <= top)
+            return;
+
+        ComPtr<ID2D1PathGeometry> path;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (FAILED(ctx.D2DFactory->CreatePathGeometry(path.GetAddressOf())) || FAILED(path->Open(sink.GetAddressOf())))
+            return;
+        const int count = (int)std::size(values);
+        for (int i = 0; i < count; i++) {
+            D2D1_POINT_2F p{ left + (right - left) * i / (count - 1), bottom - (bottom - top) * values[i] / 100 };
+            if (i == 0) sink->BeginFigure(p, D2D1_FIGURE_BEGIN_HOLLOW);
+            else sink->AddLine(p);
+        }
+        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+        sink->Close();
+
+        m_Brush->SetColor(D2D1::ColorF(1, 1, 1, 0.15f));
+        ctx.Target->DrawLine({ left, bottom }, { right, bottom }, m_Brush.Get(), 1);
+        m_Brush->SetColor(D2D1::ColorF(1.0f, 0.8f, 0.3f));
+        ctx.Target->DrawGeometry(path.Get(), m_Brush.Get(), 1.5f);
+    }
+
+    // a circle instead of the rounded rectangle, lighter under the mouse
+    void DrawCircle(const NodeDrawContext& ctx) {
+        const float w = ctx.GraphNode.Width, h = ctx.GraphNode.Height;
+        const D2D1_ELLIPSE circle{ { w / 2, h / 2 }, w / 2 - 2, h / 2 - 2 };
+        m_Brush->SetColor(ctx.Hovered ? D2D1::ColorF(0.35f, 0.75f, 0.45f) : D2D1::ColorF(0.2f, 0.6f, 0.3f));
+        ctx.Target->FillEllipse(circle, m_Brush.Get());
+        m_Brush->SetColor(ctx.Selected ? D2D1::ColorF(D2D1::ColorF::Yellow) : D2D1::ColorF(0.1f, 0.35f, 0.15f));
+        ctx.Target->DrawEllipse(circle, m_Brush.Get(), ctx.Selected ? 3.0f : 1.5f);
+    }
+
+    ComPtr<ID2D1SolidColorBrush> m_Brush;
+    uint32_t m_Generation = 0;
+};
+
+static DemoDrawHandler g_drawHandler;
+
 // Nodes with icons, titles and images, in each of the ways they can be placed.
 static void PopulateContent(NodeGraphModel& m) {
     m.Clear();
@@ -204,6 +296,27 @@ static void PopulateContent(NodeGraphModel& m) {
     m.AddEdge(code, center);
     m.AddEdge(code, stretch);
     m.AddEdge(top, code);
+
+    // owner drawn (DemoDrawHandler)
+    NodeId start = node(L"Start", 100, 600, 70, 70, [&](Node& n) {
+        n.Style.OwnerDraw = true;
+        n.UserData = (void*)DemoDraw::Circle;
+    });
+    NodeId download = node(L"setup.exe", 270, 600, 170, 70, [&](Node& n) {
+        n.Content.Title = L"Download";
+        n.Content.Icon = app;
+        n.Style.OwnerDraw = true;
+        n.UserData = (void*)DemoDraw::Progress;
+    });
+    NodeId cpu = node(L"", 470, 600, 180, 90, [&](Node& n) {
+        n.Content.Title = L"CPU";
+        n.Style.FillColor = RGB(45, 50, 60);
+        n.Style.BorderColor = RGB(90, 96, 110);
+        n.Style.OwnerDraw = true;
+        n.UserData = (void*)DemoDraw::Sparkline;
+    });
+    m.AddEdge(start, download);
+    m.AddEdge(download, cpu);
 }
 
 static void UpdateStatus(HWND /*hwnd*/) {
@@ -242,6 +355,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
             0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)IDC_STATUS, nullptr, nullptr);
 
+        g_graph.SetNodeDrawHandler(&g_drawHandler);
         PopulateDemo(*g_graph.GetModel());
         g_graph.FitInView();
         g_graph.SetMinimapVisible(true);

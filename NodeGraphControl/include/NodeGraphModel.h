@@ -29,6 +29,7 @@ struct NodeStyle {
     float    CornerRadius = 6.0f;
     bool     Code         = false;   // monospaced, left aligned text that scales with the zoom (a block of code)
     bool     ScaleLabel   = true;    // the label scales with the zoom (false: the same size on the screen at any zoom)
+    bool     OwnerDraw    = false;   // drawn with the control's INodeDrawHandler as well (or instead)
 };
 
 enum class IconPlacement  : uint8_t { Left, Top, Right };          // where the icon is, next to the label

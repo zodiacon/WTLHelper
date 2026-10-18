@@ -1134,6 +1134,11 @@ namespace NodeGraphCtrl {
 	void CNodeGraphControl::OnMouseMove(UINT /*nFlags*/, CPoint pt) {
 		int sx = pt.x, sy = pt.y;
 
+		if (m_Renderer.GetNodeDrawHandler()) {
+			auto gp = m_Vt.ToGraph((float)sx, (float)sy);
+			SetHoveredNode(m_Renderer.HitTestNode(*m_Model, gp.x, gp.y));
+		}
+
 		if (m_Resize.Active) {
 			auto gp = m_Vt.ToGraph((float)sx, (float)sy);
 			float dGX = gp.x - m_Resize.StartGX;
@@ -1251,6 +1256,41 @@ namespace NodeGraphCtrl {
 				Invalidate(FALSE);
 			}
 		}
+	}
+
+	void CNodeGraphControl::OnMouseLeave() {
+		SetHoveredNode(InvalidNode);
+	}
+
+	// Repaints if an owner drawn node is hovered or not anymore (the others don't show it).
+	void CNodeGraphControl::SetHoveredNode(NodeId id) {
+		if (id == m_HoveredNode)
+			return;
+		if (m_HoveredNode == InvalidNode) {
+			TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };
+			::TrackMouseEvent(&tme);
+		}
+		auto ownerDrawn = [&](NodeId nid) {
+			const Node* n = m_Model->GetNode(nid);
+			return n && n->Style.OwnerDraw;
+		};
+		const bool repaint = ownerDrawn(m_HoveredNode) || ownerDrawn(id);
+		m_HoveredNode = id;
+		m_Renderer.SetHoveredNode(id);
+		if (repaint)
+			Invalidate(FALSE);
+	}
+
+	void CNodeGraphControl::SetNodeDrawHandler(INodeDrawHandler* handler) {
+		m_Renderer.SetNodeDrawHandler(handler);
+		if (!handler)
+			SetHoveredNode(InvalidNode);
+		if (m_hWnd)
+			Invalidate(FALSE);
+	}
+
+	INodeDrawHandler* CNodeGraphControl::GetNodeDrawHandler() const {
+		return m_Renderer.GetNodeDrawHandler();
 	}
 
 	LRESULT CNodeGraphControl::OnNotify(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
@@ -1511,7 +1551,9 @@ namespace NodeGraphCtrl {
 		vt.OffsetX = -minX * scale;
 		vt.OffsetY = -minY * scale;
 		RECT rc{ 0, 0, cx, cy };
+		m_Renderer.SetExporting(true);
 		m_Renderer.Render(hdc, rc, *m_Model, vt, {}, InvalidEdge, false);
+		m_Renderer.SetExporting(false);
 		::GdiFlush();
 		::SelectObject(hdc, old);
 		::DeleteDC(hdc);

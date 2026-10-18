@@ -148,6 +148,7 @@ public:
         MSG_WM_LBUTTONDBLCLK(OnLButtonDblClk)
         MSG_WM_LBUTTONUP(OnLButtonUp)
         MSG_WM_MOUSEMOVE(OnMouseMove)
+        MSG_WM_MOUSELEAVE(OnMouseLeave)
         MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
         MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
@@ -229,8 +230,13 @@ public:
     // Writes the whole graph (not only the part in view) as an image, without the selection, grid and minimap.
     // The format comes from the extension: .jpg/.jpeg, .bmp, otherwise PNG. scale is pixels per graph unit; it is
     // lowered if the image would be too large (more than 16384 pixels a side or about 32 million pixels).
-    // Needs COM to be initialized on the thread. False for an empty graph or on error.
+    // False for an empty graph or on error.
     bool SaveImage(const wchar_t* path, float scale = 1.0f);
+
+    // Draws the nodes that have NodeStyle::OwnerDraw (see INodeDrawHandler). Not owned: it must outlive the control,
+    // or be set to null before it goes. Repaints.
+    void SetNodeDrawHandler(INodeDrawHandler* handler);
+    INodeDrawHandler* GetNodeDrawHandler() const;
 
 private:
     // ---- Message handlers ----
@@ -248,6 +254,7 @@ private:
     void OnLButtonDblClk(UINT nFlags, CPoint pt);
     void OnLButtonUp(UINT nFlags, CPoint pt);
     void OnMouseMove(UINT nFlags, CPoint pt);
+    void OnMouseLeave();
     LRESULT OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     BOOL OnEraseBkgnd(CDCHandle dc);
@@ -268,6 +275,7 @@ private:
     void CommitLabelEdit();
     void CancelLabelEdit();
     RECT LabelEditRect(const Node& n) const;
+    void SetHoveredNode(NodeId id);
     void FinalizeRubberBand();
 
 private:
@@ -306,6 +314,8 @@ private:
 
     int  m_UpdateDepth       = 0;
     bool m_PendingInvalidate = false;
+
+    NodeId m_HoveredNode = InvalidNode;     // tracked only while there is a node draw handler
 };
 
 } // namespace NodeGraphCtrl
