@@ -7,6 +7,7 @@
 // The sheet's built-in tab image list (used with PSP_USEICONID) is low color depth,
 // so it is replaced with a 32-bit one once the sheet is initialized.
 // Pages added after that need nothing special: the sheet adds their icons to the tab's current (32-bit) image list.
+// The sheet destroys the tab's image list when it's destroyed, so the sheet's own list is put back before that.
 // TBase is the sheet implementation to build on, so it composes with other sheet impls, e.g.
 //   class CMySheet : public CIconPropertySheetImpl<CMySheet, CResizablePropertySheetImpl<CMySheet>> {};
 // A derived class that defines OnSheetInitialized must call the base version.
@@ -15,6 +16,11 @@ template<typename T, typename TBase = CPropertySheetImpl<T>>
 class CIconPropertySheetImpl : public TBase {
 public:
 	using TBase::TBase;
+
+	BEGIN_MSG_MAP(CIconPropertySheetImpl)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		CHAIN_MSG_MAP(TBase)
+	END_MSG_MAP()
 
 	//
 	// before the sheet exists, the icons must stay in step with the pages
@@ -69,13 +75,25 @@ public:
 			item.iImage = hIcon ? m_Images.AddIcon(hIcon) : -1;
 			tabs.SetItem(i, &item);
 		}
-		tabs.SetImageList(m_Images);
+		m_SheetImages = tabs.SetImageList(m_Images);
 		m_Icons.clear();
+	}
+
+protected:
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+		bHandled = FALSE;
+		// the sheet destroys the tab's image list: its own, not m_Images (which destroys itself)
+		if (m_Images) {
+			CTabCtrl(static_cast<T*>(this)->GetTabControl()).SetImageList(m_SheetImages);
+			m_SheetImages = nullptr;
+		}
+		return 0;
 	}
 
 private:
 	std::vector<PCWSTR> m_Icons;
 	CImageListManaged m_Images;
+	HIMAGELIST m_SheetImages{ nullptr };	// the sheet's own, replaced by m_Images
 };
 
 class CIconPropertySheet : public CIconPropertySheetImpl<CIconPropertySheet> {
