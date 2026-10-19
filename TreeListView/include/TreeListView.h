@@ -155,6 +155,7 @@ public:
 		NOTIFY_HANDLER(IDC_LIST, LVN_KEYDOWN, OnKeyDown)
 		NOTIFY_HANDLER(IDC_LIST, LVN_BEGINLABELEDITW, OnBeginLabelEdit)
 		NOTIFY_HANDLER(IDC_LIST, LVN_ENDLABELEDITW, OnEndLabelEdit)
+		NOTIFY_HANDLER(IDC_LIST, LVN_ODFINDITEMW, OnFindItem)
 	END_MSG_MAP()
 
 	// ---- Column API ---------------------------------------------------------
@@ -236,6 +237,7 @@ public:
 
 	int     GetItemCount() const;          // total nodes in the tree
 	int     GetVisibleItemCount() const;   // nodes currently in the flat visible list
+	// searches the visible items' text, including callback text (TLVN_GETDISPINFO)
 	HTLITEM FindItem(HTLITEM hStart, int col, LPCWSTR text, UINT flags = 0) const;
 	bool    GetItemRect(HTLITEM hItem, RECT* prc) const;  // bounds in ListView client coords
 	HTLITEM HitTest(POINT pt, int* pCol = nullptr) const; // pt in TLV client coords
@@ -318,6 +320,7 @@ private:
 	LRESULT OnItemChanged(int, LPNMHDR, BOOL&);
 	LRESULT OnBeginLabelEdit(int, LPNMHDR, BOOL&);
 	LRESULT OnEndLabelEdit(int, LPNMHDR, BOOL&);
+	LRESULT OnFindItem(int, LPNMHDR, BOOL&);
 
 	static LRESULT CALLBACK ListSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 	static LRESULT CALLBACK EditSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
@@ -335,6 +338,8 @@ private:
 	void    Unlink(TlvNode* node);
 	void    DeleteTree(TlvNode* node);
 	LRESULT FireNotify(NMHDR* pnm);
+	// a cell's text as displayed: the stored text, or the owner's (TLVN_GETDISPINFO) for a callback cell
+	std::wstring GetCellText(TlvNode* node, int col) const;
 
 	LRESULT RelayCustomDraw(NMLVCUSTOMDRAW* plvcd);
 	void    DrawColumn0(NMLVCUSTOMDRAW* pcd);

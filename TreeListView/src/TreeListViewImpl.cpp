@@ -519,7 +519,7 @@ HTLITEM CTreeListViewCtrl::FindItem(HTLITEM hStart, int col, LPCWSTR text, UINT 
 	const int  textLen   = (int)wcslen(text);
 
 	auto matches = [&](TlvNode* node) -> bool {
-		const std::wstring& s = (col < (int)node->cols.size()) ? node->cols[col] : std::wstring{};
+		const std::wstring s = GetCellText(node, col);
 		if (contains) {
 			auto eq = [matchCase](wchar_t a, wchar_t b) {
 				return matchCase ? (a == b) : (::towlower(a) == ::towlower(b));
@@ -742,6 +742,53 @@ LRESULT CTreeListViewCtrl::FireNotify(NMHDR* pnm) {
 	if (::IsWindow(parent))
 		return ::SendMessage(parent, WM_NOTIFY, (WPARAM)GetDlgCtrlID(), (LPARAM)pnm);
 	return 0;
+}
+
+std::wstring CTreeListViewCtrl::GetCellText(TlvNode* node, int col) const {
+	if (m_CallbackMode || (col < 64 && (node->callbackCols >> col) & 1)) {
+		wchar_t buf[512] = {};
+		NMTLVDISPINFO nm = {};
+		nm.hdr.hwndFrom = m_hWnd;
+		nm.hdr.idFrom   = GetDlgCtrlID();
+		nm.hdr.code     = TLVN_GETDISPINFO;
+		nm.hItem        = node;
+		nm.iSubItem     = col;
+		nm.pszText      = buf;
+		nm.cchTextMax   = (int)std::size(buf);
+		// FireNotify only sends a message
+		const_cast<CTreeListViewCtrl*>(this)->FireNotify(&nm.hdr);
+		return buf;
+	}
+	return col < (int)node->cols.size() ? node->cols[col] : std::wstring{};
+}
+
+// ---- LVN_ODFINDITEM: type-ahead ---------------------------------------------
+
+// The list view asks for the item whose text starts with what was typed (owner data has no text of its own).
+// Without an answer, WM_NOTIFY returns 0, and the list view takes that as "item 0" and goes to the first row.
+LRESULT CTreeListViewCtrl::OnFindItem(int, LPNMHDR pnmh, BOOL&) {
+	auto* pfi = reinterpret_cast<NMLVFINDITEMW*>(pnmh);
+	auto& fi = pfi->lvfi;
+	if (!(fi.flags & (LVFI_STRING | LVFI_PARTIAL | LVFI_SUBSTRING)) || !fi.psz || !*fi.psz)
+		return -1;
+
+	const size_t len = wcslen(fi.psz);
+	// a prefix: type-ahead asks with LVFI_SUBSTRING (LVFI_PARTIAL is the older flag); despite the name, not a substring
+	const bool partial = (fi.flags & (LVFI_PARTIAL | LVFI_SUBSTRING)) != 0;
+	auto matches = [&](int index) {
+		auto text = GetCellText(m_Visible[index], 0);
+		return partial ? _wcsnicmp(text.c_str(), fi.psz, len) == 0 : _wcsicmp(text.c_str(), fi.psz) == 0;
+	};
+
+	// from iStart (inclusive, so typing more letters can stay on the same item), then from the top if wrapping
+	const int n = (int)m_Visible.size();
+	const int start = (pfi->iStart >= 0 && pfi->iStart < n) ? pfi->iStart : 0;
+	for (int i = start; i < n; ++i)
+		if (matches(i)) return i;
+	if (fi.flags & LVFI_WRAP)
+		for (int i = 0; i < start; ++i)
+			if (matches(i)) return i;
+	return -1;
 }
 
 // ---- Custom draw: relay helper ----------------------------------------------
