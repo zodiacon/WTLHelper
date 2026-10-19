@@ -15,9 +15,10 @@
 #include <tuple>
 
 static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
-static HHOOK g_hHook;
-static bool g_HookWanted;	// InitDarkMode installed the hook; SuspendHook/ResumeHook remove and reinstall it
-static int g_SuspendCount;
+// the hook is per thread (InitDarkMode's, and InitThread's for other UI threads), and so is its suspension
+static thread_local HHOOK g_hHook;
+static thread_local bool g_HookWanted;	// the thread installed the hook; SuspendHook/ResumeHook remove and reinstall it
+static thread_local int g_SuspendCount;
 
 SuspendResumeHook::SuspendResumeHook() {
 	WTLHelper::SuspendHook();
@@ -170,6 +171,20 @@ bool WTLHelper::InitDarkMode(DarkModeKind type) {
 	DarkMode::setColorizeTitleBarConfig(false);
 
 	return InitHooks();
+}
+
+void WTLHelper::InitThread() {
+	if (!g_HookWanted) {
+		g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, ::GetCurrentThreadId());
+		g_HookWanted = true;
+	}
+}
+
+void WTLHelper::TermThread() {
+	if (g_hHook)
+		::UnhookWindowsHookEx(g_hHook);
+	g_hHook = nullptr;
+	g_HookWanted = false;
 }
 
 bool WTLHelper::InitDarkMode() {

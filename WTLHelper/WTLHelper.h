@@ -31,6 +31,10 @@ struct WTLHelper final {
 	inline static UINT ThemeChangedMessage = ::RegisterWindowMessage(L"ThemeChanged");
 	static bool InitDarkMode();
 	static bool InitDarkMode(DarkModeKind type);
+	// another UI thread's windows, themed like those of the thread that called InitDarkMode (which must come first):
+	// installs the theming hook for the calling thread. TermThread removes it, before the thread ends
+	static void InitThread();
+	static void TermThread();
 	static DarkModeKind DarkModeType() noexcept;
 	static bool IsDarkMode() noexcept;
 	static bool IsClassicMode() noexcept;
