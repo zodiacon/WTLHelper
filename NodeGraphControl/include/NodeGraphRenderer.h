@@ -167,6 +167,9 @@ public:
     void SetNodeDrawHandler(INodeDrawHandler* handler) { m_DrawHandler = handler; }
     INodeDrawHandler* GetNodeDrawHandler() const { return m_DrawHandler; }
     void SetHoveredNode(NodeId id) { m_HoveredNode = id; }
+    // Edge labels moved off one another and off the nodes (PlaceLabels); on by default.
+    void SetAvoidLabelOverlap(bool avoid) { m_AvoidLabelOverlap = avoid; }
+    bool GetAvoidLabelOverlap() const { return m_AvoidLabelOverlap; }
     // A port under the mouse, or one a new edge would connect to (drawn larger, with a ring).
     void SetHoveredPort(NodeId node, PortId port) { m_HoveredPortNode = node; m_HoveredPort = port; }
     // Draws these nodes, their neighbors and the edges between them in front, and the rest of the graph dimmed behind.
@@ -249,6 +252,9 @@ private:
     void DrawPorts(const Node& n, const ViewTransform& vt);
     // the collapsed groups' boxes as nodes (the ends of the edges to their nodes), made for each frame
     std::unordered_map<GroupId, Node> m_Collapsed;
+    bool m_AvoidLabelOverlap = true;
+    std::unordered_map<EdgeId, Point> m_LabelPlaces;   // this frame's (with m_AvoidLabelOverlap)
+    void PlaceEdgeLabels(const NodeGraphModel& model, const ViewTransform& vt, const Rect& region);
     const Node* EdgeEnd(const NodeGraphModel& model, NodeId id) const;
     void DrawGroup(const NodeGraphModel& model, const Group& g, const ViewTransform& vt, bool selected);
     void DrawGraphText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt);

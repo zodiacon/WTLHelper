@@ -258,6 +258,11 @@ public:
     void  SetDetailThreshold(float scale);
     float GetDetailThreshold() const;
 
+    // Edge labels that would overlap one another or a node are moved along their edges, or beside them (PlaceLabels);
+    // a label in the clear stays in the middle. On by default; SaveImage and SaveSvg do the same.
+    void SetAvoidLabelOverlap(bool avoid);
+    bool GetAvoidLabelOverlap() const;
+
     // The highlight of a node's neighborhood (NGCS_HIGHLIGHT).
     void SetHighlight(bool highlight);
     bool GetHighlight() const;

@@ -325,6 +325,9 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     for (const auto& g : model.Groups())
         if (g.Collapsed && !g.Nodes.empty())
             m_Collapsed.emplace(g.Id, model.CollapsedNode(g));
+    // (the labels around the view too: the ones that could push those in view, so that they stay put as it scrolls)
+    const float aroundX = view.Right - view.Left, aroundY = view.Bottom - view.Top;
+    PlaceEdgeLabels(model, vt, { view.Left - aroundX, view.Top - aroundY, view.Right + aroundX, view.Bottom + aroundY });
     auto groupSelected = [&](const Group& g) {      // all of its nodes
         return !g.Nodes.empty() && std::all_of(g.Nodes.begin(), g.Nodes.end(), [&](NodeId n) { return selected.contains(n); });
     };
@@ -554,8 +557,82 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
             DrawArrowhead(screen(end), { dx / l, dy / l }, e.Style.Arrow);
     }
 
-    if (!e.Label.empty())
-        DrawEdgeLabel(e, shape.Label, vt, emphasis);
+    if (!e.Label.empty()) {
+        auto placed = m_LabelPlaces.find(e.Id);
+        DrawEdgeLabel(e, placed != m_LabelPlaces.end() ? placed->second : shape.Label, vt, emphasis);
+    }
+}
+
+// The places of the labels that are drawn this frame, as their edges are drawn (DrawEdge), off the nodes, the title
+// bands of groups and the labels of loops (which stay where they are). Only what is in the region: around the view.
+void NodeGraphRenderer::PlaceEdgeLabels(const NodeGraphModel& model, const ViewTransform& vt, const Rect& region) {
+    m_LabelPlaces.clear();
+    if (!m_AvoidLabelOverlap || m_Plain)
+        return;
+    auto inRegion = [&](const Rect& r) { return r.Right >= region.Left && r.Left <= region.Right && r.Bottom >= region.Top && r.Top <= region.Bottom; };
+    auto box = [](const Node& n) { return Rect{ n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f }; };
+    std::vector<const Edge*> labeled;
+    for (const auto& e : model.Edges()) {
+        if (e.Label.empty() || (e.Style.ScaleLabel && vt.Scale < 0.3f))     // (as DrawEdgeLabel draws them)
+            continue;
+        // the box of its ends' centers and bends (as the culling has it)
+        const Node* from = model.GetNode(e.From);
+        const Node* to = model.GetNode(e.To);
+        if (!from || !to) continue;
+        Rect r{ std::min(from->X, to->X), std::min(from->Y, to->Y), std::max(from->X, to->X), std::max(from->Y, to->Y) };
+        for (const auto& w : e.Waypoints) {
+            r.Left = std::min(r.Left, w.X); r.Right = std::max(r.Right, w.X);
+            r.Top = std::min(r.Top, w.Y); r.Bottom = std::max(r.Bottom, w.Y);
+        }
+        if (inRegion(r))
+            labeled.push_back(&e);
+    }
+    if (labeled.empty())
+        return;
+
+    std::vector<Rect> obstacles;
+    obstacles.reserve(model.Nodes().size() + model.Groups().size());
+    for (const auto& n : model.Nodes())
+        if ((m_Collapsed.empty() || !model.IsHidden(n.Id)) && inRegion(box(n)))
+            obstacles.push_back(box(n));
+    for (const auto& [id, n] : m_Collapsed)
+        obstacles.push_back(box(n));
+    for (const auto& g : model.Groups())
+        if (!g.Collapsed)
+            obstacles.push_back(model.GetGroupHeader(g));
+
+    std::vector<LabelRequest> requests;
+    std::vector<EdgeId> ids;
+    requests.reserve(labeled.size());
+    ids.reserve(labeled.size());
+    for (const Edge* e : labeled) {
+        const Node* from = EdgeEnd(model, e->From);
+        const Node* to = EdgeEnd(model, e->To);
+        if (!from || !to || (from == to && model.IsHidden(e->From))) continue;
+        // a label's size in graph units: as large as the zoom makes it, or the same on the screen at any zoom
+        const float k = e->Style.ScaleLabel ? 1.0f : 1.0f / vt.Scale;
+        const float w = k_EdgeLabelWidth * k, h = k_EdgeLabelHeight * k;
+        if (IsSelfLoop(*e, *from, *to)) {
+            const auto loop = SelfLoopPath(*from, std::max(24.0f, 10.0f / vt.Scale));   // (as DrawSelfLoop)
+            const float left = loop[1].X + 4.0f * k;
+            obstacles.push_back({ left, from->Y - h * 0.5f, left + w, from->Y + h * 0.5f });
+            continue;
+        }
+        const float lane = m_EdgePairs.contains((uint64_t)e->To << 32 | e->From) ? 7.0f / vt.Scale : 0.0f;
+        EdgeShape shape = GetEdgeShape(*e, *from, *to, lane);
+        if (shape.Path.size() < 2) continue;
+        LabelRequest r;
+        r.Preferred = shape.Label;
+        r.Line = FlattenEdgeShape(shape);
+        r.Width = w;
+        r.Height = h;
+        requests.push_back(std::move(r));
+        ids.push_back(e->Id);
+    }
+    const std::vector<Point> centers = PlaceLabels(requests, obstacles);
+    m_LabelPlaces.reserve(ids.size());
+    for (size_t i = 0; i < ids.size(); i++)
+        m_LabelPlaces.emplace(ids[i], centers[i]);
 }
 
 void NodeGraphRenderer::SetEdgeBrush(const Edge& e, EdgeEmphasis emphasis) {
@@ -570,7 +647,7 @@ float NodeGraphRenderer::EdgeWidth(const Edge& e, EdgeEmphasis emphasis) const {
 // or the same size at any zoom.
 // beside: the box starts a little right of the point (a self loop's label), instead of around it.
 void NodeGraphRenderer::DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis, bool beside) {
-    const float lw = 110.0f, lh = 18.0f, gap = 4.0f;
+    const float lw = k_EdgeLabelWidth, lh = k_EdgeLabelHeight, gap = 4.0f;
     D2D1_RECT_F box;
     if (e.Style.ScaleLabel) {
         if (vt.Scale < 0.3f) return;
@@ -1300,25 +1377,8 @@ EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, flo
 
         // every piece of the path from one node to the other (or around the node, back to it); a curve as short lines
         const bool loop = IsSelfLoop(e, *from, *to);
-        EdgeShape shape = loop ? EdgeShape{ SelfLoopPath(*from) } : GetEdgeShape(e, *from, *to);
-        std::vector<Point> path = std::move(shape.Path);
+        const std::vector<Point> path = FlattenEdgeShape(loop ? EdgeShape{ SelfLoopPath(*from) } : GetEdgeShape(e, *from, *to));
         if (path.size() < 2) continue;
-        if (!shape.Controls.empty()) {
-            const auto& controls = shape.Controls;
-            const int steps = 12;
-            std::vector<Point> flat;
-            flat.reserve((path.size() - 1) * steps + 1);
-            flat.push_back(path[0]);
-            for (size_t i = 0; i + 1 < path.size(); i++) {
-                const Point &p0 = path[i], &c1 = controls[i * 2], &c2 = controls[i * 2 + 1], &p1 = path[i + 1];
-                for (int s = 1; s <= steps; s++) {
-                    const float t = (float)s / steps, u = 1 - t;
-                    flat.push_back({ u * u * u * p0.X + 3 * u * u * t * c1.X + 3 * u * t * t * c2.X + t * t * t * p1.X,
-                                     u * u * u * p0.Y + 3 * u * u * t * c1.Y + 3 * u * t * t * c2.Y + t * t * t * p1.Y });
-                }
-            }
-            path = std::move(flat);
-        }
 
         for (size_t i = 0; i + 1 < path.size(); i++) {
             float dx = path[i + 1].X - path[i].X, dy = path[i + 1].Y - path[i].Y;

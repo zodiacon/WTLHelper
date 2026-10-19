@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <unordered_map>
 #include <unordered_set>
 #include <cstdio>
 #include <cstring>
@@ -455,6 +456,122 @@ namespace NodeGraphCtrl {
             controls.back() = { p[n - 1].X + endOut.X * d, p[n - 1].Y + endOut.Y * d };
         }
         return controls;
+    }
+
+    std::vector<Point> FlattenEdgeShape(const EdgeShape& shape, int steps) {
+        const auto& path = shape.Path;
+        const auto& controls = shape.Controls;
+        if (controls.empty() || path.size() < 2)
+            return path;
+        std::vector<Point> flat;
+        flat.reserve((path.size() - 1) * steps + 1);
+        flat.push_back(path[0]);
+        for (size_t i = 0; i + 1 < path.size(); i++) {
+            const Point &p0 = path[i], &c1 = controls[i * 2], &c2 = controls[i * 2 + 1], &p1 = path[i + 1];
+            for (int s = 1; s <= steps; s++) {
+                const float t = (float)s / steps, u = 1 - t;
+                flat.push_back({ u * u * u * p0.X + 3 * u * u * t * c1.X + 3 * u * t * t * c2.X + t * t * t * p1.X,
+                                 u * u * u * p0.Y + 3 * u * u * t * c1.Y + 3 * u * t * t * c2.Y + t * t * t * p1.Y });
+            }
+        }
+        return flat;
+    }
+
+    std::vector<Point> PlaceLabels(const std::vector<LabelRequest>& labels, const std::vector<Rect>& obstacles) {
+        // what is placed (the obstacles, then the labels), in a grid of cells for finding what is near a box
+        constexpr float cell = 128.0f;
+        std::vector<Rect> placed;
+        placed.reserve(obstacles.size() + labels.size());
+        std::vector<uint32_t> seen;     // the query a box was last counted in (each once, in however many cells)
+        seen.reserve(obstacles.size() + labels.size());
+        uint32_t query = 0;
+        std::unordered_map<int64_t, std::vector<uint32_t>> grid;
+        auto forCells = [&](const Rect& r, auto&& f) {
+            const int x0 = (int)std::floor(r.Left / cell), x1 = (int)std::floor(r.Right / cell);
+            const int y0 = (int)std::floor(r.Top / cell), y1 = (int)std::floor(r.Bottom / cell);
+            for (int x = x0; x <= x1; x++)
+                for (int y = y0; y <= y1; y++)
+                    f((int64_t)x << 32 | (uint32_t)y);
+        };
+        auto add = [&](const Rect& r) {
+            if (r.IsEmpty()) return;
+            const uint32_t index = (uint32_t)placed.size();
+            placed.push_back(r);
+            seen.push_back(0);
+            forCells(r, [&](int64_t key) { grid[key].push_back(index); });
+        };
+        auto overlap = [&](const Rect& r) {
+            float area = 0;
+            ++query;
+            forCells(r, [&](int64_t key) {
+                auto it = grid.find(key);
+                if (it == grid.end()) return;
+                for (uint32_t i : it->second) {
+                    if (seen[i] == query) continue;
+                    seen[i] = query;
+                    const Rect& o = placed[i];
+                    const float w = std::min(r.Right, o.Right) - std::max(r.Left, o.Left);
+                    const float h = std::min(r.Bottom, o.Bottom) - std::max(r.Top, o.Top);
+                    if (w > 0 && h > 0) area += w * h;
+                }
+            });
+            return area;
+        };
+        for (const auto& r : obstacles)
+            add(r);
+
+        std::vector<Point> centers;
+        centers.reserve(labels.size());
+        std::vector<float> lengths;     // along the line, to each of its points
+        for (const auto& label : labels) {
+            const float w = label.Width, h = label.Height;
+            auto box = [&](Point c) { return Rect{ c.X - w * 0.5f, c.Y - h * 0.5f, c.X + w * 0.5f, c.Y + h * 0.5f }; };
+            Point best = label.Preferred;
+            float bestArea = FLT_MAX;
+            auto fits = [&](Point c) {      // the best yet: kept; overlapping nothing (a little apart): taken
+                const Rect b = box(c);
+                const float area = overlap({ b.Left - 2, b.Top - 2, b.Right + 2, b.Bottom + 2 });
+                if (area < bestArea) { bestArea = area; best = c; }
+                return area <= 0;
+            };
+
+            if (!fits(label.Preferred) && label.Line.size() >= 2) {
+                const auto& line = label.Line;
+                lengths.clear();
+                lengths.reserve(line.size());
+                lengths.push_back(0);
+                for (size_t i = 1; i < line.size(); i++)
+                    lengths.push_back(lengths.back() + std::hypot(line[i].X - line[i - 1].X, line[i].Y - line[i - 1].Y));
+                // the point a part of the way along, and the line's way there
+                auto along = [&](float part, Point& dir) {
+                    const float at = lengths.back() * part;
+                    size_t i = 1;
+                    while (i + 1 < line.size() && lengths[i] < at) i++;
+                    const float piece = lengths[i] - lengths[i - 1];
+                    const float t = piece > 0 ? (at - lengths[i - 1]) / piece : 0;
+                    const Point& a = line[i - 1];
+                    const Point& b = line[i];
+                    dir = piece > 0 ? Point{ (b.X - a.X) / piece, (b.Y - a.Y) / piece } : Point{ 1, 0 };
+                    return Point{ a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t };
+                };
+                bool done = false;
+                Point dir;
+                for (float part : { 0.4f, 0.6f, 0.3f, 0.7f, 0.2f, 0.8f })
+                    if ((done = fits(along(part, dir)))) break;
+                // beside the line, just clear of it, then a label further out
+                for (int lane = 0; lane < 2 && !done; lane++)
+                    for (float part : { 0.5f, 0.4f, 0.6f, 0.3f, 0.7f }) {
+                        const Point p = along(part, dir);
+                        const Point n{ -dir.Y, dir.X };
+                        const float across = std::fabs(n.X) * w + std::fabs(n.Y) * h;     // the label's size that way
+                        const float d = across * (0.5f + lane) + 3.0f * (lane + 1);
+                        if ((done = fits({ p.X + n.X * d, p.Y + n.Y * d }) || fits({ p.X - n.X * d, p.Y - n.Y * d }))) break;
+                    }
+            }
+            add(box(best));
+            centers.push_back(best);
+        }
+        return centers;
     }
 
     Point EdgeLabelPoint(const std::vector<Point>& path, const std::vector<Point>& controls) {

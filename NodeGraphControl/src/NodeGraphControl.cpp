@@ -2305,6 +2305,15 @@ namespace NodeGraphCtrl {
 		return m_Renderer.GetDetailThreshold();
 	}
 
+	void CNodeGraphControl::SetAvoidLabelOverlap(bool avoid) {
+		m_Renderer.SetAvoidLabelOverlap(avoid);
+		if (m_hWnd) Invalidate(FALSE);
+	}
+
+	bool CNodeGraphControl::GetAvoidLabelOverlap() const {
+		return m_Renderer.GetAvoidLabelOverlap();
+	}
+
 	void CNodeGraphControl::SetHighlight(bool highlight) {
 		m_Highlight = highlight;
 		if (!TracksHover())
@@ -2773,7 +2782,7 @@ namespace NodeGraphCtrl {
 				return pic;
 			};
 		}
-		return m_Model->SaveSvg(path, GetBackgroundColor(), picture);
+		return m_Model->SaveSvg(path, GetBackgroundColor(), picture, GetAvoidLabelOverlap());
 	}
 
 	void CNodeGraphControl::ApplyLayout(LayoutAlgorithm algorithm, const LayoutOptions& options, bool fitInView) {
@@ -3033,7 +3042,7 @@ namespace NodeGraphCtrl {
 			extend(n.X + n.Width * 0.5f + out, n.Y + n.Height * 0.5f + out);
 		}
 		// a label's box: 110 x 18 (the renderer's), around its point or right of it
-		const float labelWidth = 110.0f, labelHeight = 18.0f;
+		const float labelWidth = k_EdgeLabelWidth, labelHeight = k_EdgeLabelHeight;
 		for (const auto& e : m_Edges) {
 			for (const auto& w : e.Waypoints)
 				extend(w.X, w.Y);
@@ -3294,7 +3303,7 @@ namespace NodeGraphCtrl {
 		}
 	}
 
-	bool NodeGraphModel::SaveSvg(const wchar_t* path, COLORREF background, const NodePictureFunc& picture) const {
+	bool NodeGraphModel::SaveSvg(const wchar_t* path, COLORREF background, const NodePictureFunc& picture, bool avoidLabelOverlap) const {
 		if (m_Nodes.empty()) return false;
 
 		const Rect bounds = GetBounds();
@@ -3394,6 +3403,45 @@ namespace NodeGraphCtrl {
 		pairs.reserve(m_Edges.size());
 		for (const auto& e : m_Edges)
 			pairs.insert((uint64_t)e.From << 32 | e.To);
+
+		// the labels kept apart as the renderer has them (PlaceEdgeLabels), at the zoom of 1
+		std::unordered_map<EdgeId, Point> labelPlaces;
+		if (avoidLabelOverlap) {
+			std::vector<Rect> obstacles;
+			obstacles.reserve(m_Nodes.size() + m_Groups.size());
+			auto box = [](const Node& n) { return Rect{ n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f }; };
+			for (const auto& n : m_Nodes)
+				if (!IsHidden(n.Id)) obstacles.push_back(box(n));
+			for (const auto& [id, n] : collapsed)
+				obstacles.push_back(box(n));
+			for (const auto& g : m_Groups)
+				if (!g.Collapsed) obstacles.push_back(GetGroupHeader(g));
+			const size_t labeled = std::count_if(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return !e.Label.empty(); });
+			std::vector<LabelRequest> requests;
+			std::vector<EdgeId> ids;
+			requests.reserve(labeled);
+			ids.reserve(labeled);
+			for (const auto& e : m_Edges) {
+				if (e.Label.empty()) continue;
+				const Node* from = edgeEnd(e.From);
+				const Node* to = edgeEnd(e.To);
+				if (!from || !to || (from == to && IsHidden(e.From))) continue;
+				if (IsSelfLoop(e, *from, *to)) {
+					const float left = SelfLoopPath(*from)[1].X + 4.0f;
+					obstacles.push_back({ left, from->Y - k_EdgeLabelHeight * 0.5f, left + k_EdgeLabelWidth, from->Y + k_EdgeLabelHeight * 0.5f });
+					continue;
+				}
+				EdgeShape shape = GetEdgeShape(e, *from, *to, pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f);
+				if (shape.Path.size() < 2) continue;
+				requests.push_back({ shape.Label, FlattenEdgeShape(shape), k_EdgeLabelWidth, k_EdgeLabelHeight });
+				ids.push_back(e.Id);
+			}
+			const std::vector<Point> centers = PlaceLabels(requests, obstacles);
+			labelPlaces.reserve(ids.size());
+			for (size_t i = 0; i < ids.size(); i++)
+				labelPlaces.emplace(ids[i], centers[i]);
+		}
+
 		for (const auto& e : m_Edges) {
 			const Node* from = edgeEnd(e.From);
 			const Node* to = edgeEnd(e.To);
@@ -3441,7 +3489,8 @@ namespace NodeGraphCtrl {
 					svg += SvgArrowhead(end, { dx / l, dy / l }, e.Style.Arrow, color);
 			}
 			if (!e.Label.empty()) {
-				const Point& at = shape.Label;
+				auto placed = labelPlaces.find(e.Id);
+				const Point& at = placed != labelPlaces.end() ? placed->second : shape.Label;
 				svg += "<text x=\"" + Num(at.X) + "\" y=\"" + Num(at.Y) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
 					XmlEscape(Utf8(e.Label)) + "</text>\n";
 			}

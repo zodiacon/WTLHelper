@@ -202,6 +202,20 @@ bool IsSelfLoop(const Edge& e, const Node& from, const Node& to);
 std::vector<Point> SelfLoopPath(const Node& n, float reach = 24.0f);
 // The point halfway along a piece of a path (the curve's, for a curved one): where the label goes.
 Point EdgeLabelPoint(const std::vector<Point>& path, const std::vector<Point>& controls);
+// The line an edge's shape is: its path, with a curve as short lines (steps for each piece).
+std::vector<Point> FlattenEdgeShape(const EdgeShape& shape, int steps = 12);
+
+// Edge labels kept from overlapping one another and what's in the way (nodes): each as near its edge's middle as it can
+// be. A label goes, in turn, at its preferred point, further along its line either way, then beside the line there; the
+// first place where it overlaps nothing, or else where it overlaps the least. One placed overlaps nothing at its preferred
+// point stays there. Returns the centers, in the order of the labels.
+struct LabelRequest {
+    Point Preferred;            // where it would go (EdgeShape::Label)
+    std::vector<Point> Line;    // its edge (FlattenEdgeShape)
+    float Width = 0, Height = 0;
+};
+std::vector<Point> PlaceLabels(const std::vector<LabelRequest>& labels, const std::vector<Rect>& obstacles);
+constexpr float k_EdgeLabelWidth = 110.0f, k_EdgeLabelHeight = 18.0f;   // the box of an edge label
 
 // Turns the UserData of nodes and edges into bytes and back, so that it is saved (Save/Load) and copied (the clipboard)
 // with them. The model doesn't own UserData: what Load makes is the host's, as before.
@@ -324,7 +338,9 @@ public:
     // background: the canvas color (CNodeGraphControl::GetBackgroundColor for the control's).
     // picture: called for every node; the nodes it returns a picture of are written as that picture (it is how
     // CNodeGraphControl::SaveSvg writes owner drawn nodes).
-    bool SaveSvg(const wchar_t* path, COLORREF background = RGB(38, 38, 38), const NodePictureFunc& picture = {}) const;
+    // avoidLabelOverlap: the edges' labels placed as PlaceLabels has them (as the control draws them by default).
+    bool SaveSvg(const wchar_t* path, COLORREF background = RGB(38, 38, 38), const NodePictureFunc& picture = {},
+                 bool avoidLabelOverlap = true) const;
 
 private:
     std::vector<Node> m_Nodes;
