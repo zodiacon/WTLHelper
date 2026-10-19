@@ -440,13 +440,14 @@ HTLITEM CTreeListViewCtrl::GetSelectedItem() const {
 	return m_Visible[idx];
 }
 
-void CTreeListViewCtrl::SelectItem(HTLITEM hItem) {
+void CTreeListViewCtrl::SelectItem(HTLITEM hItem, bool ensureVisible) {
 	ExpandToItem(hItem);
 	int idx = VisibleIndex(hItem);
 	if (idx < 0) return;
 	m_List.SetItemState(-1, 0, LVIS_SELECTED);
 	m_List.SetItemState(idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-	m_List.EnsureVisible(idx, FALSE);
+	if (ensureVisible)
+		m_List.EnsureVisible(idx, FALSE);
 }
 
 void CTreeListViewCtrl::EnsureVisible(HTLITEM hItem) {
@@ -1026,10 +1027,12 @@ LRESULT CTreeListViewCtrl::OnCustomDraw(int, LPNMHDR pnmh, BOOL&) {
 
 	if (stage == CDDS_ITEMPREPAINT) {
 		m_ClrText = m_ClrTextBk = CLR_DEFAULT;
-		RelayCustomDraw(plvcd);
+		LRESULT lr = RelayCustomDraw(plvcd);
 		// CDRF_NOTIFYPOSTPAINT ensures CDDS_ITEMPOSTPAINT fires, where we draw
 		// column 0 reliably (CDDS_SUBITEM for col 0 is not sent on all comctl32 versions).
-		return CDRF_NOTIFYSUBITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+		// Per-subitem notifications only when the parent asks for them, as with a plain list view:
+		// relaying one for every cell of every row is a large part of the painting cost.
+		return CDRF_NOTIFYPOSTPAINT | (lr & CDRF_NOTIFYSUBITEMDRAW);
 	}
 
 	if (stage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM))

@@ -16,6 +16,7 @@
 
 static DarkModeKind g_DarkModeType { DarkModeKind::Unknown };
 static HHOOK g_hHook;
+static bool g_HookWanted;	// InitDarkMode installed the hook; SuspendHook/ResumeHook remove and reinstall it
 static int g_SuspendCount;
 
 SuspendResumeHook::SuspendResumeHook() {
@@ -160,6 +161,7 @@ bool InitHooks() {
 
 bool WTLHelper::InitDarkMode(DarkModeKind type) {
 	g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, GetCurrentThreadId());
+	g_HookWanted = true;
 	g_DarkModeType = type;
 
 	DarkMode::initDarkMode();
@@ -279,12 +281,21 @@ bool WTLHelper::IsSystemInDarkMode() {
 	return key.QueryDWORDValue(L"AppsUseLightTheme", value) == ERROR_SUCCESS && value == 0;
 }
 
+// While a WH_CALLWNDPROCRET hook is installed, every SendMessage on the thread goes through the kernel and a hook
+// callback, even when the hook ignores the message. That is costly for message-heavy work such as painting a large
+// list view (thousands of notifications), so suspending removes the hook rather than just skipping it.
 int WTLHelper::SuspendHook() noexcept {
-	return ++g_SuspendCount;
+	if (g_SuspendCount++ == 0 && g_hHook) {
+		::UnhookWindowsHookEx(g_hHook);
+		g_hHook = nullptr;
+	}
+	return g_SuspendCount;
 }
 
 int WTLHelper::ResumeHook() noexcept {
-	return --g_SuspendCount;
+	if (--g_SuspendCount == 0 && g_HookWanted && !g_hHook)
+		g_hHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, OnHook, nullptr, ::GetCurrentThreadId());
+	return g_SuspendCount;
 }
 
 bool WTLHelper::SetDarkTone(DarkMode::ColorTone tone, HWND hWnd) {

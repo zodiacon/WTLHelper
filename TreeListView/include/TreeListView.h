@@ -222,7 +222,7 @@ public:
 
 	HTLITEM GetSelectedItem() const;                     // first selected item
 	HTLITEM GetNextSelectedItem(HTLITEM hPrev) const;    // pass nullptr for first; multi-select enumeration
-	void    SelectItem(HTLITEM hItem);
+	void    SelectItem(HTLITEM hItem, bool ensureVisible = true);  // false: keep the scroll position (e.g. restoring selection after an update)
 	void    SelectAll();
 	void    DeselectAll();
 	void    EnsureVisible(HTLITEM hItem);
