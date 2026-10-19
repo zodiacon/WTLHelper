@@ -1,6 +1,7 @@
 #include "NodeGraphImaging.h"
 #include "NodeGraphSerialization.h"
 #include <shlwapi.h>
+#include <dwrite.h>
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -11,6 +12,7 @@
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "dwrite.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -456,6 +458,32 @@ namespace NodeGraphCtrl {
             controls.back() = { p[n - 1].X + endOut.X * d, p[n - 1].Y + endOut.Y * d };
         }
         return controls;
+    }
+
+    float EdgeLabelWidth(const std::wstring& text) {
+        // measured once for each text (the labels of a graph repeat), in the renderer's font for them
+        static ComPtr<IDWriteFactory> factory;
+        static ComPtr<IDWriteTextFormat> format;
+        static bool tried = false;
+        static std::unordered_map<std::wstring, float> widths;
+        if (!tried) {
+            tried = true;
+            if (SUCCEEDED(::DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(factory.GetAddressOf()))))
+                factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                    11.0f, L"en-US", format.GetAddressOf());
+        }
+        if (auto it = widths.find(text); it != widths.end())
+            return it->second;
+        float width = k_EdgeLabelMaxWidth;      // (unmeasured: the most)
+        ComPtr<IDWriteTextLayout> layout;
+        DWRITE_TEXT_METRICS metrics{};
+        if (format && SUCCEEDED(factory->CreateTextLayout(text.c_str(), (UINT32)text.size(), format.Get(), 1e6f, 100.0f, layout.GetAddressOf())) &&
+            SUCCEEDED(layout->GetMetrics(&metrics)))
+            width = std::min(std::ceil(metrics.widthIncludingTrailingWhitespace) + k_EdgeLabelPadding * 2, k_EdgeLabelMaxWidth);
+        if (widths.size() >= 4096)      // (a graph whose labels are all different: not kept forever)
+            widths.clear();
+        widths.emplace(text, width);
+        return width;
     }
 
     std::vector<Point> FlattenEdgeShape(const EdgeShape& shape, int steps) {

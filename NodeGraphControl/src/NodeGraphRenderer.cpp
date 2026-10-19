@@ -55,6 +55,12 @@ HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     if (FAILED(hr)) return hr;
     m_EdgeTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     m_EdgeTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    // one line in its box (EdgeLabelWidth), cut short when longer than the most
+    m_EdgeTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    hr = m_DwFactory->CreateEllipsisTrimmingSign(m_EdgeTextFormat.Get(), m_EdgeEllipsis.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    DWRITE_TRIMMING edgeTrimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+    m_EdgeTextFormat->SetTrimming(&edgeTrimming, m_EdgeEllipsis.Get());
 
     hr = m_DwFactory->CreateTextFormat(
         L"Consolas", nullptr,
@@ -109,8 +115,10 @@ void NodeGraphRenderer::Shutdown() {
     DiscardDeviceResources();
     m_DashStyle.Reset();
     for (auto& style : m_LineStyles) style.Reset();
+    m_EdgeEllipsis.Reset();
     m_EdgeTextFormat.Reset();
     m_CodeTextFormat.Reset();
+    m_PortTextFormat.Reset();
     m_Ellipsis.Reset();
     m_TitleTextFormat.Reset();
     m_TextFormat.Reset();
@@ -611,7 +619,7 @@ void NodeGraphRenderer::PlaceEdgeLabels(const NodeGraphModel& model, const ViewT
         if (!from || !to || (from == to && model.IsHidden(e->From))) continue;
         // a label's size in graph units: as large as the zoom makes it, or the same on the screen at any zoom
         const float k = e->Style.ScaleLabel ? 1.0f : 1.0f / vt.Scale;
-        const float w = k_EdgeLabelWidth * k, h = k_EdgeLabelHeight * k;
+        const float w = EdgeLabelWidth(e->Label) * k, h = k_EdgeLabelHeight * k;
         if (IsSelfLoop(*e, *from, *to)) {
             const auto loop = SelfLoopPath(*from, std::max(24.0f, 10.0f / vt.Scale));   // (as DrawSelfLoop)
             const float left = loop[1].X + 4.0f * k;
@@ -647,7 +655,7 @@ float NodeGraphRenderer::EdgeWidth(const Edge& e, EdgeEmphasis emphasis) const {
 // or the same size at any zoom.
 // beside: the box starts a little right of the point (a self loop's label), instead of around it.
 void NodeGraphRenderer::DrawEdgeLabel(const Edge& e, const Point& at, const ViewTransform& vt, EdgeEmphasis emphasis, bool beside) {
-    const float lw = k_EdgeLabelWidth, lh = k_EdgeLabelHeight, gap = 4.0f;
+    const float lw = EdgeLabelWidth(e.Label), lh = k_EdgeLabelHeight, gap = 4.0f;
     D2D1_RECT_F box;
     if (e.Style.ScaleLabel) {
         if (vt.Scale < 0.3f) return;

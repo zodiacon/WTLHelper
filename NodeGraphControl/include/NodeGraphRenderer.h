@@ -219,6 +219,7 @@ private:
     ComPtr<IDWriteFactory>      m_DwFactory;
     ComPtr<IDWriteTextFormat>   m_TextFormat;      // 13pt, used for node labels
     ComPtr<IDWriteTextFormat>   m_EdgeTextFormat;  // 11pt, used for edge labels
+    ComPtr<IDWriteInlineObject> m_EdgeEllipsis;
     ComPtr<IDWriteTextFormat>   m_CodeTextFormat;  // 12 units monospaced, left aligned, for nodes with NodeStyle::Code
     ComPtr<IDWriteTextFormat>   m_TitleTextFormat; // 12 units bold, left aligned, one line with an ellipsis, for NodeContent::Title
     ComPtr<IDWriteTextFormat>   m_PortTextFormat;  // 10 units, one line, for the names of ports

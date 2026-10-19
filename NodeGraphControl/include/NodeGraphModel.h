@@ -215,7 +215,10 @@ struct LabelRequest {
     float Width = 0, Height = 0;
 };
 std::vector<Point> PlaceLabels(const std::vector<LabelRequest>& labels, const std::vector<Rect>& obstacles);
-constexpr float k_EdgeLabelWidth = 110.0f, k_EdgeLabelHeight = 18.0f;   // the box of an edge label
+// The box of an edge label: as wide as its text (Segoe UI 11) with a little room each side, up to the most (the text
+// cut short with an ellipsis), in graph units at the zoom of 1 (as many pixels for a label of the same size at any zoom).
+constexpr float k_EdgeLabelMaxWidth = 220.0f, k_EdgeLabelPadding = 4.0f, k_EdgeLabelHeight = 18.0f;
+float EdgeLabelWidth(const std::wstring& text);
 
 // Turns the UserData of nodes and edges into bytes and back, so that it is saved (Save/Load) and copied (the clipboard)
 // with them. The model doesn't own UserData: what Load makes is the host's, as before.
@@ -301,6 +304,16 @@ public:
     // the labels of the edges (the size they have at the zoom of 1) and the boxes of the groups. Empty without nodes.
     Rect GetBounds() const;
 
+    // The labels of the edges (but loops') at the zoom of 1: where each would go (the middle of its edge) and where it
+    // goes kept apart from the others and the nodes (PlaceLabels; without avoidOverlap, there too), as SaveSvg has them
+    // and the control draws the ones that scale with the zoom.
+    struct EdgeLabelPlace {
+        EdgeId Edge;
+        Point  Preferred, Center;
+        float  Width;
+    };
+    std::vector<EdgeLabelPlace> PlaceEdgeLabels(bool avoidOverlap = true) const;
+
     void Clear();   // the nodes, edges and images
 
     // Saves and loads UserData (Save/Load, the clipboard). Not owned; null: UserData isn't kept.
@@ -350,6 +363,15 @@ private:
     std::unordered_map<NodeId, GroupId> m_GroupOf;
     GroupId m_NextGroupId = 0;
     void ForgetMembers(const std::vector<NodeId>& nodes);   // nodes removed: out of their groups
+
+    // The box of the edges' labels (but loops'), both where they would go and where they go kept apart (GetBounds),
+    // made again only when what places them changes (a fingerprint of it: the nodes, edges and groups can change
+    // through their references without the model knowing). Empty: no labels.
+    Rect LabelBounds() const;
+    uint64_t LabelFingerprint() const;
+    mutable uint64_t m_LabelBoundsKey = 0;
+    mutable Rect     m_LabelBounds;
+    mutable bool     m_LabelBoundsValid = false;
 
     // id -> index in m_Nodes / m_Edges, made again on the next lookup after a removal (the indices after it move)
     mutable std::unordered_map<NodeId, uint32_t> m_NodeIndex;

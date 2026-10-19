@@ -3041,8 +3041,13 @@ namespace NodeGraphCtrl {
 			extend(n.X - n.Width * 0.5f - out, n.Y - n.Height * 0.5f - out);
 			extend(n.X + n.Width * 0.5f + out, n.Y + n.Height * 0.5f + out);
 		}
-		// a label's box: 110 x 18 (the renderer's), around its point or right of it
-		const float labelWidth = k_EdgeLabelWidth, labelHeight = k_EdgeLabelHeight;
+		// a label's box (the renderer's): right of a loop, or where it would go and where it goes kept apart (so that the
+		// bounds are right either way)
+		const float labelHeight = k_EdgeLabelHeight;
+		if (const Rect labels = LabelBounds(); !labels.IsEmpty()) {
+			extend(labels.Left, labels.Top);
+			extend(labels.Right, labels.Bottom);
+		}
 		for (const auto& e : m_Edges) {
 			for (const auto& w : e.Waypoints)
 				extend(w.X, w.Y);
@@ -3063,19 +3068,10 @@ namespace NodeGraphCtrl {
 				const float right = from->X + from->Width * 0.5f + 30.0f;	// the loop goes 24 units to the right of the node
 				extend(right, from->Y);
 				if (!e.Label.empty()) {
+					const float labelWidth = EdgeLabelWidth(e.Label);
 					extend(right - 2.0f + labelWidth, from->Y - labelHeight * 0.5f);
 					extend(right - 2.0f + labelWidth, from->Y + labelHeight * 0.5f);
 				}
-			}
-			else if (!e.Label.empty()) {
-				// where EdgeLabelPoint puts it, near enough: the middle bend or the middle of the middle piece, through
-				// the centers (no path is made: this is on every paint with scroll bars)
-				const size_t count = e.Waypoints.size() + 2;
-				auto point = [&](size_t i) { return i == 0 ? Point{ from->X, from->Y } : i == count - 1 ? Point{ to->X, to->Y } : e.Waypoints[i - 1]; };
-				const Point a = point((count - 1) / 2), b = point(count / 2);
-				const float x = (a.X + b.X) * 0.5f, y = (a.Y + b.Y) * 0.5f;
-				extend(x - labelWidth * 0.5f, y - labelHeight * 0.5f);
-				extend(x + labelWidth * 0.5f, y + labelHeight * 0.5f);
 			}
 		}
 		for (const auto& g : m_Groups) {
@@ -3085,6 +3081,114 @@ namespace NodeGraphCtrl {
 			extend(box.Right, box.Bottom);
 		}
 		return r;
+	}
+
+	Rect NodeGraphModel::LabelBounds() const {
+		if (std::none_of(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return !e.Label.empty(); }))
+			return {};
+		const uint64_t key = LabelFingerprint();
+		if (m_LabelBoundsValid && key == m_LabelBoundsKey)
+			return m_LabelBounds;
+		Rect r{ FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX };
+		for (const auto& place : PlaceEdgeLabels())
+			for (const Point& at : { place.Preferred, place.Center }) {
+				r.Left = std::min(r.Left, at.X - place.Width * 0.5f);
+				r.Right = std::max(r.Right, at.X + place.Width * 0.5f);
+				r.Top = std::min(r.Top, at.Y - k_EdgeLabelHeight * 0.5f);
+				r.Bottom = std::max(r.Bottom, at.Y + k_EdgeLabelHeight * 0.5f);
+			}
+		m_LabelBounds = r.Left <= r.Right ? r : Rect{};
+		m_LabelBoundsKey = key;
+		m_LabelBoundsValid = true;
+		return m_LabelBounds;
+	}
+
+	// FNV-1a over all that PlaceEdgeLabels reads
+	uint64_t NodeGraphModel::LabelFingerprint() const {
+		uint64_t h = 14695981039346656037ull;
+		auto add = [&](const void* data, size_t size) {
+			auto bytes = static_cast<const uint8_t*>(data);
+			for (size_t i = 0; i < size; i++) h = (h ^ bytes[i]) * 1099511628211ull;
+		};
+		auto value = [&](const auto& v) { add(&v, sizeof(v)); };
+		value(m_Nodes.size());
+		for (const auto& n : m_Nodes) {
+			value(n.Id); value(n.X); value(n.Y); value(n.Width); value(n.Height); value(n.Style.Shape);
+			value(n.Ports.size());
+			for (const auto& p : n.Ports) { value(p.Id); value(p.Side); value(p.Offset); }
+		}
+		value(m_Edges.size());
+		for (const auto& e : m_Edges) {
+			value(e.From); value(e.To); value(e.FromPort); value(e.ToPort); value(e.Style.Curved);
+			value(e.Waypoints.size());
+			if (!e.Waypoints.empty()) add(e.Waypoints.data(), e.Waypoints.size() * sizeof(Point));
+			value(e.Label.size());
+			if (!e.Label.empty()) add(e.Label.data(), e.Label.size() * sizeof(wchar_t));
+		}
+		value(m_Groups.size());
+		for (const auto& g : m_Groups) {
+			value(g.Id); value(g.Collapsed); value(g.Title.size());
+			value(g.Nodes.size());
+			if (!g.Nodes.empty()) add(g.Nodes.data(), g.Nodes.size() * sizeof(NodeId));
+		}
+		return h;
+	}
+
+	std::vector<NodeGraphModel::EdgeLabelPlace> NodeGraphModel::PlaceEdgeLabels(bool avoidOverlap) const {
+		// an end in a collapsed group is its box
+		std::unordered_map<GroupId, Node> collapsed;
+		for (const auto& g : m_Groups)
+			if (g.Collapsed && !g.Nodes.empty())
+				collapsed.emplace(g.Id, CollapsedNode(g));
+		auto edgeEnd = [&](NodeId id) -> const Node* {
+			if (!collapsed.empty())
+				if (auto it = collapsed.find(GroupOf(id)); it != collapsed.end()) return &it->second;
+			return GetNode(id);
+		};
+		// an edge with one going the other way is in its lane (7 units to its right), as the renderer has it
+		std::unordered_set<uint64_t> pairs;
+		pairs.reserve(m_Edges.size());
+		for (const auto& e : m_Edges)
+			pairs.insert((uint64_t)e.From << 32 | e.To);
+
+		std::vector<Rect> obstacles;
+		obstacles.reserve(m_Nodes.size() + m_Groups.size());
+		auto box = [](const Node& n) { return Rect{ n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f }; };
+		for (const auto& n : m_Nodes)
+			if (!IsHidden(n.Id)) obstacles.push_back(box(n));
+		for (const auto& [id, n] : collapsed)
+			obstacles.push_back(box(n));
+		for (const auto& g : m_Groups)
+			if (!g.Collapsed) obstacles.push_back(GetGroupHeader(g));
+
+		const size_t labeled = std::count_if(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return !e.Label.empty(); });
+		std::vector<LabelRequest> requests;
+		std::vector<EdgeLabelPlace> places;
+		requests.reserve(labeled);
+		places.reserve(labeled);
+		for (const auto& e : m_Edges) {
+			if (e.Label.empty()) continue;
+			const Node* from = edgeEnd(e.From);
+			const Node* to = edgeEnd(e.To);
+			if (!from || !to || (from == to && IsHidden(e.From))) continue;
+			const float width = EdgeLabelWidth(e.Label);
+			if (IsSelfLoop(e, *from, *to)) {	// (right of the loop: in the way of the others)
+				const float left = SelfLoopPath(*from)[1].X + 4.0f;
+				obstacles.push_back({ left, from->Y - k_EdgeLabelHeight * 0.5f, left + width, from->Y + k_EdgeLabelHeight * 0.5f });
+				continue;
+			}
+			EdgeShape shape = GetEdgeShape(e, *from, *to, pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f);
+			if (shape.Path.size() < 2) continue;
+			places.push_back({ e.Id, shape.Label, shape.Label, width });
+			if (avoidOverlap)
+				requests.push_back({ shape.Label, FlattenEdgeShape(shape), width, k_EdgeLabelHeight });
+		}
+		if (avoidOverlap) {
+			const std::vector<Point> centers = PlaceLabels(requests, obstacles);
+			for (size_t i = 0; i < places.size(); i++)
+				places[i].Center = centers[i];
+		}
+		return places;
 	}
 
 	void NodeGraphModel::Clear() {
@@ -3192,6 +3296,7 @@ namespace NodeGraphCtrl {
 		// ending in an ellipsis, as DirectWrite trims them on the screen. Made when first needed.
 		class TitleFitter {
 		public:
+			TitleFitter(DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_SEMI_BOLD, float size = 12.0f) : m_Weight(weight), m_Size(size) {}
 			std::wstring Fit(const std::wstring& title, float width) {
 				if (!Ready() || Width(title) <= width)
 					return title;
@@ -3211,14 +3316,16 @@ namespace NodeGraphCtrl {
 		private:
 			ComPtr<IDWriteFactory> m_Factory;
 			ComPtr<IDWriteTextFormat> m_Format;
+			DWRITE_FONT_WEIGHT m_Weight;
+			float m_Size;
 			bool m_Tried = false;
 
 			bool Ready() {
 				if (!m_Tried) {
 					m_Tried = true;
 					if (SUCCEEDED(::DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(m_Factory.GetAddressOf()))))
-						m_Factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
-							DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-US", m_Format.GetAddressOf());
+						m_Factory->CreateTextFormat(L"Segoe UI", nullptr, m_Weight, DWRITE_FONT_STYLE_NORMAL,
+							DWRITE_FONT_STRETCH_NORMAL, m_Size, L"en-US", m_Format.GetAddressOf());
 				}
 				return m_Format != nullptr;
 			}
@@ -3348,6 +3455,8 @@ namespace NodeGraphCtrl {
 		}
 		auto isWritten = [&](ImageId id) { return std::find(written.begin(), written.end(), id) != written.end(); };
 		TitleFitter titles;
+		TitleFitter edgeLabels(DWRITE_FONT_WEIGHT_NORMAL, 11.0f);	// (as the renderer cuts them short)
+		auto edgeLabel = [&](const std::wstring& label) { return XmlEscape(Utf8(edgeLabels.Fit(label, k_EdgeLabelMaxWidth - k_EdgeLabelPadding * 2))); };
 
 		svg += "<rect x=\"" + Num(minX) + "\" y=\"" + Num(minY) + "\" width=\"" + Num(maxX - minX) + "\" height=\"" + Num(maxY - minY) + "\" fill=\"" + Hex(background) + "\"/>\n";
 
@@ -3407,39 +3516,10 @@ namespace NodeGraphCtrl {
 		// the labels kept apart as the renderer has them (PlaceEdgeLabels), at the zoom of 1
 		std::unordered_map<EdgeId, Point> labelPlaces;
 		if (avoidLabelOverlap) {
-			std::vector<Rect> obstacles;
-			obstacles.reserve(m_Nodes.size() + m_Groups.size());
-			auto box = [](const Node& n) { return Rect{ n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f }; };
-			for (const auto& n : m_Nodes)
-				if (!IsHidden(n.Id)) obstacles.push_back(box(n));
-			for (const auto& [id, n] : collapsed)
-				obstacles.push_back(box(n));
-			for (const auto& g : m_Groups)
-				if (!g.Collapsed) obstacles.push_back(GetGroupHeader(g));
-			const size_t labeled = std::count_if(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return !e.Label.empty(); });
-			std::vector<LabelRequest> requests;
-			std::vector<EdgeId> ids;
-			requests.reserve(labeled);
-			ids.reserve(labeled);
-			for (const auto& e : m_Edges) {
-				if (e.Label.empty()) continue;
-				const Node* from = edgeEnd(e.From);
-				const Node* to = edgeEnd(e.To);
-				if (!from || !to || (from == to && IsHidden(e.From))) continue;
-				if (IsSelfLoop(e, *from, *to)) {
-					const float left = SelfLoopPath(*from)[1].X + 4.0f;
-					obstacles.push_back({ left, from->Y - k_EdgeLabelHeight * 0.5f, left + k_EdgeLabelWidth, from->Y + k_EdgeLabelHeight * 0.5f });
-					continue;
-				}
-				EdgeShape shape = GetEdgeShape(e, *from, *to, pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f);
-				if (shape.Path.size() < 2) continue;
-				requests.push_back({ shape.Label, FlattenEdgeShape(shape), k_EdgeLabelWidth, k_EdgeLabelHeight });
-				ids.push_back(e.Id);
-			}
-			const std::vector<Point> centers = PlaceLabels(requests, obstacles);
-			labelPlaces.reserve(ids.size());
-			for (size_t i = 0; i < ids.size(); i++)
-				labelPlaces.emplace(ids[i], centers[i]);
+			const auto places = PlaceEdgeLabels();
+			labelPlaces.reserve(places.size());
+			for (const auto& place : places)
+				labelPlaces.emplace(place.Edge, place.Center);
 		}
 
 		for (const auto& e : m_Edges) {
@@ -3459,7 +3539,7 @@ namespace NodeGraphCtrl {
 					svg += SvgArrowhead(loop[3], { -1, 0 }, e.Style.Arrow, color);
 				if (!e.Label.empty())	// right of the loop
 					svg += "<text x=\"" + Num(loop[1].X + 4) + "\" y=\"" + Num(from->Y) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" dominant-baseline=\"central\">" +
-						XmlEscape(Utf8(e.Label)) + "</text>\n";
+						edgeLabel(e.Label) + "</text>\n";
 				continue;
 			}
 
@@ -3492,7 +3572,7 @@ namespace NodeGraphCtrl {
 				auto placed = labelPlaces.find(e.Id);
 				const Point& at = placed != labelPlaces.end() ? placed->second : shape.Label;
 				svg += "<text x=\"" + Num(at.X) + "\" y=\"" + Num(at.Y) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
-					XmlEscape(Utf8(e.Label)) + "</text>\n";
+					edgeLabel(e.Label) + "</text>\n";
 			}
 		}
 
