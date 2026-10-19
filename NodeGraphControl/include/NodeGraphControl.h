@@ -31,6 +31,8 @@
 #define NGCN_CONTEXTMENU   11   // lParam -> NODEGRAPHCONTEXTMENUNOTIFY*, a context menu is asked for (right click, Shift+F10,
                                 //   the menu key); the node or edge is selected first. Return nonzero if it was shown;
                                 //   0: WM_CONTEXTMENU goes on to the parent, as without the notification
+#define NGCN_CANCONNECT    12   // lParam -> NODEGRAPHCONNECTNOTIFY*, a new edge (dragged) would connect these: return nonzero to
+                                //   refuse it (asked while the mouse moves over a place, and again when it's let go there)
 
 namespace NodeGraphCtrl {
 
@@ -50,13 +52,24 @@ struct NODEGRAPHEDGENOTIFY {
     NodeId  FromNode;
     NodeId  ToNode;
     EdgeId  EdgeId;
+    PortId  FromPort;   // the ports it connects (InvalidPort: on the outline)
+    PortId  ToPort;
+};
+
+struct NODEGRAPHCONNECTNOTIFY {
+    NMHDR   Hdr;
+    NodeId  FromNode;   // the edge's direction: from an output (or a node) to an input (or a node)
+    PortId  FromPort;
+    NodeId  ToNode;
+    PortId  ToPort;
 };
 
 struct NODEGRAPHTOOLTIPNOTIFY {
     NMHDR    Hdr;
-    NodeId   NodeId;       // InvalidNode if not over a node
+    NodeId   NodeId;       // InvalidNode if not over a node (over a port: its node)
     EdgeId   EdgeId;       // InvalidEdge if not over an edge
     wchar_t  SzText[256];  // pre-filled with default label; host may override
+    PortId   PortId;       // over a port of NodeId: it (pre-filled with its name), else InvalidPort
 };
 
 struct NODEGRAPHCONTEXTMENUNOTIFY {
@@ -384,7 +397,13 @@ private:
 
     // ---- Internal helpers ----
     LRESULT Notify(UINT code, NodeId nodeId, EdgeId edgeId, const D2D1_POINT_2F* at = nullptr);   // at: in graph space; the parent's result
-    void NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId);
+    void NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId, PortId fromPort = InvalidPort, PortId toPort = InvalidPort);
+    bool CanConnect(NodeId from, PortId fromPort, NodeId to, PortId toPort);
+    // a new edge (m_EdgePreview): what it would connect to with the mouse there (with the hovered port), and making it
+    void StartConnection(NodeId node, PortId port, POINT pt, bool leftButton);
+    void UpdateConnectionTarget(POINT pt);
+    void FinishConnection();
+    void CancelConnection();
     void NotifyUndoChanged();
     void PushUndo(std::unique_ptr<UndoCmd> cmd);
     void TrimUndo();
@@ -399,6 +418,7 @@ private:
     void CancelLabelEdit();
     RECT LabelEditRect(const Node& n) const;
     void SetHoveredNode(NodeId id);
+    void SetHoveredPort(NodeId node, PortId port);
     void OnModelReset();
     void MoveSelectionBy(float dx, float dy);
     void SelectNext(bool backwards);
@@ -452,6 +472,8 @@ private:
     bool m_PendingInvalidate = false;
 
     NodeId m_HoveredNode = InvalidNode;     // tracked only while there is a node draw handler
+    NodeId m_HoveredPortNode = InvalidNode; // the port under the mouse (or the one a new edge would connect to)
+    PortId m_HoveredPort = InvalidPort;
 
     size_t m_UndoLimit      = 0;
     bool m_Highlight        = false;

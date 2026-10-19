@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <cmath>
+#include <algorithm>
 #include "NodeGraphControl.h"
 
 #pragma comment(lib, "NodeGraphControl.lib")
@@ -45,6 +46,7 @@ static constexpr int IDC_DISTRIBUTEV = 126;
 static constexpr int IDC_ALIGN = 130;   // IDC_ALIGN + (int)Alignment
 static constexpr int IDC_GROUP = 140;
 static constexpr int IDC_UNGROUP = 141;
+static constexpr int IDC_DATAFLOW = 142;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -234,6 +236,60 @@ private:
 };
 
 static DemoDrawHandler g_drawHandler;
+
+// A node of a data flow: its name in the title band, inputs on the left and outputs on the right below it, one row each.
+static NodeId AddProcessor(NodeGraphModel& m, const wchar_t* name, float x, float y,
+    std::initializer_list<const wchar_t*> inputs, std::initializer_list<const wchar_t*> outputs) {
+    const float title = 24, row = 22;
+    const float height = title + 8 + row * std::max(inputs.size(), outputs.size());
+    const NodeId id = m.AddNode(L"", x, y, 150, height);
+    Node& n = *m.GetNode(id);
+    n.Content.Title = name;
+    n.Content.LabelPos = LabelPlacement::Hidden;
+    n.Ports.reserve(inputs.size() + outputs.size());
+    auto add = [&](std::initializer_list<const wchar_t*> names, PortSide side, PortDirection direction) {
+        int i = 0;
+        for (const wchar_t* port : names)
+            m.AddPort(id, port, side, direction, (title + 4 + row * (i++ + 0.5f)) / height);
+    };
+    add(inputs, PortSide::Left, PortDirection::In);
+    add(outputs, PortSide::Right, PortDirection::Out);
+    return id;
+}
+
+// Nodes with ports, and wires between them.
+static void PopulateDataFlow(NodeGraphModel& m) {
+    m.Clear();
+    const NodeId read = AddProcessor(m, L"Read File", 100, 200, {}, { L"bytes", L"size" });
+    const NodeId decode = AddProcessor(m, L"Decode", 330, 200, { L"bytes" }, { L"image", L"metadata" });
+    const NodeId width = AddProcessor(m, L"Width = 640", 330, 360, {}, { L"value" });
+    const NodeId height = AddProcessor(m, L"Height = 480", 330, 450, {}, { L"value" });
+    const NodeId resize = AddProcessor(m, L"Resize", 580, 260, { L"image", L"width", L"height" }, { L"image" });
+    const NodeId blur = AddProcessor(m, L"Blur", 800, 200, { L"image", L"radius" }, { L"image" });
+    const NodeId save = AddProcessor(m, L"Save PNG", 1030, 260, { L"image", L"path" }, {});
+    // ports on other shapes and sides: on the outline
+    const NodeId mix = m.AddNode(L"Mix", 600, 560, 110, 70);
+    m.GetNode(mix)->Style.Shape = NodeShape::Ellipse;
+    m.GetNode(mix)->Style.FillColor = RGB(90, 70, 130);
+    const PortId mixA = m.AddPort(mix, L"a", PortSide::Left, PortDirection::In, 0.3f);
+    const PortId mixB = m.AddPort(mix, L"b", PortSide::Left, PortDirection::In, 0.7f);
+    const PortId mixOut = m.AddPort(mix, L"", PortSide::Bottom, PortDirection::Out);
+    const NodeId log = m.AddNode(L"Log", 600, 690, 100, 36);
+    const PortId logIn = m.AddPort(log, L"", PortSide::Top, PortDirection::In);
+
+    // the ports in the order they were added: inputs first
+    m.Connect(read, 0, decode, 0);
+    m.Connect(decode, 1, resize, 0);
+    m.Connect(width, 0, resize, 1);
+    m.Connect(height, 0, resize, 2);
+    m.Connect(resize, 3, blur, 0);
+    m.Connect(blur, 2, save, 0);
+    m.Connect(decode, 2, mix, mixA, L"metadata");
+    m.Connect(height, 0, mix, mixB);
+    m.Connect(mix, mixOut, log, logIn);
+    for (const auto& e : m.Edges())
+        m.GetEdge(e.Id)->Style.Curved = true;
+}
 
 // Nodes with icons, titles and images, in each of the ways they can be placed.
 static void PopulateContent(NodeGraphModel& m) {
@@ -586,7 +642,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 // what a menu would have for a node, an edge or the canvas
                 auto* cm = reinterpret_cast<NODEGRAPHCONTEXTMENUNOTIFY*>(lParam);
                 NodeGraphModel& m = *g_graph.GetModel();
-                enum { Rename = 1, Delete, Rectangle, Ellipse, Diamond, AddHere, PasteHere, Fit, Collapse, Ungroup };
+                enum { Rename = 1, Delete, Rectangle, Ellipse, Diamond, AddHere, PasteHere, Fit, Collapse, Ungroup, AddInput, AddOutput, RemovePorts };
                 HMENU menu = CreatePopupMenu();
                 if (const Group* g = m.GetGroup(cm->GroupId)) {
                     AppendMenu(menu, MF_STRING, Collapse, g->Collapsed ? L"&Expand" : L"&Collapse");
@@ -602,6 +658,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     AppendMenu(menu, MF_STRING, Rename, L"&Rename\tF2");
                     AppendMenu(menu, MF_STRING, Delete, L"&Delete\tDel");
                     AppendMenu(menu, MF_POPUP, (UINT_PTR)shapes, L"&Shape");
+                    AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenu(menu, MF_STRING, AddInput, L"Add &Input Port");
+                    AppendMenu(menu, MF_STRING, AddOutput, L"Add &Output Port");
+                    AppendMenu(menu, MF_STRING | (n->Ports.empty() ? MF_GRAYED : 0), RemovePorts, L"Remove &Ports");
                 }
                 else if (cm->EdgeId != InvalidEdge)
                     AppendMenu(menu, MF_STRING, Delete, L"&Delete Edge\tDel");
@@ -633,8 +693,49 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     case Fit: g_graph.FitInView(); break;
                     case Collapse: g_graph.SetGroupCollapsed(cm->GroupId, !m.GetGroup(cm->GroupId)->Collapsed); break;
                     case Ungroup: g_graph.Ungroup(cm->GroupId); break;
+                    case AddInput: case AddOutput: {
+                        // spread on its side with the others
+                        const bool input = cmd == AddInput;
+                        const size_t count = std::count_if(m.GetNode(cm->NodeId)->Ports.begin(), m.GetNode(cm->NodeId)->Ports.end(),
+                            [&](const Port& p) { return p.Direction == (input ? PortDirection::In : PortDirection::Out); });
+                        const std::wstring name = (input ? L"in" : L"out") + std::to_wstring(count + 1);
+                        m.AddPort(cm->NodeId, name, input ? PortSide::Left : PortSide::Right, input ? PortDirection::In : PortDirection::Out);
+                        g_graph.Refresh();
+                        break;
+                    }
+                    case RemovePorts:
+                        while (!m.GetNode(cm->NodeId)->Ports.empty())
+                            m.RemovePort(cm->NodeId, m.GetNode(cm->NodeId)->Ports.back().Id);
+                        g_graph.Refresh();
+                        break;
                 }
                 return TRUE;
+            }
+            case NGCN_CANCONNECT: {
+                // an input takes one edge
+                auto* cn = reinterpret_cast<NODEGRAPHCONNECTNOTIFY*>(lParam);
+                if (cn->ToPort == InvalidPort) return FALSE;
+                for (const auto& e : g_graph.GetModel()->Edges())
+                    if (e.To == cn->ToNode && e.ToPort == cn->ToPort) {
+                        SetWindowText(g_status, L"That input is connected already");
+                        return TRUE;
+                    }
+                return FALSE;
+            }
+            case NGCN_EDGEADDED: {
+                auto* en = reinterpret_cast<NODEGRAPHEDGENOTIFY*>(lParam);
+                const NodeGraphModel& m = *g_graph.GetModel();
+                auto name = [&](NodeId node, PortId port) -> std::wstring {
+                    const Node* n = m.GetNode(node);
+                    if (!n) return L"?";
+                    std::wstring s = n->Content.Title.empty() ? n->Label : n->Content.Title;
+                    if (const Port* p = FindPort(*n, port)) s += L"." + p->Name;
+                    return s;
+                };
+                wchar_t buf[300];
+                swprintf_s(buf, L"Connected %s to %s", name(en->FromNode, en->FromPort).c_str(), name(en->ToNode, en->ToPort).c_str());
+                SetWindowText(g_status, buf);
+                break;
             }
             case NGCN_NODEDBLCLICK: {
                 // a double click on the progress bar is two clicks of the button, not a rename
@@ -684,6 +785,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         case IDC_CONTENT:
             PopulateContent(*g_graph.GetModel());
+            g_graph.FitInView();
+            UpdateStatus(hwnd);
+            break;
+        case IDC_DATAFLOW:
+            PopulateDataFlow(*g_graph.GetModel());
             g_graph.FitInView();
             UpdateStatus(hwnd);
             break;
@@ -910,6 +1016,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hGraph, MF_STRING, IDC_SAMPLE,  L"&Sample Graph");
     AppendMenu(hGraph, MF_STRING, IDC_CONTENT, L"C&ontent Sample");
+    AppendMenu(hGraph, MF_STRING, IDC_DATAFLOW, L"&Data Flow Sample");
     AppendMenu(hGraph, MF_STRING, IDC_BTNCLR,  L"&Clear All");
     AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hGraph, L"&Graph");
 

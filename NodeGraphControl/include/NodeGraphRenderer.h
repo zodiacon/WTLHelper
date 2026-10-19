@@ -36,8 +36,15 @@ struct ViewTransform {
 struct EdgePreview {
     bool   Active   = false;
     NodeId FromNode = InvalidNode;
+    PortId FromPort = InvalidPort;      // dragged out of a port of it
     float  ScreenX  = 0;  // current mouse position in client/screen coords
     float  ScreenY  = 0;
+    // what it would connect to where the mouse is (InvalidNode: nothing); the line ends on the port. Reversed: the edge
+    // would go from there to FromNode (dragged out of an input).
+    NodeId ToNode   = InvalidNode;
+    PortId ToPort   = InvalidPort;
+    bool   Reversed = false;
+    bool   LeftButton = false;          // started with the left button (out of a port), not the right
 };
 
 struct RubberBand {
@@ -135,6 +142,8 @@ public:
 
     // Hit testing in graph space.
     NodeId HitTestNode(const NodeGraphModel& model, float gx, float gy) const;
+    // The port at a point of the screen (as drawn: none where the view is drawn plain), of the top node there.
+    bool   HitTestPort(const NodeGraphModel& model, const ViewTransform& vt, float sx, float sy, NodeId& node, PortId& port) const;
     EdgeId HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance = 5.0f) const;
 
     // The group whose header (the title band, or all of a collapsed box) is at a point in graph space; onButton: on its
@@ -158,6 +167,8 @@ public:
     void SetNodeDrawHandler(INodeDrawHandler* handler) { m_DrawHandler = handler; }
     INodeDrawHandler* GetNodeDrawHandler() const { return m_DrawHandler; }
     void SetHoveredNode(NodeId id) { m_HoveredNode = id; }
+    // A port under the mouse, or one a new edge would connect to (drawn larger, with a ring).
+    void SetHoveredPort(NodeId node, PortId port) { m_HoveredPortNode = node; m_HoveredPort = port; }
     // Draws these nodes, their neighbors and the edges between them in front, and the rest of the graph dimmed behind.
     // Empty: no highlight.
     void SetHighlight(std::vector<NodeId> focus) { m_Highlight = std::move(focus); }
@@ -207,6 +218,7 @@ private:
     ComPtr<IDWriteTextFormat>   m_EdgeTextFormat;  // 11pt, used for edge labels
     ComPtr<IDWriteTextFormat>   m_CodeTextFormat;  // 12 units monospaced, left aligned, for nodes with NodeStyle::Code
     ComPtr<IDWriteTextFormat>   m_TitleTextFormat; // 12 units bold, left aligned, one line with an ellipsis, for NodeContent::Title
+    ComPtr<IDWriteTextFormat>   m_PortTextFormat;  // 10 units, one line, for the names of ports
     ComPtr<IDWriteInlineObject> m_Ellipsis;
     ComPtr<ID2D1StrokeStyle>    m_DashStyle;
     ComPtr<ID2D1StrokeStyle>    m_LineStyles[4];   // by EdgeLine (null: solid)
@@ -226,17 +238,20 @@ private:
 
     INodeDrawHandler* m_DrawHandler = nullptr;
     NodeId   m_HoveredNode = InvalidNode;
+    NodeId   m_HoveredPortNode = InvalidNode;
+    PortId   m_HoveredPort = InvalidPort;
     std::vector<NodeId> m_Highlight;
     float m_DetailThreshold = 0.25f;
     float m_GridSize = 40.0f;
     std::vector<GuideLine> m_Guides;
     bool  m_Plain = false;      // this frame is drawn plain
     void DrawNodePlain(const Node& n, const ViewTransform& vt, bool selected);
+    void DrawPorts(const Node& n, const ViewTransform& vt);
     // the collapsed groups' boxes as nodes (the ends of the edges to their nodes), made for each frame
     std::unordered_map<GroupId, Node> m_Collapsed;
     const Node* EdgeEnd(const NodeGraphModel& model, NodeId id) const;
     void DrawGroup(const NodeGraphModel& model, const Group& g, const ViewTransform& vt, bool selected);
-    void DrawGroupText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt);
+    void DrawGraphText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt);
     void DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis);
     bool     m_Exporting = false;
     uint32_t m_DeviceGeneration = 0;    // of the current render target, unique in the process

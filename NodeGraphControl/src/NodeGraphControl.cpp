@@ -314,7 +314,7 @@ namespace NodeGraphCtrl {
 		return ::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
 	}
 
-	void CNodeGraphControl::NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId) {
+	void CNodeGraphControl::NotifyEdgeAdded(NodeId from, NodeId to, EdgeId edgeId, PortId fromPort, PortId toPort) {
 		HWND parent = ::GetParent(m_hWnd);
 		if (!parent) return;
 		NODEGRAPHEDGENOTIFY gn{};
@@ -324,7 +324,144 @@ namespace NodeGraphCtrl {
 		gn.FromNode = from;
 		gn.ToNode = to;
 		gn.EdgeId = edgeId;
+		gn.FromPort = fromPort;
+		gn.ToPort = toPort;
 		::SendMessage(parent, WM_NOTIFY, gn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gn));
+	}
+
+	bool CNodeGraphControl::CanConnect(NodeId from, PortId fromPort, NodeId to, PortId toPort) {
+		HWND parent = ::GetParent(m_hWnd);
+		if (!parent) return true;
+		NODEGRAPHCONNECTNOTIFY cn{};
+		cn.Hdr.hwndFrom = m_hWnd;
+		cn.Hdr.idFrom = (UINT_PTR)GetDlgCtrlID();
+		cn.Hdr.code = NGCN_CANCONNECT;
+		cn.FromNode = from;
+		cn.FromPort = fromPort;
+		cn.ToNode = to;
+		cn.ToPort = toPort;
+		return ::SendMessage(parent, WM_NOTIFY, cn.Hdr.idFrom, reinterpret_cast<LPARAM>(&cn)) == 0;
+	}
+
+	void CNodeGraphControl::StartConnection(NodeId node, PortId port, POINT pt, bool leftButton) {
+		m_EdgePreview = {};
+		m_EdgePreview.Active = true;
+		m_EdgePreview.FromNode = node;
+		m_EdgePreview.FromPort = port;
+		m_EdgePreview.LeftButton = leftButton;
+		m_EdgePreview.ScreenX = (float)pt.x;
+		m_EdgePreview.ScreenY = (float)pt.y;
+		SetCapture();
+		Invalidate(FALSE);
+	}
+
+	// What a new edge would connect to with the mouse at pt: the port there, or the nearest of the node there that fits
+	// (on the outline of a node without ports). Edges go from an output to an input: out of an input the edge is
+	// reversed (it comes from there); no port is as one of both ways. Its own node only between two ports, aimed at.
+	void CNodeGraphControl::UpdateConnectionTarget(POINT pt) {
+		EdgePreview& p = m_EdgePreview;
+		p.ScreenX = (float)pt.x;
+		p.ScreenY = (float)pt.y;
+		p.ToNode = InvalidNode;
+		p.ToPort = InvalidPort;
+		p.Reversed = false;
+		const Node* from = m_Model->GetNode(p.FromNode);
+		if (!from) return;
+		const Port* fromPort = FindPort(*from, p.FromPort);
+		const PortDirection source = fromPort ? fromPort->Direction : PortDirection::Both;
+		// whether a port of a direction takes it, and which way the edge goes then
+		auto fits = [&](PortDirection target, bool& reversed) {
+			if ((source == PortDirection::In && target == PortDirection::In) || (source == PortDirection::Out && target == PortDirection::Out))
+				return false;
+			reversed = source == PortDirection::In || (source == PortDirection::Both && target == PortDirection::Out);
+			return true;
+		};
+
+		NodeId node = InvalidNode;
+		PortId port = InvalidPort;
+		bool reversed = false;
+		if (m_Renderer.HitTestPort(*m_Model, m_Vt, (float)pt.x, (float)pt.y, node, port)) {
+			const Node* n = m_Model->GetNode(node);
+			if ((node == p.FromNode && port == p.FromPort) || (node == p.FromNode && !fromPort) || !fits(FindPort(*n, port)->Direction, reversed))
+				node = InvalidNode;
+		}
+		else {
+			const auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
+			node = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
+			const Node* n = m_Model->GetNode(node);
+			if (!n || node == p.FromNode)
+				node = InvalidNode;
+			else if (!n->Ports.empty()) {
+				// the nearest that fits; none: not this node
+				float best = FLT_MAX;
+				for (const auto& q : n->Ports) {
+					bool rev = false;
+					if (!fits(q.Direction, rev)) continue;
+					const Point at = PortPosition(*n, q);
+					const float d = (at.X - gp.x) * (at.X - gp.x) + (at.Y - gp.y) * (at.Y - gp.y);
+					if (d < best) { best = d; port = q.Id; reversed = rev; }
+				}
+				if (port == InvalidPort)
+					node = InvalidNode;
+			}
+			else
+				fits(PortDirection::Both, reversed);
+		}
+		if (node != InvalidNode) {
+			const bool ok = reversed ? CanConnect(node, port, p.FromNode, p.FromPort) : CanConnect(p.FromNode, p.FromPort, node, port);
+			if (ok) {
+				p.ToNode = node;
+				p.ToPort = port;
+				p.Reversed = reversed;
+			}
+		}
+		SetHoveredPort(p.ToNode, p.ToPort);
+	}
+
+	// Makes the edge the preview ends on (if any), and ends the preview.
+	void CNodeGraphControl::FinishConnection() {
+		const EdgePreview p = m_EdgePreview;
+		CancelConnection();
+		if (p.ToNode == InvalidNode)
+			return;
+		NodeId from = p.FromNode, to = p.ToNode;
+		PortId fromPort = p.FromPort, toPort = p.ToPort;
+		if (p.Reversed) {
+			std::swap(from, to);
+			std::swap(fromPort, toPort);
+		}
+		if (!CanConnect(from, fromPort, to, toPort))
+			return;
+		const EdgeId eid = m_Model->Connect(from, fromPort, to, toPort);
+		if (Edge* e = m_Model->GetEdge(eid)) {
+			if (fromPort != InvalidPort || toPort != InvalidPort)
+				e->Style.Curved = true;		// at a port: a wire, straight out of it
+			auto cmd = std::make_unique<AddEdgeCmd>();
+			cmd->Saved = *e;
+			PushUndo(std::move(cmd));
+		}
+		NotifyEdgeAdded(from, to, eid, fromPort, toPort);
+	}
+
+	void CNodeGraphControl::CancelConnection() {
+		if (!m_EdgePreview.Active) return;
+		m_EdgePreview = {};
+		SetHoveredPort(InvalidNode, InvalidPort);
+		if (::GetCapture() == m_hWnd)
+			::ReleaseCapture();
+		Invalidate(FALSE);
+	}
+
+	// The port under the mouse: drawn larger, its name as the tooltip.
+	void CNodeGraphControl::SetHoveredPort(NodeId node, PortId port) {
+		if (node == m_HoveredPortNode && port == m_HoveredPort)
+			return;
+		m_HoveredPortNode = node;
+		m_HoveredPort = port;
+		m_Renderer.SetHoveredPort(node, port);
+		if (m_TooltipWnd)
+			::SendMessage(m_TooltipWnd, TTM_UPDATE, 0, 0);	// the text of what is under the mouse now
+		Invalidate(FALSE);
 	}
 
 	void CNodeGraphControl::NotifyUndoChanged() {
@@ -375,8 +512,7 @@ namespace NodeGraphCtrl {
 			// what a read-only graph doesn't do: editing a label, making an edge, resizing
 			if (m_LabelEdit) CancelLabelEdit();
 			if (m_EdgePreview.Active || m_Resize.Active) {
-				m_EdgePreview.Active = false;
-				m_EdgePreview.FromNode = InvalidNode;
+				CancelConnection();
 				m_Resize.Active = false;
 				m_Resize.NodeId = InvalidNode;
 				if (::GetCapture() == m_hWnd) ::ReleaseCapture();
@@ -675,8 +811,10 @@ namespace NodeGraphCtrl {
 		m_Resize.NodeId = InvalidNode;
 		m_Resize.Hovered = ResizeHandle::None;
 		m_RubberBand.Active = false;
-		m_EdgePreview.Active = false;
-		m_EdgePreview.FromNode = InvalidNode;
+		m_EdgePreview = {};
+		m_HoveredPortNode = InvalidNode;
+		m_HoveredPort = InvalidPort;
+		m_Renderer.SetHoveredPort(InvalidNode, InvalidPort);
 		m_KeyMove = nullptr;
 		m_Renderer.SetGuides({});
 		if (m_hWnd && ::GetCapture() == m_hWnd)
@@ -1049,11 +1187,14 @@ namespace NodeGraphCtrl {
 	}
 
 	LRESULT CNodeGraphControl::OnSetCursor(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+		POINT pt; ::GetCursorPos(&pt); ScreenToClient(&pt);
 		if (m_EdgePreview.Active) {
-			::SetCursor(::LoadCursor(nullptr, IDC_CROSS));
+			// over a node it can't connect to: no
+			auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
+			const bool refused = m_EdgePreview.ToNode == InvalidNode && m_Renderer.HitTestNode(*m_Model, gp.x, gp.y) != InvalidNode;
+			::SetCursor(::LoadCursor(nullptr, refused ? IDC_NO : IDC_CROSS));
 			return TRUE;
 		}
-		POINT pt; ::GetCursorPos(&pt); ScreenToClient(&pt);
 
 		// The minimap overlays the graph (the nodes under it aren't the ones the mouse would act on).
 		RECT rc; GetClientRect(&rc);
@@ -1081,6 +1222,10 @@ namespace NodeGraphCtrl {
 			}
 		}
 
+		if (!m_ReadOnly && m_HoveredPort != InvalidPort) {	// a new edge out of it
+			::SetCursor(::LoadCursor(nullptr, IDC_CROSS));
+			return TRUE;
+		}
 		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
 		if (m_Renderer.HitTestNode(*m_Model, gp.x, gp.y) != InvalidNode) {
 			::SetCursor(::LoadCursor(nullptr, IDC_SIZEALL));
@@ -1114,15 +1259,15 @@ namespace NodeGraphCtrl {
 		}
 
 		if (m_ReadOnly) return;
-		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
-		NodeId hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
-		if (hit != InvalidNode) {
-			m_EdgePreview.Active = true;
-			m_EdgePreview.FromNode = hit;
-			m_EdgePreview.ScreenX = (float)pt.x;
-			m_EdgePreview.ScreenY = (float)pt.y;
-			SetCapture();
+		// a new edge out of the node (or its port) there
+		NodeId hit = InvalidNode;
+		PortId port = InvalidPort;
+		if (!m_Renderer.HitTestPort(*m_Model, m_Vt, (float)pt.x, (float)pt.y, hit, port)) {
+			auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
+			hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 		}
+		if (hit != InvalidNode)
+			StartConnection(hit, port, pt, false);
 	}
 
 	void CNodeGraphControl::OnRButtonUp(UINT /*nFlags*/, CPoint pt) {
@@ -1133,36 +1278,20 @@ namespace NodeGraphCtrl {
 				SetMsgHandled(FALSE);	// a right click without a drag still brings the context menu
 			return;
 		}
-		if (!m_EdgePreview.Active) {
+		if (!m_EdgePreview.Active || m_EdgePreview.LeftButton) {
 			SetMsgHandled(FALSE);	// let the default processing send WM_CONTEXTMENU to the parent
 			return;
 		}
-		m_EdgePreview.Active = false;
-		::ReleaseCapture();
-
-		auto gp = m_Vt.ToGraph((float)pt.x, (float)pt.y);
-		NodeId hit = m_Renderer.HitTestNode(*m_Model, gp.x, gp.y);
 		// released where it went down: a right click on the node, not a new edge; the default processing sends
 		// WM_CONTEXTMENU (OnContextMenu)
 		const int dx = pt.x - m_RightDown.x, dy = pt.y - m_RightDown.y;
-		if (hit == m_EdgePreview.FromNode && dx * dx + dy * dy <= 16) {
-			m_EdgePreview.FromNode = InvalidNode;
-			Invalidate(FALSE);
+		if (dx * dx + dy * dy <= 16) {
+			CancelConnection();
 			SetMsgHandled(FALSE);
 			return;
 		}
-		if (hit != InvalidNode && hit != m_EdgePreview.FromNode) {
-			EdgeId eid = m_Model->AddEdge(m_EdgePreview.FromNode, hit);
-			const Edge* e = m_Model->GetEdge(eid);
-			if (e) {
-				auto cmd = std::make_unique<AddEdgeCmd>();
-				cmd->Saved = *e;
-				PushUndo(std::move(cmd));
-			}
-			NotifyEdgeAdded(m_EdgePreview.FromNode, hit, eid);
-		}
-		m_EdgePreview.FromNode = InvalidNode;
-		Invalidate(FALSE);
+		UpdateConnectionTarget(pt);
+		FinishConnection();
 	}
 
 	void CNodeGraphControl::OnMButtonDown(UINT /*nFlags*/, CPoint pt) {
@@ -1225,6 +1354,16 @@ namespace NodeGraphCtrl {
 					SetCapture();
 					return;
 				}
+			}
+		}
+
+		// a port: a new edge out of it
+		if (!m_ReadOnly) {
+			NodeId portNode = InvalidNode;
+			PortId port = InvalidPort;
+			if (m_Renderer.HitTestPort(*m_Model, m_Vt, (float)sx, (float)sy, portNode, port)) {
+				StartConnection(portNode, port, pt, true);
+				return;
 			}
 		}
 
@@ -1354,7 +1493,12 @@ namespace NodeGraphCtrl {
 			BeginEditLabel(hitNode);
 	}
 
-	void CNodeGraphControl::OnLButtonUp(UINT /*nFlags*/, CPoint /*pt*/) {
+	void CNodeGraphControl::OnLButtonUp(UINT /*nFlags*/, CPoint pt) {
+		if (m_EdgePreview.Active && m_EdgePreview.LeftButton) {
+			UpdateConnectionTarget(pt);
+			FinishConnection();
+			return;
+		}
 		m_Renderer.SetGuides({});	// the guides are only while dragging
 		if (m_Resize.Active) {
 			m_Resize.Active = false;
@@ -1537,8 +1681,7 @@ namespace NodeGraphCtrl {
 			}
 		}
 		else if (m_EdgePreview.Active) {
-			m_EdgePreview.ScreenX = (float)sx;
-			m_EdgePreview.ScreenY = (float)sy;
+			UpdateConnectionTarget({ sx, sy });
 			Invalidate(FALSE);
 		}
 		else if (m_Panning) {
@@ -1585,11 +1728,21 @@ namespace NodeGraphCtrl {
 				m_Resize.Hovered = newHov;
 				Invalidate(FALSE);
 			}
+			NodeId portNode = InvalidNode;
+			PortId port = InvalidPort;
+			m_Renderer.HitTestPort(*m_Model, m_Vt, (float)sx, (float)sy, portNode, port);
+			if (port != InvalidPort && m_HoveredPort == InvalidPort && m_HoveredNode == InvalidNode) {
+				TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };		// (to forget it when the mouse leaves)
+				::TrackMouseEvent(&tme);
+			}
+			SetHoveredPort(portNode, port);
 		}
 	}
 
 	void CNodeGraphControl::OnMouseLeave() {
 		SetHoveredNode(InvalidNode);
+		if (!m_EdgePreview.Active)
+			SetHoveredPort(InvalidNode, InvalidPort);
 	}
 
 	// Repaints if an owner drawn node is hovered or not anymore (the others don't show it).
@@ -1636,7 +1789,23 @@ namespace NodeGraphCtrl {
 				: InvalidEdge;
 
 			m_TooltipBuf[0] = L'\0';
-			if (nid != InvalidNode) {
+			// a port: its name (none: what is around it)
+			NodeId portNode = InvalidNode;
+			PortId port = InvalidPort;
+			if (m_Renderer.HitTestPort(*m_Model, m_Vt, (float)pt.x, (float)pt.y, portNode, port)) {
+				const Port* p = FindPort(*m_Model->GetNode(portNode), port);
+				if (p->Name.empty())
+					port = InvalidPort;
+				else {
+					nid = portNode;
+					eid = InvalidEdge;
+					wcsncpy_s(m_TooltipBuf, p->Name.c_str(), _TRUNCATE);
+				}
+			}
+			if (port != InvalidPort) {
+				// (its name)
+			}
+			else if (nid != InvalidNode) {
 				const Node* n = m_Model->GetNode(nid);
 				if (n && !n->Tooltip.empty())
 					wcsncpy_s(m_TooltipBuf, n->Tooltip.c_str(), _TRUNCATE);
@@ -1665,6 +1834,7 @@ namespace NodeGraphCtrl {
 				gtn.Hdr.code = NGCN_GETTOOLTIP;
 				gtn.NodeId = nid;
 				gtn.EdgeId = eid;
+				gtn.PortId = port;
 				wcsncpy_s(gtn.SzText, m_TooltipBuf, _TRUNCATE);
 				HWND par = ::GetParent(m_hWnd);
 				if (par) ::SendMessage(par, WM_NOTIFY, gtn.Hdr.idFrom, reinterpret_cast<LPARAM>(&gtn));
@@ -1716,6 +1886,10 @@ namespace NodeGraphCtrl {
 				SelectNext(shift);
 				return 0;
 			case VK_ESCAPE:
+				if (m_EdgePreview.Active) {		// a new edge: not made
+					CancelConnection();
+					return 0;
+				}
 				if (!m_SelectedNodes.empty() || m_SelectedEdge != InvalidEdge)
 					ClearSelection();
 				return 0;
@@ -2854,8 +3028,9 @@ namespace NodeGraphCtrl {
 			r.Top = std::min(r.Top, y); r.Bottom = std::max(r.Bottom, y);
 		};
 		for (const auto& n : m_Nodes) {
-			extend(n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f);
-			extend(n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f);
+			const float out = n.Ports.empty() ? 0.0f : k_PortRadius;	// (ports are on the outline)
+			extend(n.X - n.Width * 0.5f - out, n.Y - n.Height * 0.5f - out);
+			extend(n.X + n.Width * 0.5f + out, n.Y + n.Height * 0.5f + out);
 		}
 		// a label's box: 110 x 18 (the renderer's), around its point or right of it
 		const float labelWidth = 110.0f, labelHeight = 18.0f;
@@ -2865,7 +3040,17 @@ namespace NodeGraphCtrl {
 			const Node* from = GetNode(e.From);
 			const Node* to = GetNode(e.To);
 			if (!from || !to) continue;
-			if (from == to) {
+			// out of a port a curve goes straight out of the node first (CurveControls): about 3/4 of the way to its control
+			auto portOut = [&](const Node& n, PortId id, const Node& other) {
+				const Port* p = FindPort(n, id);
+				if (!p || !e.Style.Curved) return;
+				const Point at = PortPosition(n, *p), out = PortNormal(p->Side);
+				const float reach = std::max(30.0f, std::hypot(other.X - at.X, other.Y - at.Y) / 3) * 0.75f;
+				extend(at.X + out.X * reach, at.Y + out.Y * reach);
+			};
+			portOut(*from, e.FromPort, *to);
+			portOut(*to, e.ToPort, *from);
+			if (IsSelfLoop(e, *from, *to)) {
 				const float right = from->X + from->Width * 0.5f + 30.0f;	// the loop goes 24 units to the right of the node
 				extend(right, from->Y);
 				if (!e.Label.empty()) {
@@ -3217,7 +3402,7 @@ namespace NodeGraphCtrl {
 			const std::string color = Hex(e.Style.Color);
 			const std::string stroke = "fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(e.Style.Width) + "\" stroke-linejoin=\"round\"" + DashArray(e.Style);
 
-			if (from == to) {
+			if (IsSelfLoop(e, *from, *to)) {
 				const auto loop = SelfLoopPath(*from);
 				const bool solidHead = e.Style.Directed && (e.Style.Arrow == ArrowHead::Filled || e.Style.Arrow == ArrowHead::Diamond);
 				svg += "<path d=\"M" + Num(loop[0].X) + " " + Num(loop[0].Y) + " L" + Num(loop[1].X) + " " + Num(loop[1].Y) + " L" + Num(loop[2].X) + " " +
@@ -3231,9 +3416,10 @@ namespace NodeGraphCtrl {
 			}
 
 			const float lane = pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f;
-			const std::vector<Point> points = EdgePath(e, *from, *to, lane);
+			const EdgeShape shape = GetEdgeShape(e, *from, *to, lane);
+			const std::vector<Point>& points = shape.Path;
 			if (points.size() < 2) continue;
-			const std::vector<Point> controls = e.Style.Curved && points.size() > 2 ? CurveControls(points) : std::vector<Point>{};
+			const std::vector<Point>& controls = shape.Controls;
 
 			svg += "<path d=\"M" + Num(points[0].X) + " " + Num(points[0].Y);
 			for (size_t i = 0; i + 1 < points.size(); i++) {
@@ -3255,11 +3441,33 @@ namespace NodeGraphCtrl {
 					svg += SvgArrowhead(end, { dx / l, dy / l }, e.Style.Arrow, color);
 			}
 			if (!e.Label.empty()) {
-				const Point at = EdgeLabelPoint(points, controls);
+				const Point& at = shape.Label;
 				svg += "<text x=\"" + Num(at.X) + "\" y=\"" + Num(at.Y) + "\" fill=\"#D9D9D9\" font-family=\"Segoe UI,sans-serif\" font-size=\"11\" text-anchor=\"middle\" dominant-baseline=\"central\">" +
 					XmlEscape(Utf8(e.Label)) + "</text>\n";
 			}
 		}
+
+		// the ports as the renderer draws them (DrawPorts, at the zoom of 1): on the outline in a ring of the background,
+		// their names inside next to them
+		auto writePorts = [&](const Node& n) {
+			for (const auto& p : n.Ports) {
+				const Point at = PortPosition(n, p);
+				svg += "<circle cx=\"" + Num(at.X) + "\" cy=\"" + Num(at.Y) + "\" r=\"" + Num(k_PortRadius) + "\" fill=\"" + Hex(PortColor(p)) +
+					"\" stroke=\"" + Hex(background) + "\" stroke-width=\"1.5\"/>\n";
+				if (p.Name.empty()) continue;
+				const float gap = k_PortRadius + 4;
+				float x = at.X, y = at.Y;
+				const char* anchor = "middle";
+				switch (p.Side) {
+					case PortSide::Left:  x += gap; anchor = "start"; break;
+					case PortSide::Right: x -= gap; anchor = "end"; break;
+					case PortSide::Top:   y += gap + 5; break;
+					default:              y -= gap + 5; break;
+				}
+				svg += "<text x=\"" + Num(x) + "\" y=\"" + Num(y) + "\" fill=\"" + Hex(n.Style.TextColor) + "\" font-family=\"Segoe UI,sans-serif\" font-size=\"10\" text-anchor=\"" +
+					anchor + "\" dominant-baseline=\"central\">" + XmlEscape(Utf8(p.Name)) + "</text>\n";
+			}
+		};
 
 		// the parts of the nodes as the renderer draws them (the layout is in the node's units: moved to its top-left corner)
 		for (size_t i = 0; i < m_Nodes.size(); i++) {
@@ -3271,6 +3479,7 @@ namespace NodeGraphCtrl {
 			if (const auto& pic = pictures[i]; !pic.Png.empty()) {
 				svg += "<image x=\"" + Num(pic.Bounds.Left) + "\" y=\"" + Num(pic.Bounds.Top) + "\" width=\"" + Num(pic.Bounds.Width()) + "\" height=\"" + Num(pic.Bounds.Height()) +
 					"\" preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64," + Base64(pic.Png.data(), pic.Png.size()) + "\"/>\n";
+				writePorts(n);
 				continue;
 			}
 
@@ -3346,6 +3555,7 @@ namespace NodeGraphCtrl {
 				}
 				svg += border;
 			}
+			writePorts(n);
 		}
 		// the collapsed groups, with the nodes (in front of the edges to them)
 		for (const auto& g : m_Groups)

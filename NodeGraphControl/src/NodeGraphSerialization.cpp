@@ -65,6 +65,16 @@ namespace NodeGraphCtrl {
             w.WriteStr(c.Title);
             w.Write(c.TitleFill);
             WriteUserData(w, n, serializer, &IUserDataSerializer::SaveNode);
+
+            w.Write((uint32_t)n.Ports.size());
+            for (const auto& p : n.Ports) {
+                w.Write(p.Id);
+                w.WriteStr(p.Name);
+                w.Write((uint8_t)p.Side);
+                w.Write(p.Offset);
+                w.Write((uint8_t)p.Direction);
+                w.Write(p.Color);
+            }
         }
 
         bool ReadNode(Reader& r, Node& n, uint32_t version, IUserDataSerializer* serializer) {
@@ -106,6 +116,21 @@ namespace NodeGraphCtrl {
             c.LabelPos = (LabelPlacement)labelPos;
             if (ok && version >= 4)
                 ok = ReadUserData(r, n, serializer, &IUserDataSerializer::LoadNode);
+            if (!ok || version < 7)
+                return ok;
+
+            uint32_t count = 0;
+            ok = r.Read(count) && count <= (r.Size - r.Pos) / MinPortRecord;
+            if (ok) n.Ports.reserve(count);
+            for (uint32_t i = 0; i < count && ok; ++i) {
+                Port p;
+                uint8_t side = 0, direction = 0;
+                ok = r.Read(p.Id) && r.ReadStr(p.Name) && r.Read(side) && r.Read(p.Offset) && r.Read(direction) && r.Read(p.Color)
+                    && side <= (uint8_t)PortSide::Bottom && direction <= (uint8_t)PortDirection::Both;
+                p.Side = (PortSide)side;
+                p.Direction = (PortDirection)direction;
+                n.Ports.push_back(std::move(p));
+            }
             return ok;
         }
 
@@ -125,6 +150,8 @@ namespace NodeGraphCtrl {
             w.Write((uint8_t)e.Style.Arrow);
             w.Write((uint8_t)((e.Style.Curved ? EF_CURVED : 0) | (e.Style.ScaleLabel ? EF_SCALELABEL : 0)));
             WriteUserData(w, e, serializer, &IUserDataSerializer::SaveEdge);
+            w.Write(e.FromPort);
+            w.Write(e.ToPort);
         }
 
         bool ReadEdge(Reader& r, Edge& e, uint32_t version, IUserDataSerializer* serializer) {
@@ -159,6 +186,8 @@ namespace NodeGraphCtrl {
             }
             if (ok && version >= 4)
                 ok = ReadUserData(r, e, serializer, &IUserDataSerializer::LoadEdge);
+            if (ok && version >= 7)
+                ok = r.Read(e.FromPort) && r.Read(e.ToPort);
             return ok;
         }
 

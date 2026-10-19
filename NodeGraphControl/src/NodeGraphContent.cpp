@@ -262,20 +262,123 @@ namespace NodeGraphCtrl {
         }
     }
 
+    float NodeHalfHeightAt(const Node& n, float dx) {
+        const float a = n.Width * 0.5f, b = n.Height * 0.5f;
+        const float t = (std::min)(std::fabs(dx) / a, 1.0f);
+        switch (n.Style.Shape) {
+            case NodeShape::Ellipse: return b * std::sqrt(1.0f - t * t);
+            case NodeShape::Diamond: return b * (1.0f - t);
+            default:                 return b;
+        }
+    }
+
+    // ---- Ports ------------------------------------------------------------------------
+
+    const Port* FindPort(const Node& n, PortId id) {
+        if (id == InvalidPort) return nullptr;
+        for (const auto& p : n.Ports) if (p.Id == id) return &p;
+        return nullptr;
+    }
+
+    Point PortNormal(PortSide side) {
+        switch (side) {
+            case PortSide::Left:  return { -1, 0 };
+            case PortSide::Top:   return { 0, -1 };
+            case PortSide::Right: return { 1, 0 };
+            default:              return { 0, 1 };
+        }
+    }
+
+    COLORREF PortColor(const Port& p) {
+        if (p.Color != CLR_INVALID) return p.Color;
+        switch (p.Direction) {
+            case PortDirection::In:  return RGB(90, 170, 240);
+            case PortDirection::Out: return RGB(240, 170, 60);
+            default:                 return RGB(200, 200, 200);
+        }
+    }
+
+    Point PortPosition(const Node& n, const Port& p) {
+        // where along the side: its own place, or spread evenly with the side's other ports without one
+        float along = p.Offset;
+        if (along < 0) {
+            int index = 0, count = 0;
+            for (const auto& q : n.Ports)
+                if (q.Side == p.Side && q.Offset < 0) {
+                    if (&q == &p) index = count;
+                    count++;
+                }
+            along = (index + 1.0f) / (count + 1.0f);
+        }
+        along = std::clamp(along, 0.0f, 1.0f);
+        // on the outline of the shape
+        switch (p.Side) {
+            case PortSide::Left:
+            case PortSide::Right: {
+                const float dy = (along - 0.5f) * n.Height;
+                const float half = NodeHalfWidthAt(n, dy);
+                return { p.Side == PortSide::Left ? n.X - half : n.X + half, n.Y + dy };
+            }
+            default: {
+                const float dx = (along - 0.5f) * n.Width;
+                const float half = NodeHalfHeightAt(n, dx);
+                return { n.X + dx, p.Side == PortSide::Top ? n.Y - half : n.Y + half };
+            }
+        }
+    }
+
+    PortId NodeGraphModel::AddPort(NodeId node, std::wstring name, PortSide side, PortDirection direction, float offset) {
+        Node* n = GetNode(node);
+        if (!n) return InvalidPort;
+        PortId id = 0;
+        for (const auto& p : n->Ports) id = (std::max)(id, p.Id + 1);
+        Port p;
+        p.Id = id;
+        p.Name = std::move(name);
+        p.Side = side;
+        p.Direction = direction;
+        p.Offset = offset;
+        n->Ports.push_back(std::move(p));
+        return id;
+    }
+
+    bool NodeGraphModel::RemovePort(NodeId node, PortId port) {
+        Node* n = GetNode(node);
+        if (!n || !std::erase_if(n->Ports, [port](const Port& p) { return p.Id == port; }))
+            return false;
+        for (auto& e : m_Edges) {   // its edges end on the outline now
+            if (e.From == node && e.FromPort == port) e.FromPort = InvalidPort;
+            if (e.To == node && e.ToPort == port) e.ToPort = InvalidPort;
+        }
+        return true;
+    }
+
+    EdgeId NodeGraphModel::Connect(NodeId from, PortId fromPort, NodeId to, PortId toPort, std::wstring label) {
+        const EdgeId id = AddEdge(from, to, std::move(label));
+        Edge* e = GetEdge(id);
+        e->FromPort = fromPort;
+        e->ToPort = toPort;
+        return id;
+    }
+
     // ---- Edge paths -------------------------------------------------------------------
 
     std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, float lane) {
+        const Port* fromPort = FindPort(from, e.FromPort);
+        const Port* toPort = FindPort(to, e.ToPort);
         std::vector<Point> path;
         path.reserve(e.Waypoints.size() + 2);
-        path.push_back({ from.X, from.Y });
+        path.push_back(fromPort ? PortPosition(from, *fromPort) : Point{ from.X, from.Y });
         path.insert(path.end(), e.Waypoints.begin(), e.Waypoints.end());
-        path.push_back({ to.X, to.Y });
+        path.push_back(toPort ? PortPosition(to, *toPort) : Point{ to.X, to.Y });
 
         const float dx = path[1].X - path[0].X, dy = path[1].Y - path[0].Y;
         const float len = std::sqrt(dx * dx + dy * dy);
         if (path.size() == 2 && len < 1e-3f)
             return {};
-        if (path.size() == 2 && lane != 0) {
+        if (fromPort && toPort)
+            return path;    // both ends where they are
+        if (path.size() == 2 && lane != 0 && !fromPort && !toPort) {
             const float nx = dx / len, ny = dy / len;
             for (auto& p : path) { p.X -= ny * lane; p.Y += nx * lane; }
         }
@@ -295,9 +398,29 @@ namespace NodeGraphCtrl {
             at.Y += ny * t;
         };
         const Point beforeLast = path[path.size() - 2];
-        clip(from, path.front(), path[1]);
-        clip(to, path.back(), beforeLast);
+        if (!fromPort) clip(from, path.front(), path[1]);
+        if (!toPort) clip(to, path.back(), beforeLast);
         return path;
+    }
+
+    EdgeShape GetEdgeShape(const Edge& e, const Node& from, const Node& to, float lane) {
+        EdgeShape shape;
+        shape.Path = EdgePath(e, from, to, lane);
+        if (shape.Path.size() < 2) {
+            shape.Path.clear();
+            return shape;
+        }
+        // at a port the curve leaves (comes in) straight out of the node
+        const Port* fromPort = FindPort(from, e.FromPort);
+        const Port* toPort = FindPort(to, e.ToPort);
+        if (e.Style.Curved && (shape.Path.size() > 2 || fromPort || toPort))
+            shape.Controls = CurveControls(shape.Path, fromPort ? PortNormal(fromPort->Side) : Point{}, toPort ? PortNormal(toPort->Side) : Point{});
+        shape.Label = EdgeLabelPoint(shape.Path, shape.Controls);
+        return shape;
+    }
+
+    bool IsSelfLoop(const Edge& e, const Node& from, const Node& to) {
+        return &from == &to && !(FindPort(from, e.FromPort) && FindPort(to, e.ToPort));
     }
 
     std::vector<Point> SelfLoopPath(const Node& n, float reach) {
@@ -307,7 +430,7 @@ namespace NodeGraphCtrl {
         return { { end, n.Y - rise }, { right, n.Y - rise }, { right, n.Y + rise }, { end, n.Y + rise } };
     }
 
-    std::vector<Point> CurveControls(const std::vector<Point>& p) {
+    std::vector<Point> CurveControls(const std::vector<Point>& p, Point startOut, Point endOut) {
         std::vector<Point> controls;
         const size_t n = p.size();
         if (n < 2) return controls;
@@ -318,6 +441,18 @@ namespace NodeGraphCtrl {
             const Point& next = p[i + 2 < n ? i + 2 : n - 1];
             controls.push_back({ p[i].X + (p[i + 1].X - prev.X) / 6, p[i].Y + (p[i + 1].Y - prev.Y) / 6 });
             controls.push_back({ p[i + 1].X - (next.X - p[i].X) / 6, p[i + 1].Y - (next.Y - p[i].Y) / 6 });
+        }
+        // out of a port: straight along its way out, as far as a third of the piece (at least a little)
+        auto reach = [&](const Point& a, const Point& b) {
+            return (std::max)(std::sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y)) / 3, 30.0f);
+        };
+        if (startOut.X != 0 || startOut.Y != 0) {
+            const float d = reach(p[0], p[1]);
+            controls[0] = { p[0].X + startOut.X * d, p[0].Y + startOut.Y * d };
+        }
+        if (endOut.X != 0 || endOut.Y != 0) {
+            const float d = reach(p[n - 2], p[n - 1]);
+            controls.back() = { p[n - 1].X + endOut.X * d, p[n - 1].Y + endOut.Y * d };
         }
         return controls;
     }

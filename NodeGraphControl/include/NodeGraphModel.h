@@ -98,6 +98,24 @@ struct EdgeStyle {
     bool      ScaleLabel = true;              // the label scales with the zoom (false: the same size on the screen)
 };
 
+// A port: a named point on a side of a node where edges attach (Edge::FromPort, ToPort). Edges go from an Out (or Both)
+// port to an In (or Both) one.
+using PortId = uint32_t;
+constexpr PortId InvalidPort = UINT32_MAX;
+enum class PortSide      : uint8_t { Left, Top, Right, Bottom };
+enum class PortDirection : uint8_t { In, Out, Both };
+
+struct Port {
+    PortId        Id;                       // unique in its node
+    std::wstring  Name;                     // shown inside the node next to it, and as its tooltip
+    PortSide      Side      = PortSide::Left;
+    float         Offset    = -1.0f;        // where along the side, 0..1 from its top (left); <0: spread evenly with the others
+    PortDirection Direction = PortDirection::Both;
+    COLORREF      Color     = CLR_INVALID;  // CLR_INVALID: by its direction
+};
+
+constexpr float k_PortRadius = 5.0f;       // graph units
+
 struct Node {
     NodeId       Id;
     std::wstring Label;
@@ -106,6 +124,7 @@ struct Node {
     NodeStyle    Style;
     NodeContent  Content;
     std::wstring Tooltip;               // shown instead of the label (nothing is shown for a Code node without one)
+    std::vector<Port> Ports;
     void*        UserData = nullptr;
 };
 
@@ -113,10 +132,18 @@ struct Node {
 bool  NodeContains(const Node& n, float x, float y);            // (x, y) in graph space
 float NodeBorderDistance(const Node& n, float dx, float dy);   // from the center to the outline along a unit direction
 float NodeHalfWidthAt(const Node& n, float dy);                // half the width of the shape dy above or below the center
+float NodeHalfHeightAt(const Node& n, float dx);               // half the height of the shape dx left or right of the center
 
 struct Point {
     float X = 0.0f, Y = 0.0f;
 };
+
+// Ports: one of a node by id (null if it has none such), where it is (on the node's outline, in graph space), and the
+// way out of the node there (a unit vector).
+const Port* FindPort(const Node& n, PortId id);
+Point PortPosition(const Node& n, const Port& p);
+Point PortNormal(PortSide side);
+COLORREF PortColor(const Port& p);                             // its Color, or by its direction
 
 struct Edge {
     EdgeId       Id;
@@ -126,6 +153,8 @@ struct Edge {
     EdgeStyle    Style;
     std::wstring Tooltip;               // shown instead of "from -> to"
     std::vector<Point> Waypoints;       // in graph space: the edge goes from the center of From through these to the center of To
+    PortId       FromPort = InvalidPort; // where it attaches (a port of From, of To); InvalidPort: on the outline, toward the other end
+    PortId       ToPort   = InvalidPort;
     void*        UserData = nullptr;
 };
 
@@ -152,10 +181,22 @@ constexpr float k_CollapsedWidth = 160.0f, k_CollapsedHeight = 48.0f;
 // Where an edge between two different nodes goes, in graph units: from the outline of one through the bends to the
 // outline of the other. lane moves a straight edge to its right (an edge with one going the other way is drawn apart
 // from it). Empty if it has no length. The renderer, hit testing and SVG export all use it.
+// An end at a port is the port (not moved by lane), and an edge from a node to itself between ports is such a path too.
 std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, float lane = 0.0f);
 // For a curved edge (EdgeStyle::Curved): the two control points of each cubic Bezier piece between the points of its
-// path (a Catmull-Rom curve, so it goes through every bend).
-std::vector<Point> CurveControls(const std::vector<Point>& path);
+// path (a Catmull-Rom curve, so it goes through every bend). startOut, endOut: the way out of the nodes at the ends
+// (ports); not zero, the curve leaves (comes in) straight along it.
+std::vector<Point> CurveControls(const std::vector<Point>& path, Point startOut = {}, Point endOut = {});
+
+// All of an edge's shape, as the renderer, hit testing and SVG export have it: its path, the controls of its curve
+// (none: straight), and where its label goes. lane as EdgePath. Path empty: nothing to draw.
+struct EdgeShape {
+    std::vector<Point> Path, Controls;
+    Point Label;
+};
+EdgeShape GetEdgeShape(const Edge& e, const Node& from, const Node& to, float lane = 0.0f);
+// An edge drawn as a loop (SelfLoopPath): from a node to itself, not between two of its ports.
+bool IsSelfLoop(const Edge& e, const Node& from, const Node& to);
 // The loop of an edge from a node to itself, in graph units: out of the right of the node's outline, around a box reach
 // past it, and back (its 4 corners; the arrowhead at the last one, pointing left). Its label goes right of (reach, Y).
 std::vector<Point> SelfLoopPath(const Node& n, float reach = 24.0f);
@@ -211,6 +252,12 @@ public:
 
     // Where the title, image, icon and label of the node go (the same for drawing, exporting and editing).
     NodeLayout GetNodeLayout(const Node& n) const;
+
+    // Ports. AddPort: InvalidPort if there is no such node. Removing a port leaves its edges, on the node's outline.
+    // Connect: an edge between ports (a port may be InvalidPort: that end on the outline).
+    PortId AddPort(NodeId node, std::wstring name, PortSide side, PortDirection direction = PortDirection::Both, float offset = -1.0f);
+    bool   RemovePort(NodeId node, PortId port);
+    EdgeId Connect(NodeId from, PortId fromPort, NodeId to, PortId toPort, std::wstring label = {});
 
     // Groups. AddGroup takes the nodes out of the groups they were in. Removing a group leaves its nodes; removing a
     // node takes it out of its group.

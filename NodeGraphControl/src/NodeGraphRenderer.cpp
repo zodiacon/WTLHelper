@@ -80,6 +80,15 @@ HRESULT NodeGraphRenderer::Init(HINSTANCE /*hInstance*/) {
     DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
     m_TitleTextFormat->SetTrimming(&trimming, m_Ellipsis.Get());
 
+    hr = m_DwFactory->CreateTextFormat(
+        L"Segoe UI", nullptr,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        10.0f, L"en-US",
+        m_PortTextFormat.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    m_PortTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    m_PortTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
     D2D1_STROKE_STYLE_PROPERTIES ssp = D2D1::StrokeStyleProperties();
     ssp.dashStyle = D2D1_DASH_STYLE_DASH;
     hr = m_D2dFactory->CreateStrokeStyle(ssp, nullptr, 0, m_DashStyle.GetAddressOf());
@@ -339,7 +348,13 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
             // the edge stays within the box of the centers of its nodes and its bends (a curve a little past it)
             float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
             float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
-            if (from == to) {   // the loop and the label right of it
+            if (e.FromPort != InvalidPort || e.ToPort != InvalidPort) {
+                // out of a port the curve goes straight out of the node first, as far as a third of the way (at least 30)
+                const float pad = std::max({ from->Width, from->Height, to->Width, to->Height }) * 0.5f +
+                    std::max(30.0f, std::hypot(to->X - from->X, to->Y - from->Y) / 3);
+                left -= pad; right += pad; top -= pad; bottom += pad;
+            }
+            else if (from == to) {   // the loop and the label right of it
                 left -= from->Width * 0.5f; right += from->Width * 0.5f + (e.Label.empty() ? 0.0f : 140.0f);
                 top -= from->Height * 0.5f; bottom += from->Height * 0.5f;
             }
@@ -406,24 +421,58 @@ void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGr
                                     const ViewTransform& vt) {
     const Node* from = model.GetNode(preview.FromNode);
     if (!from) return;
+    const Node* to = model.GetNode(preview.ToNode);
+    const Port* fromPort = FindPort(*from, preview.FromPort);
+    const Port* toPort = to ? FindPort(*to, preview.ToPort) : nullptr;
 
-    auto p0 = vt.ToScreen(from->X, from->Y);
-    D2D1_POINT_2F p1 = { preview.ScreenX, preview.ScreenY };
+    // the ends on the screen, and the ways out of their nodes (none: not at a port)
+    struct End { D2D1_POINT_2F At; Point Out; };
+    End a{}, b{};
+    if (toPort) {
+        const Point p = PortPosition(*to, *toPort);
+        b = { vt.ToScreen(p.X, p.Y), PortNormal(toPort->Side) };
+    }
+    else
+        b = { { preview.ScreenX, preview.ScreenY }, {} };
+    if (fromPort) {
+        const Point p = PortPosition(*from, *fromPort);
+        a = { vt.ToScreen(p.X, p.Y), PortNormal(fromPort->Side) };
+    }
+    else {
+        // on the outline, toward the other end
+        const auto c = vt.ToScreen(from->X, from->Y);
+        const float dx = b.At.x - c.x, dy = b.At.y - c.y, len = std::sqrtf(dx * dx + dy * dy);
+        if (len < 1.0f) return;
+        const float t = std::min(NodeBorderDistance(*from, dx / len, dy / len) * vt.Scale, len);
+        a = { { c.x + dx / len * t, c.y + dy / len * t }, {} };
+    }
+    if (preview.Reversed)
+        std::swap(a, b);     // the arrow goes into the port it came out of
 
-    float dx = p1.x - p0.x, dy = p1.y - p0.y;
-    float len = std::sqrtf(dx * dx + dy * dy);
+    const float dx = b.At.x - a.At.x, dy = b.At.y - a.At.y, len = std::sqrtf(dx * dx + dy * dy);
     if (len < 1.0f) return;
-
-    float nx = dx / len, ny = dy / len;
-
-    // Clip start to source node border
-    float t0 = std::min(NodeBorderDistance(*from, nx, ny) * vt.Scale, len);
-
-    D2D1_POINT_2F start = { p0.x + nx * t0, p0.y + ny * t0 };
-
     m_Brush->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.3f, 0.75f));
-    m_RenderTarget->DrawLine(start, p1, m_Brush.Get(), 2.0f, m_DashStyle.Get());
-    DrawArrowhead(p1, { nx, ny });
+    D2D1_POINT_2F before = a.At;     // where the line comes into its end from (for the arrowhead)
+    if (!fromPort && !toPort)
+        m_RenderTarget->DrawLine(a.At, b.At, m_Brush.Get(), 2.0f, m_DashStyle.Get());
+    else {
+        // a curve straight out of the ports, as the edge will be (CurveControls)
+        const float d = std::max(len / 3, 30.0f * vt.Scale);
+        const D2D1_POINT_2F c1{ a.At.x + a.Out.X * d, a.At.y + a.Out.Y * d }, c2{ b.At.x + b.Out.X * d, b.At.y + b.Out.Y * d };
+        ComPtr<ID2D1PathGeometry> geometry;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) && SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
+            sink->BeginFigure(a.At, D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddBezier({ c1, c2, b.At });
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            if (SUCCEEDED(sink->Close()))
+                m_RenderTarget->DrawGeometry(geometry.Get(), m_Brush.Get(), 2.0f, m_DashStyle.Get());
+        }
+        if (b.Out.X != 0 || b.Out.Y != 0) before = c2;
+    }
+    const float ax = b.At.x - before.x, ay = b.At.y - before.y, al = std::sqrtf(ax * ax + ay * ay);
+    if (al > 0)
+        DrawArrowhead(b.At, { ax / al, ay / al });
 }
 
 void NodeGraphRenderer::DrawGrid(const RECT& rc, const ViewTransform& vt) {
@@ -450,21 +499,23 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
     if (!from || !to) return;
     if (from == to && model.IsHidden(e.From)) return;     // inside a collapsed group
 
+    const bool loop = IsSelfLoop(e, *from, *to);
     if (m_Plain) {
-        if (from != to)     // (a loop is a few pixels this far out)
+        if (!loop)          // (a loop is a few pixels this far out)
             DrawEdgePlain(e, *from, *to, vt, emphasis);
         return;
     }
-    if (from == to) {
+    if (loop) {
         DrawSelfLoop(e, *from, vt, emphasis);
         return;
     }
 
     // An edge that has one going the other way is moved to its right (7 pixels), so that the two can be told apart.
     const float lane = m_EdgePairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f / vt.Scale : 0.0f;
-    const std::vector<Point> path = EdgePath(e, *from, *to, lane);
+    const EdgeShape shape = GetEdgeShape(e, *from, *to, lane);
+    const std::vector<Point>& path = shape.Path;
     if (path.size() < 2) return;
-    const std::vector<Point> controls = e.Style.Curved && path.size() > 2 ? CurveControls(path) : std::vector<Point>{};
+    const std::vector<Point>& controls = shape.Controls;
     auto screen = [&](const Point& p) { return vt.ToScreen(p.X, p.Y); };
 
     SetEdgeBrush(e, emphasis);
@@ -504,7 +555,7 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
     }
 
     if (!e.Label.empty())
-        DrawEdgeLabel(e, EdgeLabelPoint(path, controls), vt, emphasis);
+        DrawEdgeLabel(e, shape.Label, vt, emphasis);
 }
 
 void NodeGraphRenderer::SetEdgeBrush(const Edge& e, EdgeEmphasis emphasis) {
@@ -671,16 +722,16 @@ void NodeGraphRenderer::DrawGroup(const NodeGraphModel& model, const Group& g, c
 
     if (g.Collapsed) {
         std::wstring text = g.Title + L" (" + std::to_wstring(g.Nodes.size()) + L")";
-        DrawGroupText(text, { box.Left + 8, box.Top, button.Left - 4, box.Bottom }, m_TextFormat.Get(), g.TextColor, vt);
+        DrawGraphText(text, { box.Left + 8, box.Top, button.Left - 4, box.Bottom }, m_TextFormat.Get(), g.TextColor, vt);
     }
     else {
         const Rect header = model.GetGroupHeader(g);
-        DrawGroupText(g.Title, { header.Left + 8, header.Top, button.Left - 4, header.Bottom }, m_TitleTextFormat.Get(), g.TextColor, vt);
+        DrawGraphText(g.Title, { header.Left + 8, header.Top, button.Left - 4, header.Bottom }, m_TitleTextFormat.Get(), g.TextColor, vt);
     }
 }
 
 // Text in an area of the graph, at the zoom, clipped to it.
-void NodeGraphRenderer::DrawGroupText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt) {
+void NodeGraphRenderer::DrawGraphText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt) {
     if (area.IsEmpty() || text.empty()) return;
     const D2D1_RECT_F rect{ area.Left, area.Top, area.Right, area.Bottom };
     m_RenderTarget->SetTransform(D2D1::Matrix3x2F::Scale(vt.Scale, vt.Scale) * D2D1::Matrix3x2F::Translation(vt.OffsetX, vt.OffsetY));
@@ -695,13 +746,19 @@ void NodeGraphRenderer::DrawGroupText(const std::wstring& text, const Rect& area
 void NodeGraphRenderer::DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis) {
     SetEdgeBrush(e, emphasis);
     const float width = EdgeWidth(e, emphasis);
-    D2D1_POINT_2F p = vt.ToScreen(from.X, from.Y);
+    // from the centers, or the ports
+    auto end = [](const Node& n, PortId id) {
+        const Port* port = FindPort(n, id);
+        return port ? PortPosition(n, *port) : Point{ n.X, n.Y };
+    };
+    const Point start = end(from, e.FromPort), last = end(to, e.ToPort);
+    D2D1_POINT_2F p = vt.ToScreen(start.X, start.Y);
     for (const auto& w : e.Waypoints) {
         const D2D1_POINT_2F q = vt.ToScreen(w.X, w.Y);
         m_RenderTarget->DrawLine(p, q, m_Brush.Get(), width);
         p = q;
     }
-    m_RenderTarget->DrawLine(p, vt.ToScreen(to.X, to.Y), m_Brush.Get(), width);
+    m_RenderTarget->DrawLine(p, vt.ToScreen(last.X, last.Y), m_Brush.Get(), width);
 }
 
 // Zoomed far out: the shape in its fill (a diamond as its box), a border only to show the selection.
@@ -811,6 +868,39 @@ void NodeGraphRenderer::DrawNode(const NodeGraphModel& model, const Node& n, con
 
     if (ownerDraw && (flags & NDF_POSTPAINT))
         CallOwnerDraw(model, n, layout, rr, vt, selected, true);
+    if (!n.Ports.empty())
+        DrawPorts(n, vt);
+}
+
+// On the outline: a dot in its color with a ring of the background (larger when hovered); its name inside the node next
+// to it, from half the size up.
+void NodeGraphRenderer::DrawPorts(const Node& n, const ViewTransform& vt) {
+    const float radius = std::max(k_PortRadius * vt.Scale, 3.0f);
+    const bool names = vt.Scale >= 0.5f;
+    for (const auto& p : n.Ports) {
+        const Point at = PortPosition(n, p);
+        const D2D1_POINT_2F c = vt.ToScreen(at.X, at.Y);
+        const bool hovered = n.Id == m_HoveredPortNode && p.Id == m_HoveredPort;
+        const float r = hovered ? radius * 1.5f : radius;
+        m_Brush->SetColor(ColorrefToD2D(PortColor(p)));
+        m_RenderTarget->FillEllipse({ c, r, r }, m_Brush.Get());
+        m_Brush->SetColor(hovered ? SelectionColor() : ColorrefToD2D(m_Background));
+        m_RenderTarget->DrawEllipse({ c, r, r }, m_Brush.Get(), hovered ? 2.0f : 1.5f);
+
+        if (!names || p.Name.empty()) continue;
+        // a box of the name's line, in graph units, beside the port toward the inside
+        const float gap = k_PortRadius + 4, lineHeight = 14, width = n.Width * 0.5f - gap;
+        Rect box;
+        DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING;
+        switch (p.Side) {
+            case PortSide::Left:  box = { at.X + gap, at.Y - lineHeight / 2, at.X + gap + width, at.Y + lineHeight / 2 }; break;
+            case PortSide::Right: box = { at.X - gap - width, at.Y - lineHeight / 2, at.X - gap, at.Y + lineHeight / 2 }; align = DWRITE_TEXT_ALIGNMENT_TRAILING; break;
+            case PortSide::Top:   box = { at.X - 40, at.Y + gap - 2, at.X + 40, at.Y + gap - 2 + lineHeight }; align = DWRITE_TEXT_ALIGNMENT_CENTER; break;
+            default:              box = { at.X - 40, at.Y - gap + 2 - lineHeight, at.X + 40, at.Y - gap + 2 }; align = DWRITE_TEXT_ALIGNMENT_CENTER; break;
+        }
+        m_PortTextFormat->SetTextAlignment(align);
+        DrawGraphText(p.Name, box, m_PortTextFormat.Get(), n.Style.TextColor, vt);
+    }
 }
 
 // The outline of a node in a rect (rounded for a rectangle), as a geometry.
@@ -1023,6 +1113,28 @@ NodeId NodeGraphRenderer::HitTestNode(const NodeGraphModel& model, float gx, flo
     return InvalidNode;
 }
 
+bool NodeGraphRenderer::HitTestPort(const NodeGraphModel& model, const ViewTransform& vt, float sx, float sy, NodeId& node, PortId& port) const {
+    node = InvalidNode;
+    port = InvalidPort;
+    if (vt.Scale < m_DetailThreshold)
+        return false;
+    // as drawn (DrawPorts), with a few pixels more to aim
+    const float radius = std::max(k_PortRadius * vt.Scale, 3.0f) + 3.0f;
+    for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it) {
+        if (it->Ports.empty() || model.IsHidden(it->Id)) continue;
+        for (const auto& p : it->Ports) {
+            const Point at = PortPosition(*it, p);
+            const D2D1_POINT_2F c = vt.ToScreen(at.X, at.Y);
+            if ((c.x - sx) * (c.x - sx) + (c.y - sy) * (c.y - sy) <= radius * radius) {
+                node = it->Id;
+                port = p.Id;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 GroupId NodeGraphRenderer::HitTestGroup(const NodeGraphModel& model, float gx, float gy, bool* onButton) const {
     auto in = [&](const Rect& r) { return !r.IsEmpty() && gx >= r.Left && gx <= r.Right && gy >= r.Top && gy <= r.Bottom; };
     // the last drawn on top: collapsed boxes (drawn with the nodes) before the headers of expanded groups
@@ -1187,10 +1299,12 @@ EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, flo
         if (from == to && model.IsHidden(e.From)) continue;   // inside a collapsed group
 
         // every piece of the path from one node to the other (or around the node, back to it); a curve as short lines
-        std::vector<Point> path = from == to ? SelfLoopPath(*from) : EdgePath(e, *from, *to);
+        const bool loop = IsSelfLoop(e, *from, *to);
+        EdgeShape shape = loop ? EdgeShape{ SelfLoopPath(*from) } : GetEdgeShape(e, *from, *to);
+        std::vector<Point> path = std::move(shape.Path);
         if (path.size() < 2) continue;
-        if (from != to && e.Style.Curved && path.size() > 2) {
-            const auto controls = CurveControls(path);
+        if (!shape.Controls.empty()) {
+            const auto& controls = shape.Controls;
             const int steps = 12;
             std::vector<Point> flat;
             flat.reserve((path.size() - 1) * steps + 1);
