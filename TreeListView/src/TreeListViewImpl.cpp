@@ -201,7 +201,7 @@ HTLITEM CTreeListViewCtrl::InsertItem(HTLITEM hParent, HTLITEM hInsertAfter,
 	LinkAfter(parent, node, hInsertAfter);
 	if (m_UpdateCount == 0) {
 		RebuildVisibleList();
-		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 		m_List.Invalidate();
 	}
 	return node;
@@ -213,7 +213,7 @@ BOOL CTreeListViewCtrl::DeleteItem(HTLITEM hItem) {
 	DeleteTree(hItem);
 	if (m_UpdateCount == 0) {
 		RebuildVisibleList();
-		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 		m_List.Invalidate();
 	}
 	return TRUE;
@@ -223,7 +223,7 @@ void CTreeListViewCtrl::DeleteAllItems() {
 	DeleteTree(&m_Root);
 	m_Visible.clear();
 	if (m_UpdateCount == 0) {
-		m_List.SetItemCountEx(0, LVSICF_NOINVALIDATEALL);
+		m_List.SetItemCountEx(0, LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 		m_List.Invalidate();
 	}
 }
@@ -368,7 +368,7 @@ void CTreeListViewCtrl::Expand(HTLITEM hItem, bool expand) {
 
 	hItem->expanded = expand;
 	RebuildVisibleList();
-	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 	m_List.Invalidate();
 
 	nm.hdr.code = TLVN_ITEMEXPANDED;
@@ -388,14 +388,14 @@ bool CTreeListViewCtrl::IsExpanded(HTLITEM hItem) const {
 void CTreeListViewCtrl::ExpandAll(HTLITEM hItem) {
 	ExpandRecursive(hItem ? hItem : &m_Root, true);
 	RebuildVisibleList();
-	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 	m_List.Invalidate();
 }
 
 void CTreeListViewCtrl::CollapseAll(HTLITEM hItem) {
 	ExpandRecursive(hItem ? hItem : &m_Root, false);
 	RebuildVisibleList();
-	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 	m_List.Invalidate();
 }
 
@@ -424,7 +424,7 @@ void CTreeListViewCtrl::SetViewMode(bool treeMode) {
 	if (m_TreeMode == treeMode) return;
 	m_TreeMode = treeMode;
 	RebuildVisibleList();
-	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 	m_List.Invalidate();
 }
 
@@ -569,7 +569,7 @@ HTLITEM CTreeListViewCtrl::HitTest(POINT pt, int* pCol) const {
 void CTreeListViewCtrl::SortChildren(HTLITEM hParent, PFNTLVCOMPARE pfn, LPARAM lParam, bool recurse) {
 	SortNode(hParent ? hParent : &m_Root, pfn, lParam, recurse);
 	RebuildVisibleList();
-	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+	m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 	m_List.Invalidate();
 }
 
@@ -698,7 +698,7 @@ void CTreeListViewCtrl::ExpandToItem(TlvNode* node) {
 	}
 	if (changed) {
 		RebuildVisibleList();
-		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 		m_List.Invalidate();
 	}
 }
@@ -730,7 +730,7 @@ void CTreeListViewCtrl::BeginUpdate() {
 void CTreeListViewCtrl::EndUpdate() {
 	if (m_UpdateCount > 0 && --m_UpdateCount == 0) {
 		RebuildVisibleList();
-		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL);
+		m_List.SetItemCountEx((int)m_Visible.size(), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
 		m_List.SendMessage(WM_SETREDRAW, TRUE);
 		m_List.Invalidate();
 		m_List.UpdateWindow();
