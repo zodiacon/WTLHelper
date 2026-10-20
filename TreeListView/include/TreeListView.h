@@ -237,6 +237,9 @@ public:
 
 	int     GetItemCount() const;          // total nodes in the tree
 	int     GetVisibleItemCount() const;   // nodes currently in the flat visible list
+	HTLITEM GetVisibleItem(int index) const;  // the node at a row of the inner ListView; nullptr if out of range
+	// a cell's text as displayed: the stored text, or the owner's (TLVN_GETDISPINFO) for a callback cell
+	std::wstring GetCellText(HTLITEM hItem, int col) const;
 	// searches the visible items' text, including callback text (TLVN_GETDISPINFO)
 	HTLITEM FindItem(HTLITEM hStart, int col, LPCWSTR text, UINT flags = 0) const;
 	bool    GetItemRect(HTLITEM hItem, RECT* prc) const;  // bounds in ListView client coords
@@ -338,8 +341,6 @@ private:
 	void    Unlink(TlvNode* node);
 	void    DeleteTree(TlvNode* node);
 	LRESULT FireNotify(NMHDR* pnm);
-	// a cell's text as displayed: the stored text, or the owner's (TLVN_GETDISPINFO) for a callback cell
-	std::wstring GetCellText(TlvNode* node, int col) const;
 
 	LRESULT RelayCustomDraw(NMLVCUSTOMDRAW* plvcd);
 	void    DrawColumn0(NMLVCUSTOMDRAW* pcd);

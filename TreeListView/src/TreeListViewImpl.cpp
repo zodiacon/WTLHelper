@@ -511,6 +511,10 @@ int CTreeListViewCtrl::GetVisibleItemCount() const {
 	return (int)m_Visible.size();
 }
 
+HTLITEM CTreeListViewCtrl::GetVisibleItem(int index) const {
+	return index >= 0 && index < (int)m_Visible.size() ? m_Visible[index] : nullptr;
+}
+
 HTLITEM CTreeListViewCtrl::FindItem(HTLITEM hStart, int col, LPCWSTR text, UINT flags) const {
 	if (!text || m_Visible.empty()) return nullptr;
 
