@@ -49,6 +49,7 @@ static constexpr int IDC_UNGROUP = 141;
 static constexpr int IDC_DATAFLOW = 142;
 static constexpr int IDC_LABELSAPART = 143;
 static constexpr int IDC_ELBOW = 144;
+static constexpr int IDC_ROUNDED = 145;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -828,6 +829,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_graph.Refresh();
             break;
         }
+        case IDC_ROUNDED: {
+            // the corners of all the elbow edges
+            const bool rounded = !(GetMenuState(GetMenu(hwnd), IDC_ROUNDED, MF_BYCOMMAND) & MF_CHECKED);
+            NodeGraphModel& m = *g_graph.GetModel();
+            for (const auto& e : m.Edges())
+                m.GetEdge(e.Id)->Style.CornerRadius = rounded ? EdgeStyle{}.CornerRadius : 0.0f;
+            CheckMenuItem(GetMenu(hwnd), IDC_ROUNDED, rounded ? MF_CHECKED : MF_UNCHECKED);
+            g_graph.Refresh();
+            break;
+        }
         case IDC_LABELSAPART:
             g_graph.SetAvoidLabelOverlap(!g_graph.GetAvoidLabelOverlap());
             CheckMenuItem(GetMenu(hwnd), IDC_LABELSAPART, g_graph.GetAvoidLabelOverlap() ? MF_CHECKED : MF_UNCHECKED);
@@ -1030,6 +1041,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_STRING, IDC_HIGHLIGHT, L"&Highlight Neighbors");
     AppendMenu(hGraph, MF_STRING, IDC_CURVED, L"C&urved Edges");
     AppendMenu(hGraph, MF_STRING, IDC_ELBOW, L"&Elbow Edges");
+    AppendMenu(hGraph, MF_STRING | MF_CHECKED, IDC_ROUNDED, L"Rou&nded Corners");
     AppendMenu(hGraph, MF_STRING | MF_CHECKED, IDC_LABELSAPART, L"&Keep Labels Apart");
     AppendMenu(hGraph, MF_STRING, IDC_READONLY, L"&Read Only");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);

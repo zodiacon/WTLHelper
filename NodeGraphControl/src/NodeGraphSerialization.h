@@ -20,8 +20,9 @@ namespace NodeGraphCtrl::Serialization {
     // version 4 adds the UserData of nodes and edges (as their serializer makes it; empty without one);
     // version 5 adds an edge's line, arrowhead, Curved and ScaleLabel;
     // version 6 adds the groups (after the edges) and the next group id (after the next image id);
-    // version 7 adds a node's ports and an edge's ports (each after its UserData)
-    constexpr uint32_t Version = 7;
+    // version 7 adds a node's ports and an edge's ports (each after its UserData);
+    // version 8 adds an edge's CornerRadius (after its ports; Elbow is a bit of the version 5 flags)
+    constexpr uint32_t Version = 8;
 
     // the fewest bytes a record takes (its first version, empty strings and data): to cap counts read from the input
     constexpr size_t MinImageRecord = 4 * 4 + 1;                    // id, width, height, data size, a byte of data

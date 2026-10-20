@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <span>
 
 namespace NodeGraphCtrl {
 
@@ -96,6 +97,7 @@ struct EdgeStyle {
     ArrowHead Arrow      = ArrowHead::Filled;
     bool      Curved     = false;             // a smooth curve through the bends (a straight edge stays straight)
     bool      Elbow      = false;             // across and up and down only, straight out of the nodes (ElbowPath); before Curved
+    float     CornerRadius = 8.0f;            // an elbow's corners rounded this much (graph units; 0: square)
     bool      ScaleLabel = true;              // the label scales with the zoom (false: the same size on the screen)
 };
 
@@ -198,12 +200,30 @@ std::vector<Point> ElbowPath(Point start, Point startOut, Point end, Point endOu
                              Rect startBox = {}, Rect endBox = {});
 
 // All of an edge's shape, as the renderer, hit testing and SVG export have it: its path, the controls of its curve
-// (none: straight), and where its label goes. lane as EdgePath. Path empty: nothing to draw.
+// (none: straight), and where its label goes. lane as EdgePath. Path empty: nothing to draw. An elbow's pieces are moved
+// across by shifts (one for each piece of EdgePath's path: NodeGraphModel::ElbowShifts), and its corners rounded
+// (RoundCorners).
 struct EdgeShape {
     std::vector<Point> Path, Controls;
     Point Label;
 };
-EdgeShape GetEdgeShape(const Edge& e, const Node& from, const Node& to, float lane = 0.0f);
+EdgeShape GetEdgeShape(const Edge& e, const Node& from, const Node& to, float lane = 0.0f, std::span<const float> shifts = {});
+// A path of horizontal and vertical lines with its corners rounded: radius (at most half of the pieces either side),
+// a quarter circle each, as the pieces of a curve (the straight ones too: EdgeShape::Controls for all).
+EdgeShape RoundCorners(const std::vector<Point>& path, float radius);
+
+// Elbow edges whose middles would lie on one another, moved apart: the pieces (not the first or the last, at the nodes)
+// that are less than spacing apart and overlap are spread across, spacing apart (less where the pieces either side are
+// too short), in the order that crosses the fewest. Pieces of edges with an end in common (From, To: a node and port)
+// stay together. For each edge moved, how far each piece of its path is moved.
+struct ElbowRoute {
+    EdgeId Edge;
+    std::vector<Point> Path;        // EdgePath's
+    uint64_t From = 0, To = 0;
+};
+using ElbowShiftMap = std::unordered_map<EdgeId, std::vector<float>>;
+ElbowShiftMap SpreadElbows(const std::vector<ElbowRoute>& routes, float spacing = 8.0f);
+std::span<const float> ShiftsOf(const ElbowShiftMap& shifts, EdgeId edge);     // none: empty
 // An edge drawn as a loop (SelfLoopPath): from a node to itself, not between two of its ports.
 bool IsSelfLoop(const Edge& e, const Node& from, const Node& to);
 // The loop of an edge from a node to itself, in graph units: out of the right of the node's outline, around a box reach
@@ -323,6 +343,10 @@ public:
     };
     std::vector<EdgeLabelPlace> PlaceEdgeLabels(bool avoidOverlap = true) const;
 
+    // The elbow edges kept apart (SpreadElbows), as they are drawn (with GetEdgeShape): made again only when the graph
+    // changes (as LabelBounds).
+    const ElbowShiftMap& ElbowShifts() const;
+
     void Clear();   // the nodes, edges and images
 
     // Saves and loads UserData (Save/Load, the clipboard). Not owned; null: UserData isn't kept.
@@ -381,6 +405,10 @@ private:
     mutable uint64_t m_LabelBoundsKey = 0;
     mutable Rect     m_LabelBounds;
     mutable bool     m_LabelBoundsValid = false;
+    mutable uint64_t m_ElbowShiftsKey = 0;
+    mutable ElbowShiftMap m_ElbowShifts;
+    mutable bool     m_ElbowShiftsValid = false;
+    std::unordered_map<GroupId, Node> CollapsedBoxes() const;      // the box of each collapsed group, as an edge end
 
     // id -> index in m_Nodes / m_Edges, made again on the next lookup after a removal (the indices after it move)
     mutable std::unordered_map<NodeId, uint32_t> m_NodeIndex;

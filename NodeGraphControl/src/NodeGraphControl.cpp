@@ -3059,6 +3059,7 @@ namespace NodeGraphCtrl {
 			extend(labels.Left, labels.Top);
 			extend(labels.Right, labels.Bottom);
 		}
+		const ElbowShiftMap& shifts = ElbowShifts();
 		for (const auto& e : m_Edges) {
 			for (const auto& w : e.Waypoints)
 				extend(w.X, w.Y);
@@ -3076,7 +3077,7 @@ namespace NodeGraphCtrl {
 			portOut(*from, e.FromPort, *to);
 			portOut(*to, e.ToPort, *from);
 			if (e.Style.Elbow && from != to)	// (its corners can be out of the nodes' box)
-				for (const auto& p : GetEdgeShape(e, *from, *to).Path)
+				for (const auto& p : GetEdgeShape(e, *from, *to, 0.0f, ShiftsOf(shifts, e.Id)).Path)
 					extend(p.X, p.Y);
 			if (IsSelfLoop(e, *from, *to)) {
 				const float right = from->X + from->Width * 0.5f + 30.0f;	// the loop goes 24 units to the right of the node
@@ -3148,12 +3149,52 @@ namespace NodeGraphCtrl {
 		return h;
 	}
 
-	std::vector<NodeGraphModel::EdgeLabelPlace> NodeGraphModel::PlaceEdgeLabels(bool avoidOverlap) const {
-		// an end in a collapsed group is its box
+	std::unordered_map<GroupId, Node> NodeGraphModel::CollapsedBoxes() const {
 		std::unordered_map<GroupId, Node> collapsed;
 		for (const auto& g : m_Groups)
 			if (g.Collapsed && !g.Nodes.empty())
 				collapsed.emplace(g.Id, CollapsedNode(g));
+		return collapsed;
+	}
+
+	const ElbowShiftMap& NodeGraphModel::ElbowShifts() const {
+		static const ElbowShiftMap none;
+		if (std::none_of(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return e.Style.Elbow; }))
+			return none;
+		const uint64_t key = LabelFingerprint();
+		if (m_ElbowShiftsValid && key == m_ElbowShiftsKey)
+			return m_ElbowShifts;
+		// the paths as the renderer has them (at the zoom of 1: the lanes don't change which pieces they have)
+		const std::unordered_map<GroupId, Node> collapsed = CollapsedBoxes();
+		auto edgeEnd = [&](NodeId id) -> const Node* {
+			if (!collapsed.empty())
+				if (auto it = collapsed.find(GroupOf(id)); it != collapsed.end()) return &it->second;
+			return GetNode(id);
+		};
+		std::unordered_set<uint64_t> pairs;
+		pairs.reserve(m_Edges.size());
+		for (const auto& e : m_Edges)
+			pairs.insert((uint64_t)e.From << 32 | e.To);
+		std::vector<ElbowRoute> routes;
+		routes.reserve(std::count_if(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return e.Style.Elbow; }));
+		for (const auto& e : m_Edges) {
+			if (!e.Style.Elbow) continue;
+			const Node* from = edgeEnd(e.From);
+			const Node* to = edgeEnd(e.To);
+			if (!from || !to || IsSelfLoop(e, *from, *to)) continue;
+			std::vector<Point> path = EdgePath(e, *from, *to, pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f);
+			if (path.size() > 3)
+				routes.push_back({ e.Id, std::move(path), (uint64_t)e.From << 32 | e.FromPort, (uint64_t)e.To << 32 | e.ToPort });
+		}
+		m_ElbowShifts = SpreadElbows(routes);
+		m_ElbowShiftsKey = key;
+		m_ElbowShiftsValid = true;
+		return m_ElbowShifts;
+	}
+
+	std::vector<NodeGraphModel::EdgeLabelPlace> NodeGraphModel::PlaceEdgeLabels(bool avoidOverlap) const {
+		// an end in a collapsed group is its box
+		const std::unordered_map<GroupId, Node> collapsed = CollapsedBoxes();
 		auto edgeEnd = [&](NodeId id) -> const Node* {
 			if (!collapsed.empty())
 				if (auto it = collapsed.find(GroupOf(id)); it != collapsed.end()) return &it->second;
@@ -3175,6 +3216,7 @@ namespace NodeGraphCtrl {
 		for (const auto& g : m_Groups)
 			if (!g.Collapsed) obstacles.push_back(GetGroupHeader(g));
 
+		const ElbowShiftMap& shifts = ElbowShifts();
 		const size_t labeled = std::count_if(m_Edges.begin(), m_Edges.end(), [](const Edge& e) { return !e.Label.empty(); });
 		std::vector<LabelRequest> requests;
 		std::vector<EdgeLabelPlace> places;
@@ -3191,7 +3233,7 @@ namespace NodeGraphCtrl {
 				obstacles.push_back({ left, from->Y - k_EdgeLabelHeight * 0.5f, left + width, from->Y + k_EdgeLabelHeight * 0.5f });
 				continue;
 			}
-			EdgeShape shape = GetEdgeShape(e, *from, *to, pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f);
+			EdgeShape shape = GetEdgeShape(e, *from, *to, pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f, ShiftsOf(shifts, e.Id));
 			if (shape.Path.size() < 2) continue;
 			places.push_back({ e.Id, shape.Label, shape.Label, width });
 			if (avoidOverlap)
@@ -3535,6 +3577,7 @@ namespace NodeGraphCtrl {
 			for (const auto& place : places)
 				labelPlaces.emplace(place.Edge, place.Center);
 		}
+		const ElbowShiftMap& elbowShifts = ElbowShifts();
 
 		for (const auto& e : m_Edges) {
 			const Node* from = edgeEnd(e.From);
@@ -3558,7 +3601,7 @@ namespace NodeGraphCtrl {
 			}
 
 			const float lane = pairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f : 0.0f;
-			const EdgeShape shape = GetEdgeShape(e, *from, *to, lane);
+			const EdgeShape shape = GetEdgeShape(e, *from, *to, lane, ShiftsOf(elbowShifts, e.Id));
 			const std::vector<Point>& points = shape.Path;
 			if (points.size() < 2) continue;
 			const std::vector<Point>& controls = shape.Controls;

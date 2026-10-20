@@ -153,6 +153,7 @@ namespace NodeGraphCtrl {
             WriteUserData(w, e, serializer, &IUserDataSerializer::SaveEdge);
             w.Write(e.FromPort);
             w.Write(e.ToPort);
+            w.Write(e.Style.CornerRadius);
         }
 
         bool ReadEdge(Reader& r, Edge& e, uint32_t version, IUserDataSerializer* serializer) {
@@ -190,6 +191,8 @@ namespace NodeGraphCtrl {
                 ok = ReadUserData(r, e, serializer, &IUserDataSerializer::LoadEdge);
             if (ok && version >= 7)
                 ok = r.Read(e.FromPort) && r.Read(e.ToPort);
+            if (ok && version >= 8)
+                ok = r.Read(e.Style.CornerRadius) && e.Style.CornerRadius >= 0 && e.Style.CornerRadius <= 1000;
             return ok;
         }
 

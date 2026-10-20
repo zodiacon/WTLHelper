@@ -591,7 +591,7 @@ namespace NodeGraphCtrl {
         return path;
     }
 
-    EdgeShape GetEdgeShape(const Edge& e, const Node& from, const Node& to, float lane) {
+    EdgeShape GetEdgeShape(const Edge& e, const Node& from, const Node& to, float lane, std::span<const float> shifts) {
         EdgeShape shape;
         shape.Path = EdgePath(e, from, to, lane);
         if (shape.Path.size() < 2) {
@@ -602,6 +602,14 @@ namespace NodeGraphCtrl {
         const Port* fromPort = FindPort(from, e.FromPort);
         const Port* toPort = FindPort(to, e.ToPort);
         if (e.Style.Elbow) {
+            // its pieces moved apart from others' (the ends stay on their nodes: the first and last pieces aren't moved)
+            if (shifts.size() + 1 == shape.Path.size())
+                for (size_t i = 1; i + 2 < shape.Path.size(); i++) {
+                    if (shifts[i] == 0) continue;
+                    Point &p = shape.Path[i], &q = shape.Path[i + 1];
+                    if (std::abs(p.X - q.X) < 1e-3f) { p.X += shifts[i]; q.X += shifts[i]; }
+                    else { p.Y += shifts[i]; q.Y += shifts[i]; }
+                }
             // halfway along it (its middle point would be a corner)
             float length = 0;
             for (size_t i = 0; i + 1 < shape.Path.size(); i++)
@@ -617,12 +625,194 @@ namespace NodeGraphCtrl {
                 }
                 left -= l;
             }
+            if (e.Style.CornerRadius > 0 && shape.Path.size() > 2) {
+                EdgeShape round = RoundCorners(shape.Path, e.Style.CornerRadius);
+                shape.Path = std::move(round.Path);
+                shape.Controls = std::move(round.Controls);
+            }
             return shape;
         }
         if (e.Style.Curved && (shape.Path.size() > 2 || fromPort || toPort))
             shape.Controls = CurveControls(shape.Path, fromPort ? PortNormal(fromPort->Side) : Point{}, toPort ? PortNormal(toPort->Side) : Point{});
         shape.Label = EdgeLabelPoint(shape.Path, shape.Controls);
         return shape;
+    }
+
+    EdgeShape RoundCorners(const std::vector<Point>& path, float radius) {
+        EdgeShape s;
+        const size_t n = path.size();
+        if (n < 3 || radius <= 0) {
+            s.Path = path;
+            return s;
+        }
+        s.Path.reserve(n * 2);
+        s.Controls.reserve(n * 4);
+        s.Path.push_back(path[0]);
+        auto line = [&](Point to) {     // (a curve along the line: its controls at a third and two)
+            const Point from = s.Path.back();
+            if (std::abs(to.X - from.X) < 1e-3f && std::abs(to.Y - from.Y) < 1e-3f) return;
+            s.Controls.push_back({ from.X + (to.X - from.X) / 3, from.Y + (to.Y - from.Y) / 3 });
+            s.Controls.push_back({ from.X + (to.X - from.X) * 2 / 3, from.Y + (to.Y - from.Y) * 2 / 3 });
+            s.Path.push_back(to);
+        };
+        for (size_t i = 1; i + 1 < n; i++) {
+            const Point &prev = path[i - 1], &c = path[i], &next = path[i + 1];
+            const float in = std::hypot(c.X - prev.X, c.Y - prev.Y), out = std::hypot(next.X - c.X, next.Y - c.Y);
+            const float r = (std::min)({ radius, in * 0.5f, out * 0.5f });
+            if (r < 0.5f) {
+                line(c);
+                continue;
+            }
+            const Point din{ (c.X - prev.X) / in, (c.Y - prev.Y) / in }, dout{ (next.X - c.X) / out, (next.Y - c.Y) / out };
+            const Point a{ c.X - din.X * r, c.Y - din.Y * r }, b{ c.X + dout.X * r, c.Y + dout.Y * r };
+            line(a);
+            const float k = 0.5523f * r;     // (a cubic as near a quarter circle as one can be)
+            s.Controls.push_back({ a.X + din.X * k, a.Y + din.Y * k });
+            s.Controls.push_back({ b.X - dout.X * k, b.Y - dout.Y * k });
+            s.Path.push_back(b);
+        }
+        line(path.back());
+        return s;
+    }
+
+    std::span<const float> ShiftsOf(const ElbowShiftMap& shifts, EdgeId edge) {
+        if (shifts.empty()) return {};
+        auto it = shifts.find(edge);
+        return it != shifts.end() ? std::span<const float>(it->second) : std::span<const float>{};
+    }
+
+    ElbowShiftMap SpreadElbows(const std::vector<ElbowRoute>& routes, float spacing) {
+        ElbowShiftMap shifts;
+        // the middle pieces, across (horizontal) or up and down: where across them, and from where to where along them
+        struct Piece { uint32_t Route, Index; float At, Lo, Hi; bool Vertical; };
+        size_t count = 0;
+        for (const auto& r : routes) count += r.Path.size() > 3 ? r.Path.size() - 3 : 0;
+        std::vector<Piece> pieces;
+        pieces.reserve(count);
+        for (uint32_t ri = 0; ri < (uint32_t)routes.size(); ri++) {
+            const auto& p = routes[ri].Path;
+            for (uint32_t i = 1; i + 2 < (uint32_t)p.size(); i++) {
+                const bool vertical = std::abs(p[i].X - p[i + 1].X) < 1e-3f;
+                if (!vertical && std::abs(p[i].Y - p[i + 1].Y) >= 1e-3f) continue;
+                const float a = vertical ? p[i].Y : p[i].X, b = vertical ? p[i + 1].Y : p[i + 1].X;
+                pieces.push_back({ ri, i, vertical ? p[i].X : p[i].Y, (std::min)(a, b), (std::max)(a, b), vertical });
+            }
+        }
+        std::sort(pieces.begin(), pieces.end(), [](const Piece& a, const Piece& b) { return a.Vertical != b.Vertical ? a.Vertical < b.Vertical : a.At < b.At; });
+
+        // the far end of the piece before (after) one, across it: where the line it turns into goes
+        auto farBefore = [&](const Piece& c) { const Point& q = routes[c.Route].Path[c.Index - 1]; return c.Vertical ? q.X : q.Y; };
+        auto farAfter = [&](const Piece& c) { const Point& q = routes[c.Route].Path[c.Index + 2]; return c.Vertical ? q.X : q.Y; };
+        // a set of pieces that overlap: in tracks (those of edges with an end in common together), the tracks spread
+        std::vector<uint32_t> members, track, order, best;
+        auto spread = [&]() {
+            const size_t k = members.size();
+            // the tracks (union of the pieces with an end in common)
+            track.resize(k);
+            for (size_t i = 0; i < k; i++) track[i] = (uint32_t)i;
+            std::function<uint32_t(uint32_t)> root = [&](uint32_t i) { return track[i] == i ? i : track[i] = root(track[i]); };
+            for (size_t i = 0; i < k; i++)
+                for (size_t j = i + 1; j < k; j++) {
+                    const ElbowRoute &a = routes[pieces[members[i]].Route], &b = routes[pieces[members[j]].Route];
+                    if (a.From == b.From || a.To == b.To) track[root((uint32_t)j)] = root((uint32_t)i);
+                }
+            std::vector<uint32_t> roots;
+            roots.reserve(k);
+            for (size_t i = 0; i < k; i++) {
+                const uint32_t r = root((uint32_t)i);
+                if (std::find(roots.begin(), roots.end(), r) == roots.end()) roots.push_back(r);
+            }
+            const size_t t = roots.size();
+            if (t < 2) return;
+            std::vector<uint32_t> trackOf(k);
+            std::vector<float> mean(t, 0.0f);
+            std::vector<int> size(t, 0);
+            float base = 0;
+            for (size_t i = 0; i < k; i++) {
+                trackOf[i] = (uint32_t)(std::find(roots.begin(), roots.end(), root((uint32_t)i)) - roots.begin());
+                mean[trackOf[i]] += pieces[members[i]].At;
+                size[trackOf[i]]++;
+                base += pieces[members[i]].At;
+            }
+            base /= (float)k;
+            for (size_t i = 0; i < t; i++) mean[i] /= (float)size[i];
+
+            // the order of the tracks across: the one that crosses the fewest (all of them tried, for a few)
+            order.resize(t);
+            for (size_t i = 0; i < t; i++) order[i] = (uint32_t)i;
+            std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return mean[a] < mean[b]; });
+            best = order;
+            if (t <= 6) {
+                std::vector<float> at(t);
+                auto crossings = [&]() {
+                    for (size_t i = 0; i < t; i++) at[order[i]] = base + ((float)i - (t - 1) * 0.5f) * spacing;
+                    int n = 0;
+                    for (size_t i = 0; i < k; i++)
+                        for (size_t j = 0; j < k; j++) {
+                            if (trackOf[i] == trackOf[j]) continue;
+                            // the lines i turns into at its ends, across j?
+                            const Piece &a = pieces[members[i]], &b = pieces[members[j]];
+                            const float ca = at[trackOf[i]], cb = at[trackOf[j]];
+                            const Point& p0 = routes[a.Route].Path[a.Index];
+                            const Point& p1 = routes[a.Route].Path[a.Index + 1];
+                            const float along0 = a.Vertical ? p0.Y : p0.X, along1 = a.Vertical ? p1.Y : p1.X;
+                            for (auto [along, away] : { std::pair{ along0, farBefore(a) }, std::pair{ along1, farAfter(a) } })
+                                if (cb > (std::min)(ca, away) && cb < (std::max)(ca, away) && along > b.Lo && along < b.Hi) n++;
+                        }
+                    return n;
+                };
+                int fewest = INT_MAX;
+                std::sort(order.begin(), order.end());
+                do {
+                    const int n = crossings();
+                    if (n < fewest) { fewest = n; best = order; }
+                } while (fewest > 0 && std::next_permutation(order.begin(), order.end()));
+            }
+            // as far apart as the pieces either side let them (they must not turn back)
+            for (const float s : { spacing, spacing * 0.75f, spacing * 0.5f }) {
+                bool fits = true;
+                for (size_t i = 0; i < k && fits; i++) {
+                    const Piece& c = pieces[members[i]];
+                    const size_t pos = std::find(best.begin(), best.end(), trackOf[i]) - best.begin();
+                    const float to = base + ((float)pos - (t - 1) * 0.5f) * s;
+                    for (const float away : { farBefore(c), farAfter(c) })
+                        if ((away - c.At) * (away - to) <= 0 || std::abs(away - to) < 1.0f) fits = false;
+                }
+                if (!fits) continue;
+                for (size_t i = 0; i < k; i++) {
+                    const Piece& c = pieces[members[i]];
+                    const size_t pos = std::find(best.begin(), best.end(), trackOf[i]) - best.begin();
+                    auto& v = shifts[routes[c.Route].Edge];
+                    if (v.empty()) v.assign(routes[c.Route].Path.size() - 1, 0.0f);
+                    v[c.Index] = base + ((float)pos - (t - 1) * 0.5f) * s - c.At;
+                }
+                return;
+            }
+        };
+
+        // runs of pieces less than spacing apart, then those of a run that overlap
+        std::vector<uint32_t> run;
+        for (size_t i = 0; i < pieces.size();) {
+            size_t j = i + 1;
+            while (j < pieces.size() && pieces[j].Vertical == pieces[i].Vertical && pieces[j].At - pieces[j - 1].At < spacing - 1e-3f) j++;
+            if (j - i >= 2) {
+                run.clear();
+                for (size_t m = i; m < j; m++) run.push_back((uint32_t)m);
+                std::sort(run.begin(), run.end(), [&](uint32_t a, uint32_t b) { return pieces[a].Lo < pieces[b].Lo; });
+                for (size_t m = 0; m < run.size();) {
+                    float hi = pieces[run[m]].Hi;
+                    size_t n = m + 1;
+                    while (n < run.size() && pieces[run[n]].Lo < hi - 1e-3f) hi = (std::max)(hi, pieces[run[n++]].Hi);
+                    if (n - m >= 2) {
+                        members.assign(run.begin() + m, run.begin() + n);
+                        spread();
+                    }
+                    m = n;
+                }
+            }
+            i = j;
+        }
+        return shifts;
     }
 
     bool IsSelfLoop(const Edge& e, const Node& from, const Node& to) {

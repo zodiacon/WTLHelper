@@ -305,6 +305,7 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
     m_EdgePairs.reserve(model.Edges().size());     // (kept from frame to frame: grows once)
     for (const auto& e : model.Edges())
         m_EdgePairs.insert((uint64_t)e.From << 32 | e.To);
+    m_ElbowShifts = &model.ElbowShifts();
 
     // The highlight: the focus nodes, their neighbors and the edges of the focus are drawn last, over a veil that dims
     // the rest. Nothing is dimmed if it is all in the highlight.
@@ -487,13 +488,18 @@ void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGr
         m_RenderTarget->DrawLine(a.At, b.At, m_Brush.Get(), 2.0f, m_DashStyle.Get());
     else if (preview.Elbow) {
         // its corners, as the edge will have them (ElbowPath); the end at the mouse either way
-        const std::vector<Point> path = ElbowPath({ a.At.x, a.At.y }, a.Out, { b.At.x, b.At.y }, b.Out, {}, 20.0f * vt.Scale, boxA, boxB);
+        const EdgeShape shape = RoundCorners(ElbowPath({ a.At.x, a.At.y }, a.Out, { b.At.x, b.At.y }, b.Out, {}, 20.0f * vt.Scale, boxA, boxB),
+            EdgeStyle{}.CornerRadius * vt.Scale);
+        const std::vector<Point>& path = shape.Path;
         ComPtr<ID2D1PathGeometry> geometry;
         ComPtr<ID2D1GeometrySink> sink;
         if (path.size() >= 2 && SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) && SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
             sink->BeginFigure({ path[0].X, path[0].Y }, D2D1_FIGURE_BEGIN_HOLLOW);
             for (size_t i = 1; i < path.size(); i++)
-                sink->AddLine({ path[i].X, path[i].Y });
+                if (shape.Controls.empty())
+                    sink->AddLine({ path[i].X, path[i].Y });
+                else
+                    sink->AddBezier({ { shape.Controls[i * 2 - 2].X, shape.Controls[i * 2 - 2].Y }, { shape.Controls[i * 2 - 1].X, shape.Controls[i * 2 - 1].Y }, { path[i].X, path[i].Y } });
             sink->EndFigure(D2D1_FIGURE_END_OPEN);
             if (SUCCEEDED(sink->Close()))
                 m_RenderTarget->DrawGeometry(geometry.Get(), m_Brush.Get(), 2.0f, m_DashStyle.Get());
@@ -557,7 +563,7 @@ void NodeGraphRenderer::DrawEdge(const Edge& e, const NodeGraphModel& model,
 
     // An edge that has one going the other way is moved to its right (7 pixels), so that the two can be told apart.
     const float lane = m_EdgePairs.contains((uint64_t)e.To << 32 | e.From) ? 7.0f / vt.Scale : 0.0f;
-    const EdgeShape shape = GetEdgeShape(e, *from, *to, lane);
+    const EdgeShape shape = GetEdgeShape(e, *from, *to, lane, m_ElbowShifts ? ShiftsOf(*m_ElbowShifts, e.Id) : std::span<const float>{});
     const std::vector<Point>& path = shape.Path;
     if (path.size() < 2) return;
     const std::vector<Point>& controls = shape.Controls;
@@ -661,7 +667,7 @@ void NodeGraphRenderer::PlaceEdgeLabels(const NodeGraphModel& model, const ViewT
             continue;
         }
         const float lane = m_EdgePairs.contains((uint64_t)e->To << 32 | e->From) ? 7.0f / vt.Scale : 0.0f;
-        EdgeShape shape = GetEdgeShape(*e, *from, *to, lane);
+        EdgeShape shape = GetEdgeShape(*e, *from, *to, lane, m_ElbowShifts ? ShiftsOf(*m_ElbowShifts, e->Id) : std::span<const float>{});
         if (shape.Path.size() < 2) continue;
         LabelRequest r;
         r.Preferred = shape.Label;
@@ -1408,6 +1414,7 @@ ResizeHandle NodeGraphRenderer::HitTestResizeHandle(const Node& n, const ViewTra
 }
 
 EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, float gy, float tolerance) const {
+    const ElbowShiftMap& shifts = model.ElbowShifts();
     // an end in a collapsed group is its box (made once for each group)
     std::unordered_map<GroupId, Node> collapsed;
     auto end = [&](NodeId id) -> const Node* {
@@ -1425,13 +1432,13 @@ EdgeId NodeGraphRenderer::HitTestEdge(const NodeGraphModel& model, float gx, flo
 
         // every piece of the path from one node to the other (or around the node, back to it); a curve as short lines
         const bool loop = IsSelfLoop(e, *from, *to);
-        const std::vector<Point> path = FlattenEdgeShape(loop ? EdgeShape{ SelfLoopPath(*from) } : GetEdgeShape(e, *from, *to));
+        const std::vector<Point> path = FlattenEdgeShape(loop ? EdgeShape{ SelfLoopPath(*from) } : GetEdgeShape(e, *from, *to, 0.0f, ShiftsOf(shifts, e.Id)));
         if (path.size() < 2) continue;
 
         for (size_t i = 0; i + 1 < path.size(); i++) {
             float dx = path[i + 1].X - path[i].X, dy = path[i + 1].Y - path[i].Y;
             float len2 = dx * dx + dy * dy;
-            if (len2 < 1.0f) continue;
+            if (len2 < 1e-6f) continue;     // (a rounded corner's are short)
 
             float t = ((gx - path[i].X) * dx + (gy - path[i].Y) * dy) / len2;
             t = std::clamp(t, 0.0f, 1.0f);

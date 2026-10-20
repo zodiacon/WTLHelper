@@ -235,6 +235,7 @@ private:
 
     // the (from, to) pairs of the edges of the model that is being drawn: edges that have one going the other way are drawn apart
     std::unordered_set<uint64_t> m_EdgePairs;
+    const ElbowShiftMap* m_ElbowShifts = nullptr;     // the model's this frame (NodeGraphModel::ElbowShifts)
 
     // Image::Key -> its bitmap (null if it couldn't be made, so that it isn't tried on every paint). Device dependent.
     std::unordered_map<uint64_t, ComPtr<ID2D1Bitmap>> m_Bitmaps;
