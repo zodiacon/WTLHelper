@@ -95,6 +95,7 @@ struct EdgeStyle {
     EdgeLine  Line       = EdgeLine::Solid;
     ArrowHead Arrow      = ArrowHead::Filled;
     bool      Curved     = false;             // a smooth curve through the bends (a straight edge stays straight)
+    bool      Elbow      = false;             // across and up and down only, straight out of the nodes (ElbowPath); before Curved
     bool      ScaleLabel = true;              // the label scales with the zoom (false: the same size on the screen)
 };
 
@@ -182,11 +183,19 @@ constexpr float k_CollapsedWidth = 160.0f, k_CollapsedHeight = 48.0f;
 // outline of the other. lane moves a straight edge to its right (an edge with one going the other way is drawn apart
 // from it). Empty if it has no length. The renderer, hit testing and SVG export all use it.
 // An end at a port is the port (not moved by lane), and an edge from a node to itself between ports is such a path too.
+// An elbow edge's path has its corners (ElbowPath); an end of it not at a port is the middle of the side facing the other.
 std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, float lane = 0.0f);
 // For a curved edge (EdgeStyle::Curved): the two control points of each cubic Bezier piece between the points of its
 // path (a Catmull-Rom curve, so it goes through every bend). startOut, endOut: the way out of the nodes at the ends
 // (ports); not zero, the curve leaves (comes in) straight along it.
 std::vector<Point> CurveControls(const std::vector<Point>& path, Point startOut = {}, Point endOut = {});
+
+// An elbow connector (EdgeStyle::Elbow): from start to end in horizontal and vertical lines only, through the bends.
+// startOut, endOut: the way out of the nodes at the ends (ports), which it leaves and comes in along, going at least
+// stub out first when it has to turn back; zero: either way, toward the other end. startBox, endBox: the nodes, which it
+// goes round (empty: the ends alone). Its corners, with the ends.
+std::vector<Point> ElbowPath(Point start, Point startOut, Point end, Point endOut, const std::vector<Point>& bends = {}, float stub = 20.0f,
+                             Rect startBox = {}, Rect endBox = {});
 
 // All of an edge's shape, as the renderer, hit testing and SVG export have it: its path, the controls of its curve
 // (none: straight), and where its label goes. lane as EdgePath. Path empty: nothing to draw.

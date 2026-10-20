@@ -45,6 +45,7 @@ struct EdgePreview {
     PortId ToPort   = InvalidPort;
     bool   Reversed = false;
     bool   LeftButton = false;          // started with the left button (out of a port), not the right
+    bool   Elbow    = false;            // drawn as an elbow connector (at a port), not a curve
 };
 
 struct RubberBand {

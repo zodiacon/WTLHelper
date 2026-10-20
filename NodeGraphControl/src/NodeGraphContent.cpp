@@ -366,6 +366,189 @@ namespace NodeGraphCtrl {
 
     // ---- Edge paths -------------------------------------------------------------------
 
+    namespace {
+        // The way along the axis that to is farther from from on.
+        Point Facing(Point from, Point to) {
+            const float dx = to.X - from.X, dy = to.Y - from.Y;
+            return std::abs(dx) >= std::abs(dy) ? Point{ dx < 0 ? -1.0f : 1.0f, 0 } : Point{ 0, dy < 0 ? -1.0f : 1.0f };
+        }
+
+        // An elbow edge (EdgePath): its ends at the ports or the sides facing the other end. start, end: the ports
+        // (centers without).
+        std::vector<Point> ElbowEdgePath(const Edge& e, const Node& from, const Port* fromPort, const Node& to, const Port* toPort,
+                                         Point start, Point end, float lane) {
+            Point fromOut = fromPort ? PortNormal(fromPort->Side) : Point{}, toOut = toPort ? PortNormal(toPort->Side) : Point{};
+            auto side = [](const Node& n, Point toward, Point& at, Point& out) {
+                out = Facing({ n.X, n.Y }, toward);
+                at = out.X != 0 ? Point{ n.X + out.X * NodeHalfWidthAt(n, 0), n.Y } : Point{ n.X, n.Y + out.Y * NodeHalfHeightAt(n, 0) };
+            };
+            const Point fromAt = start, toAt = end;     // (toward each other before either moves)
+            if (!fromPort) side(from, e.Waypoints.empty() ? toAt : e.Waypoints.front(), start, fromOut);
+            if (!toPort) side(to, e.Waypoints.empty() ? fromAt : e.Waypoints.back(), end, toOut);
+            auto box = [](const Node& n) { return Rect{ n.X - n.Width * 0.5f, n.Y - n.Height * 0.5f, n.X + n.Width * 0.5f, n.Y + n.Height * 0.5f }; };
+            std::vector<Point> path = ElbowPath(start, fromOut, end, toOut, e.Waypoints, 20.0f, box(from), box(to));
+            if (lane != 0 && !fromPort && !toPort && e.Waypoints.empty() && path.size() >= 2) {
+                // to the right of the way it goes: the ends along their sides, the corners with them
+                const float dx = toAt.X - fromAt.X, dy = toAt.Y - fromAt.Y, len = std::sqrt(dx * dx + dy * dy);
+                if (len > 1e-3f) {
+                    const float sx = -dy / len * lane, sy = dx / len * lane;
+                    for (size_t i = 1; i + 1 < path.size(); i++) { path[i].X += sx; path[i].Y += sy; }
+                    if (fromOut.X != 0) path.front().Y += sy; else path.front().X += sx;
+                    if (toOut.X != 0) path.back().Y += sy; else path.back().X += sx;
+                }
+            }
+            return path;
+        }
+    }
+
+    std::vector<Point> ElbowPath(Point start, Point startOut, Point end, Point endOut, const std::vector<Point>& bends, float stub,
+                                 Rect startBox, Rect endBox) {
+        if (startBox.IsEmpty()) startBox = { start.X, start.Y, start.X, start.Y };
+        if (endBox.IsEmpty()) endBox = { end.X, end.Y, end.X, end.Y };
+        if (startOut.X == 0 && startOut.Y == 0) startOut = Facing(start, bends.empty() ? end : bends.front());
+        if (endOut.X == 0 && endOut.Y == 0) endOut = Facing(end, bends.empty() ? start : bends.back());
+        const Point a{ start.X + startOut.X * stub, start.Y + startOut.Y * stub };     // out of the nodes
+        const Point b{ end.X + endOut.X * stub, end.Y + endOut.Y * stub };
+        std::vector<Point> route;
+        route.reserve(bends.size() * 2 + 8);
+        route.push_back(start);
+        if (bends.empty()) {
+            // along the axis the start leaves on and across it
+            const bool across = startOut.X != 0;
+            auto along = [&](Point p) { return across ? p.X : p.Y; };
+            auto cross = [&](Point p) { return across ? p.Y : p.X; };
+            auto at = [&](float m, float c) { return across ? Point{ m, c } : Point{ c, m }; };
+            auto alongLo = [&](const Rect& r) { return across ? r.Left : r.Top; };
+            auto alongHi = [&](const Rect& r) { return across ? r.Right : r.Bottom; };
+            auto crossLo = [&](const Rect& r) { return across ? r.Top : r.Left; };
+            auto crossHi = [&](const Rect& r) { return across ? r.Bottom : r.Right; };
+            const float outS = along(startOut), outE = along(endOut);
+            if ((endOut.X != 0) == across) {
+                if (outS == -outE && (along(end) - along(start)) * outS > 0) {
+                    // facing each other: over in the middle between them
+                    const float mid = (along(start) + along(end)) * 0.5f;
+                    route.push_back(at(mid, cross(start)));
+                    route.push_back(at(mid, cross(end)));
+                }
+                else if (outS == -outE) {
+                    // facing away: out of both, and across between them, or round both on the nearer side
+                    const float sLo = crossLo(startBox), sHi = crossHi(startBox), eLo = crossLo(endBox), eHi = crossHi(endBox);
+                    float mid;
+                    if (sHi < eLo)
+                        mid = (sHi + eLo) * 0.5f;
+                    else if (eHi < sLo)
+                        mid = (eHi + sLo) * 0.5f;
+                    else {
+                        const float before = (std::min)(sLo, eLo) - stub, after = (std::max)(sHi, eHi) + stub;
+                        mid = std::abs(before - cross(start)) + std::abs(before - cross(end)) <= std::abs(after - cross(start)) + std::abs(after - cross(end)) ? before : after;
+                    }
+                    route.push_back(a);
+                    route.push_back(at(along(a), mid));
+                    route.push_back(at(along(b), mid));
+                    route.push_back(b);
+                }
+                else {
+                    // the same way: out past both, and back in; round the one in front where the way past it runs into it
+                    const float outer = outS > 0 ? (std::max)(alongHi(startBox), alongHi(endBox)) + stub : (std::min)(alongLo(startBox), alongLo(endBox)) - stub;
+                    auto ahead = [&](const Rect& r) { return outS > 0 ? alongHi(r) : -alongLo(r); };
+                    const bool startNearer = ahead(startBox) <= ahead(endBox);
+                    const Rect& nearBox = startNearer ? startBox : endBox;
+                    const Rect& farBox = startNearer ? endBox : startBox;
+                    const float line = cross(startNearer ? start : end);
+                    if (line >= crossLo(farBox) && line <= crossHi(farBox)) {
+                        // between the two (or just out of the nearer), beside the one in front on the nearer side, past it
+                        const float from = outS > 0 ? alongHi(nearBox) : alongLo(nearBox), to = outS > 0 ? alongLo(farBox) : alongHi(farBox);
+                        const float between = (to - from) * outS > 0 ? (from + to) * 0.5f : from + outS * stub;
+                        const float side = line - crossLo(farBox) <= crossHi(farBox) - line ? crossLo(farBox) - stub : crossHi(farBox) + stub;
+                        if (startNearer) {
+                            route.push_back(at(between, cross(start)));
+                            route.push_back(at(between, side));
+                            route.push_back(at(outer, side));
+                            route.push_back(at(outer, cross(end)));
+                        }
+                        else {
+                            route.push_back(at(outer, cross(start)));
+                            route.push_back(at(outer, side));
+                            route.push_back(at(between, side));
+                            route.push_back(at(between, cross(end)));
+                        }
+                    }
+                    else {
+                        route.push_back(at(outer, cross(start)));
+                        route.push_back(at(outer, cross(end)));
+                    }
+                }
+            }
+            else {
+                // one across, one up and down: one corner where both go on straight to it, or out of both and two
+                const Point corner = at(along(end), cross(start));
+                if ((along(corner) - along(start)) * outS > 0 &&
+                    (corner.X - end.X) * endOut.X + (corner.Y - end.Y) * endOut.Y > 0)
+                    route.push_back(corner);
+                else {
+                    // across where the end is come into from, or past the start's node if that runs through it
+                    float level = cross(b);
+                    if (level >= crossLo(startBox) && level <= crossHi(startBox))
+                        level = cross(endOut) < 0 ? (std::min)(level, crossLo(startBox) - stub) : (std::max)(level, crossHi(startBox) + stub);
+                    // (out further where the end's way in is in line with it, or it would go along that and back)
+                    const float out = std::abs(along(a) - along(b)) < 1e-3f ? along(a) + outS * stub : along(a);
+                    route.push_back(a);
+                    route.push_back(at(out, cross(start)));
+                    route.push_back(at(out, level));
+                    route.push_back(at(along(b), level));
+                    route.push_back(b);
+                }
+            }
+        }
+        else {
+            // out of the start, a corner to each bend (on the way it goes, unless that turns back), into the end (across
+            // its way in last, so as not to go back along it)
+            route.push_back(a);
+            bool across = startOut.X != 0;      // the way the last piece goes
+            auto to = [&](Point q, bool last) {
+                const Point p = route.back();
+                if (std::abs(p.X - q.X) < 1e-3f && std::abs(p.Y - q.Y) < 1e-3f)
+                    return;
+                if (std::abs(p.X - q.X) < 1e-3f || std::abs(p.Y - q.Y) < 1e-3f) {
+                    across = std::abs(p.Y - q.Y) < 1e-3f;
+                    route.push_back(q);
+                    return;
+                }
+                const Point before = route[route.size() - 2];
+                bool first = last ? endOut.X != 0 : across;
+                Point corner = first ? Point{ q.X, p.Y } : Point{ p.X, q.Y };
+                if ((corner.X - p.X) * (p.X - before.X) < 0 || (corner.Y - p.Y) * (p.Y - before.Y) < 0) {
+                    first = !first;
+                    corner = first ? Point{ q.X, p.Y } : Point{ p.X, q.Y };
+                }
+                route.push_back(corner);
+                route.push_back(q);
+                across = !first;
+            };
+            for (const auto& w : bends)
+                to(w, false);
+            to(b, true);
+        }
+        route.push_back(end);
+
+        // without points twice, or in the middle of a straight line
+        std::vector<Point> path;
+        path.reserve(route.size());
+        for (const auto& p : route) {
+            if (!path.empty() && std::abs(path.back().X - p.X) < 1e-3f && std::abs(path.back().Y - p.Y) < 1e-3f)
+                continue;
+            if (path.size() >= 2) {
+                const Point &u = path[path.size() - 2], &v = path.back();
+                const bool straight = (std::abs(u.X - v.X) < 1e-3f && std::abs(v.X - p.X) < 1e-3f && (v.Y - u.Y) * (p.Y - v.Y) >= 0) ||
+                                      (std::abs(u.Y - v.Y) < 1e-3f && std::abs(v.Y - p.Y) < 1e-3f && (v.X - u.X) * (p.X - v.X) >= 0);
+                if (straight)
+                    path.pop_back();
+            }
+            path.push_back(p);
+        }
+        return path;
+    }
+
     std::vector<Point> EdgePath(const Edge& e, const Node& from, const Node& to, float lane) {
         const Port* fromPort = FindPort(from, e.FromPort);
         const Port* toPort = FindPort(to, e.ToPort);
@@ -379,6 +562,8 @@ namespace NodeGraphCtrl {
         const float len = std::sqrt(dx * dx + dy * dy);
         if (path.size() == 2 && len < 1e-3f)
             return {};
+        if (e.Style.Elbow)
+            return ElbowEdgePath(e, from, fromPort, to, toPort, path.front(), path.back(), lane);
         if (fromPort && toPort)
             return path;    // both ends where they are
         if (path.size() == 2 && lane != 0 && !fromPort && !toPort) {
@@ -416,6 +601,24 @@ namespace NodeGraphCtrl {
         // at a port the curve leaves (comes in) straight out of the node
         const Port* fromPort = FindPort(from, e.FromPort);
         const Port* toPort = FindPort(to, e.ToPort);
+        if (e.Style.Elbow) {
+            // halfway along it (its middle point would be a corner)
+            float length = 0;
+            for (size_t i = 0; i + 1 < shape.Path.size(); i++)
+                length += std::hypot(shape.Path[i + 1].X - shape.Path[i].X, shape.Path[i + 1].Y - shape.Path[i].Y);
+            float left = length * 0.5f;
+            shape.Label = shape.Path.back();
+            for (size_t i = 0; i + 1 < shape.Path.size(); i++) {
+                const Point &p = shape.Path[i], &q = shape.Path[i + 1];
+                const float l = std::hypot(q.X - p.X, q.Y - p.Y);
+                if (l >= left && l > 0) {
+                    shape.Label = { p.X + (q.X - p.X) * left / l, p.Y + (q.Y - p.Y) * left / l };
+                    break;
+                }
+                left -= l;
+            }
+            return shape;
+        }
         if (e.Style.Curved && (shape.Path.size() > 2 || fromPort || toPort))
             shape.Controls = CurveControls(shape.Path, fromPort ? PortNormal(fromPort->Side) : Point{}, toPort ? PortNormal(toPort->Side) : Point{});
         shape.Label = EdgeLabelPoint(shape.Path, shape.Controls);

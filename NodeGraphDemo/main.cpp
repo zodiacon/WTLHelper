@@ -48,6 +48,7 @@ static constexpr int IDC_GROUP = 140;
 static constexpr int IDC_UNGROUP = 141;
 static constexpr int IDC_DATAFLOW = 142;
 static constexpr int IDC_LABELSAPART = 143;
+static constexpr int IDC_ELBOW = 144;
 // IDC_LAYOUT + (int)LayoutAlgorithm, IDC_DIRECTION + (int)LayoutDirection
 static constexpr int IDC_LAYOUT    = 200;
 static constexpr int IDC_DIRECTION = 220;
@@ -816,6 +817,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_graph.Refresh();
             break;
         }
+        case IDC_ELBOW: {
+            // all the edges, and the ones made between ports from now on
+            const bool elbow = !g_graph.GetElbowConnections();
+            g_graph.SetElbowConnections(elbow);
+            NodeGraphModel& m = *g_graph.GetModel();
+            for (const auto& e : m.Edges())
+                m.GetEdge(e.Id)->Style.Elbow = elbow;
+            CheckMenuItem(GetMenu(hwnd), IDC_ELBOW, elbow ? MF_CHECKED : MF_UNCHECKED);
+            g_graph.Refresh();
+            break;
+        }
         case IDC_LABELSAPART:
             g_graph.SetAvoidLabelOverlap(!g_graph.GetAvoidLabelOverlap());
             CheckMenuItem(GetMenu(hwnd), IDC_LABELSAPART, g_graph.GetAvoidLabelOverlap() ? MF_CHECKED : MF_UNCHECKED);
@@ -1017,6 +1029,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppendMenu(hGraph, MF_STRING, IDC_WHEELSCROLL, L"&Wheel Scrolls (Ctrl+Wheel Zooms)");
     AppendMenu(hGraph, MF_STRING, IDC_HIGHLIGHT, L"&Highlight Neighbors");
     AppendMenu(hGraph, MF_STRING, IDC_CURVED, L"C&urved Edges");
+    AppendMenu(hGraph, MF_STRING, IDC_ELBOW, L"&Elbow Edges");
     AppendMenu(hGraph, MF_STRING | MF_CHECKED, IDC_LABELSAPART, L"&Keep Labels Apart");
     AppendMenu(hGraph, MF_STRING, IDC_READONLY, L"&Read Only");
     AppendMenu(hGraph, MF_SEPARATOR, 0, nullptr);

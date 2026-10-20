@@ -18,6 +18,7 @@ namespace NodeGraphCtrl {
             enum EdgeFlags : uint8_t {      // version 5
                 EF_CURVED     = 1,
                 EF_SCALELABEL = 2,
+                EF_ELBOW      = 4,          // (read as straight before it)
             };
 
             // the UserData block of a record (version 4)
@@ -148,7 +149,7 @@ namespace NodeGraphCtrl {
             }
             w.Write((uint8_t)e.Style.Line);
             w.Write((uint8_t)e.Style.Arrow);
-            w.Write((uint8_t)((e.Style.Curved ? EF_CURVED : 0) | (e.Style.ScaleLabel ? EF_SCALELABEL : 0)));
+            w.Write((uint8_t)((e.Style.Curved ? EF_CURVED : 0) | (e.Style.ScaleLabel ? EF_SCALELABEL : 0) | (e.Style.Elbow ? EF_ELBOW : 0)));
             WriteUserData(w, e, serializer, &IUserDataSerializer::SaveEdge);
             w.Write(e.FromPort);
             w.Write(e.ToPort);
@@ -183,6 +184,7 @@ namespace NodeGraphCtrl {
                 e.Style.Arrow = (ArrowHead)arrow;
                 e.Style.Curved = (flags & EF_CURVED) != 0;
                 e.Style.ScaleLabel = (flags & EF_SCALELABEL) != 0;
+                e.Style.Elbow = (flags & EF_ELBOW) != 0;
             }
             if (ok && version >= 4)
                 ok = ReadUserData(r, e, serializer, &IUserDataSerializer::LoadEdge);

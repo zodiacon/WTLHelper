@@ -349,6 +349,7 @@ namespace NodeGraphCtrl {
 		m_EdgePreview.FromNode = node;
 		m_EdgePreview.FromPort = port;
 		m_EdgePreview.LeftButton = leftButton;
+		m_EdgePreview.Elbow = m_ElbowConnections;
 		m_EdgePreview.ScreenX = (float)pt.x;
 		m_EdgePreview.ScreenY = (float)pt.y;
 		SetCapture();
@@ -435,7 +436,7 @@ namespace NodeGraphCtrl {
 		const EdgeId eid = m_Model->Connect(from, fromPort, to, toPort);
 		if (Edge* e = m_Model->GetEdge(eid)) {
 			if (fromPort != InvalidPort || toPort != InvalidPort)
-				e->Style.Curved = true;		// at a port: a wire, straight out of it
+				(m_ElbowConnections ? e->Style.Elbow : e->Style.Curved) = true;		// at a port: a wire, straight out of it
 			auto cmd = std::make_unique<AddEdgeCmd>();
 			cmd->Saved = *e;
 			PushUndo(std::move(cmd));
@@ -2314,6 +2315,16 @@ namespace NodeGraphCtrl {
 		return m_Renderer.GetAvoidLabelOverlap();
 	}
 
+	void CNodeGraphControl::SetElbowConnections(bool elbow) {
+		m_ElbowConnections = elbow;
+		m_EdgePreview.Elbow = elbow;
+		if (m_hWnd && m_EdgePreview.Active) Invalidate(FALSE);
+	}
+
+	bool CNodeGraphControl::GetElbowConnections() const {
+		return m_ElbowConnections;
+	}
+
 	void CNodeGraphControl::SetHighlight(bool highlight) {
 		m_Highlight = highlight;
 		if (!TracksHover())
@@ -3064,6 +3075,9 @@ namespace NodeGraphCtrl {
 			};
 			portOut(*from, e.FromPort, *to);
 			portOut(*to, e.ToPort, *from);
+			if (e.Style.Elbow && from != to)	// (its corners can be out of the nodes' box)
+				for (const auto& p : GetEdgeShape(e, *from, *to).Path)
+					extend(p.X, p.Y);
 			if (IsSelfLoop(e, *from, *to)) {
 				const float right = from->X + from->Width * 0.5f + 30.0f;	// the loop goes 24 units to the right of the node
 				extend(right, from->Y);
@@ -3119,7 +3133,7 @@ namespace NodeGraphCtrl {
 		}
 		value(m_Edges.size());
 		for (const auto& e : m_Edges) {
-			value(e.From); value(e.To); value(e.FromPort); value(e.ToPort); value(e.Style.Curved);
+			value(e.From); value(e.To); value(e.FromPort); value(e.ToPort); value(e.Style.Curved); value(e.Style.Elbow);
 			value(e.Waypoints.size());
 			if (!e.Waypoints.empty()) add(e.Waypoints.data(), e.Waypoints.size() * sizeof(Point));
 			value(e.Label.size());

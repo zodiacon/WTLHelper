@@ -263,6 +263,11 @@ public:
     void SetAvoidLabelOverlap(bool avoid);
     bool GetAvoidLabelOverlap() const;
 
+    // The edges made by dragging between ports: elbow connectors (EdgeStyle::Elbow), or curves straight out of the
+    // ports (EdgeStyle::Curved, the default). The edge being dragged is drawn so.
+    void SetElbowConnections(bool elbow);
+    bool GetElbowConnections() const;
+
     // The highlight of a node's neighborhood (NGCS_HIGHLIGHT).
     void SetHighlight(bool highlight);
     bool GetHighlight() const;
@@ -482,6 +487,7 @@ private:
 
     size_t m_UndoLimit      = 0;
     bool m_Highlight        = false;
+    bool m_ElbowConnections = false;
     bool m_SnapToGrid       = false;
     bool m_Guides           = false;
     // where a node's box goes when snapped, while dragging (all of its sides) or resizing (the ones that move)

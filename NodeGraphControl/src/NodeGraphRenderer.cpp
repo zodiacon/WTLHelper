@@ -359,8 +359,9 @@ void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
             // the edge stays within the box of the centers of its nodes and its bends (a curve a little past it)
             float left = std::min(from->X, to->X), right = std::max(from->X, to->X);
             float top = std::min(from->Y, to->Y), bottom = std::max(from->Y, to->Y);
-            if (e.FromPort != InvalidPort || e.ToPort != InvalidPort) {
-                // out of a port the curve goes straight out of the node first, as far as a third of the way (at least 30)
+            if (e.FromPort != InvalidPort || e.ToPort != InvalidPort || e.Style.Elbow) {
+                // out of a port the curve goes straight out of the node first, as far as a third of the way (at least 30);
+                // an elbow goes as far as 20 out of a node
                 const float pad = std::max({ from->Width, from->Height, to->Width, to->Height }) * 0.5f +
                     std::max(30.0f, std::hypot(to->X - from->X, to->Y - from->Y) / 3);
                 left -= pad; right += pad; top -= pad; bottom += pad;
@@ -457,8 +458,26 @@ void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGr
         const float t = std::min(NodeBorderDistance(*from, dx / len, dy / len) * vt.Scale, len);
         a = { { c.x + dx / len * t, c.y + dy / len * t }, {} };
     }
-    if (preview.Reversed)
+    if (preview.Elbow && (fromPort || toPort) && !fromPort) {
+        // an elbow ends at the middle of the side facing the other end
+        const auto c = vt.ToScreen(from->X, from->Y);
+        if (std::abs(b.At.x - c.x) >= std::abs(b.At.y - c.y))
+            a = { { c.x + (b.At.x < c.x ? -1 : 1) * NodeHalfWidthAt(*from, 0) * vt.Scale, c.y }, { b.At.x < c.x ? -1.0f : 1.0f, 0 } };
+        else
+            a = { { c.x, c.y + (b.At.y < c.y ? -1 : 1) * NodeHalfHeightAt(*from, 0) * vt.Scale }, { 0, b.At.y < c.y ? -1.0f : 1.0f } };
+    }
+    // the nodes on the screen, for an elbow to go round
+    auto box = [&](const Node* n) {
+        if (!n) return Rect{};
+        const auto c = vt.ToScreen(n->X, n->Y);
+        const float hw = n->Width * vt.Scale * 0.5f, hh = n->Height * vt.Scale * 0.5f;
+        return Rect{ c.x - hw, c.y - hh, c.x + hw, c.y + hh };
+    };
+    Rect boxA = box(from), boxB = box(to);
+    if (preview.Reversed) {
         std::swap(a, b);     // the arrow goes into the port it came out of
+        std::swap(boxA, boxB);
+    }
 
     const float dx = b.At.x - a.At.x, dy = b.At.y - a.At.y, len = std::sqrtf(dx * dx + dy * dy);
     if (len < 1.0f) return;
@@ -466,6 +485,21 @@ void NodeGraphRenderer::DrawEdgePreview(const EdgePreview& preview, const NodeGr
     D2D1_POINT_2F before = a.At;     // where the line comes into its end from (for the arrowhead)
     if (!fromPort && !toPort)
         m_RenderTarget->DrawLine(a.At, b.At, m_Brush.Get(), 2.0f, m_DashStyle.Get());
+    else if (preview.Elbow) {
+        // its corners, as the edge will have them (ElbowPath); the end at the mouse either way
+        const std::vector<Point> path = ElbowPath({ a.At.x, a.At.y }, a.Out, { b.At.x, b.At.y }, b.Out, {}, 20.0f * vt.Scale, boxA, boxB);
+        ComPtr<ID2D1PathGeometry> geometry;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (path.size() >= 2 && SUCCEEDED(m_D2dFactory->CreatePathGeometry(geometry.GetAddressOf())) && SUCCEEDED(geometry->Open(sink.GetAddressOf()))) {
+            sink->BeginFigure({ path[0].X, path[0].Y }, D2D1_FIGURE_BEGIN_HOLLOW);
+            for (size_t i = 1; i < path.size(); i++)
+                sink->AddLine({ path[i].X, path[i].Y });
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            if (SUCCEEDED(sink->Close()))
+                m_RenderTarget->DrawGeometry(geometry.Get(), m_Brush.Get(), 2.0f, m_DashStyle.Get());
+        }
+        if (path.size() >= 2) before = { path[path.size() - 2].X, path[path.size() - 2].Y };
+    }
     else {
         // a curve straight out of the ports, as the edge will be (CurveControls)
         const float d = std::max(len / 3, 30.0f * vt.Scale);
@@ -836,6 +870,12 @@ void NodeGraphRenderer::DrawEdgePlain(const Edge& e, const Node& from, const Nod
         const Port* port = FindPort(n, id);
         return port ? PortPosition(n, *port) : Point{ n.X, n.Y };
     };
+    if (e.Style.Elbow && &from != &to) {     // (its corners: it would look another edge as a straight line)
+        const std::vector<Point> path = GetEdgeShape(e, from, to).Path;
+        for (size_t i = 0; i + 1 < path.size(); i++)
+            m_RenderTarget->DrawLine(vt.ToScreen(path[i].X, path[i].Y), vt.ToScreen(path[i + 1].X, path[i + 1].Y), m_Brush.Get(), width);
+        return;
+    }
     const Point start = end(from, e.FromPort), last = end(to, e.ToPort);
     D2D1_POINT_2F p = vt.ToScreen(start.X, start.Y);
     for (const auto& w : e.Waypoints) {
