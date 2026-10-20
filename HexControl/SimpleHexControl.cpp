@@ -29,7 +29,7 @@ void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 	uint8_t data[512];
 	std::vector<POLYTEXT> poly(m_Lines + 2);
 
-	const std::wstring addrFormat = L"%0" + std::to_wstring(m_AddressDigits) + (m_DecimalAddresses ? L"llu" : L"X");
+	const std::wstring addrFormat = L"%0" + std::to_wstring(m_AddressDigits) + (m_DecimalAddresses ? L"llu" : L"llX");	// 64-bit: the bias can be beyond 4 GB
 	int x = (m_AddressDigits + 1) * m_CharWidth;
 	int factor = m_CharWidth * (m_DataSize * 2 + 1);
 	int rulerHeight = GetRulerHeight();
@@ -634,7 +634,8 @@ void CHexControl::RecalcLayout() {
 	si.nPage = (rc.bottom - GetRulerHeight()) / m_CharHeight;
 	SetScrollInfo(SB_VERT, &si);
 
-	bool big = m_Buffer->GetSize() >= 1LL << 32;
+	// the addresses shown include the bias offset
+	bool big = m_BiasOffset + m_Buffer->GetSize() >= 1LL << 32;
 	m_AddressDigits = m_DecimalAddresses ? (big ? 20 : 10) : (big ? 16 : 8);
 	// base chars + extra half-chars for column separators
 	int sepExtra = (m_ColSeparator > 0) ? (int)(m_BytesPerLine / m_ColSeparator) : 0;
@@ -1579,6 +1580,9 @@ uint32_t CHexControl::Fill(int64_t offset, const uint8_t* pattern, uint32_t patt
 int64_t CHexControl::SetBiasOffset(int64_t offset) {
 	auto current = m_BiasOffset;
 	m_BiasOffset = offset;
+	// the address column's width depends on the bias
+	if (m_hWnd)
+		RecalcLayout();
 	RedrawWindow();
 	return current;
 }
