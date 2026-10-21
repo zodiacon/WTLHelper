@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Settings.h"
 #include "IniFile.h"
+#include "DpiHelper.h"
 
 bool Settings::LoadFromKey(PCWSTR registryPath) {
 	if (registryPath == nullptr)
@@ -170,6 +171,9 @@ void Settings::SetString(PCWSTR name, PCWSTR value) {
 	}
 }
 
+//
+// the placement is in pixels, so the DPI of the window is saved with it (as "<name>Dpi")
+//
 bool Settings::SaveWindowPosition(HWND hWnd, PCWSTR name) {
 	CWindow win(hWnd);
 	WINDOWPLACEMENT wp = { sizeof(wp) };
@@ -177,15 +181,37 @@ bool Settings::SaveWindowPosition(HWND hWnd, PCWSTR name) {
 		return false;
 
 	Set(name, wp);
+	Set((std::wstring(name) + L"Dpi").c_str(), (int)DpiHelper::GetDpi(hWnd));
 	return true;
 }
 
+//
+// the window is placed twice: the first time puts it on its monitor, where it takes that monitor's DPI (and its WM_DPICHANGED
+// handler resizes it from the DPI it had before, which is not the DPI the size was saved at); the second time gives it
+// the saved size scaled to that DPI
+//
 bool Settings::LoadWindowPosition(HWND hWnd, PCWSTR name) const {
 	const auto wp = GetBinary<WINDOWPLACEMENT>(name);
 	if (wp == nullptr)
 		return false;
 
-	return CWindow(hWnd).SetWindowPlacement(wp);
+	CWindow win(hWnd);
+	UINT dpiBefore = DpiHelper::GetDpi(hWnd);
+	if (!win.SetWindowPlacement(wp))
+		return false;
+
+	UINT dpi = DpiHelper::GetDpi(hWnd);
+	UINT savedDpi = (UINT)GetValueOrDefault<int>((std::wstring(name) + L"Dpi").c_str(), 0);
+	if (dpi == dpiBefore && (savedDpi == 0 || savedDpi == dpi))
+		return true;
+
+	auto placement = *wp;
+	if (savedDpi && savedDpi != dpi) {
+		auto& rc = placement.rcNormalPosition;
+		rc.right = rc.left + DpiHelper::Scale(rc.right - rc.left, dpi, savedDpi);
+		rc.bottom = rc.top + DpiHelper::Scale(rc.bottom - rc.top, dpi, savedDpi);
+	}
+	return win.SetWindowPlacement(&placement);
 }
 
 std::wstring Settings::GetString(PCWSTR name) const {

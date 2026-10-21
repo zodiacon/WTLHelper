@@ -1,9 +1,10 @@
 #pragma once
 
 #include "WTLHelper.h"
+#include "DpiHelper.h"
 
 // The close button of a tab: WTL's CTabViewCloseBtn with colors that follow the dark mode. WTL draws it with system colors, which
-// are not those of the dark mode: the button was black on black.
+// are not those of the dark mode: the button was black on black. Sizes are at 96 DPI, scaled to the DPI of the button.
 class CNativeTabCloseBtn : public ATL::CWindowImpl<CNativeTabCloseBtn> {
 public:
 	DECLARE_WND_CLASS_EX(_T("NativeTabView_CloseBtn"), 0, -1)
@@ -114,10 +115,12 @@ public:
 		RECT rect = {};
 		GetClientRect(&rect);
 
-		RECT rcImage = { _xyBtnImageLeftTop, _xyBtnImageLeftTop, _xyBtnImageRightBottom + 1, _xyBtnImageRightBottom + 1 };
+		UINT dpi = DpiHelper::GetDpi(m_hWnd);
+		int first = DpiHelper::Scale(_xyBtnImageLeftTop, dpi), last = DpiHelper::Scale(_xyBtnImageRightBottom + 1, dpi);
+		RECT rcImage = { first, first, last, last };
 		::OffsetRect(&rcImage, rect.left, rect.top);
 		if (m_bPressed)
-			::OffsetRect(&rcImage, 1, 0);
+			::OffsetRect(&rcImage, DpiHelper::Scale(1, dpi), 0);
 
 		COLORREF frame, fill, cross;
 		bool active = m_bHover || m_bPressed;
@@ -145,15 +148,15 @@ public:
 		penX.CreatePen(PS_SOLID, 0, cross);
 		dc.SelectPen(penX);
 
-		dc.MoveTo(rcImage.left, rcImage.top);
-		dc.LineTo(rcImage.right, rcImage.bottom);
-		dc.MoveTo(rcImage.left + 1, rcImage.top);
-		dc.LineTo(rcImage.right + 1, rcImage.bottom);
+		// each stroke of the X is 2 pixels wide at 96 DPI: lines side by side
+		int width = DpiHelper::Scale(2, dpi);
+		for (int i = 0; i < width; i++) {
+			dc.MoveTo(rcImage.left + i, rcImage.top);
+			dc.LineTo(rcImage.right + i, rcImage.bottom);
 
-		dc.MoveTo(rcImage.left, rcImage.bottom - 1);
-		dc.LineTo(rcImage.right, rcImage.top - 1);
-		dc.MoveTo(rcImage.left + 1, rcImage.bottom - 1);
-		dc.LineTo(rcImage.right + 1, rcImage.top - 1);
+			dc.MoveTo(rcImage.left + i, rcImage.bottom - 1);
+			dc.LineTo(rcImage.right + i, rcImage.top - 1);
+		}
 
 		dc.SelectPen(hPenOld);
 		dc.SelectBrush(hBrushOld);
@@ -194,6 +197,7 @@ public:
 		_AUTOSCROLL_RIGHT = 1
 	};
 
+	// sizes at 96 DPI
 	enum CloseBtn {
 		_cxCloseBtn = 14,
 		_cyCloseBtn = 13,
@@ -857,6 +861,33 @@ public:
 		return 0;
 	}
 
+	//
+	// the view moved to a monitor with another DPI (or the DPI of its monitor changed). The font the view created is recreated for the new DPI
+	// (a font set with WM_SETFONT is the owner's, who sets one for the new DPI), the tabs get new padding and the layout is redone.
+	// The image list of the tabs is the owner's too: it may set one with images of the new size.
+	// Called when the tab control has handled its WM_DPICHANGED_AFTERPARENT (which comes after the view's)
+	//
+	void OnTabDpiChanged() {
+		T* pT = static_cast<T*>(this);
+		if (m_bInternalFont) {
+			HFONT hFont = m_tab.GetFont();
+			m_tab.SetFont(DpiHelper::CreateControlFont(DpiHelper::GetDpi(this->m_hWnd)), FALSE);
+			::DeleteObject(hFont);
+		}
+		// the tab control keeps some metrics of the DPI it had before (its tabs came out 2 pixels taller after a move to another DPI and back)
+		// until it reloads its theme
+		m_tab.SendMessage(WM_THEMECHANGED);
+		pT->UpdateTabPadding();
+		m_cyTabHeight = pT->CalcTabHeight();
+
+		if (m_btnClose.m_hWnd != nullptr) {
+			m_nCloseItem = -1;
+			pT->DestroyCloseButton();
+		}
+		pT->UpdateLayout();
+		m_tab.Invalidate();
+	}
+
 	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 		if (wParam == _nAutoScrollTimerID) {
 			T* pT = static_cast<T*>(this);
@@ -999,13 +1030,14 @@ public:
 			POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
 			if (!m_bTabDrag) {
-				if ((abs(m_ptStartDrag.x - GET_X_LPARAM(lParam)) >= ::GetSystemMetrics(SM_CXDRAG)) ||
-					(abs(m_ptStartDrag.y - GET_Y_LPARAM(lParam)) >= ::GetSystemMetrics(SM_CYDRAG))) {
+				UINT dpi = DpiHelper::GetDpi(m_tab);
+				if ((abs(m_ptStartDrag.x - GET_X_LPARAM(lParam)) >= DpiHelper::GetSystemMetrics(SM_CXDRAG, dpi)) ||
+					(abs(m_ptStartDrag.y - GET_Y_LPARAM(lParam)) >= DpiHelper::GetSystemMetrics(SM_CYDRAG, dpi))) {
 					T* pT = static_cast<T*>(this);
 					pT->GenerateDragImage(m_nActivePage);
 
-					int cxCursor = ::GetSystemMetrics(SM_CXCURSOR);
-					int cyCursor = ::GetSystemMetrics(SM_CYCURSOR);
+					int cxCursor = DpiHelper::GetSystemMetrics(SM_CXCURSOR, dpi);
+					int cyCursor = DpiHelper::GetSystemMetrics(SM_CYCURSOR, dpi);
 					m_ilDrag.BeginDrag(0, -(cxCursor / 2), -(cyCursor / 2));
 					POINT ptEnter = m_ptStartDrag;
 					m_tab.ClientToScreen(&ptEnter);
@@ -1153,6 +1185,12 @@ public:
 		LRESULT result = 0;
 		if (msg == WM_NCDESTROY)
 			::RemoveWindowSubclass(hWnd, TabSubclassProc, id);
+		else if (msg == WM_DPICHANGED_AFTERPARENT) {
+			// the tab control's own metrics for the new DPI come first: the view's are calculated from them
+			result = ::DefSubclassProc(hWnd, msg, wp, lp);
+			pT->OnTabDpiChanged();
+			return result;
+		}
 		else if (pT->ProcessWindowMessage(hWnd, msg, wp, lp, result, 1))
 			return result;
 		return ::DefSubclassProc(hWnd, msg, wp, lp);
@@ -1169,18 +1207,27 @@ public:
 		// would bypass (the tabs were light).
 		::SetWindowSubclass(m_tab, TabSubclassProc, 1, (DWORD_PTR)this);
 
-		m_tab.SetFont(AtlCreateControlFont());
+		m_tab.SetFont(DpiHelper::CreateControlFont(DpiHelper::GetDpi(this->m_hWnd)));
 		m_bInternalFont = true;
 
 		m_tab.SetItemExtra(sizeof(TABVIEWPAGE));
 
-		if (m_bTabCloseButton)
-			m_tab.SetPadding(CSize(_cxCloseBtn + 2, 3));	// the button is drawn over the right end of the tab: leave room for it
-
 		T* pT = static_cast<T*>(this);
+		pT->UpdateTabPadding();
 		m_cyTabHeight = pT->CalcTabHeight();
 
 		return true;
+	}
+
+	void UpdateTabPadding() {
+		// the close button is drawn over the right end of the tab: leave room for it
+		if (m_bTabCloseButton)
+			m_tab.SetPadding(CSize(ScaleToDpi(_cxCloseBtn + 2), ScaleToDpi(3)));
+	}
+
+	// a size at 96 DPI, at the DPI of the view
+	int ScaleToDpi(int value) const {
+		return DpiHelper::Scale(value, this->m_hWnd);
 	}
 
 	int CalcTabHeight() {
@@ -1282,13 +1329,14 @@ public:
 			HPEN hPenOld = dc.SelectPen(pen);
 			HBRUSH hBrushOld = dc.SelectBrush(brush);
 
+			int cxMark = ScaleToDpi(m_cxMoveMark), cyMark = ScaleToDpi(m_cyMoveMark);
 			int x = rect.left;
 			int y = rect.top;
-			POINT ptsTop[3] = { { x, y }, { x + m_cxMoveMark, y }, { x + (m_cxMoveMark / 2), y + m_cyMoveMark } };
+			POINT ptsTop[3] = { { x, y }, { x + cxMark, y }, { x + (cxMark / 2), y + cyMark } };
 			dc.Polygon(ptsTop, 3);
 
 			y = rect.bottom - 1;
-			POINT ptsBottom[3] = { { x, y }, { x + m_cxMoveMark, y }, { x + (m_cxMoveMark / 2), y - m_cyMoveMark } };
+			POINT ptsBottom[3] = { { x, y }, { x + cxMark, y }, { x + (cxMark / 2), y - cyMark } };
 			dc.Polygon(ptsBottom, 3);
 
 			dc.SelectPen(hPenOld);
@@ -1302,13 +1350,14 @@ public:
 		RECT rcItem = {};
 		m_tab.GetItemRect(m_nInsertItem, &rcItem);
 
+		int cxMark = ScaleToDpi(m_cxMoveMark);
 		if (m_nInsertItem <= m_nActivePage) {
-			rect.left = rcItem.left - m_cxMoveMark / 2 - 1;
-			rect.right = rcItem.left + m_cxMoveMark / 2;
+			rect.left = rcItem.left - cxMark / 2 - 1;
+			rect.right = rcItem.left + cxMark / 2;
 		}
 		else {
-			rect.left = rcItem.right - m_cxMoveMark / 2 - 1;
-			rect.right = rcItem.right + m_cxMoveMark / 2;
+			rect.left = rcItem.right - cxMark / 2 - 1;
+			rect.right = rcItem.right + cxMark / 2;
 		}
 	}
 
@@ -1321,7 +1370,8 @@ public:
 
 		RECT rcItem = {};
 		m_tab.GetItemRect(nItem, &rcItem);
-		::InflateRect(&rcItem, 2, 2);   // make bigger to cover selected item
+		int inflate = ScaleToDpi(2);
+		::InflateRect(&rcItem, inflate, inflate);   // make bigger to cover selected item
 
 		ATLASSERT(m_ilDrag.m_hImageList == nullptr);
 		m_ilDrag.Create(rcItem.right - rcItem.left, rcItem.bottom - rcItem.top, ILC_COLORDDB | ILC_MASK, 1, 1);
@@ -1387,7 +1437,7 @@ public:
 		if (x != -1) {
 			RECT rect = {};
 			m_tab.GetClientRect(&rect);
-			int dx = ::GetSystemMetrics(SM_CXVSCROLL);
+			int dx = DpiHelper::GetSystemMetrics(SM_CXVSCROLL, m_tab);
 			if ((x >= 0) && (x < dx)) {
 				RECT rcItem = {};
 				m_tab.GetItemRect(0, &rcItem);
@@ -1534,10 +1584,11 @@ public:
 		RECT rcItem = {};
 		m_tab.GetItemRect(nItem, &rcItem);
 
-		int cy = (rcItem.bottom - rcItem.top - _cyCloseBtn) / 2;
-		int cx = (nItem == m_tab.GetCurSel()) ? _cxCloseBtnMarginSel : _cxCloseBtnMargin;
-		::SetRect(&rcClose, rcItem.right - cx - _cxCloseBtn, rcItem.top + cy,
-			rcItem.right - cx, rcItem.top + cy + _cyCloseBtn);
+		int cxBtn = ScaleToDpi(_cxCloseBtn), cyBtn = ScaleToDpi(_cyCloseBtn);
+		int cy = (rcItem.bottom - rcItem.top - cyBtn) / 2;
+		int cx = ScaleToDpi((nItem == m_tab.GetCurSel()) ? _cxCloseBtnMarginSel : _cxCloseBtnMargin);
+		::SetRect(&rcClose, rcItem.right - cx - cxBtn, rcItem.top + cy,
+			rcItem.right - cx, rcItem.top + cy + cyBtn);
 	}
 };
 

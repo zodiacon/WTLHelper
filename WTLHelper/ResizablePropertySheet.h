@@ -2,6 +2,7 @@
 
 #include <atldlgs.h>
 #include "SizeGrip.h"
+#include "DpiHelper.h"
 
 //
 // property sheet the user can resize (not for wizards).
@@ -21,6 +22,7 @@ public:
 		MESSAGE_HANDLER(WM_SHOWWINDOW, OnShowWindow)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_GETMINMAXINFO, OnGetMinMaxInfo)
+		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		CHAIN_MSG_MAP(TBase)
 	END_MSG_MAP()
@@ -29,12 +31,19 @@ public:
 	// the sheet's (window) size, to restore a size the user gave it: set before the sheet is shown (it's applied
 	// once the sheet has laid itself out, never smaller than the sheet needs); after the sheet is closed, its last size
 	//
-	void SetSize(CSize const& size) {
+	// dpi: the DPI the size is for (GetSizeDpi when it was saved); 0 means the size is used as is
+	void SetSize(CSize const& size, UINT dpi = 0) {
 		m_Size = size;
+		m_SizeDpi = dpi;
 	}
 
 	CSize GetSize() const {
 		return m_Size;
+	}
+
+	// the DPI of the size GetSize returns
+	UINT GetSizeDpi() const {
+		return m_SizeDpi;
 	}
 
 	//
@@ -102,8 +111,16 @@ protected:
 
 		m_SizeGrip.CreateGrip(pT->m_hWnd);
 
+		// on a DPI change the sheet sizes and lays itself out (see OnDpiChanged); the dialog manager only scales the fonts
+		m_Dpi = DpiHelper::GetDpi(pT->m_hWnd);
+		::SetDialogDpiChangeBehavior(pT->m_hWnd, DDC_DISABLE_RESIZE | DDC_DISABLE_CONTROL_RELAYOUT, DDC_DISABLE_RESIZE | DDC_DISABLE_CONTROL_RELAYOUT);
+
 		Layout(client.Size());
 
+		if (m_SizeDpi && m_SizeDpi != m_Dpi) {
+			m_Size = DpiHelper::Scale(m_Size, m_Dpi, m_SizeDpi);
+			m_SizeDpi = m_Dpi;
+		}
 		if (m_Size.cx > 0 && m_Size.cy > 0) {
 			// around the same center (the sheet is placed before it's shown), inside the monitor's work area;
 			// the WM_SIZE lays out the controls
@@ -124,12 +141,75 @@ protected:
 		CRect window;
 		static_cast<T*>(this)->GetWindowRect(&window);
 		m_Size = window.Size();
+		m_SizeDpi = m_Dpi;
 		return 0;
+	}
+
+	//
+	// the sheet moved to a monitor with another DPI (or the DPI of its monitor changed). It takes the rectangle Windows suggests,
+	// and the controls keep their distances from the edges they follow, scaled to the new DPI
+	//
+	LRESULT OnDpiChanged(UINT msg, WPARAM wp, LPARAM lp, BOOL& bHandled) {
+		if (m_Controls.empty()) {
+			bHandled = FALSE;
+			return 0;
+		}
+
+		auto pT = static_cast<T*>(this);
+		UINT dpi = LOWORD(wp), oldDpi = m_Dpi;
+		m_Dpi = dpi;
+
+		CRect oldClient;
+		pT->GetClientRect(&oldClient);
+		std::vector<CRect> rects;
+		rects.reserve(m_Controls.size());
+		for (auto& c : m_Controls) {
+			CRect rc;
+			::GetWindowRect(c.hWnd, &rc);
+			pT->ScreenToClient(&rc);
+			rects.push_back(rc);
+		}
+
+		auto result = pT->DefWindowProc(msg, wp, lp);	// the fonts
+
+		m_InDpiChange = true;
+		auto suggested = reinterpret_cast<RECT const*>(lp);
+		pT->SetWindowPos(nullptr, suggested, SWP_NOZORDER | SWP_NOACTIVATE);
+		m_InDpiChange = false;
+
+		auto scale = [&](int value) { return DpiHelper::Scale(value, dpi, oldDpi); };
+		m_MinSize = DpiHelper::Scale(m_MinSize, dpi, oldDpi);
+		m_PageMargins = DpiHelper::Scale(m_PageMargins, dpi, oldDpi);
+
+		CRect client;
+		pT->GetClientRect(&client);
+		auto hdwp = ::BeginDeferWindowPos((int)m_Controls.size());
+		for (size_t i = 0; i < m_Controls.size(); i++) {
+			auto& rc = rects[i];
+			CRect rcNew;
+			if (m_Controls[i].Stretch) {
+				// the tab control: its margins from the edges
+				rcNew.SetRect(scale(rc.left), scale(rc.top), client.right - scale(oldClient.right - rc.right), client.bottom - scale(oldClient.bottom - rc.bottom));
+			}
+			else {
+				// a button: its distance from the bottom (the buttons are centered by Layout)
+				int bottom = client.bottom - scale(oldClient.bottom - rc.bottom);
+				rcNew.SetRect(scale(rc.left), bottom - scale(rc.Height()), scale(rc.right), bottom);
+			}
+			hdwp = ::DeferWindowPos(hdwp, m_Controls[i].hWnd, nullptr, rcNew.left, rcNew.top, rcNew.Width(), rcNew.Height(), SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+		::EndDeferWindowPos(hdwp);
+
+		m_ClientSize = client.Size();
+		Layout(client.Size());
+		ResizePage(pT->GetActivePage());
+		pT->Invalidate();
+		return result;
 	}
 
 	LRESULT OnSize(UINT, WPARAM wp, LPARAM lp, BOOL& bHandled) {
 		bHandled = FALSE;
-		if (m_Controls.empty() || wp == SIZE_MINIMIZED)
+		if (m_Controls.empty() || m_InDpiChange || wp == SIZE_MINIMIZED)
 			return 0;
 
 		auto pT = static_cast<T*>(this);
@@ -223,6 +303,9 @@ private:
 	CSize m_ClientSize, m_MinSize;
 	CSize m_Size;		// to restore when shown; the last size once destroyed
 	CRect m_PageMargins;
+	UINT m_SizeDpi{ 0 };	// the DPI of m_Size (0: unknown)
+	UINT m_Dpi{ USER_DEFAULT_SCREEN_DPI };	// the DPI the layout is for
+	bool m_InDpiChange{ false };
 };
 
 class CResizablePropertySheet : public CResizablePropertySheetImpl<CResizablePropertySheet> {

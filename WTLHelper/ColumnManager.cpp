@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ColumnManager.h"
+#include "ListViewhelper.h"
 #include <atlctrls.h>
 
 class ListCtrlHelper {
@@ -65,10 +66,11 @@ void ColumnManager::AddFromControl(HWND hWnd) {
 	item.pszText = text;
 	item.cchTextMax = _countof(text);
 	item.mask = HDI_FORMAT | HDI_WIDTH | HDI_TEXT | HDI_LPARAM;
+	UINT dpi = DpiHelper::GetDpi(header);
 	for (int i = 0; i < count; i++) {
 		ATLVERIFY(header.GetItem(i, &item));
 		ColumnInfo info;
-		info.DefaultWidth = item.cxy;
+		info.DefaultWidth = DpiHelper::Scale(item.cxy, USER_DEFAULT_SCREEN_DPI, dpi);
 		info.Flags = (info.DefaultWidth <= 1 && ((item.fmt & HDF_FIXEDWIDTH) > 0) ? ColumnFlags::Visible : ColumnFlags::None);
 		info.Name = item.pszText;
 		info.Tag = (int)item.lParam;
@@ -114,6 +116,7 @@ void ColumnManager::UpdateColumns() {
 		return;
 	}
 	auto header = m_ListView.GetHeader();
+	EnableDpiScaling();
 	HDITEM hdi;
 	hdi.mask = HDI_LPARAM;
 	for (int i = 0; i < GetCount(); i++) {
@@ -121,7 +124,7 @@ void ColumnManager::UpdateColumns() {
 			if (IsVisible(i)) {
 				auto& info = GetColumn(i);
 				// make visible - add column
-				int c = m_ListView.InsertColumn(header.GetItemCount(), info.Name, info.Format, info.DefaultWidth);
+				int c = m_ListView.InsertColumn(header.GetItemCount(), info.Name, info.Format, DpiHelper::Scale(info.DefaultWidth, m_ListView));
 				hdi.lParam = i;
 				header.SetItem(c, &hdi);
 			}
@@ -152,6 +155,11 @@ void ColumnManager::SetColumn(int i, const ColumnInfo & info) {
 	if ((info.Flags & ColumnFlags::Visible) != (m_Columns[i].Flags & ColumnFlags::Visible)) {
 		SetVisible(i, (info.Flags & ColumnFlags::Visible) == ColumnFlags::Visible);
 	}
+}
+
+void ColumnManager::EnableDpiScaling() {
+	if (m_ListView.IsWindow())
+		ListViewHelper::EnableColumnDpiScaling(m_ListView);
 }
 
 int ColumnManager::GetRealColumn(int index) const {

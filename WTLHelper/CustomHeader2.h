@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WTLHelper.h"
+#include "DpiHelper.h"
 #include "DarkMode/DarkModeSubclass.h"
 
 class CCustomHeader2 :
@@ -30,13 +31,14 @@ public:
 			dc.SetDCPenColor(RGB(192, 192, 192));
 			std::vector<int> order(GetItemCount());
 			GetOrderArray(GetItemCount(), order.data());
-			const int sortLen = 4;
+			UINT dpi = DpiHelper::GetDpi(m_hWnd);
+			const int sortLen = DpiHelper::Scale(4, dpi), margin = DpiHelper::Scale(6, dpi), sortTop = DpiHelper::Scale(2, dpi);
 			for (auto index : order) {
 				GetItemRect(index, &rc);
 				GetItem(index, &hdi);
 				dc.FillSolidRect(&rc, DarkMode::getCtrlBackgroundColor());
-				rc.right -= 6;
-				rc.left += 6;
+				rc.right -= margin;
+				rc.left += margin;
 				auto fmt = DT_SINGLELINE | DT_LEFT | DT_VCENTER;
 				if ((hdi.fmt & HDF_JUSTIFYMASK) == HDF_CENTER)
 					fmt |= DT_CENTER;
@@ -44,7 +46,7 @@ public:
 					fmt |= DT_RIGHT;
 
 				dc.DrawText(text, -1, &rc, fmt);
-				rc.top += 2;
+				rc.top += sortTop;
 				if (hdi.fmt & HDF_SORTUP) {
 					dc.MoveTo(rc.CenterPoint().x, rc.top);
 					dc.LineTo(rc.CenterPoint().x - sortLen, rc.top + sortLen);
@@ -57,8 +59,8 @@ public:
 					dc.MoveTo(rc.CenterPoint().x + sortLen, rc.top);
 					dc.LineTo(rc.CenterPoint().x, rc.top + sortLen);
 				}
-				rc.top -= 2;
-				rc.right += 2;
+				rc.top -= sortTop;
+				rc.right += DpiHelper::Scale(2, dpi);
 				dc.MoveTo(rc.right, rc.top);
 				dc.LineTo(rc.right, rc.bottom);
 			}
@@ -133,8 +135,9 @@ public:
 
 		CDCHandle dc(cd->hdc);
 		dc.SelectStockPen(WHITE_PEN);
+		UINT dpi = DpiHelper::GetDpi(m_Header);
 		CRect rc(cd->rc);
-		rc.bottom -= 2;
+		rc.bottom -= DpiHelper::Scale(2, dpi);
 		bool isSortinColumn = item.fmt & (HDF_SORTUP | HDF_SORTDOWN);
 		auto color = DarkMode::getBackgroundColor();
 		dc.FillSolidRect(&rc, isSortinColumn ? RGB(32, 0, 0) : color);
@@ -153,7 +156,7 @@ public:
 		dc.SetBkMode(TRANSPARENT);
 		dc.SetTextColor(DarkMode::getTextColor());
 		rc = cd->rc;
-		rc.left += 6;
+		rc.left += DpiHelper::Scale(6, dpi);
 
 		DWORD fmt = DT_LEFT;
 		if ((item.fmt & LVCFMT_JUSTIFYMASK) == LVCFMT_RIGHT)
@@ -161,15 +164,16 @@ public:
 		else if ((item.fmt & LVCFMT_JUSTIFYMASK) == LVCFMT_CENTER)
 			fmt = DT_CENTER;
 
-		rc.DeflateRect(4, 0);
+		rc.DeflateRect(DpiHelper::Scale(4, dpi), 0);
 		dc.DrawText(text, -1, &rc, fmt | DT_VCENTER | DT_SINGLELINE);
 
 		// draw sort indicator (if any)
 		if (item.fmt & (HDF_SORTUP | HDF_SORTDOWN)) {
 			auto pt = rc.CenterPoint();
 			auto up = item.fmt & HDF_SORTUP;
-			pt.y = up ? rc.top : rc.top + 4;
-			int offset = up ? 4 : -4;
+			int len = DpiHelper::Scale(4, dpi);
+			pt.y = up ? rc.top : rc.top + len;
+			int offset = up ? len : -len;
 			dc.MoveTo(pt);
 			dc.LineTo(pt.x - offset, pt.y + offset);
 			dc.MoveTo(pt);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DpiHelper.h"
+
 const UINT EN_DELAYCHANGE = EN_CHANGE + 1;
 
 class CQuickFindEdit : public CWindowImpl<CQuickFindEdit, CEdit> {
@@ -28,10 +30,12 @@ public:
 			dc.SelectFont(GetFont());
 			CRect rc;
 			GetClientRect(&rc);
-			rc.left += 2;
+			UINT dpi = DpiHelper::GetDpi(m_hWnd);
+			rc.left += DpiHelper::Scale(2, dpi);
 			if (m_hIcon) {
-				dc.DrawIconEx(rc.left, rc.Height() / 2 - 8, m_hIcon, 16, 16);
-				rc.left += 20;
+				int size = DpiHelper::SmallIconSize(dpi);
+				dc.DrawIconEx(rc.left, (rc.Height() - size) / 2, m_hIcon, size, size);
+				rc.left += size + DpiHelper::Scale(4, dpi);
 			}
 			dc.DrawText(m_Watermark, -1, &rc, DT_VCENTER | DT_SINGLELINE | DT_LEFT);
 		}
@@ -56,6 +60,7 @@ public:
 		m_Delay = ms;
 	}
 
+	// drawn in the small icon size of the DPI of the edit box (stretched if it's another size)
 	void SetWatermarkIcon(HICON hIcon) {
 		m_hIcon = hIcon;
 		Invalidate();

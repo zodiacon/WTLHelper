@@ -13,6 +13,7 @@ enum class ListViewRowCheck {
 
 struct ColumnsState {
 	int Count{ 0 };
+	UINT Dpi{ 0 };		// the DPI of the widths in Columns (0: unknown, the widths are used as they are)
 	int SortColumn{ -1 };
 	bool SortAscending{ true };
 	std::unique_ptr<int[]> Order;
@@ -371,14 +372,22 @@ protected:
 		auto empty = header.GetItemCount() == 0;
 		HDITEM hdi;
 		hdi.mask = HDI_LPARAM;
+		// widths saved at another DPI are scaled to the list view's, which keeps them in step with its DPI from now on
+		UINT dpi = DpiHelper::GetDpi(h);
+		ListViewHelper::EnableColumnDpiScaling(h);
 		for (int i = 0; i < state.Count; i++) {
 			if (state.Text) {
 				state.Columns[i].pszText = state.Text[i].data();
 			}
+			auto column = state.Columns[i];
+			if (state.Dpi && state.Dpi != dpi) {
+				column.cx = DpiHelper::Scale(column.cx, dpi, state.Dpi);
+				column.cxMin = DpiHelper::Scale(column.cxMin, dpi, state.Dpi);
+			}
 			if(empty)
-				lv.InsertColumn(i, state.Columns.get() + i);
+				lv.InsertColumn(i, &column);
 			else
-				lv.SetColumn(i, state.Columns.get() + i);
+				lv.SetColumn(i, &column);
 			hdi.lParam = state.Tags[i];
 			header.SetItem(i, &hdi);
 		}
@@ -397,6 +406,7 @@ protected:
 	ColumnsState SaveState(HWND h, bool names = true) {
 		CListViewCtrl lv(h);
 		ColumnsState state;
+		state.Dpi = DpiHelper::GetDpi(h);
 		auto si = GetSortInfo(h);
 		auto header = lv.GetHeader();
 		auto count = header.GetItemCount();

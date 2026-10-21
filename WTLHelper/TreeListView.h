@@ -42,6 +42,8 @@
 #error TreeListView.h requires _WIN32_IE >= 0x0400
 #endif
 
+#include "DpiHelper.h"
+
 
 // The TreeListView item structure
 typedef struct tagTLVITEM {
@@ -108,6 +110,7 @@ public:
 	COLORREF m_clrSelectionText;                     // Text color for selected item
 	DWORD m_dwExStyle;                               // Extended TreeListView styles
 	DWORD m_dwHeaderStyle;                           // Style for header at creation
+	UINT m_Dpi{ USER_DEFAULT_SCREEN_DPI };           // DPI the column widths are for
 
 	CTreeListViewImpl() :
 		m_ctrlTree(this, 1),
@@ -302,6 +305,7 @@ public:
 		// Create the header control
 		m_ctrlHeader.Create(this, 2, p->m_hWnd, &p->rcDefault, nullptr, m_dwHeaderStyle);
 		ATLASSERT(m_ctrlHeader.IsWindow());
+		m_Dpi = DpiHelper::GetDpi(p->m_hWnd);
 
 		p->SendMessage(WM_SETTINGCHANGE);
 
@@ -344,7 +348,7 @@ public:
 		RECT rcClient;
 		auto p = static_cast<T*>(this);
 		p->GetClientRect(&rcClient);
-		if (p->GetStyle() & WS_VSCROLL) rcClient.right += ::GetSystemMetrics(SM_CXHTHUMB);
+		if (p->GetStyle() & WS_VSCROLL) rcClient.right += DpiHelper::GetSystemMetrics(SM_CXHTHUMB, p->m_hWnd);
 		LONG cxClient = (rcClient.right - rcClient.left);
 		if (m_cxHeader - cxClient >= 0) {
 			SCROLLINFO si;
@@ -364,7 +368,7 @@ public:
 				m_ctrlHeader.SetWindowPos(nullptr,
 					-si.nPos,
 					0,
-					abs(si.nPos) + ::GetSystemMetrics(SM_CXVSCROLL) + 1 + rcTree.right - rcTree.left,
+					abs(si.nPos) + DpiHelper::GetSystemMetrics(SM_CXVSCROLL, p->m_hWnd) + 1 + rcTree.right - rcTree.left,
 					rcHeader.bottom - rcHeader.top,
 					SWP_SHOWWINDOW);
 			}
@@ -391,6 +395,7 @@ public:
 		// mode's background after switching between dark and light
 		MESSAGE_HANDLER(::RegisterWindowMessage(L"ThemeChanged"), OnUpdateTheme)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
+		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		NOTIFY_CODE_HANDLER(TVN_DELETEITEMA, OnTreeItemDelete)
 		NOTIFY_CODE_HANDLER(TVN_DELETEITEMW, OnTreeItemDelete)
 		NOTIFY_CODE_HANDLER(TVN_ITEMEXPANDEDA, OnTreeItemExpanded)
@@ -427,29 +432,48 @@ public:
 		return 0;
 	}
 
+	// width: at 96 DPI
 	bool AddColumn(PCWSTR text, int width, DWORD format = HDF_LEFT) {
 		auto header = GetHeaderControl();
 		HDITEM col;
 		col.mask = HDI_FORMAT | HDI_TEXT | HDI_WIDTH;
 		col.fmt = format;
-		col.cxy = width;
+		col.cxy = DpiHelper::Scale(width, m_Dpi);
 		col.pszText = (PWSTR)text;
 		return header.InsertItem(header.GetItemCount(), &col);
 	}
 
 	LRESULT OnSettingChange(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
-		if (!m_fontHeader.IsNull()) 
-			m_fontHeader.DeleteObject();
-		NONCLIENTMETRICS ncm = { 0 };
-		ncm.cbSize = sizeof(ncm);
-		::SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-		m_fontHeader.CreateFontIndirect(&ncm.lfMenuFont);
-		if (::IsWindow(m_ctrlHeader)) {
-			m_ctrlHeader.SetFont(m_fontHeader);
-		}
-
 		auto p = static_cast<T*>(this);
+		// the header font is the menu font at the DPI of the control
+		CFont font(DpiHelper::CreateMenuFont(DpiHelper::GetDpi(p->m_hWnd)));
+		if (::IsWindow(m_ctrlHeader)) {
+			m_ctrlHeader.SetFont(font);
+		}
+		if (!m_fontHeader.IsNull())
+			m_fontHeader.DeleteObject();
+		m_fontHeader.Attach(font.Detach());
+
 		p->Invalidate();
+		return 0;
+	}
+
+	// a new DPI: the header font for it (the font of the tree is the owner's, who sets one for the new DPI),
+	// the column widths scaled to it and a new layout
+	LRESULT OnDpiChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+		OnSettingChange(uMsg, wParam, lParam, bHandled);
+		UINT dpi = DpiHelper::GetDpi(static_cast<T*>(this)->m_hWnd);
+		if (dpi != m_Dpi) {
+			HDITEM hdi{ HDI_WIDTH };
+			for (int i = 0; i < m_ctrlHeader.GetItemCount(); i++) {
+				m_ctrlHeader.GetItem(i, &hdi);
+				hdi.cxy = DpiHelper::Scale(hdi.cxy, dpi, m_Dpi);
+				m_ctrlHeader.SetItem(i, &hdi);
+			}
+			m_Dpi = dpi;
+		}
+		static_cast<T*>(this)->UpdateLayout();
+		bHandled = FALSE;
 		return 0;
 	}
 	LRESULT OnSetFocus(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
@@ -477,7 +501,7 @@ public:
 		auto p = static_cast<T*>(this);
 
 		int cxClient = abs(rcClient.right - rcClient.left);   // One Page
-		const int nWidthLine = 6;               // Microsoft's line-step in a CListCtrl, got from MFC - sourcecode
+		const int nWidthLine = DpiHelper::Scale(6, p->m_hWnd);	// Microsoft's line-step in a CListCtrl, got from MFC - sourcecode (at 96 DPI)
 		int nCurPos = p->GetScrollPos(SB_HORZ);    // Current scrollingposition
 		int nPrevPos = nCurPos;                 // Save current scrolling position for calculating
 
@@ -530,7 +554,7 @@ public:
 		m_ctrlHeader.GetClientRect(&rcHeader);
 
 		if (rcTree.right - rcTree.left != 0) {
-			int iVSWidth = ::GetSystemMetrics(SM_CXVSCROLL) + 1;
+			int iVSWidth = DpiHelper::GetSystemMetrics(SM_CXVSCROLL, p->m_hWnd) + 1;
 			m_ctrlHeader.SetWindowPos(nullptr, m_nOffset, 0, abs(m_nOffset) + iVSWidth + rcTree.right - rcTree.left, rcHeader.bottom - rcHeader.top, SWP_SHOWWINDOW);
 		}
 
@@ -565,7 +589,7 @@ public:
 		p->GetClientRect(&rcClient);
 		int x = GET_X_LPARAM(lParam) - m_nOffset;
 		int y = GET_Y_LPARAM(lParam);
-		if (x > rcClient.right - rcClient.left) x = rcClient.right - 40;
+		if (x > rcClient.right - rcClient.left) x = rcClient.right - DpiHelper::Scale(40, p->m_hWnd);
 		TVHITTESTINFO hti;
 		hti.pt.x = x;
 		hti.pt.y = y;
@@ -579,10 +603,10 @@ public:
 		if (hItem == nullptr) return (LRESULT)hItem;
 
 		// Create a new item
-		tMapItem* pVal;
+		tMapItem* pVal = nullptr;
 		ATLTRY(pVal = new tMapItem);
 		ATLASSERT(pVal);
-		LPTLVITEM pItem;
+		LPTLVITEM pItem = nullptr;
 		int nHeaders = m_ctrlHeader.GetItemCount();
 		for (int i = 0; i < nHeaders; i++) {
 			ATLTRY(pItem = new TLVITEM);
@@ -666,7 +690,7 @@ public:
 		// each tree item as well...
 		LRESULT lRes = m_ctrlHeader.DefWindowProc(uMsg, wParam, lParam);
 		if (lRes != -1) {
-			LPTLVITEM pItem;
+			LPTLVITEM pItem = nullptr;
 			for (int i = 0; i < m_mapItems.GetSize(); i++) {
 				tMapItem* pVal = m_mapItems.GetValueAt(i);
 				ATLTRY(pItem = new TLVITEM);
@@ -901,7 +925,7 @@ public:
 			// Sergey Solozhentsev kindly added coloring based on the dropitem as well.
 			// We now support the control original text & background-color.
 			if (pItem->mask & TLVIF_TEXT) {
-				rc.left += 2;
+				rc.left += DpiHelper::Scale(2, m_ctrlTree);
 
 				COLORREF clrText = lptvcd->clrText == CLR_INVALID ? ::GetSysColor(COLOR_WINDOWTEXT) : lptvcd->clrText;
 				COLORREF clrBack = lptvcd->clrTextBk == CLR_INVALID ? ::GetSysColor(COLOR_WINDOW) : lptvcd->clrTextBk;

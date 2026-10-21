@@ -157,6 +157,9 @@
     <ClInclude Include="DialogHelper.h">
       <Filter>Helpers</Filter>
     </ClInclude>
+    <ClInclude Include="DpiHelper.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
     <ClInclude Include="CompoundFile.h">
       <Filter>CompoundFiles</Filter>
     </ClInclude>

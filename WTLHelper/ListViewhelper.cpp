@@ -4,6 +4,7 @@
 #include <wil\resource.h>
 #include "VirtualListView.h"
 #include "WTLHelper.h"
+#include "DpiHelper.h"
 #include <atldlgs.h>
 
 namespace {
@@ -281,7 +282,8 @@ bool ListViewHelper::WriteColumnsState(ColumnsState const& state, IStream* stm) 
 			}
 		}
 	}
-	uint32_t end = 0xffff;
+	// the end marker; its high half is the DPI of the widths (0 before it was recorded)
+	uint32_t end = 0xffff | ((state.Dpi & 0xffff) << 16);
 	write(&end, sizeof(end));
 	return ok;
 }
@@ -290,7 +292,8 @@ bool ListViewHelper::WriteColumnsState(ColumnsState const& state, IStream* stm) 
 // Reads what WriteColumnsState wrote: the state is filled completely, or (false) not touched at all, whatever the stream
 // holds - a short or damaged one is rejected, not guessed at. The column records are LVCOLUMNs as they were in memory, so
 // a state is only good for the same build (bitness) that saved it; their text pointers mean nothing later and are cleared
-// (the texts, if there are any, are in state.Text).
+// (the texts, if there are any, are in state.Text). The DPI of the widths is in the end marker; a state saved before it was
+// recorded reads with state.Dpi 0 (builds from before reject a state that has it).
 //
 bool ListViewHelper::ReadColumnsState(ColumnsState& state, IStream* stm) {
 	if (stm == nullptr)
@@ -338,11 +341,58 @@ bool ListViewHelper::ReadColumnsState(ColumnsState& state, IStream* stm) {
 		if (len != 0xffff)
 			return false;
 	}
-	// the other half of the end marker
+	// the other half of the end marker: the DPI of the widths, or 0 in a state saved before the DPI was recorded
 	uint16_t high = 0;
-	if (!read(&high, sizeof(high)) || high != 0)
+	if (!read(&high, sizeof(high)) || (high != 0 && (high < 48 || high > 2400)))
 		return false;
+	result.Dpi = high;
 
 	state = std::move(result);
 	return true;
+}
+
+namespace {
+	// the subclass data is the DPI the column widths are for
+	LRESULT CALLBACK ColumnDpiSubclassProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR dpi) {
+		switch (msg) {
+			case WM_DPICHANGED_AFTERPARENT:
+			{
+				auto result = ::DefSubclassProc(hWnd, msg, wp, lp);
+				UINT newDpi = DpiHelper::GetDpi(hWnd);
+				if (newDpi != (UINT)dpi) {
+					ListViewHelper::ScaleColumns(hWnd, newDpi, (UINT)dpi);
+					::SetWindowSubclass(hWnd, ColumnDpiSubclassProc, id, newDpi);
+				}
+				return result;
+			}
+			case WM_NCDESTROY:
+				::RemoveWindowSubclass(hWnd, ColumnDpiSubclassProc, id);
+				break;
+		}
+		return ::DefSubclassProc(hWnd, msg, wp, lp);
+	}
+}
+
+void ListViewHelper::EnableColumnDpiScaling(HWND hListView) {
+	DWORD_PTR dpi;
+	if (!::GetWindowSubclass(hListView, ColumnDpiSubclassProc, 1, &dpi))
+		::SetWindowSubclass(hListView, ColumnDpiSubclassProc, 1, DpiHelper::GetDpi(hListView));
+}
+
+void ListViewHelper::ScaleColumns(HWND hListView, UINT toDpi, UINT fromDpi) {
+	if (toDpi == fromDpi || fromDpi == 0)
+		return;
+	CListViewCtrl lv(hListView);
+	int count = lv.GetHeader().GetItemCount();
+	lv.SetRedraw(FALSE);
+	for (int i = 0; i < count; i++) {
+		LVCOLUMN lvc{ LVCF_WIDTH | LVCF_MINWIDTH };
+		if (!lv.GetColumn(i, &lvc))
+			continue;
+		lvc.cx = DpiHelper::Scale(lvc.cx, toDpi, fromDpi);
+		lvc.cxMin = DpiHelper::Scale(lvc.cxMin, toDpi, fromDpi);
+		lv.SetColumn(i, &lvc);
+	}
+	lv.SetRedraw(TRUE);
+	lv.Invalidate();
 }

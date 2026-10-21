@@ -1,8 +1,10 @@
 #include "pch.h"
 #include "IconHelper.h"
+#include "DpiHelper.h"
+#include <shlobj_core.h>
 
-HICON IconHelper::GetShieldIcon() {
-	return GetStockIcon(SIID_SHIELD);
+HICON IconHelper::GetShieldIcon(UINT dpi) {
+	return GetStockIcon(SIID_SHIELD, false, dpi);
 }
 
 CComPtr<IImageList2> IconHelper::CreateImageList() {
@@ -35,4 +37,22 @@ HICON IconHelper::GetStockIcon(SHSTOCKICONID id, bool big) {
 		return nullptr;
 
 	return ssii.hIcon;
+}
+
+//
+// SHGetStockIconInfo gives icons of the system DPI only: the icon is extracted from where it lives in the size for dpi
+//
+HICON IconHelper::GetStockIcon(SHSTOCKICONID id, bool big, UINT dpi) {
+	if (dpi == 0)
+		return GetStockIcon(id, big);
+
+	SHSTOCKICONINFO ssii = { sizeof(ssii) };
+	if (FAILED(::SHGetStockIconInfo(id, SHGSI_ICONLOCATION, &ssii)))
+		return nullptr;
+
+	int size = big ? DpiHelper::IconSize(dpi) : DpiHelper::SmallIconSize(dpi);
+	HICON hIcon = nullptr;
+	if (::SHDefExtractIcon(ssii.szPath, ssii.iIcon, 0, &hIcon, nullptr, size) != S_OK)
+		return GetStockIcon(id, big);
+	return hIcon;
 }

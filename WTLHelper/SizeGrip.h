@@ -3,6 +3,7 @@
 #include "ThemeHelper.h"
 #include "Theme.h"
 #include "WTLHelper.h"
+#include "DpiHelper.h"
 
 //
 // size grip (SBS_SIZEGRIP scroll bar) that follows the colors of the application:
@@ -20,13 +21,14 @@ public:
 	BEGIN_MSG_MAP(CSizeGrip)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 	END_MSG_MAP()
 
 	HWND CreateGrip(HWND hParent) {
 		CRect client;
 		::GetClientRect(hParent, &client);
-		auto cx = ::GetSystemMetrics(SM_CXVSCROLL), cy = ::GetSystemMetrics(SM_CYHSCROLL);
-		CRect rc(client.right - cx, client.bottom - cy, client.right, client.bottom);
+		auto size = GetGripSize(DpiHelper::GetDpi(hParent));
+		CRect rc(CPoint(client.right - size.cx, client.bottom - size.cy), size);
 		CScrollBar grip;
 		grip.Create(hParent, rc, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SBS_SIZEGRIP | SBS_SIZEBOXBOTTOMRIGHTALIGN);
 		if (!grip || !SubclassWindow(grip))
@@ -81,6 +83,25 @@ private:
 		return ThemeHelper::IsDefault() ? Look::System : Look::Theme;
 	}
 
+	static CSize GetGripSize(UINT dpi) {
+		return CSize(DpiHelper::GetSystemMetrics(SM_CXVSCROLL, dpi), DpiHelper::GetSystemMetrics(SM_CYHSCROLL, dpi));
+	}
+
+	//
+	// the size of a scroll bar at the new DPI, keeping the bottom-right corner where it is
+	// (the parent moves the grip to its corner when it lays itself out)
+	//
+	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+		bHandled = FALSE;
+		CRect rc;
+		GetWindowRect(&rc);
+		GetParent().ScreenToClient(&rc);
+		auto size = GetGripSize(DpiHelper::GetDpi(m_hWnd));
+		SetWindowPos(nullptr, rc.right - size.cx, rc.bottom - size.cy, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+		Invalidate();
+		return 0;
+	}
+
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 		bHandled = GetLook() != Look::System;
 		return 1;
@@ -96,7 +117,7 @@ private:
 		CRect rc;
 		GetClientRect(&rc);
 		if (look == Look::DarkMode)
-			DrawSizeGrip(dc.m_hDC, rc, DarkMode::getDlgBackgroundColor(), DarkMode::getDisabledTextColor(), ::GetDpiForWindow(m_hWnd));
+			DrawSizeGrip(dc.m_hDC, rc, DarkMode::getDlgBackgroundColor(), DarkMode::getDisabledTextColor(), DpiHelper::GetDpi(m_hWnd));
 		else
 			DrawSizeGrip(dc.m_hDC, rc);
 		return 0;

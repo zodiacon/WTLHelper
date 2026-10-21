@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atldlgs.h>
+#include "DpiHelper.h"
 
 //
 // property sheet with full color tab icons.
@@ -8,6 +9,7 @@
 // so it is replaced with a 32-bit one once the sheet is initialized.
 // Pages added after that need nothing special: the sheet adds their icons to the tab's current (32-bit) image list.
 // The sheet destroys the tab's image list when it's destroyed, so the sheet's own list is put back before that.
+// When the sheet's DPI changes (WM_DPICHANGED), the images are made again in the new size.
 // TBase is the sheet implementation to build on, so it composes with other sheet impls, e.g.
 //   class CMySheet : public CIconPropertySheetImpl<CMySheet, CResizablePropertySheetImpl<CMySheet>> {};
 // A derived class that defines OnSheetInitialized must call the base version.
@@ -19,6 +21,7 @@ public:
 
 	BEGIN_MSG_MAP(CIconPropertySheetImpl)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
 		CHAIN_MSG_MAP(TBase)
 	END_MSG_MAP()
 
@@ -60,7 +63,7 @@ public:
 		auto pT = static_cast<T*>(this);
 		CTabCtrl tabs(pT->GetTabControl());
 		CImageList sheetImages(tabs.GetImageList());
-		auto size = ::GetSystemMetrics(SM_CXSMICON);
+		auto size = DpiHelper::SmallIconSize(pT->m_hWnd);
 		auto count = tabs.GetItemCount();
 		m_Images.Create(size, size, ILC_COLOR32 | ILC_MASK, count, 4);
 		for (int i = 0; i < count; i++) {
@@ -73,6 +76,8 @@ public:
 			else if (item.iImage >= 0 && sheetImages)
 				hIcon = sheetImages.GetIcon(item.iImage);
 			item.iImage = hIcon ? m_Images.AddIcon(hIcon) : -1;
+			if (hIcon)
+				m_ImageIcons.push_back(icon);
 			tabs.SetItem(i, &item);
 		}
 		m_SheetImages = tabs.SetImageList(m_Images);
@@ -90,8 +95,36 @@ protected:
 		return 0;
 	}
 
+	//
+	// the images for the new DPI, at the same indices: icons from resources are loaded again in the new size,
+	// others (such as those the sheet adds for pages added later) are stretched from the current images
+	//
+	LRESULT OnDpiChanged(UINT, WPARAM wp, LPARAM, BOOL& bHandled) {
+		bHandled = FALSE;
+		if (!m_Images)
+			return 0;
+
+		auto pT = static_cast<T*>(this);
+		CTabCtrl tabs(pT->GetTabControl());
+		auto size = DpiHelper::SmallIconSize(LOWORD(wp));
+		auto count = m_Images.GetImageCount();
+		CImageListManaged images;
+		images.Create(size, size, ILC_COLOR32 | ILC_MASK, count, 4);
+		for (int i = 0; i < count; i++) {
+			auto icon = i < (int)m_ImageIcons.size() ? m_ImageIcons[i] : nullptr;
+			CIcon hIcon(icon ? AtlLoadIconImage(icon, LR_DEFAULTCOLOR, size, size) : nullptr);
+			if (!hIcon)
+				hIcon = m_Images.GetIcon(i);
+			images.AddIcon(hIcon);
+		}
+		tabs.SetImageList(images);
+		m_Images.Attach(images.Detach());
+		return 0;
+	}
+
 private:
 	std::vector<PCWSTR> m_Icons;
+	std::vector<PCWSTR> m_ImageIcons;	// the icon of each image of m_Images (nullptr: an image the sheet gave)
 	CImageListManaged m_Images;
 	HIMAGELIST m_SheetImages{ nullptr };	// the sheet's own, replaced by m_Images
 };

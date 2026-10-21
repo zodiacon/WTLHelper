@@ -11,6 +11,7 @@
 #include "CustomDateTimePicker.h"
 #include "CustomMonthCalendar.h"
 #include "IconHelper.h"
+#include "DpiHelper.h"
 #include "CustomCheckAclUI.h"
 #include <tuple>
 
