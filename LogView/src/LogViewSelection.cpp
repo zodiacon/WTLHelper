@@ -25,10 +25,12 @@ size_t CLogViewCtrl::LineLength(size_t line) const {
 }
 
 LGVPOS CLogViewCtrl::ClampPos(LGVPOS pos) const {
-	size_t count = GetLineCount();
-	if (count == 0)
+	size_t rows = RowCount();
+	if (rows == 0)
 		return { 0, 0 };
-	pos.line = std::min(pos.line, count - 1);
+	// on a line the filter hides: the next one shown (or the last)
+	if (!IsLineShown(pos.line))
+		pos.line = LineOfRow(std::min(RowOfLine(pos.line), rows - 1));
 	pos.column = std::min(pos.column, LineLength(pos.line));
 	return pos;
 }
@@ -36,8 +38,9 @@ LGVPOS CLogViewCtrl::ClampPos(LGVPOS pos) const {
 LGVPOS CLogViewCtrl::LineStartOrNext(size_t line, bool next) const {
 	if (!next)
 		return { line, 0 };
-	if (line + 1 < GetLineCount())
-		return { line + 1, 0 };
+	size_t row = RowOfLine(line);
+	if (row + 1 < RowCount())
+		return { LineOfRow(row + 1), 0 };
 	return { line, LineLength(line) };   // the last line has no break to take
 }
 
@@ -99,21 +102,29 @@ size_t CLogViewCtrl::XToIndex(size_t line, int x) const {
 }
 
 LGVPOS CLogViewCtrl::PosFromPoint(POINT pt) const {
-	size_t count = GetLineCount();
+	size_t count = RowCount();
 	if (count == 0)
 		return { 0, 0 };
-	long long row = pt.y >= 0 ? pt.y / m_LineHeight : -((-pt.y + m_LineHeight - 1) / m_LineHeight);
-	long long line = (long long)m_TopLine + row;
-	if (line < 0)
-		return { 0, 0 };
-	if ((size_t)line >= count)
-		return { count - 1, LineLength(count - 1) };
-	return { (size_t)line, XToIndex((size_t)line, pt.x - GutterWidth() - m_Pad + m_Left) };
+	long long offset = pt.y >= 0 ? pt.y / m_LineHeight : -((-pt.y + m_LineHeight - 1) / m_LineHeight);
+	long long row = (long long)m_TopRow + offset;
+	if (row < 0)
+		return { LineOfRow(0), 0 };
+	if ((size_t)row >= count) {
+		size_t last = LineOfRow(count - 1);
+		return { last, LineLength(last) };
+	}
+	size_t line = LineOfRow((size_t)row);
+	return { line, XToIndex(line, pt.x - GutterWidth() - m_Pad + m_Left) };
 }
 
 LGVPOS CLogViewCtrl::WordLeft(LGVPOS pos) const {
-	if (pos.column == 0)
-		return pos.line > 0 ? LGVPOS{ pos.line - 1, LineLength(pos.line - 1) } : pos;
+	if (pos.column == 0) {
+		size_t row = RowOfLine(pos.line);
+		if (row == 0)
+			return pos;
+		size_t prev = LineOfRow(row - 1);
+		return { prev, LineLength(prev) };
+	}
 	LineData data;
 	GetLine(pos.line, data);
 	return { pos.line, LgWordLeft({ data.text, data.length }, pos.column) };
@@ -122,8 +133,10 @@ LGVPOS CLogViewCtrl::WordLeft(LGVPOS pos) const {
 LGVPOS CLogViewCtrl::WordRight(LGVPOS pos) const {
 	LineData data;
 	GetLine(pos.line, data);
-	if (pos.column >= data.length)
-		return pos.line + 1 < GetLineCount() ? LGVPOS{ pos.line + 1, 0 } : pos;
+	if (pos.column >= data.length) {
+		size_t row = RowOfLine(pos.line);
+		return row + 1 < RowCount() ? LGVPOS{ LineOfRow(row + 1), 0 } : pos;
+	}
 	return { pos.line, LgWordRight({ data.text, data.length }, pos.column) };
 }
 
@@ -175,9 +188,10 @@ void CLogViewCtrl::SetSelection(LGVPOS anchor, LGVPOS caret) {
 }
 
 void CLogViewCtrl::SelectAll() {
-	size_t count = GetLineCount();
-	if (count)
-		Select({ 0, 0 }, { count - 1, LineLength(count - 1) }, false);
+	if (size_t rows = RowCount()) {
+		size_t last = LineOfRow(rows - 1);
+		Select({ LineOfRow(0), 0 }, { last, LineLength(last) }, false);
+	}
 }
 
 bool CLogViewCtrl::HasSelection() const {
@@ -216,11 +230,22 @@ ATL::CString CLogViewCtrl::GetSelectedText() const {
 		return {};
 	LGVPOS s, e;
 	GetSelection(&s, &e);
+	// the rows shown from start to end: an end on a hidden line takes the whole row before it
+	size_t startRow = RowOfLine(s.line), endRow = RowOfLine(e.line);
+	size_t startCol = IsLineShown(s.line) ? s.column : 0, endCol = e.column;
+	if (!IsLineShown(e.line)) {
+		if (endRow == 0)
+			return {};
+		endRow--;
+		endCol = SIZE_MAX;
+	}
+	if (startRow > endRow || endRow >= RowCount())
+		return {};
 	std::wstring text;
-	LgJoinRange(s.line, s.column, e.line, e.column, [this](size_t line) {
+	LgJoinRange(startRow, startCol, endRow, endCol, [this](size_t row) {
 		// used before the next line is asked for (a virtual line's text is replaced then)
 		LineData data;
-		GetLine(line, data);
+		GetLine(LineOfRow(row), data);
 		return std::wstring_view(data.text, data.length);
 	}, text);
 	return ATL::CString(text.c_str(), (int)std::min<size_t>(text.size(), INT_MAX));
@@ -230,7 +255,7 @@ BOOL CLogViewCtrl::Copy() {
 	ATL::CString text;
 	if (HasSelection())
 		text = GetSelectedText();
-	else if (m_Caret.line < GetLineCount())
+	else if (IsLineShown(m_Caret.line))
 		text = GetLineText(m_Caret.line) + L"\r\n";   // nothing selected: the caret's line
 	else
 		return FALSE;
@@ -266,13 +291,14 @@ void CLogViewCtrl::CreateSystemCaret() {
 void CLogViewCtrl::UpdateCaret() {
 	if (!m_HasCaret)
 		return;
-	size_t count = GetLineCount();
-	bool visible = m_Caret.line >= m_TopLine && m_Caret.line <= m_TopLine + GetPageLines() && (m_Caret.line < count || count == 0);
+	// an empty view shows it at the start; a line the filter hides (while it's still going) doesn't
+	size_t row = RowCount() == 0 ? 0 : RowOfLine(m_Caret.line);
+	bool visible = (RowCount() == 0 || IsLineShown(m_Caret.line)) && row >= m_TopRow && row <= m_TopRow + GetPageLines();
 	POINT pt{};
 	if (visible) {
 		int gutter = GutterWidth();
 		pt.x = gutter + m_Pad - m_Left + IndexToX(m_Caret.line, m_Caret.column);
-		pt.y = (int)(m_Caret.line - m_TopLine) * m_LineHeight;
+		pt.y = (int)(row - m_TopRow) * m_LineHeight;
 		visible = pt.x >= gutter && pt.x < GetTextRect().right;
 	}
 	if (visible) {
@@ -288,14 +314,15 @@ void CLogViewCtrl::UpdateCaret() {
 }
 
 void CLogViewCtrl::EnsureCaretVisible(bool byUser) {
-	if (!m_Text->IsWindow() || GetLineCount() == 0)
+	if (!m_Text->IsWindow() || !IsLineShown(m_Caret.line))
 		return;
+	size_t row = RowOfLine(m_Caret.line);
 	size_t page = GetPageLines();
-	size_t top = m_TopLine;
-	if (m_Caret.line < top)
-		top = m_Caret.line;
-	else if (m_Caret.line >= top + page)
-		top = m_Caret.line - page + 1;
+	size_t top = m_TopRow;
+	if (row < top)
+		top = row;
+	else if (row >= top + page)
+		top = row - page + 1;
 
 	int x = IndexToX(m_Caret.line, m_Caret.column);
 	int width = std::max(m_CharWidth, (int)GetTextRect().right - GutterWidth() - 2 * m_Pad);
@@ -318,11 +345,11 @@ LRESULT CLogViewCtrl::OnTextGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
 }
 
 void CLogViewCtrl::HandleCaretKey(WPARAM key, bool ctrl, bool shift) {
-	size_t count = GetLineCount();
+	size_t count = RowCount();
 	if (count == 0)
 		return;
 	size_t page = GetPageLines();
-	LGVPOS pos = m_Caret;
+	LGVPOS pos = ClampPos(m_Caret);
 	LGVPOS start, end;
 	GetSelection(&start, &end);
 	bool keepX = false;
@@ -330,8 +357,8 @@ void CLogViewCtrl::HandleCaretKey(WPARAM key, bool ctrl, bool shift) {
 	// Up, Down, Page Up and Page Down keep to the column the caret started from
 	auto vertical = [&](long long lines) {
 		int x = m_DesiredX >= 0 ? m_DesiredX : IndexToX(pos.line, pos.column);
-		long long line = std::clamp((long long)pos.line + lines, 0LL, (long long)count - 1);
-		pos = { (size_t)line, XToIndex((size_t)line, x) };
+		size_t line = LineOfRow((size_t)std::clamp((long long)RowOfLine(pos.line) + lines, 0LL, (long long)count - 1));
+		pos = { line, XToIndex(line, x) };
 		m_DesiredX = x;
 		keepX = true;
 	};
@@ -344,8 +371,8 @@ void CLogViewCtrl::HandleCaretKey(WPARAM key, bool ctrl, bool shift) {
 				pos = WordLeft(pos);
 			else if (pos.column > 0)
 				pos.column--;
-			else if (pos.line > 0)
-				pos = { pos.line - 1, LineLength(pos.line - 1) };
+			else if (size_t row = RowOfLine(pos.line); row > 0)
+				pos = { LineOfRow(row - 1), LineLength(LineOfRow(row - 1)) };
 			break;
 		case VK_RIGHT:
 			if (HasSelection() && !shift)
@@ -354,14 +381,14 @@ void CLogViewCtrl::HandleCaretKey(WPARAM key, bool ctrl, bool shift) {
 				pos = WordRight(pos);
 			else if (pos.column < LineLength(pos.line))
 				pos.column++;
-			else if (pos.line + 1 < count)
-				pos = { pos.line + 1, 0 };
+			else if (size_t row = RowOfLine(pos.line); row + 1 < count)
+				pos = { LineOfRow(row + 1), 0 };
 			break;
 		case VK_UP:
 		case VK_DOWN:
 			if (ctrl) {
 				// the view only
-				ScrollTo(key == VK_UP ? m_TopLine - std::min<size_t>(m_TopLine, 1) : m_TopLine + 1, m_Left, true);
+				ScrollTo(key == VK_UP ? m_TopRow - std::min<size_t>(m_TopRow, 1) : m_TopRow + 1, m_Left, true);
 				return;
 			}
 			vertical(key == VK_UP ? -1 : 1);
@@ -369,12 +396,12 @@ void CLogViewCtrl::HandleCaretKey(WPARAM key, bool ctrl, bool shift) {
 		case VK_PRIOR:
 		case VK_NEXT:
 			// the view moves a page too, so the caret keeps its place on the screen
-			ScrollTo(key == VK_PRIOR ? m_TopLine - std::min(m_TopLine, page) : m_TopLine + page, m_Left, true);
+			ScrollTo(key == VK_PRIOR ? m_TopRow - std::min(m_TopRow, page) : m_TopRow + page, m_Left, true);
 			vertical(key == VK_PRIOR ? -(long long)page : (long long)page);
 			break;
 		case VK_HOME:
 			if (ctrl) {
-				pos = { 0, 0 };
+				pos = { LineOfRow(0), 0 };
 			}
 			else {
 				// smart Home: the first non-blank, then the start of the line
@@ -387,7 +414,9 @@ void CLogViewCtrl::HandleCaretKey(WPARAM key, bool ctrl, bool shift) {
 			}
 			break;
 		case VK_END:
-			pos = ctrl ? LGVPOS{ count - 1, LineLength(count - 1) } : LGVPOS{ pos.line, LineLength(pos.line) };
+			if (ctrl)
+				pos.line = LineOfRow(count - 1);
+			pos.column = LineLength(pos.line);
 			break;
 		default:
 			return;
@@ -409,8 +438,8 @@ LRESULT CLogViewCtrl::OnTextKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled)
 		case 'A':
 			if (!ctrl)
 				bHandled = FALSE;
-			else if (size_t count = GetLineCount())
-				Select({ 0, 0 }, { count - 1, LineLength(count - 1) }, true);
+			else if (size_t rows = RowCount())
+				Select({ LineOfRow(0), 0 }, { LineOfRow(rows - 1), LineLength(LineOfRow(rows - 1)) }, true);
 			break;
 		case 'C':
 		case VK_INSERT:
@@ -423,10 +452,10 @@ LRESULT CLogViewCtrl::OnTextKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled)
 			MoveCaret(m_Caret, false, true);
 			break;
 		case VK_RETURN:
-			if (m_Caret.line < GetLineCount()) {
+			if (IsLineShown(m_Caret.line)) {
 				EnsureCaretVisible(true);
 				POINT pt{ GutterWidth() + m_Pad - m_Left + IndexToX(m_Caret.line, m_Caret.column),
-					(int)(m_Caret.line - m_TopLine + 1) * m_LineHeight };
+					(int)(RowOfLine(m_Caret.line) - m_TopRow + 1) * m_LineHeight };
 				m_Text->ClientToScreen(&pt);
 				NotifyLine(LGVN_ACTIVATE, m_Caret.line, pt);
 			}
@@ -443,7 +472,7 @@ LRESULT CLogViewCtrl::OnTextLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL
 	m_Text->SetFocus();
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	bool shift = (wParam & MK_SHIFT) != 0;
-	if (GetLineCount() == 0)
+	if (RowCount() == 0)
 		return 0;
 	if (pt.x < GutterWidth()) {
 		// whole lines
@@ -523,7 +552,7 @@ LRESULT CLogViewCtrl::OnTextTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 		m_Text->KillTimer(DragScrollTimer);
 		return 0;
 	}
-	size_t top = lines < 0 ? m_TopLine - std::min<size_t>(m_TopLine, (size_t)-lines) : m_TopLine + (size_t)lines;
+	size_t top = lines < 0 ? m_TopRow - std::min<size_t>(m_TopRow, (size_t)-lines) : m_TopRow + (size_t)lines;
 	ScrollTo(top, m_Left + dx, true);
 	DragTo(pt);
 	return 0;
@@ -543,7 +572,7 @@ LRESULT CLogViewCtrl::OnTextCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CLogViewCtrl::OnTextLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
-	if (GetLineCount() == 0)
+	if (RowCount() == 0)
 		return 0;
 	LGVPOS pos;
 	if (pt.x < GutterWidth()) {
@@ -568,7 +597,7 @@ LRESULT CLogViewCtrl::OnTextRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	m_Text->SetFocus();
 	// outside the selection the caret moves to the click; inside, the menu is for the selection
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
-	if (GetLineCount() == 0 || pt.x < GutterWidth())
+	if (RowCount() == 0 || pt.x < GutterWidth())
 		return 0;
 	auto pos = PosFromPoint(pt);
 	LGVPOS s, e;

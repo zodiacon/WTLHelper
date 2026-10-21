@@ -82,6 +82,32 @@ struct LGVPOS {
 	size_t column;
 };
 
+// ---- Filter and rules ----------------------------------------------------------
+//
+// A filter shows only the lines whose text matches (or, with LGVFF_EXCLUDE, doesn't) and whose level is in the
+// mask. A rule styles the lines matching it in place of their level's style (when the line has no style of its
+// own; the level's gutter marker stays unless the rule's style has one), or with LGVRF_MATCHONLY just the text it
+// matches. The first whole-line rule that matches wins; match-only rules all apply, later ones over earlier.
+
+#define LGVFF_MATCHCASE   0x0001
+#define LGVFF_REGEX       0x0002   // ECMAScript (std::wregex)
+#define LGVFF_EXCLUDE     0x0004   // filter: the lines that don't match the text
+#define LGVRF_MATCHONLY   0x0100   // rule: style the matched text only (its colors; bold and italic don't apply)
+
+#define LGV_ALLLEVELS     0xFFFFFFFF
+
+struct LGVFILTER {
+	LPCWSTR pszText = nullptr;         // nullptr or "": any text
+	UINT    flags = 0;                 // LGVFF_*
+	DWORD   levelMask = LGV_ALLLEVELS; // 1 << level
+};
+
+struct LGVRULE {
+	LPCWSTR pszText = nullptr;
+	UINT    flags = 0;                 // LGVFF_MATCHCASE, LGVFF_REGEX, LGVRF_MATCHONLY
+	BYTE    style = 0;                 // 1..255 (SetStyle)
+};
+
 // ---- Colors ----------------------------------------------------------------------
 
 struct LGVCOLORS {
@@ -110,6 +136,7 @@ struct LGVCOLORS {
 #define LGVN_ACTIVATE       (LGVN_FIRST - 2)   // NMLGVLINE; a double click or Enter on a line
 #define LGVN_FOLLOWCHANGED  (LGVN_FIRST - 3)   // NMHDR; the user's scrolling turned following the tail on or off
 #define LGVN_SELCHANGED     (LGVN_FIRST - 4)   // NMHDR; the user moved the caret or changed the selection
+#define LGVN_FILTERDONE     (LGVN_FIRST - 5)   // NMHDR; SetFilter's pass over the lines is complete
 
 struct NMLGVLINE {
 	NMHDR  hdr;
@@ -134,6 +161,9 @@ struct NMLGVDISPINFO {
 
 class LgStore;
 class LgBatch;
+struct LgFilter;
+class LgRowMap;
+struct LgRule;
 class LgTextWindow;
 
 class CLogViewCtrl : public ATL::CWindowImpl<CLogViewCtrl> {
@@ -155,6 +185,7 @@ public:
 		MESSAGE_HANDLER(WM_SETFONT, OnSetFont)
 		MESSAGE_HANDLER(WM_GETFONT, OnGetFont)
 		MESSAGE_HANDLER(WM_LGV_FLUSH, OnFlush)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
@@ -233,6 +264,27 @@ public:
 	void    EndUpdate();
 	HWND    GetTextWindow() const;                    // the child that shows the lines (scroll bars, focus)
 
+	// ---- Filter and rules ---------------------------------------------------------------
+	//
+	// Filtering goes through the lines in slices on a timer, so even a regex over millions of lines leaves the
+	// window responsive: lines that pass show up as it goes, and LGVN_FILTERDONE says when it has caught up.
+	// Lines appended later are filtered as they come in. In virtual mode the parent is asked for each line
+	// (LGVN_GETDISPINFO); after changing lines' text it sets the filter again to filter them anew. When the pass
+	// is done the caret (moved to a line that's shown) is scrolled into view, unless the user scrolled meanwhile
+	// or the view follows the tail. The gutter keeps the lines' own numbers. Line indexes in the rest of the API
+	// stay those of all the lines.
+
+	BOOL    SetFilter(const LGVFILTER* filter);       // nullptr: none. FALSE: a bad regex (the filter stays)
+	BOOL    GetFilter(LGVFILTER* filter) const;       // pszText points into the control until the filter changes
+	bool    IsFiltered() const;
+	bool    IsFilterPending() const;                  // still going through the lines
+	size_t  GetShownLineCount() const;                // the lines the filter shows (all of them with no filter)
+	bool    IsLineShown(size_t line) const;
+	int     AddRule(const LGVRULE* rule);             // the rule's index, -1 for a bad regex or no text
+	BOOL    RemoveRule(int index);
+	void    ClearRules();
+	int     GetRuleCount() const;
+
 	// ---- Caret and selection ----------------------------------------------------------
 	//
 	// The selection runs from the anchor to the caret. Clicking places the caret, dragging or Shift selects;
@@ -272,6 +324,7 @@ private:
 	LRESULT OnSetFont(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetFont(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnFlush(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 
@@ -309,6 +362,15 @@ private:
 	ULONGLONG LineNumber(size_t line) const;
 	size_t  MaxColumns() const;
 
+	// rows: the lines in view order, all of them or those the filter shows (LogViewFilter.cpp)
+	ULONGLONG FirstSerial() const;                    // line 0's serial number
+	size_t  RowCount() const;
+	size_t  LineOfRow(size_t row) const;
+	size_t  RowOfLine(size_t line) const;             // its row, or the next shown line's (RowCount() if none)
+	bool    ScanStep(DWORD budgetMs);                 // filters the lines not seen yet; true when done
+	void    StartScan();
+	void    FilterDone();
+
 	// layout and scrolling
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -317,7 +379,7 @@ private:
 	RECT    GetTextRect() const;                      // the text area's client rect
 	int     GutterWidth() const;
 	int     GetPageLines() const;
-	size_t  MaxTopLine() const;
+	size_t  MaxTopRow() const;
 	int     MaxLeft() const;
 	void    UpdateScrollBars();
 	void    ScrollTo(size_t topLine, int left, bool byUser);
@@ -367,7 +429,7 @@ private:
 	bool                          m_LinesChanged = false;   // appended on the window's thread, not yet laid out
 
 	// view state
-	size_t                        m_TopLine = 0;
+	size_t                        m_TopRow = 0;
 	int                           m_Left = 0;        // horizontal scroll, pixels
 	bool                          m_Follow = true;
 	bool                          m_LineNumbers = true;
@@ -375,6 +437,14 @@ private:
 	int                           m_UpdateCount = 0;
 	int                           m_WheelRemainder = 0;
 	int                           m_HWheelRemainder = 0;
+
+	// filter and rules
+	std::unique_ptr<LgFilter>     m_Filter;
+	std::unique_ptr<LgRowMap>     m_Rows;
+	std::vector<LgRule>           m_Rules;
+	ULONGLONG                     m_ScanSerial = 0;  // the next line to filter
+	bool                          m_FilterDonePending = false;
+	bool                          m_CaretAfterFilter = false;   // scroll to the caret when the pass is done
 
 	// caret and selection
 	LGVPOS                        m_Anchor{};

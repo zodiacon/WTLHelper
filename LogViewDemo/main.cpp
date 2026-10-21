@@ -26,6 +26,7 @@ CAppModule _Module;
 enum {
 	IDC_LOG = 101,
 	IDC_STATUS = 102,
+	IDC_FILTER = 103,
 
 	ID_FILE_ADD = 201,
 	ID_FILE_ADDMILLION,
@@ -41,6 +42,16 @@ enum {
 	ID_VIEW_VIRTUAL,
 	ID_LINE_COPY,
 	ID_LINE_MARK,
+	ID_FILTER_FOCUS,
+	ID_FILTER_REGEX,
+	ID_FILTER_MATCHCASE,
+	ID_FILTER_EXCLUDE,
+	ID_FILTER_WARNINGS,
+	ID_FILTER_CLEAR,
+	ID_RULES_WORKER3,
+	ID_RULES_CACHEMISS,
+	ID_RULES_NUMBERS,
+	ID_RULES_CLEAR,
 };
 
 // ---- Globals ----------------------------------------------------------------
@@ -52,8 +63,14 @@ static std::thread       g_stream;
 static std::atomic<bool> g_streamStop = false;
 static size_t            g_menuLine = LGV_NOLINE;   // the context menu's line
 static CString           g_event;
+static HWND              g_filterEdit = nullptr;
+static UINT              g_filterFlags = 0;
+static bool              g_warningsOnly = false;
 
 constexpr BYTE STYLE_MARKED = 1;
+constexpr BYTE STYLE_HIGHLIGHT = 2;   // match-only rule: yellow behind the text
+constexpr BYTE STYLE_CACHE = 3;       // whole-line rule
+constexpr BYTE STYLE_NUMBER = 4;      // match-only rule: colored text
 constexpr size_t VIRTUAL_LINES = 10'000'000;
 
 static void SetEventText(LPCWSTR text) {
@@ -196,6 +213,40 @@ static void ApplyColors() {
 	g_log.SetColors(&c);
 }
 
+// ---- Filter -------------------------------------------------------------------
+
+static void ApplyFilter() {
+	wchar_t text[256] = L"";
+	::GetWindowTextW(g_filterEdit, text, (int)std::size(text));
+	LGVFILTER f;
+	f.pszText = text;
+	f.flags = g_filterFlags;
+	if (g_warningsOnly)
+		f.levelMask = (1u << LGVL_WARNING) | (1u << LGVL_ERROR) | (1u << LGVL_CRITICAL);
+	if (!g_log.SetFilter(&f))
+		SetEventText(L"Bad regex");
+}
+
+static void ToggleRule(LPCWSTR text, UINT flags, BYTE style) {
+	// a rule with the same text goes, else it's added
+	static std::vector<std::pair<CString, int>> added;
+	for (size_t i = 0; i < added.size(); i++) {
+		if (added[i].first == text) {
+			g_log.RemoveRule(added[i].second);
+			for (auto& a : added)
+				if (a.second > added[i].second)
+					a.second--;
+			added.erase(added.begin() + i);
+			return;
+		}
+	}
+	LGVRULE r;
+	r.pszText = text;
+	r.flags = flags;
+	r.style = style;
+	added.push_back({ text, g_log.AddRule(&r) });
+}
+
 // ---- Commands ---------------------------------------------------------------
 
 static void UpdateChecks(HMENU menu) {
@@ -207,6 +258,10 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_TABS8, g_log.GetTabSize() == 8);
 	check(ID_VIEW_LIMIT, g_log.GetLineLimit() != 0);
 	check(ID_VIEW_VIRTUAL, g_log.IsVirtual());
+	check(ID_FILTER_REGEX, g_filterFlags & LGVFF_REGEX);
+	check(ID_FILTER_MATCHCASE, g_filterFlags & LGVFF_MATCHCASE);
+	check(ID_FILTER_EXCLUDE, g_filterFlags & LGVFF_EXCLUDE);
+	check(ID_FILTER_WARNINGS, g_warningsOnly);
 }
 
 static void UpdateStatus() {
@@ -214,6 +269,8 @@ static void UpdateStatus() {
 	auto caret = g_log.GetCaret();
 	text.Format(L"%zu lines%s%s | top %zu | Ln %zu, Col %zu", g_log.GetLineCount(), g_log.IsVirtual() ? L" (virtual)" : L"",
 		g_log.IsFollowingTail() ? L" | following" : L"", g_log.GetTopLine(), caret.line + 1, caret.column + 1);
+	if (g_log.IsFiltered())
+		text.AppendFormat(L" | %zu shown%s", g_log.GetShownLineCount(), g_log.IsFilterPending() ? L" (filtering...)" : L"");
 	if (g_log.HasSelection()) {
 		LGVPOS start, end;
 		g_log.GetSelection(&start, &end);
@@ -281,6 +338,43 @@ static void OnCommand(HWND hwnd, UINT id) {
 				g_log.SetVirtualLineCount(VIRTUAL_LINES);
 			}
 			break;
+		case ID_FILTER_FOCUS:
+			::SetFocus(g_filterEdit);
+			::SendMessage(g_filterEdit, EM_SETSEL, 0, -1);
+			break;
+		case ID_FILTER_REGEX:
+			g_filterFlags ^= LGVFF_REGEX;
+			ApplyFilter();
+			break;
+		case ID_FILTER_MATCHCASE:
+			g_filterFlags ^= LGVFF_MATCHCASE;
+			ApplyFilter();
+			break;
+		case ID_FILTER_EXCLUDE:
+			g_filterFlags ^= LGVFF_EXCLUDE;
+			ApplyFilter();
+			break;
+		case ID_FILTER_WARNINGS:
+			g_warningsOnly = !g_warningsOnly;
+			ApplyFilter();
+			break;
+		case ID_FILTER_CLEAR:
+			g_warningsOnly = false;
+			::SetWindowTextW(g_filterEdit, L"");   // EN_CHANGE applies it
+			ApplyFilter();
+			break;
+		case ID_RULES_WORKER3:
+			ToggleRule(L"worker 3", LGVRF_MATCHONLY, STYLE_HIGHLIGHT);
+			break;
+		case ID_RULES_CACHEMISS:
+			ToggleRule(L"cache miss", 0, STYLE_CACHE);
+			break;
+		case ID_RULES_NUMBERS:
+			ToggleRule(L"\\b\\d+$", LGVFF_REGEX | LGVRF_MATCHONLY, STYLE_NUMBER);
+			break;
+		case ID_RULES_CLEAR:
+			g_log.ClearRules();
+			break;
 		case ID_LINE_COPY:
 			g_log.Copy();
 			break;
@@ -310,6 +404,10 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			break;
 		}
 		case LGVN_SELCHANGED:
+			UpdateStatus();
+			break;
+		case LGVN_FILTERDONE:
+			SetEventText(L"Filter done");
 			UpdateStatus();
 			break;
 		case LGVN_FOLLOWCHANGED:
@@ -349,7 +447,9 @@ static void LayoutChildren(HWND hwnd) {
 	::SendMessage(g_status, WM_SIZE, 0, 0);
 	RECT rcStatus;
 	::GetWindowRect(g_status, &rcStatus);
-	g_log.SetWindowPos(nullptr, 0, 0, rc.right, rc.bottom - (rcStatus.bottom - rcStatus.top), SWP_NOZORDER | SWP_NOACTIVATE);
+	int filterHeight = ::MulDiv(24, ::GetDpiForWindow(hwnd), 96);
+	::SetWindowPos(g_filterEdit, nullptr, 0, 0, rc.right, filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+	g_log.SetWindowPos(nullptr, 0, filterHeight, rc.right, rc.bottom - (rcStatus.bottom - rcStatus.top) - filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -362,6 +462,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			marked.crText = RGB(0, 0, 0);
 			marked.crMarker = RGB(0x30, 0x80, 0xE0);
 			g_log.SetStyle(STYLE_MARKED, &marked);
+			LGVSTYLE highlight;
+			highlight.crBack = RGB(0xFF, 0xE0, 0x40);
+			highlight.crText = RGB(0, 0, 0);
+			g_log.SetStyle(STYLE_HIGHLIGHT, &highlight);
+			LGVSTYLE cache;
+			cache.crText = RGB(0x20, 0x70, 0xD0);
+			cache.flags = LGVSF_ITALIC;
+			g_log.SetStyle(STYLE_CACHE, &cache);
+			LGVSTYLE number;
+			number.crText = RGB(0x10, 0xA0, 0x60);
+			g_log.SetStyle(STYLE_NUMBER, &number);
+			g_filterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+				0, 0, 0, 0, hwnd, (HMENU)IDC_FILTER, _Module.GetModuleInstance(), nullptr);
+			::SendMessage(g_filterEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter (Ctrl+F)");
+			{
+				NONCLIENTMETRICSW ncm{ sizeof(ncm) };
+				::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, ::GetDpiForWindow(hwnd));
+				static HFONT font = ::CreateFontIndirectW(&ncm.lfMessageFont);
+				::SendMessage(g_filterEdit, WM_SETFONT, (WPARAM)font, FALSE);
+			}
 			// appended before the window exists: taken in when it's created
 			g_log.AppendLine(L"LogView demo. File > Start Stream appends from another thread; View > Virtual Mode shows 10 million lines.");
 			g_log.AppendLine(L"A tab\there, and\ttwo more\tstops.", LGVL_INFO);
@@ -395,6 +515,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			return OnNotify(hwnd, (NMHDR*)lParam);
 
 		case WM_COMMAND:
+			if (LOWORD(wParam) == IDC_FILTER) {
+				if (HIWORD(wParam) == EN_CHANGE)
+					ApplyFilter();
+				return 0;
+			}
 			OnCommand(hwnd, LOWORD(wParam));
 			return 0;
 
@@ -447,9 +572,27 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hView, MF_STRING, ID_VIEW_VIRTUAL, L"&Virtual Mode (10M lines)");
 
+	HMENU hFilter = CreatePopupMenu();
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_FOCUS, L"&Edit Filter\tCtrl+F");
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_REGEX, L"&Regex");
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_MATCHCASE, L"Match &Case");
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_EXCLUDE, L"E&xclude Matches");
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_WARNINGS, L"&Warnings and Errors Only");
+	AppendMenuW(hFilter, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_CLEAR, L"C&lear Filter");
+
+	HMENU hRules = CreatePopupMenu();
+	AppendMenuW(hRules, MF_STRING, ID_RULES_WORKER3, L"Highlight \"worker 3\" (match only)");
+	AppendMenuW(hRules, MF_STRING, ID_RULES_CACHEMISS, L"Style Lines with \"cache miss\"");
+	AppendMenuW(hRules, MF_STRING, ID_RULES_NUMBERS, L"Color the Last Number (regex, match only)");
+	AppendMenuW(hRules, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hRules, MF_STRING, ID_RULES_CLEAR, L"&Clear Rules");
+
 	HMENU hMenu = CreateMenu();
 	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
 	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
+	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFilter, L"F&ilter");
+	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hRules, L"&Rules");
 
 	HWND hwnd = CreateWindowExW(0, L"LogViewDemoWnd", L"Log View Demo", WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT, CW_USEDEFAULT, 900, 600, nullptr, hMenu, hInstance, nullptr);
@@ -461,6 +604,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, 'S', ID_FILE_STREAM },
 		{ FVIRTKEY | FCONTROL, 'O', ID_FILE_LOAD },
 		{ FVIRTKEY | FCONTROL, 'T', ID_VIEW_FOLLOW },
+		{ FVIRTKEY | FCONTROL, 'F', ID_FILTER_FOCUS },
 	};
 	HACCEL hAccel = CreateAcceleratorTable(accels, (int)std::size(accels));
 

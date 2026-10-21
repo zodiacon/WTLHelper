@@ -51,7 +51,7 @@ static int Digits(ULONGLONG n) {
 // ---- Construction ------------------------------------------------------------------
 
 CLogViewCtrl::CLogViewCtrl() : m_Store(std::make_unique<LgStore>()), m_Text(std::make_unique<LgTextWindow>(this)),
-	m_Pending(std::make_unique<LgBatch>()) {
+	m_Pending(std::make_unique<LgBatch>()), m_Filter(std::make_unique<LgFilter>()), m_Rows(std::make_unique<LgRowMap>()) {
 	for (BYTE level = 0; level < 32; level++)
 		m_LevelStyles[level] = DefaultLevelStyle(level);
 }
@@ -238,8 +238,8 @@ int CLogViewCtrl::GetVisibleLineCount() const {
 	return GetPageLines();
 }
 
-size_t CLogViewCtrl::MaxTopLine() const {
-	size_t count = GetLineCount();
+size_t CLogViewCtrl::MaxTopRow() const {
+	size_t count = RowCount();
 	size_t page = GetPageLines();
 	return count > page ? count - page : 0;
 }
@@ -258,14 +258,14 @@ int CLogViewCtrl::MaxLeft() const {
 void CLogViewCtrl::UpdateScrollBars() {
 	if (!m_Text->IsWindow() || m_UpdateCount > 0)
 		return;
-	m_TopLine = m_Follow ? MaxTopLine() : std::min(m_TopLine, MaxTopLine());
+	m_TopRow = m_Follow ? MaxTopRow() : std::min(m_TopRow, MaxTopRow());
 	m_Left = std::clamp(m_Left, 0, MaxLeft());
 
 	// the scroll bar's range is an int: past INT_MAX lines the bottom can't be reached with it
 	SCROLLINFO si{ sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS };
-	si.nMax = (int)std::min<size_t>(GetLineCount(), INT_MAX) - 1;
+	si.nMax = (int)std::min<size_t>(RowCount(), INT_MAX) - 1;
 	si.nPage = GetPageLines();
-	si.nPos = (int)std::min<size_t>(m_TopLine, INT_MAX);
+	si.nPos = (int)std::min<size_t>(m_TopRow, INT_MAX);
 	m_Text->SetScrollInfo(SB_VERT, &si, TRUE);
 
 	auto rc = GetTextRect();
@@ -277,16 +277,18 @@ void CLogViewCtrl::UpdateScrollBars() {
 }
 
 void CLogViewCtrl::ScrollTo(size_t topLine, int left, bool byUser) {
-	topLine = std::min(topLine, MaxTopLine());
+	topLine = std::min(topLine, MaxTopRow());
 	left = std::clamp(left, 0, MaxLeft());
-	if (topLine == m_TopLine && left == m_Left)
+	if (topLine == m_TopRow && left == m_Left)
 		return;
-	bool vertical = topLine != m_TopLine;
-	m_TopLine = topLine;
+	bool vertical = topLine != m_TopRow;
+	m_TopRow = topLine;
 	m_Left = left;
 	// following means being at the end: scrolling there turns it on, away from there off
 	if (vertical)
-		SetFollow(m_TopLine == MaxTopLine(), byUser);
+		SetFollow(m_TopRow == MaxTopRow(), byUser);
+	if (vertical && byUser)
+		m_CaretAfterFilter = false;   // the user's place wins over the caret's
 	UpdateScrollBars();
 	m_Text->Invalidate();
 }
@@ -314,21 +316,23 @@ bool CLogViewCtrl::IsFollowingTail() const {
 }
 
 void CLogViewCtrl::SetTopLine(size_t line) {
-	ScrollTo(line, m_Left, false);
+	ScrollTo(RowOfLine(line), m_Left, false);
 }
 
 size_t CLogViewCtrl::GetTopLine() const {
-	return m_TopLine;
+	size_t rows = RowCount();
+	return rows ? LineOfRow(std::min(m_TopRow, rows - 1)) : 0;
 }
 
 void CLogViewCtrl::EnsureVisible(size_t line) {
-	if (line >= GetLineCount())
+	if (!IsLineShown(line))
 		return;
+	size_t row = RowOfLine(line);
 	size_t page = GetPageLines();
-	if (line < m_TopLine)
-		ScrollTo(line, m_Left, false);
-	else if (line >= m_TopLine + page)
-		ScrollTo(line - page + 1, m_Left, false);
+	if (row < m_TopRow)
+		ScrollTo(row, m_Left, false);
+	else if (row >= m_TopRow + page)
+		ScrollTo(row - page + 1, m_Left, false);
 }
 
 void CLogViewCtrl::BeginUpdate() {
@@ -462,9 +466,13 @@ void CLogViewCtrl::Flush() {
 void CLogViewCtrl::LinesAdded() {
 	// the lines the limit dropped were above the view: what's shown stays put unless following
 	size_t dropped = m_Store->TakeDropped();
+	size_t rowsDropped = IsFiltered() ? m_Rows->DropBefore(FirstSerial()) : dropped;
 	if (!m_Follow)
-		m_TopLine -= std::min(dropped, m_TopLine);
+		m_TopRow -= std::min(rowsDropped, m_TopRow);
 	MovePositionsUp(dropped);
+	// new lines: what's quick now, the rest on the timer
+	if (IsFiltered() && !ScanStep(5))
+		StartScan();
 	if (!m_Text->IsWindow())
 		return;
 	UpdateScrollBars();
@@ -476,11 +484,13 @@ void CLogViewCtrl::Clear() {
 	m_Pending->Clear();
 	::ReleaseSRWLockExclusive(&m_PendingLock);
 	m_Store->Clear();
+	m_Rows->Clear();
+	m_ScanSerial = 0;
 	m_LinesChanged = false;
 	m_Virtual = false;
 	m_VirtualCount = 0;
 	m_SeenColumns = 0;
-	m_TopLine = 0;
+	m_TopRow = 0;
 	m_Left = 0;
 	m_Anchor = m_Caret = {};
 	m_DesiredX = -1;
@@ -569,8 +579,15 @@ void CLogViewCtrl::SetVirtualLineCount(size_t count) {
 		m_LinesChanged = false;
 		m_Virtual = true;
 		m_SeenColumns = 0;
+		m_Rows->Clear();
+		m_ScanSerial = 0;
 	}
+	// fewer lines: the rows of those gone go; more: they're filtered
+	m_Rows->DropFrom(count);
+	m_ScanSerial = std::min<ULONGLONG>(m_ScanSerial, count);
 	m_VirtualCount = count;
+	if (IsFiltered() && !ScanStep(5))
+		StartScan();
 	m_Anchor = ClampPos(m_Anchor);
 	m_Caret = ClampPos(m_Caret);
 	if (m_Text->IsWindow()) {
@@ -586,13 +603,17 @@ bool CLogViewCtrl::IsVirtual() const {
 void CLogViewCtrl::InvalidateLines(size_t first, size_t count) {
 	if (!m_Text->IsWindow() || count == 0)
 		return;
+	if (IsFiltered()) {
+		m_Text->Invalidate();   // rows and lines don't line up
+		return;
+	}
 	size_t last = first + count - 1;   // inclusive
-	size_t end = m_TopLine + GetPageLines();   // a part line shows below the whole ones
-	if (last < m_TopLine || first > end)
+	size_t end = m_TopRow + GetPageLines();   // a part line shows below the whole ones
+	if (last < m_TopRow || first > end)
 		return;
 	auto rc = GetTextRect();
-	rc.top = (int)(std::max(first, m_TopLine) - m_TopLine) * m_LineHeight;
-	rc.bottom = (int)(std::min(last, end) - m_TopLine + 1) * m_LineHeight;
+	rc.top = (int)(std::max(first, m_TopRow) - m_TopRow) * m_LineHeight;
+	rc.bottom = (int)(std::min(last, end) - m_TopRow + 1) * m_LineHeight;
 	m_Text->InvalidateRect(&rc, FALSE);
 }
 
@@ -605,11 +626,11 @@ size_t CLogViewCtrl::HitTest(POINT pt, UINT* pPart, size_t* pColumn) const {
 		MapWindowPoints(m_Text->m_hWnd, &pt, 1);
 		auto rc = GetTextRect();
 		if (::PtInRect(&rc, pt)) {
-			size_t hit = m_TopLine + pt.y / m_LineHeight;
-			if (hit >= GetLineCount())
+			size_t hit = m_TopRow + pt.y / m_LineHeight;
+			if (hit >= RowCount())
 				part = LGVHT_BELOW;
 			else {
-				line = hit;
+				line = LineOfRow(hit);
 				part = pt.x < GutterWidth() ? LGVHT_GUTTER : LGVHT_TEXT;
 				if (part == LGVHT_TEXT && pColumn)
 					*pColumn = XToIndex(line, pt.x - GutterWidth() - m_Pad + m_Left);
@@ -622,10 +643,13 @@ size_t CLogViewCtrl::HitTest(POINT pt, UINT* pPart, size_t* pColumn) const {
 }
 
 BOOL CLogViewCtrl::GetLineRect(size_t line, RECT* prc) const {
-	if (!prc || !m_Text->IsWindow() || line >= GetLineCount() || line < m_TopLine || line > m_TopLine + GetPageLines())
+	if (!prc || !m_Text->IsWindow() || !IsLineShown(line))
+		return FALSE;
+	size_t row = RowOfLine(line);
+	if (row < m_TopRow || row > m_TopRow + GetPageLines())
 		return FALSE;
 	auto rc = GetTextRect();
-	rc.top = (int)(line - m_TopLine) * m_LineHeight;
+	rc.top = (int)(row - m_TopRow) * m_LineHeight;
 	rc.bottom = rc.top + m_LineHeight;
 	m_Text->MapWindowPoints(m_hWnd, &rc);
 	*prc = rc;
@@ -720,11 +744,11 @@ void CLogViewCtrl::Paint(WTL::CDCHandle dc, const RECT& rcPaint) {
 	auto oldFont = dc.SelectFont(m_hFont);
 	dc.SetBkMode(TRANSPARENT);
 
-	size_t count = GetLineCount();
-	size_t line = m_TopLine + std::max(0, (int)rcPaint.top) / m_LineHeight;
-	int y = (int)(line - m_TopLine) * m_LineHeight;
-	for (; y < rcPaint.bottom && line < count; line++, y += m_LineHeight)
-		PaintLine(dc, line, { 0, y, rc.right, y + m_LineHeight }, c, gutter);
+	size_t count = RowCount();
+	size_t row = m_TopRow + std::max(0, (int)rcPaint.top) / m_LineHeight;
+	int y = (int)(row - m_TopRow) * m_LineHeight;
+	for (; y < rcPaint.bottom && row < count; row++, y += m_LineHeight)
+		PaintLine(dc, LineOfRow(row), { 0, y, rc.right, y + m_LineHeight }, c, gutter);
 	if (y < rcPaint.bottom) {
 		FillSolid(dc, { 0, y, gutter, rcPaint.bottom }, c.crGutterBack);
 		FillSolid(dc, { gutter, y, std::max(gutter, (int)rc.right), rcPaint.bottom }, c.crBack);
@@ -736,7 +760,21 @@ void CLogViewCtrl::PaintLine(WTL::CDCHandle dc, size_t line, const RECT& rc, con
 	LineData data;
 	if (!GetLine(line, data))
 		return;
+	std::wstring_view view(data.text, data.length);
 	auto style = EffectiveStyle(data.level, data.style);
+	if (data.style == 0) {
+		// the first whole-line rule that matches
+		for (auto& rule : m_Rules) {
+			if (!rule.matchOnly && rule.matcher.Matches(view)) {
+				// the level's marker stays unless the rule's style has one
+				COLORREF marker = style.crMarker;
+				style = m_Styles[rule.style];
+				if (style.crMarker == CLR_NONE)
+					style.crMarker = marker;
+				break;
+			}
+		}
+	}
 
 	// gutter: the level's marker, then the number
 	FillSolid(dc, { rc.left, rc.top, gutter, rc.bottom }, c.crGutterBack);
@@ -752,69 +790,76 @@ void CLogViewCtrl::PaintLine(WTL::CDCHandle dc, size_t line, const RECT& rc, con
 		dc.SetTextAlign(TA_LEFT | TA_TOP);
 	}
 
-	// text
 	COLORREF back = style.crBack == CLR_DEFAULT ? c.crBack : style.crBack;
-	COLORREF selText = c.crSelText;
 	COLORREF text = style.crText == CLR_DEFAULT ? c.crText : style.crText;
 	if (style.flags & LGVSF_DIM)
 		text = Blend(text, back, 50);
 	RECT clip{ gutter, rc.top, std::max(gutter, (int)rc.right), rc.bottom };
 	FillSolid(dc, clip, back);
 
-	// the selection's part of the line; a selected line break shows as a character's width past the end
-	RECT rcSel{};
-	size_t selStart, selEnd;
-	bool lineBreak;
+	// the part of the text to draw
+	size_t first = 0, last = 0;
+	if (data.length) {
+		LgExpandTabs(view, m_TabSize, m_DrawBuffer);
+		if (m_Virtual)
+			m_SeenColumns = std::max(m_SeenColumns, m_DrawBuffer.size());
+		last = m_DrawBuffer.size();
+		if (m_FixedPitch) {
+			// the columns in view only, so a very long line costs no more than a short one
+			int width = clip.right - clip.left;
+			first = std::min<size_t>(last, (size_t)std::max(0, m_Left - m_Pad) / m_CharWidth);
+			last = std::min<size_t>(last, (size_t)(std::max(0, m_Left - m_Pad) + width) / m_CharWidth + 2);
+		}
+		else {
+			last = std::min<size_t>(last, 32 * 1024);   // GDI gets slow, then fails, on very long strings
+		}
+	}
 	int origin = gutter + m_Pad - m_Left;
-	if (SelectionInLine(line, selStart, selEnd, lineBreak)) {
-		std::wstring_view view(data.text, data.length);
-		selEnd = std::min(selEnd, data.length);
-		rcSel = { origin + TextX(view, style.flags, std::min(selStart, data.length)), rc.top,
-			origin + TextX(view, style.flags, selEnd) + (lineBreak ? m_CharWidth : 0), rc.bottom };
-		rcSel.left = std::max(rcSel.left, clip.left);
-		rcSel.right = std::min(rcSel.right, clip.right);
-		bool focused = ::GetFocus() == m_Text->m_hWnd;
-		if (rcSel.right > rcSel.left)
-			FillSolid(dc, rcSel, focused ? c.crSelBack : c.crSelBackInactive);
-		else
-			rcSel = {};
-		selText = focused ? c.crSelText : c.crSelTextInactive;
-	}
-	if (data.length == 0)
-		return;
-
-	LgExpandTabs({ data.text, data.length }, m_TabSize, m_DrawBuffer);
-	if (m_Virtual)
-		m_SeenColumns = std::max(m_SeenColumns, m_DrawBuffer.size());
-	size_t first = 0, last = m_DrawBuffer.size();
-	if (m_FixedPitch) {
-		// the columns in view only, so a very long line costs no more than a short one
-		int width = clip.right - clip.left;
-		first = std::min<size_t>(last, (size_t)std::max(0, m_Left - m_Pad) / m_CharWidth);
-		last = std::min<size_t>(last, (size_t)(std::max(0, m_Left - m_Pad) + width) / m_CharWidth + 2);
-	}
-	else {
-		last = std::min<size_t>(last, 32 * 1024);   // GDI gets slow, then fails, on very long strings
-	}
-	if (first >= last)
-		return;
-	auto old = dc.SelectFont(FontFor(style.flags));
 	int x = origin + (int)first * m_CharWidth;
+	auto old = dc.SelectFont(FontFor(style.flags));
 	auto draw = [&](COLORREF color, const RECT& rcClip) {
+		if (first >= last)
+			return;
 		dc.SetTextColor(color);
 		dc.ExtTextOut(x, rc.top + m_TextOffset, ETO_CLIPPED, &rcClip, m_DrawBuffer.c_str() + first, (UINT)(last - first), nullptr);
 	};
-	// the text outside the selection, then inside it in the selection's color
-	if (rcSel.right > rcSel.left) {
-		RECT before{ clip.left, clip.top, rcSel.left, clip.bottom }, after{ rcSel.right, clip.top, clip.right, clip.bottom };
-		if (before.right > before.left)
-			draw(text, before);
-		if (after.right > after.left)
-			draw(text, after);
-		draw(selText, rcSel);
+	// characters start..end, plus extra pixels, clipped to the text area
+	auto spanRect = [&](size_t start, size_t end, int extra) {
+		RECT r{ origin + TextX(view, style.flags, start), rc.top, origin + TextX(view, style.flags, end) + extra, rc.bottom };
+		r.left = std::max(r.left, clip.left);
+		r.right = std::min(r.right, clip.right);
+		return r;
+	};
+
+	draw(text, clip);
+
+	// rules that color only what they match, over the text
+	std::vector<LgMatcher::Span> spans;
+	for (auto& rule : m_Rules) {
+		if (!rule.matchOnly || data.length == 0)
+			continue;
+		rule.matcher.FindAll(view, spans);
+		auto& rs = m_Styles[rule.style];
+		for (auto& span : spans) {
+			auto r = spanRect(span.start, span.start + span.length, 0);
+			if (r.right <= r.left)
+				continue;
+			if (rs.crBack != CLR_DEFAULT)
+				FillSolid(dc, r, rs.crBack);
+			draw(rs.crText != CLR_DEFAULT ? rs.crText : text, r);
+		}
 	}
-	else {
-		draw(text, clip);
+
+	// the selection over everything; a selected line break shows as a character's width past the end
+	size_t selStart, selEnd;
+	bool lineBreak;
+	if (SelectionInLine(line, selStart, selEnd, lineBreak)) {
+		auto r = spanRect(std::min(selStart, data.length), std::min(selEnd, data.length), lineBreak ? m_CharWidth : 0);
+		if (r.right > r.left) {
+			bool focused = ::GetFocus() == m_Text->m_hWnd;
+			FillSolid(dc, r, focused ? c.crSelBack : c.crSelBackInactive);
+			draw(focused ? c.crSelText : c.crSelTextInactive, r);
+		}
 	}
 	dc.SelectFont(old);
 }
@@ -826,9 +871,9 @@ LRESULT CLogViewCtrl::OnTextContextMenu(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	size_t line;
 	if (pt.x == -1 && pt.y == -1) {
 		// from the keyboard: the caret's line, below the caret
-		line = m_Caret.line < GetLineCount() ? m_Caret.line : LGV_NOLINE;
+		line = IsLineShown(m_Caret.line) ? m_Caret.line : LGV_NOLINE;
 		EnsureCaretVisible(true);
-		pt = { GutterWidth() + m_Pad - m_Left + IndexToX(m_Caret.line, m_Caret.column), (int)(m_Caret.line - m_TopLine + 1) * m_LineHeight };
+		pt = { GutterWidth() + m_Pad - m_Left + IndexToX(m_Caret.line, m_Caret.column), (int)(RowOfLine(m_Caret.line) - m_TopRow + 1) * m_LineHeight };
 		m_Text->ClientToScreen(&pt);
 	}
 	else {
@@ -851,7 +896,7 @@ LRESULT CLogViewCtrl::OnTextMouseWheel(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) 
 		m_HWheelRemainder += delta;
 		int steps = m_HWheelRemainder / WHEEL_DELTA;
 		m_HWheelRemainder -= steps * WHEEL_DELTA;
-		ScrollTo(m_TopLine, m_Left + steps * (int)chars * m_CharWidth, true);
+		ScrollTo(m_TopRow, m_Left + steps * (int)chars * m_CharWidth, true);
 		return 0;
 	}
 	UINT lines = 3;
@@ -862,21 +907,21 @@ LRESULT CLogViewCtrl::OnTextMouseWheel(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) 
 	int steps = m_WheelRemainder / WHEEL_DELTA;
 	m_WheelRemainder -= steps * WHEEL_DELTA;
 	long long move = -(long long)steps * lines;
-	size_t top = move < 0 ? m_TopLine - std::min<size_t>(m_TopLine, (size_t)-move) : m_TopLine + (size_t)move;
+	size_t top = move < 0 ? m_TopRow - std::min<size_t>(m_TopRow, (size_t)-move) : m_TopRow + (size_t)move;
 	ScrollTo(top, m_Left, true);
 	return 0;
 }
 
 LRESULT CLogViewCtrl::OnTextVScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
 	size_t page = GetPageLines();
-	size_t top = m_TopLine;
+	size_t top = m_TopRow;
 	switch (LOWORD(wParam)) {
 		case SB_LINEUP: top -= std::min<size_t>(top, 1); break;
 		case SB_LINEDOWN: top++; break;
 		case SB_PAGEUP: top -= std::min(top, page); break;
 		case SB_PAGEDOWN: top += page; break;
 		case SB_TOP: top = 0; break;
-		case SB_BOTTOM: top = MaxTopLine(); break;
+		case SB_BOTTOM: top = MaxTopRow(); break;
 		case SB_THUMBTRACK:
 		case SB_THUMBPOSITION: {
 			SCROLLINFO si{ sizeof(si), SIF_TRACKPOS };
@@ -911,7 +956,7 @@ LRESULT CLogViewCtrl::OnTextHScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		default:
 			return 0;
 	}
-	ScrollTo(m_TopLine, left, true);
+	ScrollTo(m_TopRow, left, true);
 	return 0;
 }
 

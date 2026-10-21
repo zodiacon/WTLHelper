@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -68,6 +69,7 @@ public:
 	const LgLineRec& Line(size_t line) const { return m_Lines[line]; }
 	LgLineRec& Line(size_t line) { return m_Lines[line]; }
 	ULONGLONG Number(size_t line) const { return m_Dropped + line + 1; }
+	ULONGLONG FirstSerial() const { return m_Dropped; }   // line 0's serial (its number - 1)
 
 	void   SetLimit(size_t maxLines);     // 0: none; drops lines right away if there are more
 	size_t Limit() const { return m_Limit; }
@@ -96,6 +98,67 @@ private:
 	size_t                 m_NewlyDropped = 0;
 	size_t                 m_MaxColumns = 0;
 	int                    m_TabSize = 4;
+};
+
+// Text to look for in lines: plain (ordinal, optionally ignoring case) or an ECMAScript regex.
+class LgMatcher {
+public:
+	struct Span {
+		size_t start;
+		size_t length;
+	};
+
+	bool   Set(std::wstring_view text, bool regex, bool matchCase);   // false: a bad regex (nothing changes)
+	void   Clear();
+	bool   Empty() const { return m_Text.empty(); }
+	bool   Matches(std::wstring_view text) const;                   // an empty matcher matches everything
+	void   FindAll(std::wstring_view text, std::vector<Span>& spans) const;   // in order, not overlapping, not empty
+	const std::wstring& Text() const { return m_Text; }
+	bool   IsRegex() const { return m_Regex != nullptr; }
+	bool   MatchCase() const { return m_MatchCase; }
+
+private:
+	std::wstring                 m_Text;
+	bool                         m_MatchCase = false;
+	std::shared_ptr<std::wregex> m_Regex;   // shared: matchers are copied, the compiled regex isn't changed
+};
+
+// Which lines a filter shows: those matching the text (or not matching it, with exclude) whose level is in the mask.
+struct LgFilter {
+	LgMatcher matcher;
+	bool      exclude = false;
+	DWORD     levelMask = 0xFFFFFFFF;
+
+	bool Active() const { return !matcher.Empty() || levelMask != 0xFFFFFFFF; }
+	bool Passes(std::wstring_view text, BYTE level) const {
+		if (!(levelMask & (1u << (level & 31))))
+			return false;
+		return matcher.Empty() || matcher.Matches(text) != exclude;
+	}
+};
+
+// A rule: lines (or with matchOnly the text) matching it get a style.
+struct LgRule {
+	LgMatcher matcher;
+	BYTE      style = 0;
+	bool      matchOnly = false;
+};
+
+// The lines a filter shows, in order, by serial number (a line's number - 1: it doesn't change when older
+// lines are dropped). Row = index here.
+class LgRowMap {
+public:
+	void     Clear() { m_Serials.clear(); }
+	void     Add(ULONGLONG serial) { m_Serials.push_back(serial); }   // larger than any before
+	size_t   Count() const { return m_Serials.size(); }
+	ULONGLONG Serial(size_t row) const { return m_Serials[row]; }
+	size_t   RowOf(ULONGLONG serial) const;          // the first row at or after serial (Count() if none)
+	bool     Contains(ULONGLONG serial) const;
+	size_t   DropBefore(ULONGLONG serial);           // returns the rows dropped
+	void     DropFrom(ULONGLONG serial);
+
+private:
+	std::deque<ULONGLONG> m_Serials;
 };
 
 // columns the text takes with tabs expanded to the next multiple of tabSize

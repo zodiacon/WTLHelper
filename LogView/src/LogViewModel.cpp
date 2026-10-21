@@ -1,6 +1,7 @@
 #include "LogViewModel.h"
 
 #include <algorithm>
+#include <climits>
 #include <cwctype>
 #include <utility>
 
@@ -87,6 +88,94 @@ void LgWordAt(std::wstring_view text, size_t index, size_t& start, size_t& end) 
 		start--;
 	while (end < n && CharClass(text[end]) == cls)
 		end++;
+}
+
+// ---- LgMatcher ---------------------------------------------------------------------
+
+bool LgMatcher::Set(std::wstring_view text, bool regex, bool matchCase) {
+	if (text.empty()) {
+		Clear();
+		return true;
+	}
+	std::shared_ptr<std::wregex> compiled;
+	if (regex) {
+		try {
+			auto flags = std::regex_constants::ECMAScript | std::regex_constants::optimize;
+			if (!matchCase)
+				flags |= std::regex_constants::icase;
+			compiled = std::make_shared<std::wregex>(text.data(), text.size(), flags);
+		}
+		catch (const std::regex_error&) {
+			return false;
+		}
+	}
+	m_Text.assign(text);
+	m_MatchCase = matchCase;
+	m_Regex = std::move(compiled);
+	return true;
+}
+
+void LgMatcher::Clear() {
+	m_Text.clear();
+	m_MatchCase = false;
+	m_Regex.reset();
+}
+
+// FindStringOrdinal takes int lengths
+static int FindOrdinal(std::wstring_view text, const std::wstring& what, bool matchCase) {
+	int n = (int)std::min<size_t>(text.size(), INT_MAX);
+	return ::FindStringOrdinal(FIND_FROMSTART, text.data(), n, what.c_str(), (int)what.size(), !matchCase);
+}
+
+bool LgMatcher::Matches(std::wstring_view text) const {
+	if (m_Text.empty())
+		return true;
+	if (m_Regex)
+		return std::regex_search(text.begin(), text.end(), *m_Regex);
+	return FindOrdinal(text, m_Text, m_MatchCase) >= 0;
+}
+
+void LgMatcher::FindAll(std::wstring_view text, std::vector<Span>& spans) const {
+	spans.clear();
+	if (m_Text.empty())
+		return;
+	if (m_Regex) {
+		using Iterator = std::regex_iterator<std::wstring_view::const_iterator>;
+		for (Iterator it(text.begin(), text.end(), *m_Regex), end; it != end; ++it) {
+			if (it->length(0) > 0)
+				spans.push_back({ (size_t)it->position(0), (size_t)it->length(0) });
+		}
+		return;
+	}
+	size_t pos = 0;
+	while (pos < text.size()) {
+		int found = FindOrdinal(text.substr(pos), m_Text, m_MatchCase);
+		if (found < 0)
+			break;
+		spans.push_back({ pos + found, m_Text.size() });
+		pos += found + m_Text.size();
+	}
+}
+
+// ---- LgRowMap ----------------------------------------------------------------------
+
+size_t LgRowMap::RowOf(ULONGLONG serial) const {
+	return std::lower_bound(m_Serials.begin(), m_Serials.end(), serial) - m_Serials.begin();
+}
+
+bool LgRowMap::Contains(ULONGLONG serial) const {
+	return std::binary_search(m_Serials.begin(), m_Serials.end(), serial);
+}
+
+size_t LgRowMap::DropBefore(ULONGLONG serial) {
+	auto end = std::lower_bound(m_Serials.begin(), m_Serials.end(), serial);
+	size_t count = end - m_Serials.begin();
+	m_Serials.erase(m_Serials.begin(), end);
+	return count;
+}
+
+void LgRowMap::DropFrom(ULONGLONG serial) {
+	m_Serials.erase(std::lower_bound(m_Serials.begin(), m_Serials.end(), serial), m_Serials.end());
 }
 
 // ---- LgBatch -----------------------------------------------------------------------

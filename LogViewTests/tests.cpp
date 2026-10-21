@@ -335,6 +335,126 @@ TEST(JoinRange) {
 	CHECK_STR(out, L"");
 }
 
+static std::wstring Spans(const LgMatcher& m, std::wstring_view text) {
+	std::vector<LgMatcher::Span> spans;
+	m.FindAll(text, spans);
+	std::wstring out;
+	for (auto& s : spans) {
+		out += L'[';
+		out += text.substr(s.start, s.length);
+		out += L']';
+	}
+	return out;
+}
+
+TEST(Matcher_Plain) {
+	LgMatcher m;
+	CHECK(m.Empty());
+	CHECK(m.Matches(L"anything"));
+	CHECK(m.Set(L"error", false, false));
+	CHECK(!m.Empty());
+	CHECK(!m.IsRegex());
+	CHECK(m.Matches(L"an ERROR here"));
+	CHECK(m.Matches(L"error"));
+	CHECK(!m.Matches(L"err or"));
+	CHECK(!m.Matches(L""));
+	CHECK_STR(Spans(m, L"Error, error and ERRORerror"), L"[Error][error][ERROR][error]");
+	CHECK(m.Set(L"Error", false, true));
+	CHECK(m.MatchCase());
+	CHECK(!m.Matches(L"an ERROR here"));
+	CHECK_STR(Spans(m, L"Error, error and ERRORError"), L"[Error][Error]");
+	// special characters are plain text
+	CHECK(m.Set(L"a.b(", false, false));
+	CHECK(m.Matches(L"x a.b( y"));
+	CHECK(!m.Matches(L"axb("));
+	CHECK_STR(Spans(m, L"aaa"), L"");
+	// overlapping occurrences: the first of them
+	CHECK(m.Set(L"aa", false, false));
+	CHECK_STR(Spans(m, L"aaaaa"), L"[aa][aa]");
+	CHECK(m.Set(L"", false, false));
+	CHECK(m.Empty());
+}
+
+TEST(Matcher_Regex) {
+	LgMatcher m;
+	CHECK(m.Set(L"time(out)?", true, false));
+	CHECK(m.IsRegex());
+	CHECK(m.Matches(L"retrying after TIMEOUT"));
+	CHECK(m.Matches(L"the time"));
+	CHECK(!m.Matches(L"tim"));
+	CHECK_STR(Spans(m, L"time, Timeout"), L"[time][Timeout]");
+	CHECK(m.Set(L"\\d+", true, true));
+	CHECK_STR(Spans(m, L"a1 b22 c333"), L"[1][22][333]");
+	// empty matches are left out
+	CHECK(m.Set(L"x*", true, true));
+	CHECK_STR(Spans(m, L"axxb"), L"[xx]");
+	// a bad regex leaves the matcher as it was
+	CHECK(!m.Set(L"(unclosed", true, false));
+	CHECK(m.Text() == L"x*");
+	CHECK(m.IsRegex());
+	// but as plain text it's fine
+	CHECK(m.Set(L"(unclosed", false, false));
+	CHECK(m.Matches(L"an (unclosed paren"));
+}
+
+TEST(Filter_Passes) {
+	LgFilter f;
+	CHECK(!f.Active());
+	CHECK(f.Passes(L"x", 3));
+	f.levelMask = (1u << 4) | (1u << 5);
+	CHECK(f.Active());
+	CHECK(!f.Passes(L"x", 3));
+	CHECK(f.Passes(L"x", 4));
+	f.matcher.Set(L"disk", false, false);
+	CHECK(f.Passes(L"Disk full", 5));
+	CHECK(!f.Passes(L"memory low", 5));
+	CHECK(!f.Passes(L"disk", 2));          // the level comes first
+	f.exclude = true;
+	CHECK(!f.Passes(L"Disk full", 5));
+	CHECK(f.Passes(L"memory low", 5));
+	f.levelMask = 0xFFFFFFFF;
+	f.matcher.Clear();
+	CHECK(!f.Active());                     // exclude with no text excludes nothing
+	CHECK(f.Passes(L"anything", 1));
+}
+
+TEST(RowMap) {
+	LgRowMap r;
+	CHECK(r.Count() == 0);
+	CHECK(r.RowOf(5) == 0);
+	for (ULONGLONG s : { 2, 5, 6, 10, 15 })
+		r.Add(s);
+	CHECK(r.Count() == 5);
+	CHECK(r.Serial(3) == 10);
+	CHECK(r.RowOf(5) == 1);
+	CHECK(r.RowOf(7) == 3);      // the next one shown
+	CHECK(r.RowOf(0) == 0);
+	CHECK(r.RowOf(16) == 5);
+	CHECK(r.Contains(6));
+	CHECK(!r.Contains(7));
+	CHECK(r.DropBefore(6) == 2);
+	CHECK(r.Count() == 3);
+	CHECK(r.Serial(0) == 6);
+	CHECK(r.DropBefore(1) == 0);
+	r.DropFrom(11);
+	CHECK(r.Count() == 2);
+	CHECK(r.Serial(1) == 10);
+	r.DropFrom(0);
+	CHECK(r.Count() == 0);
+}
+
+TEST(Store_FirstSerial) {
+	LgStore s;
+	s.SetLimit(2);
+	CHECK(s.FirstSerial() == 0);
+	for (int i = 0; i < 5; i++)
+		Add(s, L"x");
+	CHECK(s.FirstSerial() == 3);
+	CHECK(s.Number(0) == s.FirstSerial() + 1);
+	s.Clear();
+	CHECK(s.FirstSerial() == 0);
+}
+
 int wmain() {
 	Run_Store_AppendKeepsTextAndAttributes();
 	Run_Store_EmbeddedNulsAreText();
@@ -352,6 +472,11 @@ int wmain() {
 	Run_ColumnOf_And_IndexAtColumn();
 	Run_Words();
 	Run_JoinRange();
+	Run_Matcher_Plain();
+	Run_Matcher_Regex();
+	Run_Filter_Passes();
+	Run_RowMap();
+	Run_Store_FirstSerial();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;
