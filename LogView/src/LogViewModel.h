@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -101,6 +102,33 @@ private:
 size_t LgColumns(std::wstring_view text, int tabSize);
 // the text with tabs expanded to spaces
 void   LgExpandTabs(std::wstring_view text, int tabSize, std::wstring& out);
+// the columns before the character at index (tabs expanded)
+size_t LgColumnOf(std::wstring_view text, size_t index, int tabSize);
+// the character boundary nearest to a column (fractional: a point inside a character); a point inside a tab goes
+// to the nearer side of the tab
+size_t LgIndexAtColumn(std::wstring_view text, double column, int tabSize);
+
+// words, for Ctrl+arrows and double clicks: runs of letters, digits and '_', runs of other non-space characters
+size_t LgWordRight(std::wstring_view text, size_t index);   // the start of the next word (or the end)
+size_t LgWordLeft(std::wstring_view text, size_t index);    // the start of this word or the one before
+void   LgWordAt(std::wstring_view text, size_t index, size_t& start, size_t& end);   // the run around index
+
+// the text from (startLine, startCol) to (endLine, endCol), lines joined with "\r\n"; getLine(line) returns
+// a line's text. Columns past a line's end are taken as its end.
+template<typename GetLine>
+void   LgJoinRange(size_t startLine, size_t startCol, size_t endLine, size_t endCol, GetLine&& getLine, std::wstring& out) {
+	out.clear();
+	for (size_t line = startLine; line <= endLine; line++) {
+		std::wstring_view text = getLine(line);
+		size_t from = line == startLine ? std::min(startCol, text.size()) : 0;
+		size_t to = line == endLine ? std::min(endCol, text.size()) : text.size();
+		if (to > from)
+			out.append(text.substr(from, to - from));
+		if (line < endLine)
+			out.append(L"\r\n");
+	}
+}
+
 // calls fn(start, length) for each line of text, as LgBatch::AddText splits it
 template<typename Fn>
 void   LgSplitLines(std::wstring_view text, Fn&& fn) {

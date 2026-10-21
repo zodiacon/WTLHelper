@@ -255,6 +255,86 @@ TEST(Batch_AddAndAppend) {
 	CHECK(b.Count() == 0);
 }
 
+TEST(ColumnOf_And_IndexAtColumn) {
+	CHECK(LgColumnOf(L"abc", 0, 4) == 0);
+	CHECK(LgColumnOf(L"abc", 2, 4) == 2);
+	CHECK(LgColumnOf(L"abc", 9, 4) == 3);      // past the end: the end
+	CHECK(LgColumnOf(L"a\tb", 2, 4) == 4);
+	CHECK(LgColumnOf(L"a\tb", 3, 4) == 5);
+
+	CHECK(LgIndexAtColumn(L"abc", 0.0, 4) == 0);
+	CHECK(LgIndexAtColumn(L"abc", 0.4, 4) == 0);
+	CHECK(LgIndexAtColumn(L"abc", 0.6, 4) == 1);
+	CHECK(LgIndexAtColumn(L"abc", 2.5, 4) == 3);
+	CHECK(LgIndexAtColumn(L"abc", 99.0, 4) == 3);
+	CHECK(LgIndexAtColumn(L"abc", -3.0, 4) == 0);
+	CHECK(LgIndexAtColumn(L"", 5.0, 4) == 0);
+	// "a\tb": the tab covers columns 1..4
+	CHECK(LgIndexAtColumn(L"a\tb", 2.0, 4) == 1);   // nearer its start
+	CHECK(LgIndexAtColumn(L"a\tb", 3.0, 4) == 2);   // nearer its end
+	CHECK(LgIndexAtColumn(L"a\tb", 4.2, 4) == 2);
+	CHECK(LgIndexAtColumn(L"a\tb", 4.6, 4) == 3);
+	// the round trip from a boundary's column
+	std::wstring_view t = L"x\t\tyz\tw";
+	for (size_t i = 0; i <= t.size(); i++)
+		CHECK(LgIndexAtColumn(t, (double)LgColumnOf(t, i, 3), 3) == i);
+}
+
+TEST(Words) {
+	std::wstring_view t = L"foo_bar = baz(12);  end";
+	//                       0123456789012345678901234
+	CHECK(LgWordRight(t, 0) == 8);      // "foo_bar " -> '='
+	CHECK(LgWordRight(t, 8) == 10);     // "= " -> "baz"
+	CHECK(LgWordRight(t, 10) == 13);    // "baz" -> "("
+	CHECK(LgWordRight(t, 13) == 14);    // "(" -> "12"
+	CHECK(LgWordRight(t, 16) == 20);    // ");  " -> "end"
+	CHECK(LgWordRight(t, 20) == 23);
+	CHECK(LgWordRight(t, 23) == 23);
+	CHECK(LgWordRight(t, 7) == 8);      // a space: past the spaces
+
+	CHECK(LgWordLeft(t, 23) == 20);
+	CHECK(LgWordLeft(t, 20) == 16);
+	CHECK(LgWordLeft(t, 12) == 10);     // inside "baz": its start
+	CHECK(LgWordLeft(t, 10) == 8);
+	CHECK(LgWordLeft(t, 3) == 0);
+	CHECK(LgWordLeft(t, 0) == 0);
+	CHECK(LgWordLeft(L"   ", 3) == 0);
+
+	size_t s, e;
+	LgWordAt(t, 2, s, e);
+	CHECK(s == 0 && e == 7);
+	LgWordAt(t, 7, s, e);               // the space
+	CHECK(s == 7 && e == 8);
+	LgWordAt(t, 17, s, e);              // ");" is one run
+	CHECK(s == 16 && e == 18);
+	LgWordAt(t, 23, s, e);              // past the end: the last word
+	CHECK(s == 20 && e == 23);
+	LgWordAt(L"", 0, s, e);
+	CHECK(s == 0 && e == 0);
+}
+
+TEST(JoinRange) {
+	LgStore st;
+	Add(st, L"first line");
+	Add(st, L"second");
+	Add(st, L"");
+	Add(st, L"fourth");
+	auto get = [&](size_t line) { return st.Text(line); };
+	std::wstring out;
+	LgJoinRange(0, 6, 0, 10, get, out);
+	CHECK_STR(out, L"line");
+	LgJoinRange(0, 6, 1, 3, get, out);
+	CHECK_STR(out, L"line\r\nsec");
+	LgJoinRange(1, 0, 3, 6, get, out);
+	CHECK_STR(out, L"second\r\n\r\nfourth");
+	LgJoinRange(0, 0, 1, 0, get, out);   // a whole line with its break
+	CHECK_STR(out, L"first line\r\n");
+	LgJoinRange(1, 99, 2, 99, get, out); // columns past the end
+	CHECK_STR(out, L"\r\n");
+	LgJoinRange(3, 2, 3, 2, get, out);
+	CHECK_STR(out, L"");
+}
+
 int wmain() {
 	Run_Store_AppendKeepsTextAndAttributes();
 	Run_Store_EmbeddedNulsAreText();
@@ -269,6 +349,9 @@ int wmain() {
 	Run_Columns_And_ExpandTabs();
 	Run_SplitLines();
 	Run_Batch_AddAndAppend();
+	Run_ColumnOf_And_IndexAtColumn();
+	Run_Words();
+	Run_JoinRange();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

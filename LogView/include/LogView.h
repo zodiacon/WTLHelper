@@ -15,6 +15,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // ---- Window class name -------------------------------------------------------
@@ -72,6 +73,15 @@ struct LGVLINEINFO {
 	size_t    length;                  // characters
 };
 
+// ---- Positions ----------------------------------------------------------------
+//
+// A place between characters: column is a character index in the line (a tab is one character), 0..length.
+
+struct LGVPOS {
+	size_t line;
+	size_t column;
+};
+
 // ---- Colors ----------------------------------------------------------------------
 
 struct LGVCOLORS {
@@ -99,6 +109,7 @@ struct LGVCOLORS {
 #define LGVN_CONTEXTMENU    (LGVN_FIRST - 1)   // NMLGVLINE; pt in screen coords, line may be LGV_NOLINE
 #define LGVN_ACTIVATE       (LGVN_FIRST - 2)   // NMLGVLINE; a double click or Enter on a line
 #define LGVN_FOLLOWCHANGED  (LGVN_FIRST - 3)   // NMHDR; the user's scrolling turned following the tail on or off
+#define LGVN_SELCHANGED     (LGVN_FIRST - 4)   // NMHDR; the user moved the caret or changed the selection
 
 struct NMLGVLINE {
 	NMHDR  hdr;
@@ -158,6 +169,11 @@ public:
 		MESSAGE_HANDLER(WM_KEYDOWN, OnTextKeyDown)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnTextLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnTextLButtonDblClk)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnTextLButtonUp)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnTextMouseMove)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnTextCaptureChanged)
+		MESSAGE_HANDLER(WM_TIMER, OnTextTimer)
+		MESSAGE_HANDLER(WM_SETCURSOR, OnTextSetCursor)
 		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnTextRButtonDown)
 		MESSAGE_HANDLER(WM_CONTEXTMENU, OnTextContextMenu)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnTextMouseWheel)
@@ -206,7 +222,8 @@ public:
 	void    SetTopLine(size_t line);
 	size_t  GetTopLine() const;
 	int     GetVisibleLineCount() const;              // whole lines that fit
-	size_t  HitTest(POINT pt, UINT* pPart = nullptr) const;   // client coords; LGVHT_* in *pPart
+	// client coords; LGVHT_* in *pPart; *pColumn: the character boundary nearest to pt (LGVHT_TEXT only)
+	size_t  HitTest(POINT pt, UINT* pPart = nullptr, size_t* pColumn = nullptr) const;
 	BOOL    GetLineRect(size_t line, RECT* prc) const;        // client coords; FALSE if not in view
 	void    ShowLineNumbers(bool show);
 	bool    AreLineNumbersShown() const;
@@ -215,6 +232,24 @@ public:
 	void    BeginUpdate();                            // nests; suppresses painting and scroll bar updates
 	void    EndUpdate();
 	HWND    GetTextWindow() const;                    // the child that shows the lines (scroll bars, focus)
+
+	// ---- Caret and selection ----------------------------------------------------------
+	//
+	// The selection runs from the anchor to the caret. Clicking places the caret, dragging or Shift selects;
+	// the gutter selects whole lines. Keys: arrows, Home/End (smart Home), Page Up/Down, Ctrl+Home/End, with
+	// Ctrl moving by words and Shift extending; Ctrl+Up/Down scroll without moving the caret; Ctrl+A selects
+	// all; Ctrl+C or Ctrl+Insert copies (the caret's line when nothing is selected); Enter and a double click
+	// send LGVN_ACTIVATE (a double click also selects the word). Positions follow their lines when the limit
+	// drops older ones; a selection that's all dropped goes.
+
+	LGVPOS  GetCaret() const;
+	void    SetCaret(LGVPOS pos, bool extend = false);   // scrolls it into view; no notification
+	void    GetSelection(LGVPOS* pStart, LGVPOS* pEnd) const;   // in order; equal if nothing is selected
+	void    SetSelection(LGVPOS anchor, LGVPOS caret);   // the caret is scrolled into view; no notification
+	void    SelectAll();
+	bool    HasSelection() const;
+	ATL::CString GetSelectedText() const;              // lines joined with CR LF
+	BOOL    Copy();                                    // as Ctrl+C
 
 	// ---- Appearance -------------------------------------------------------------------
 	//
@@ -247,6 +282,11 @@ private:
 	LRESULT OnTextKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTextLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTextMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTextCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTextTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTextSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextRButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextContextMenu(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
@@ -283,6 +323,28 @@ private:
 	void    ScrollTo(size_t topLine, int left, bool byUser);
 	void    SetFollow(bool follow, bool notify);
 
+	// caret and selection (LogViewSelection.cpp)
+	enum class Drag { None, Text, Gutter };
+	size_t  LineLength(size_t line) const;
+	LGVPOS  ClampPos(LGVPOS pos) const;
+	LGVPOS  LineStartOrNext(size_t line, bool next) const; // (line, 0), or with next the start of the line after
+	int     IndexToX(size_t line, size_t index) const;   // from the text's start (no gutter, no scrolling)
+	size_t  XToIndex(size_t line, int x) const;
+	LGVPOS  PosFromPoint(POINT pt) const;             // text window coords; clamped to the lines
+	int     TextX(std::wstring_view text, UINT flags, size_t index) const;   // IndexToX for a line's text
+	size_t  TextIndexAt(std::wstring_view text, UINT flags, int x) const;  // XToIndex for a line's text
+	void    Select(LGVPOS anchor, LGVPOS caret, bool notify, bool keepDesiredX = false);
+	void    MoveCaret(LGVPOS pos, bool extend, bool notify, bool keepDesiredX = false);
+	void    EnsureCaretVisible(bool byUser);
+	void    CreateSystemCaret();                      // on focus, and again when the line height changes
+	void    UpdateCaret();                            // the system caret's place, after scrolling or moving
+	void    MovePositionsUp(size_t dropped);          // lines dropped by the limit
+	bool    SelectionInLine(size_t line, size_t& start, size_t& end, bool& lineBreak) const;
+	void    DragTo(POINT pt);
+	void    HandleCaretKey(WPARAM key, bool ctrl, bool shift);
+	LGVPOS  WordLeft(LGVPOS pos) const;
+	LGVPOS  WordRight(LGVPOS pos) const;
+
 	// painting
 	void    Paint(WTL::CDCHandle dc, const RECT& rcPaint);
 	void    PaintLine(WTL::CDCHandle dc, size_t line, const RECT& rc, const LGVCOLORS& c, int gutter);
@@ -313,6 +375,16 @@ private:
 	int                           m_UpdateCount = 0;
 	int                           m_WheelRemainder = 0;
 	int                           m_HWheelRemainder = 0;
+
+	// caret and selection
+	LGVPOS                        m_Anchor{};
+	LGVPOS                        m_Caret{};
+	int                           m_DesiredX = -1;   // Up/Down keep to it; -1: the caret's own
+	Drag                          m_Drag = Drag::None;
+	size_t                        m_DragLine = 0;    // gutter drag: the line it started on
+	POINT                         m_DragPoint{};     // the mouse, for scrolling while dragging outside
+	bool                          m_HasCaret = false;
+	bool                          m_CaretShown = false;
 
 	// metrics (pixels at the current DPI)
 	UINT                          m_Dpi = 96;

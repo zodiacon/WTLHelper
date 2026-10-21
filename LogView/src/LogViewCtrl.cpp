@@ -1,27 +1,9 @@
 #include "LogView.h"
 #include "LogViewModel.h"
+#include "LogViewText.h"
 
 #include <algorithm>
 #include <climits>
-
-// ---- The text area ----------------------------------------------------------------
-//
-// A child window, so the scroll bars run beside the text only (a toolbar goes above it). Its messages are
-// handled in the control's ALT_MSG_MAP(1).
-
-class LgTextWindow : public ATL::CWindowImpl<LgTextWindow> {
-public:
-	DECLARE_WND_CLASS_EX(L"LgTextView", CS_DBLCLKS, -1)
-
-	explicit LgTextWindow(CLogViewCtrl* owner) : m_Owner(owner) {}
-
-	BEGIN_MSG_MAP(LgTextWindow)
-		CHAIN_MSG_MAP_ALT_MEMBER((*m_Owner), 1)
-	END_MSG_MAP()
-
-private:
-	CLogViewCtrl* m_Owner;
-};
 
 // ---- Helpers -----------------------------------------------------------------------
 
@@ -178,6 +160,8 @@ LRESULT CLogViewCtrl::OnSetFont(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	m_OwnFont = m_hFont == nullptr;   // nullptr: back to the default font
 	UpdateFonts();
 	UpdateMetrics();
+	if (m_HasCaret)
+		CreateSystemCaret();
 	UpdateScrollBars();
 	if (lParam && m_Text->IsWindow())
 		m_Text->Invalidate();
@@ -193,6 +177,8 @@ LRESULT CLogViewCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
 	UpdateFonts();
 	UpdateMetrics();
+	if (m_HasCaret)
+		CreateSystemCaret();
 	Layout();
 	bHandled = FALSE;
 	return 0;
@@ -287,6 +273,7 @@ void CLogViewCtrl::UpdateScrollBars() {
 	si.nPage = std::max(0, (int)rc.right - GutterWidth());
 	si.nPos = m_Left;
 	m_Text->SetScrollInfo(SB_HORZ, &si, TRUE);
+	UpdateCaret();
 }
 
 void CLogViewCtrl::ScrollTo(size_t topLine, int left, bool byUser) {
@@ -477,6 +464,7 @@ void CLogViewCtrl::LinesAdded() {
 	size_t dropped = m_Store->TakeDropped();
 	if (!m_Follow)
 		m_TopLine -= std::min(dropped, m_TopLine);
+	MovePositionsUp(dropped);
 	if (!m_Text->IsWindow())
 		return;
 	UpdateScrollBars();
@@ -494,6 +482,8 @@ void CLogViewCtrl::Clear() {
 	m_SeenColumns = 0;
 	m_TopLine = 0;
 	m_Left = 0;
+	m_Anchor = m_Caret = {};
+	m_DesiredX = -1;
 	if (m_Text->IsWindow()) {
 		UpdateScrollBars();
 		m_Text->Invalidate();
@@ -581,6 +571,8 @@ void CLogViewCtrl::SetVirtualLineCount(size_t count) {
 		m_SeenColumns = 0;
 	}
 	m_VirtualCount = count;
+	m_Anchor = ClampPos(m_Anchor);
+	m_Caret = ClampPos(m_Caret);
 	if (m_Text->IsWindow()) {
 		UpdateScrollBars();
 		m_Text->Invalidate();
@@ -606,7 +598,7 @@ void CLogViewCtrl::InvalidateLines(size_t first, size_t count) {
 
 // ---- Hit testing ---------------------------------------------------------------------
 
-size_t CLogViewCtrl::HitTest(POINT pt, UINT* pPart) const {
+size_t CLogViewCtrl::HitTest(POINT pt, UINT* pPart, size_t* pColumn) const {
 	UINT part = LGVHT_NOWHERE;
 	size_t line = LGV_NOLINE;
 	if (m_Text->IsWindow()) {
@@ -619,6 +611,8 @@ size_t CLogViewCtrl::HitTest(POINT pt, UINT* pPart) const {
 			else {
 				line = hit;
 				part = pt.x < GutterWidth() ? LGVHT_GUTTER : LGVHT_TEXT;
+				if (part == LGVHT_TEXT && pColumn)
+					*pColumn = XToIndex(line, pt.x - GutterWidth() - m_Pad + m_Left);
 			}
 		}
 	}
@@ -760,11 +754,32 @@ void CLogViewCtrl::PaintLine(WTL::CDCHandle dc, size_t line, const RECT& rc, con
 
 	// text
 	COLORREF back = style.crBack == CLR_DEFAULT ? c.crBack : style.crBack;
+	COLORREF selText = c.crSelText;
 	COLORREF text = style.crText == CLR_DEFAULT ? c.crText : style.crText;
 	if (style.flags & LGVSF_DIM)
 		text = Blend(text, back, 50);
 	RECT clip{ gutter, rc.top, std::max(gutter, (int)rc.right), rc.bottom };
 	FillSolid(dc, clip, back);
+
+	// the selection's part of the line; a selected line break shows as a character's width past the end
+	RECT rcSel{};
+	size_t selStart, selEnd;
+	bool lineBreak;
+	int origin = gutter + m_Pad - m_Left;
+	if (SelectionInLine(line, selStart, selEnd, lineBreak)) {
+		std::wstring_view view(data.text, data.length);
+		selEnd = std::min(selEnd, data.length);
+		rcSel = { origin + TextX(view, style.flags, std::min(selStart, data.length)), rc.top,
+			origin + TextX(view, style.flags, selEnd) + (lineBreak ? m_CharWidth : 0), rc.bottom };
+		rcSel.left = std::max(rcSel.left, clip.left);
+		rcSel.right = std::min(rcSel.right, clip.right);
+		bool focused = ::GetFocus() == m_Text->m_hWnd;
+		if (rcSel.right > rcSel.left)
+			FillSolid(dc, rcSel, focused ? c.crSelBack : c.crSelBackInactive);
+		else
+			rcSel = {};
+		selText = focused ? c.crSelText : c.crSelTextInactive;
+	}
 	if (data.length == 0)
 		return;
 
@@ -784,92 +799,36 @@ void CLogViewCtrl::PaintLine(WTL::CDCHandle dc, size_t line, const RECT& rc, con
 	if (first >= last)
 		return;
 	auto old = dc.SelectFont(FontFor(style.flags));
-	dc.SetTextColor(text);
-	int x = gutter + m_Pad - m_Left + (int)first * m_CharWidth;
-	dc.ExtTextOut(x, rc.top + m_TextOffset, ETO_CLIPPED, &clip, m_DrawBuffer.c_str() + first, (UINT)(last - first), nullptr);
+	int x = origin + (int)first * m_CharWidth;
+	auto draw = [&](COLORREF color, const RECT& rcClip) {
+		dc.SetTextColor(color);
+		dc.ExtTextOut(x, rc.top + m_TextOffset, ETO_CLIPPED, &rcClip, m_DrawBuffer.c_str() + first, (UINT)(last - first), nullptr);
+	};
+	// the text outside the selection, then inside it in the selection's color
+	if (rcSel.right > rcSel.left) {
+		RECT before{ clip.left, clip.top, rcSel.left, clip.bottom }, after{ rcSel.right, clip.top, clip.right, clip.bottom };
+		if (before.right > before.left)
+			draw(text, before);
+		if (after.right > after.left)
+			draw(text, after);
+		draw(selText, rcSel);
+	}
+	else {
+		draw(text, clip);
+	}
 	dc.SelectFont(old);
 }
 
 // ---- Input ---------------------------------------------------------------------------------
 
-LRESULT CLogViewCtrl::OnTextFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
-	m_Text->Invalidate();   // the selection's colors (to come) follow the focus
-	bHandled = FALSE;
-	return 0;
-}
-
-LRESULT CLogViewCtrl::OnTextGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
-	return DLGC_WANTARROWS | DLGC_WANTCHARS;
-}
-
-LRESULT CLogViewCtrl::OnTextKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
-	bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
-	size_t page = GetPageLines();
-	switch (wParam) {
-		case VK_UP:
-			ScrollTo(m_TopLine - std::min<size_t>(m_TopLine, 1), m_Left, true);
-			break;
-		case VK_DOWN:
-			ScrollTo(m_TopLine + 1, m_Left, true);
-			break;
-		case VK_PRIOR:
-			ScrollTo(m_TopLine - std::min(m_TopLine, page), m_Left, true);
-			break;
-		case VK_NEXT:
-			ScrollTo(m_TopLine + page, m_Left, true);
-			break;
-		case VK_HOME:
-			ScrollTo(ctrl ? 0 : m_TopLine, 0, true);
-			break;
-		case VK_END:
-			if (ctrl) {
-				ScrollTo(MaxTopLine(), m_Left, true);
-				SetFollow(true, true);   // even when already at the end
-			}
-			else {
-				ScrollTo(m_TopLine, MaxLeft(), true);
-			}
-			break;
-		case VK_LEFT:
-			ScrollTo(m_TopLine, m_Left - 4 * m_CharWidth, true);
-			break;
-		case VK_RIGHT:
-			ScrollTo(m_TopLine, m_Left + 4 * m_CharWidth, true);
-			break;
-		default:
-			bHandled = FALSE;
-	}
-	return 0;
-}
-
-LRESULT CLogViewCtrl::OnTextLButtonDown(UINT, WPARAM, LPARAM, BOOL&) {
-	m_Text->SetFocus();
-	return 0;
-}
-
-LRESULT CLogViewCtrl::OnTextLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-	m_Text->MapWindowPoints(m_hWnd, &pt, 1);
-	size_t line = HitTest(pt);
-	if (line != LGV_NOLINE) {
-		ClientToScreen(&pt);
-		NotifyLine(LGVN_ACTIVATE, line, pt);
-	}
-	return 0;
-}
-
-LRESULT CLogViewCtrl::OnTextRButtonDown(UINT, WPARAM, LPARAM, BOOL&) {
-	m_Text->SetFocus();
-	return 0;
-}
-
 LRESULT CLogViewCtrl::OnTextContextMenu(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	size_t line;
 	if (pt.x == -1 && pt.y == -1) {
-		// from the keyboard: the top line
-		line = m_TopLine < GetLineCount() ? m_TopLine : LGV_NOLINE;
-		pt = { GutterWidth(), m_LineHeight };
+		// from the keyboard: the caret's line, below the caret
+		line = m_Caret.line < GetLineCount() ? m_Caret.line : LGV_NOLINE;
+		EnsureCaretVisible(true);
+		pt = { GutterWidth() + m_Pad - m_Left + IndexToX(m_Caret.line, m_Caret.column), (int)(m_Caret.line - m_TopLine + 1) * m_LineHeight };
 		m_Text->ClientToScreen(&pt);
 	}
 	else {

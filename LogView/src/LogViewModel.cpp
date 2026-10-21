@@ -1,6 +1,7 @@
 #include "LogViewModel.h"
 
 #include <algorithm>
+#include <cwctype>
 #include <utility>
 
 // ---- Helpers ---------------------------------------------------------------------
@@ -25,6 +26,67 @@ void LgExpandTabs(std::wstring_view text, int tabSize, std::wstring& out) {
 		else
 			out.push_back(ch);
 	}
+}
+
+size_t LgColumnOf(std::wstring_view text, size_t index, int tabSize) {
+	return LgColumns(text.substr(0, std::min(index, text.size())), tabSize);
+}
+
+size_t LgIndexAtColumn(std::wstring_view text, double column, int tabSize) {
+	size_t col = 0;
+	for (size_t i = 0; i < text.size(); i++) {
+		size_t next = text[i] == L'\t' ? (col / tabSize + 1) * tabSize : col + 1;
+		if (column < (col + next) / 2.0)
+			return i;
+		col = next;
+	}
+	return text.size();
+}
+
+// 0: space, 1: letters, digits and '_', 2: anything else
+static int CharClass(wchar_t ch) {
+	if (::iswspace(ch))
+		return 0;
+	return ::iswalnum(ch) || ch == L'_' ? 1 : 2;
+}
+
+size_t LgWordRight(std::wstring_view text, size_t index) {
+	size_t n = text.size();
+	if (index >= n)
+		return n;
+	int cls = CharClass(text[index]);
+	while (index < n && cls != 0 && CharClass(text[index]) == cls)
+		index++;
+	while (index < n && CharClass(text[index]) == 0)
+		index++;
+	return index;
+}
+
+size_t LgWordLeft(std::wstring_view text, size_t index) {
+	index = std::min(index, text.size());
+	while (index > 0 && CharClass(text[index - 1]) == 0)
+		index--;
+	if (index == 0)
+		return 0;
+	int cls = CharClass(text[index - 1]);
+	while (index > 0 && CharClass(text[index - 1]) == cls)
+		index--;
+	return index;
+}
+
+void LgWordAt(std::wstring_view text, size_t index, size_t& start, size_t& end) {
+	size_t n = text.size();
+	if (n == 0) {
+		start = end = 0;
+		return;
+	}
+	index = std::min(index, n - 1);
+	int cls = CharClass(text[index]);
+	start = end = index;
+	while (start > 0 && CharClass(text[start - 1]) == cls)
+		start--;
+	while (end < n && CharClass(text[end]) == cls)
+		end++;
 }
 
 // ---- LgBatch -----------------------------------------------------------------------

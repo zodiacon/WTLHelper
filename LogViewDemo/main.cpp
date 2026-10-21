@@ -211,23 +211,18 @@ static void UpdateChecks(HMENU menu) {
 
 static void UpdateStatus() {
 	CString text;
-	text.Format(L"%zu lines%s%s | top %zu | %s", g_log.GetLineCount(), g_log.IsVirtual() ? L" (virtual)" : L"",
-		g_log.IsFollowingTail() ? L" | following" : L"", g_log.GetTopLine(), (PCWSTR)g_event);
-	::SendMessage(g_status, SB_SETTEXT, 0, (LPARAM)(PCWSTR)text);
-}
-
-static void CopyLine(HWND hwnd, size_t line) {
-	auto text = g_log.GetLineText(line);
-	if (!OpenClipboard(hwnd))
-		return;
-	EmptyClipboard();
-	size_t bytes = (text.GetLength() + 1) * sizeof(wchar_t);
-	if (auto mem = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
-		memcpy(GlobalLock(mem), (PCWSTR)text, bytes);
-		GlobalUnlock(mem);
-		SetClipboardData(CF_UNICODETEXT, mem);
+	auto caret = g_log.GetCaret();
+	text.Format(L"%zu lines%s%s | top %zu | Ln %zu, Col %zu", g_log.GetLineCount(), g_log.IsVirtual() ? L" (virtual)" : L"",
+		g_log.IsFollowingTail() ? L" | following" : L"", g_log.GetTopLine(), caret.line + 1, caret.column + 1);
+	if (g_log.HasSelection()) {
+		LGVPOS start, end;
+		g_log.GetSelection(&start, &end);
+		// a selection ending at the start of a line doesn't take any of it
+		size_t lines = end.line - start.line + (end.column > 0 || end.line == start.line ? 1 : 0);
+		text.AppendFormat(L" | selected %zu line(s)", lines);
 	}
-	CloseClipboard();
+	text.AppendFormat(L" | %s", (PCWSTR)g_event);
+	::SendMessage(g_status, SB_SETTEXT, 0, (LPARAM)(PCWSTR)text);
 }
 
 static void OnCommand(HWND hwnd, UINT id) {
@@ -287,8 +282,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 			}
 			break;
 		case ID_LINE_COPY:
-			if (g_menuLine != LGV_NOLINE)
-				CopyLine(hwnd, g_menuLine);
+			g_log.Copy();
 			break;
 		case ID_LINE_MARK:
 			if (g_menuLine != LGV_NOLINE) {
@@ -315,6 +309,9 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			nm->cchText = line.GetLength();
 			break;
 		}
+		case LGVN_SELCHANGED:
+			UpdateStatus();
+			break;
 		case LGVN_FOLLOWCHANGED:
 			SetEventText(g_log.IsFollowingTail() ? L"Following the tail" : L"Stopped following");
 			UpdateChecks(GetMenu(hwnd));
@@ -334,7 +331,7 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			g_menuLine = nm->line;
 			HMENU menu = CreatePopupMenu();
 			UINT state = nm->line != LGV_NOLINE ? MF_STRING : MF_STRING | MF_GRAYED;
-			AppendMenuW(menu, state, ID_LINE_COPY, L"&Copy Line");
+			AppendMenuW(menu, state, ID_LINE_COPY, g_log.HasSelection() ? L"&Copy\tCtrl+C" : L"&Copy Line\tCtrl+C");
 			AppendMenuW(menu, state | (g_log.IsVirtual() ? MF_GRAYED : 0), ID_LINE_MARK, L"Toggle &Mark");
 			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 			AppendMenuW(menu, MF_STRING, ID_FILE_CLEAR, L"C&lear");

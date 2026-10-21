@@ -99,9 +99,11 @@
   <ItemGroup>
     <ClInclude Include="include\LogView.h" />
     <ClInclude Include="src\LogViewModel.h" />
+    <ClInclude Include="src\LogViewText.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\LogViewCtrl.cpp" />
+    <ClCompile Include="src\LogViewSelection.cpp" />
     <ClCompile Include="src\LogViewModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
