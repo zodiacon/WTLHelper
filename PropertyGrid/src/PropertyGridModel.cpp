@@ -218,8 +218,54 @@ static bool IsShown(const PgNode* node) {
 	return (node->flags & PRGF_HIDDEN) == 0;
 }
 
-void PgModel::BuildRows(UINT view, std::vector<PgRow>& rows) const {
+bool PgContains(const std::wstring& text, const std::wstring& part) {
+	if (part.empty())
+		return true;
+	return ::FindNLSStringEx(LOCALE_NAME_USER_DEFAULT, FIND_FROMSTART | LINGUISTIC_IGNORECASE, text.c_str(), (int)text.size(),
+		part.c_str(), (int)part.size(), nullptr, nullptr, nullptr, 0) >= 0;
+}
+
+bool PgMatches(const PgNode* node, const std::wstring& filter) {
+	if (PgContains(node->name, filter))
+		return true;
+	// the value as shown (a password's is masked, so it never matches)
+	return !node->IsCategory() && PgContains(PgFormatValue(*node), filter);
+}
+
+// the item, a flag of it, or something below it matches
+static bool SubtreeMatches(const PgNode* node, const std::wstring& filter) {
+	if (PgMatches(node, filter))
+		return true;
+	if (node->kind == PRGK_FLAGS && std::any_of(node->enumItems.begin(), node->enumItems.end(),
+		[&](auto& e) { return e.value != 0 && PgContains(e.name, filter); }))
+		return true;
+	return std::any_of(node->children.begin(), node->children.end(),
+		[&](auto& c) { return IsShown(c.get()) && SubtreeMatches(c.get(), filter); });
+}
+
+// filtering: only what matches, with the items on the way to it (expanded, whatever their state)
+static void AddFiltered(const PgNode* node, int level, const std::wstring& filter, std::vector<PgRow>& rows) {
+	rows.push_back({ const_cast<PgNode*>(node), level });
+	if (node->kind == PRGK_FLAGS)
+		for (int i = 0; i < (int)node->enumItems.size(); i++)
+			if (node->enumItems[i].value != 0 && PgContains(node->enumItems[i].name, filter))
+				rows.push_back({ const_cast<PgNode*>(node), level + 1, i });
+	for (auto& c : node->children)
+		if (IsShown(c.get()) && SubtreeMatches(c.get(), filter))
+			AddFiltered(c.get(), level + 1, filter, rows);
+}
+
+void PgModel::BuildRows(UINT view, std::vector<PgRow>& rows, const std::wstring& filter) const {
 	rows.clear();
+	bool filtering = !filter.empty();
+	auto shown = [&](const PgNode* node) { return IsShown(node) && (!filtering || SubtreeMatches(node, filter)); };
+	auto add = [&](const PgNode* node) {
+		if (filtering)
+			AddFiltered(node, 0, filter, rows);
+		else
+			AddWithChildren(node, 0, rows);
+		};
+
 	if (view == PRGV_ALPHABETICAL) {
 		std::vector<const PgNode*> props;
 		for (auto& c : root.children) {
@@ -227,10 +273,10 @@ void PgModel::BuildRows(UINT view, std::vector<PgRow>& rows) const {
 				continue;
 			if (c->IsCategory()) {
 				for (auto& p : c->children)
-					if (IsShown(p.get()))
+					if (shown(p.get()))
 						props.push_back(p.get());
 			}
-			else
+			else if (shown(c.get()))
 				props.push_back(c.get());
 		}
 		std::stable_sort(props.begin(), props.end(), [](auto a, auto b) {
@@ -238,24 +284,33 @@ void PgModel::BuildRows(UINT view, std::vector<PgRow>& rows) const {
 				a->name.c_str(), (int)a->name.size(), b->name.c_str(), (int)b->name.size(), nullptr, nullptr, 0) == CSTR_LESS_THAN;
 			});
 		for (auto p : props)
-			AddWithChildren(p, 0, rows);
+			add(p);
 		return;
 	}
 
 	// properties outside any category first, so they don't look like part of the category above them
 	for (auto& c : root.children)
-		if (!c->IsCategory() && IsShown(c.get()))
-			AddWithChildren(c.get(), 0, rows);
+		if (!c->IsCategory() && shown(c.get()))
+			add(c.get());
 	for (auto& c : root.children) {
 		if (!c->IsCategory() || !IsShown(c.get()))
 			continue;
-		if (std::none_of(c->children.begin(), c->children.end(), [](auto& p) { return IsShown(p.get()); }))
+		// a category whose name matches the filter shows all it has, as without one
+		bool all = !filtering || PgContains(c->name, filter);
+		auto keep = [&](auto& p) { return IsShown(p.get()) && (all || SubtreeMatches(p.get(), filter)); };
+		if (std::none_of(c->children.begin(), c->children.end(), keep))
 			continue;
 		rows.push_back({ c.get(), 0 });
-		if (c->expanded)
-			for (auto& p : c->children)
-				if (IsShown(p.get()))
-					AddWithChildren(p.get(), 0, rows);
+		if (!c->expanded && !filtering)
+			continue;
+		for (auto& p : c->children) {
+			if (!keep(p))
+				continue;
+			if (all)
+				AddWithChildren(p.get(), 0, rows);
+			else
+				AddFiltered(p.get(), 0, filter, rows);
+		}
 	}
 }
 

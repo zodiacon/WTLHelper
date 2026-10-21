@@ -575,6 +575,10 @@ bool CPropertyGridCtrl::HandleEditorKey(HWND, UINT msg, WPARAM key) {
 }
 
 LRESULT CPropertyGridCtrl::OnCommand(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if (m_hSearch && (HWND)lParam == m_hSearch) {
+		OnSearchCommand(HIWORD(wParam));
+		return 0;
+	}
 	if (!m_hEditor || (HWND)lParam != m_hEditor) {
 		bHandled = FALSE;
 		return 0;
@@ -634,10 +638,11 @@ LRESULT CPropertyGridCtrl::OnComboClosed(UINT, WPARAM, LPARAM, BOOL&) {
 	return 0;
 }
 
-LRESULT CPropertyGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM, BOOL&) {
+LRESULT CPropertyGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto c = GetColors();
 	auto dc = (HDC)wParam;
-	::SetTextColor(dc, m_Editing && IsReadOnly(m_Editing) ? c.crDisabledText : c.crText);
+	bool readOnly = (HWND)lParam != m_hSearch && m_Editing && IsReadOnly(m_Editing);
+	::SetTextColor(dc, readOnly ? c.crDisabledText : c.crText);
 	::SetBkColor(dc, c.crBack);
 	if (m_EditorBrushColor != c.crBack) {
 		if (!m_EditorBrush.IsNull())

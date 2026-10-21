@@ -39,6 +39,7 @@ enum {
 	ID_VIEW_COLLAPSEALL,
 	ID_VIEW_READONLY,
 	ID_ITEM_EDIT,
+	ID_VIEW_GRIDTOOLBAR,
 };
 
 // ---- Globals ----------------------------------------------------------------
@@ -228,6 +229,7 @@ static void UpdateViewChecks(HMENU menu) {
 		categorized ? ID_VIEW_CATEGORIZED : ID_VIEW_ALPHABETICAL, MF_BYCOMMAND);
 	CheckMenuItem(menu, ID_VIEW_DESCRIPTION, g_grid.IsDescriptionVisible() ? MF_CHECKED : MF_UNCHECKED);
 	CheckMenuItem(menu, ID_VIEW_READONLY, g_grid.IsReadOnly() ? MF_CHECKED : MF_UNCHECKED);
+	CheckMenuItem(menu, ID_VIEW_GRIDTOOLBAR, g_grid.IsToolbarVisible() ? MF_CHECKED : MF_UNCHECKED);
 }
 
 static void ShowAll(HPRGITEM parent) {
@@ -253,6 +255,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case ID_VIEW_READONLY:
 			g_grid.SetReadOnly(!g_grid.IsReadOnly());
+			break;
+		case ID_VIEW_GRIDTOOLBAR:
+			g_grid.ShowToolbar(!g_grid.IsToolbarVisible());
 			break;
 		case ID_ITEM_RESET:
 			if (sel && !g_grid.ResetValue(sel))
@@ -339,6 +344,14 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			}
 			return TRUE;
 		}
+		case PRGN_VIEWCHANGED:
+			Status(g_grid.GetView() == PRGV_CATEGORIZED ? L"View: categorized" : L"View: alphabetical");
+			UpdateViewChecks(GetMenu(hwnd));
+			break;
+		case PRGN_FILTERCHANGED:
+			text.Format(L"Filter: \"%s\"", (PCWSTR)g_grid.GetFilter());
+			Status(text);
+			break;
 		case PRGN_VALUECHANGED: {
 			auto nm = (NMPRGVALUE*)hdr;
 			text.Format(L"Changed: %s = %s", (PCWSTR)g_grid.GetItemName(nm->hItem), (PCWSTR)g_grid.GetValueText(nm->hItem));
@@ -379,6 +392,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_CREATE:
 			g_status = CreateWindowExW(0, STATUSCLASSNAME, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS, _Module.GetModuleInstance(), nullptr);
+			g_grid.ShowToolbar(true);
 			g_grid.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN,
 				WS_EX_CLIENTEDGE, IDC_GRID);
 			Populate();
@@ -452,6 +466,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	AppendMenuW(hView, MF_STRING, ID_VIEW_CATEGORIZED, L"&Categorized");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_ALPHABETICAL, L"&Alphabetical");
 	AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hView, MF_STRING, ID_VIEW_GRIDTOOLBAR, L"&Toolbar");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_DESCRIPTION, L"&Description Pane");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_DARK, L"Dar&k Colors");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_READONLY, L"&Read-Only Grid");
@@ -481,8 +496,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	MSG msg;
 	while (GetMessage(&msg, nullptr, 0, 0)) {
-		// no accelerators while a value is edited: Delete and Ctrl+R belong to the editor then
-		if (g_grid.IsEditing() || !TranslateAccelerator(hwnd, hAccel, &msg)) {
+		// no accelerators in the grid's editors and search box: Delete and Ctrl+R belong to them then
+		if (::IsChild(g_grid, ::GetFocus()) || !TranslateAccelerator(hwnd, hAccel, &msg)) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}

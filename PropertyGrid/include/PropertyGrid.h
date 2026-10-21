@@ -140,6 +140,7 @@ enum : UINT {
 	PRGHT_DESCSPLITTER, // above the description pane
 	PRGHT_DESCRIPTION,
 	PRGHT_BUTTON,      // the selected item's "..." or drop-down button
+	PRGHT_TOOLBAR,
 };
 
 // ---- Colors ---------------------------------------------------------------------------
@@ -170,6 +171,8 @@ struct PRGCOLORS {
 #define PRGN_VALUECHANGED   (PRGN_FIRST - 5)   // NMPRGVALUE; the user changed a value
 #define PRGN_BUTTONCLICK    (PRGN_FIRST - 6)   // NMPRGITEM; pt: the button's bottom left, screen coords;
                                                // nonzero = handled (else the kind's own dialog, if it has one)
+#define PRGN_VIEWCHANGED    (PRGN_FIRST - 7)   // NMHDR; by the toolbar's buttons
+#define PRGN_FILTERCHANGED  (PRGN_FIRST - 8)   // NMHDR; typed in the toolbar's search box
 
 struct NMPRGITEM {
 	NMHDR    hdr;
@@ -344,6 +347,14 @@ public:
 	double  GetSplitterPos() const;
 	void    BeginUpdate();                            // nests; suppresses rebuilding and painting
 	void    EndUpdate();
+	// the built-in toolbar: Categorized and Alphabetical buttons and a search box (Ctrl+F) that sets the
+	// filter. An app with its own toolbar leaves it hidden and calls SetView and SetFilter.
+	void    ShowToolbar(bool show);
+	bool    IsToolbarVisible() const;
+	// shows only the items whose name or shown value contains the text (case-insensitive), with the items
+	// above them; a category whose name contains it shows all of it. nullptr or "" shows everything.
+	void    SetFilter(LPCWSTR text);                  // no notification
+	ATL::CString GetFilter() const;
 
 	// ---- Appearance -------------------------------------------------------------------
 
@@ -414,6 +425,17 @@ private:
 	void    CloseCheckList(bool restoreText);
 	bool    IsCheckListOpen() const;
 	void    OnCheckListChanged(LONGLONG mask);
+
+	// toolbar
+	int     ToolbarHeight() const;
+	RECT    GetToolButtonRect(int index) const;      // 0: categorized, 1: alphabetical
+	RECT    GetSearchRect() const;                    // the search box's frame
+	void    CreateToolbar();
+	void    PositionToolbar();
+	void    PaintToolbar(WTL::CDCHandle dc, const PRGCOLORS& c);
+	void    ApplyFilter(const std::wstring& filter, bool notify);
+	void    OnSearchCommand(UINT code);
+	static LRESULT CALLBACK SearchSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 	// layout
 	int     Scale(int dips) const;
@@ -502,6 +524,15 @@ private:
 	SYSTEMTIME               m_EditInitialTime{};    // date picker, as it first reads back
 	bool                     m_Ending = false;       // EndEditCore running: focus changes it causes are ignored
 	std::unique_ptr<PgCheckList> m_CheckList;        // a Flags item's drop-down
+
+	// toolbar, filter, scroll bar
+	bool                     m_ShowToolbar = false;
+	HWND                     m_hSearch = nullptr;
+	HWND                     m_hToolTip = nullptr;   // the toolbar buttons'
+	bool                     m_SettingSearch = false;// the search box's text set by SetFilter: no EN_CHANGE round trip
+	std::wstring             m_Filter;
+	HWND                     m_hScroll = nullptr;    // a child, beside the grid only (not the toolbar or description)
+	bool                     m_ScrollVisible = false;
 	std::wstring             m_CheckListInitialText;
 	COLORREF                 m_CustomColors[16];     // ChooseColor's, kept between uses
 };

@@ -34,9 +34,13 @@ PgNode* CPropertyGridCtrl::Node(HPRGITEM hItem) const {
 
 LRESULT CPropertyGridCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
-	ModifyStyle(0, WS_CLIPCHILDREN);   // the editors
+	// the editors are children; the scroll bar is one too (beside the grid only), so not the window's own
+	ModifyStyle(WS_VSCROLL, WS_CLIPCHILDREN, SWP_FRAMECHANGED);
+	m_hScroll = ::CreateWindowExW(0, WC_SCROLLBARW, nullptr, WS_CHILD | SBS_VERT, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
 	UpdateFonts();
 	UpdateMetrics();
+	if (m_ShowToolbar)
+		CreateToolbar();
 	Rebuild();
 	return 0;
 }
@@ -52,6 +56,11 @@ LRESULT CPropertyGridCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	m_hErrorTip = nullptr;
 	if (m_CheckList && m_CheckList->IsWindow())
 		m_CheckList->DestroyWindow();
+	// a popup made with a child as its parent is owned by the top-level window: it would outlive the grid
+	if (m_hToolTip)
+		::DestroyWindow(m_hToolTip);
+	m_hToolTip = m_hSearch = m_hScroll = nullptr;
+	m_ScrollVisible = false;
 	bHandled = FALSE;
 	return 0;
 }
@@ -78,6 +87,8 @@ void CPropertyGridCtrl::UpdateFonts() {
 	if (!m_BoldFont.IsNull())
 		m_BoldFont.DeleteObject();
 	m_BoldFont.CreateFontIndirect(&lf);
+	if (m_hSearch)
+		::SendMessage(m_hSearch, WM_SETFONT, (WPARAM)m_hFont, TRUE);
 }
 
 void CPropertyGridCtrl::UpdateMetrics() {
@@ -148,15 +159,18 @@ RECT CPropertyGridCtrl::GetDescRect() const {
 	if (!m_ShowDesc)
 		return { 0, rc.bottom, rc.right, rc.bottom };
 	// keep a couple of rows for the grid
-	int height = std::max(0, std::min(Scale(m_DescHeightDips), (int)rc.bottom - 2 * m_RowHeight - m_DescSplitterHeight));
+	int height = std::max(0, std::min(Scale(m_DescHeightDips), (int)rc.bottom - ToolbarHeight() - 2 * m_RowHeight - m_DescSplitterHeight));
 	return { 0, rc.bottom - height, rc.right, rc.bottom };
 }
 
 RECT CPropertyGridCtrl::GetGridRect() const {
 	RECT rc;
 	GetClientRect(&rc);
+	rc.top = std::min((int)rc.bottom, ToolbarHeight());
 	if (m_ShowDesc)
 		rc.bottom = std::max(rc.top, GetDescRect().top - m_DescSplitterHeight);
+	if (m_ScrollVisible)
+		rc.right = std::max(rc.left, rc.right - ::GetSystemMetricsForDpi(SM_CXVSCROLL, m_Dpi));
 	return rc;
 }
 
@@ -173,19 +187,32 @@ int CPropertyGridCtrl::GetPageRows() const {
 }
 
 void CPropertyGridCtrl::UpdateScrollBar() {
-	if (!IsWindow())
+	if (!IsWindow() || !m_hScroll)
 		return;
 	int page = GetPageRows();
 	m_TopRow = std::max(0, std::min(m_TopRow, (int)m_Rows.size() - page));
+	bool visible = (int)m_Rows.size() > page;
+	if (visible != m_ScrollVisible) {
+		m_ScrollVisible = visible;   // the grid gets narrower or wider
+		::ShowWindow(m_hScroll, visible ? SW_SHOWNA : SW_HIDE);
+		Invalidate();
+	}
+	if (!visible)
+		return;
+	auto grid = GetGridRect();
+	RECT rc;
+	GetClientRect(&rc);
+	::SetWindowPos(m_hScroll, nullptr, grid.right, grid.top, rc.right - grid.right, grid.bottom - grid.top, SWP_NOZORDER | SWP_NOACTIVATE);
 	SCROLLINFO si{ sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS };
 	si.nMax = (int)m_Rows.size() - 1;
 	si.nPage = page;
 	si.nPos = m_TopRow;
-	SetScrollInfo(SB_VERT, &si, TRUE);
+	::SetScrollInfo(m_hScroll, SB_CTL, &si, TRUE);
 }
 
 void CPropertyGridCtrl::Layout() {
 	UpdateScrollBar();
+	PositionToolbar();
 	PositionEditor();
 	Invalidate();
 }
@@ -213,7 +240,7 @@ void CPropertyGridCtrl::Rebuild() {
 		return;
 	}
 	m_RebuildPending = false;
-	m_Model->BuildRows(m_View, m_Rows);
+	m_Model->BuildRows(m_View, m_Rows, m_Filter);
 
 	if (m_Selected && SelectedRow() < 0) {
 		// hidden by a collapse or a view change: the item's own row (for a flag row), or the nearest
@@ -354,9 +381,16 @@ void CPropertyGridCtrl::Paint(WTL::CDCHandle dc, const RECT& rcPaint) {
 		::OffsetRect(&rcRow, 0, m_RowHeight);
 	}
 
+	if (m_Rows.empty() && !m_Filter.empty()) {
+		RECT rc{ m_Margin, grid.top + m_RowHeight / 2, grid.right, grid.top + m_RowHeight * 3 / 2 };
+		dc.SetTextColor(c.crDisabledText);
+		dc.DrawText(L"No matching properties", -1, &rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+	}
+	if (m_ShowToolbar)
+		PaintToolbar(dc, c);
 	if (m_ShowDesc) {
 		auto desc = GetDescRect();
-		RECT band{ 0, grid.bottom, grid.right, desc.top };
+		RECT band{ 0, grid.bottom, desc.right, desc.top };
 		FillSolid(dc, band, c.crCategoryBack);
 		PaintDescription(dc, desc, c);
 	}
@@ -559,7 +593,9 @@ int CPropertyGridCtrl::HitRow(POINT pt, UINT* pFlags) const {
 	UINT flags = PRGHT_NOWHERE;
 	int hit = -1;
 	auto grid = GetGridRect();
-	if (m_ShowDesc && pt.y >= grid.bottom) {
+	if (m_ShowToolbar && pt.y < grid.top)
+		flags = PRGHT_TOOLBAR;
+	else if (m_ShowDesc && pt.y >= grid.bottom) {
 		auto desc = GetDescRect();
 		flags = pt.y >= desc.top ? PRGHT_DESCRIPTION : PRGHT_DESCSPLITTER;
 	}
@@ -607,6 +643,21 @@ LRESULT CPropertyGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	}
 	SetFocus();
 	switch (flags) {
+		case PRGHT_TOOLBAR: {
+			for (int i = 0; i < 2; i++) {
+				auto rc = GetToolButtonRect(i);
+				UINT view = i == 0 ? PRGV_CATEGORIZED : PRGV_ALPHABETICAL;
+				if (::PtInRect(&rc, pt) && view != m_View) {
+					SetView(view);
+					NMHDR nm{};
+					FireNotify(&nm, PRGN_VIEWCHANGED);
+				}
+			}
+			auto search = GetSearchRect();
+			if (::PtInRect(&search, pt))
+				::SetFocus(m_hSearch);   // the frame around the edit
+			break;
+		}
 		case PRGHT_DESCSPLITTER:
 			m_Drag = Drag::Description;
 			m_DragOffset = pt.y - GetDescRect().top;
@@ -790,7 +841,7 @@ LRESULT CPropertyGridCtrl::OnVScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		case SB_THUMBTRACK:
 		case SB_THUMBPOSITION: {
 			SCROLLINFO si{ sizeof(si), SIF_TRACKPOS };
-			GetScrollInfo(SB_VERT, &si);
+			::GetScrollInfo(m_hScroll, SB_CTL, &si);
 			top = si.nTrackPos;
 			break;
 		}
@@ -838,6 +889,11 @@ LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 			dropDown();
 		else
 			bHandled = FALSE;   // menu keys and the like
+		return 0;
+	}
+	if (wParam == 'F' && ::GetKeyState(VK_CONTROL) < 0 && m_ShowToolbar && m_hSearch) {
+		::SetFocus(m_hSearch);
+		::SendMessage(m_hSearch, EM_SETSEL, 0, -1);
 		return 0;
 	}
 	if (count == 0) {

@@ -59,9 +59,9 @@ static PgNode* AddCat(PgModel& m, LPCWSTR name, UINT flags = 0) {
 }
 
 // rows as "name/level" joined by spaces
-static std::wstring Rows(const PgModel& m, UINT view) {
+static std::wstring Rows(const PgModel& m, UINT view, const std::wstring& filter = {}) {
 	std::vector<PgRow> rows;
-	m.BuildRows(view, rows);
+	m.BuildRows(view, rows, filter);
 	std::wstring text;
 	for (auto& r : rows) {
 		if (!text.empty())
@@ -264,6 +264,51 @@ TEST(Rows_FlagsExpandIntoFlagRows) {
 	access->expanded = true;
 	CHECK_STR(Rows(m, PRGV_CATEGORIZED), L"Cat/0 Access/0 [Read]/1 [Write]/1 Child/1 After/0");
 	CHECK_STR(Rows(m, PRGV_ALPHABETICAL), L"Access/0 [Read]/1 [Write]/1 Child/1 After/0");
+}
+
+TEST(Rows_Filter) {
+	PgModel m;
+	auto app = AddCat(m, L"Appearance");
+	auto color = Add(m, app, L"Back Color");
+	color->value.Assign(PrgMakeString(L"blue"));
+	auto font = Add(m, app, L"Font");
+	auto size = Add(m, font, L"Size");
+	size->value.Assign(PrgMakeString(L"12"));
+	font->expanded = false;
+	auto behavior = AddCat(m, L"Behavior", PRGF_COLLAPSED);
+	Add(m, behavior, L"Name");
+	auto secret = Add(m, behavior, L"Secret", PRGK_STRING, PRGF_PASSWORD);
+	secret->value.Assign(PrgMakeString(L"color"));
+	Add(m, behavior, L"Gone", PRGK_STRING, PRGF_HIDDEN);
+	Add(m, nullptr, L"Colorless");
+
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"color"), L"Colorless/0 Appearance/0 Back Color/0");   // a password's value never matches
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"BLUE"), L"Appearance/0 Back Color/0");                // by the value
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"size"), L"Appearance/0 Font/0 Size/1");               // collapsed Font opened on the way
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"name"), L"Behavior/0 Name/0");                        // and a collapsed category
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"behav"), L"Behavior/0 Name/0 Secret/0");              // a matching category shows all it has
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"gone"), L"");                                         // hidden stays hidden
+	CHECK_STR(Rows(m, PRGV_ALPHABETICAL, L"color"), L"Back Color/0 Colorless/0");
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"zzz"), L"");
+	// no filter: as before
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED), L"Colorless/0 Appearance/0 Back Color/0 Font/0 Behavior/0");
+
+	PRGENUMITEM items[] = { { L"Read", 1 }, { L"Write", 2 } };
+	PRGITEMDESC d;
+	d.kind = PRGK_FLAGS;
+	d.pszName = L"Access";
+	d.value = PrgMakeInt(0);
+	d.enumItems = items;
+	d.enumCount = 2;
+	m.Insert(app, d, PRG_LAST);
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED, L"writ"), L"Appearance/0 Access/0 [Write]/1");          // a flag's name
+}
+
+TEST(Contains) {
+	CHECK(PgContains(L"Back Color", L"color"));
+	CHECK(PgContains(L"Back Color", L""));
+	CHECK(!PgContains(L"Back", L"Back Color"));
+	CHECK(PgContains(L"STRASSE", L"strasse"));
 }
 
 TEST(Flags_Helpers) {
@@ -587,6 +632,8 @@ int wmain() {
 	Run_Rows_AlphabeticalDropsCategories();
 	Run_Rows_FlagsExpandIntoFlagRows();
 	Run_Flags_Helpers();
+	Run_Rows_Filter();
+	Run_Contains();
 	Run_ValueFits();
 	Run_ValuesEqual();
 	Run_Format_Numbers();

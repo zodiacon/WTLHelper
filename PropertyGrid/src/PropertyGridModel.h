@@ -64,8 +64,10 @@ struct PgModel {
 	int     Count() const;
 
 	// the visible rows for a view (PRGV_*): hidden items and the children of collapsed items left out,
-	// categories without a visible property left out
-	void    BuildRows(UINT view, std::vector<PgRow>& rows) const;
+	// categories without a visible property left out. With a filter: only the items (and flags) whose name or
+	// shown value contains it, case-insensitively, and the items above them, expanded; or all of a category
+	// whose name contains it.
+	void    BuildRows(UINT view, std::vector<PgRow>& rows, const std::wstring& filter = {}) const;
 };
 
 // the value type a kind holds (PRGK_CUSTOM: PRGVT_EMPTY, meaning any)
@@ -73,6 +75,8 @@ UINT PgValueTypeOf(UINT kind);
 bool PgValueFits(UINT kind, const PRGVALUE& value);
 bool PgValuesEqual(const PRGVALUE& a, const PRGVALUE& b);
 bool PgIsAncestor(const PgNode* ancestor, const PgNode* node);
+bool PgContains(const std::wstring& text, const std::wstring& part);   // case-insensitive
+bool PgMatches(const PgNode* node, const std::wstring& filter);        // name or shown value
 // rows below the item when expanded: shown children, or a Flags item's flags (those with nonzero values)
 bool PgHasSubRows(const PgNode* node);
 bool PgIsFlagSet(LONGLONG mask, LONGLONG flag);   // all of its bits
