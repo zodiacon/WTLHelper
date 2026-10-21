@@ -21,11 +21,11 @@ NuGet dependencies (`packages.config`): Detours (`ThemeHelper.cpp` includes `<de
 
 ## Tests
 
-The automated tests are in `GraphControlTests/tests.cpp`, `WTLDockTests/` and `PropertyGridTests/tests.cpp`. Each is a console exe with a hand-rolled harness and no framework. The process exit code is the number of failed checks.
+The automated tests are in `GraphControlTests/tests.cpp`, `WTLDockTests/`, `PropertyGridTests/tests.cpp` and `LogViewTests/tests.cpp`. Each is a console exe with a hand-rolled harness and no framework. The process exit code is the number of failed checks.
 
 - Add a test with `TEST(Name) { CHECK(...); }`, then add a `Run_Name();` call in `wmain`. Registration is manual, so a test you don't call never runs.
 - To run a single test, comment out the other `Run_*` calls in `wmain`. There is no filter argument.
-- The tests mostly cover pure data models (`GraphData`, the dock layout, the property grid's item tree and formatters); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `HexTest`, `BasicDemo`).
+- The tests mostly cover pure data models (`GraphData`, the dock layout, the property grid's item tree and formatters, the log view's line storage); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `LogViewDemo`, `HexTest`, `BasicDemo`).
 
 ## Architecture
 
@@ -45,4 +45,5 @@ The rest of `WTLHelper` is a grab bag of standalone helpers: list views (`Virtua
 - `TreeListView`: tree+columns control registered as window class `WC_TreeListView`, with an opaque `HTLITEM` handle API in the style of common controls.
 - `HexControl`: hex editor control (`BufferManager`/`MemoryBuffer`/`Selection`).
 - `PropertyGrid`: categorized name/value editor (`CPropertyGridCtrl`, window class `WC_PropertyGrid`), self-drawn with GDI, with a C-style API: `HPRGITEM` handles, `PRGVALUE` tagged values, `PRGN_*` notifications. The `PRG` prefix avoids commctrl's Pager control, which owns `PGN_`/`PGF_`/`PGK_`. The window-free model (`src/PropertyGridModel.*`: the item tree, the rows of each view, formatting) is covered by `PropertyGridTests`; `PropertyGridDemo` is for checking by hand.
+- `LogView`: read-only log/text viewer for millions of lines (`CLogViewCtrl`, window class `WC_LogView`), GDI-drawn, `LGV`-prefixed C-style API (`LGVLINE`, `LGVSTYLE`, `LGVN_*` notifications). Lines are kept in chunked storage with an optional limit that drops the oldest, or supplied by the parent in virtual mode (`LGVN_GETDISPINFO`). `AppendLine`/`AppendLines`/`AppendText` may be called from any thread: from other threads lines are queued under a lock and taken in by a posted `WM_LGV_FLUSH`. The text area is a child window (`LgTextWindow`, which owns the scroll bars) whose messages are handled in the control's `ALT_MSG_MAP(1)`. The window-free model (`src/LogViewModel.*`) is covered by `LogViewTests`; `LogViewDemo` is for checking by hand.
 - `MarkdownViewLib`: `CMarkdownView`, a WTL wrapper around a Direct2D markdown viewer/editor ("Tinta"). Message handlers are thin pass-throughs to free `handleXxx(App&)` functions. Keep logic in those functions and not in the window class.
