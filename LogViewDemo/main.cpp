@@ -10,6 +10,13 @@
 
 #include "LogView.h"
 
+// WTLHelper's dark mode (its Detours and WIL come from vcpkg, set up for x64 only): the 32-bit demo has the
+// control's own dark colors only
+#ifdef _M_X64
+#define DEMO_WTLHELPER
+#include <WTLHelper.h>
+#endif
+
 #include <atomic>
 #include <iterator>
 #include <thread>
@@ -60,6 +67,8 @@ enum {
 	ID_SEARCH_REGEX,
 	ID_SEARCH_WHOLEWORD,
 	ID_FILTER_WHOLEWORD,
+	ID_VIEW_LOGTOOLBAR,   // not ID_VIEW_TOOLBAR: that's a WTL macro
+	ID_VIEW_DARKMODE,
 };
 
 // ---- Globals ----------------------------------------------------------------
@@ -285,6 +294,10 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_FILTER_EXCLUDE, g_filterFlags & LGVFF_EXCLUDE);
 	check(ID_FILTER_WARNINGS, g_warningsOnly);
 	check(ID_FILTER_WHOLEWORD, g_filterFlags & LGVFF_WHOLEWORD);
+	check(ID_VIEW_LOGTOOLBAR, g_log.IsToolbarVisible());
+#ifdef DEMO_WTLHELPER
+	check(ID_VIEW_DARKMODE, WTLHelper::IsDarkMode());
+#endif
 	check(ID_SEARCH_MATCHCASE, g_searchFlags & LGVFF_MATCHCASE);
 	check(ID_SEARCH_REGEX, g_searchFlags & LGVFF_REGEX);
 	check(ID_SEARCH_WHOLEWORD, g_searchFlags & LGVFF_WHOLEWORD);
@@ -307,6 +320,8 @@ static void UpdateStatus() {
 	text.AppendFormat(L" | %s", (PCWSTR)g_event);
 	::SendMessage(g_status, SB_SETTEXT, 0, (LPARAM)(PCWSTR)text);
 }
+
+static void LayoutChildren(HWND hwnd);
 
 static void OnCommand(HWND hwnd, UINT id) {
 	switch (id) {
@@ -380,6 +395,18 @@ static void OnCommand(HWND hwnd, UINT id) {
 			g_filterFlags ^= LGVFF_EXCLUDE;
 			ApplyFilter();
 			break;
+		case ID_VIEW_LOGTOOLBAR:
+			// the control's own toolbar, or the demo's boxes above it (which use the API)
+			g_log.ShowToolbar(!g_log.IsToolbarVisible());
+			::ShowWindow(g_filterEdit, g_log.IsToolbarVisible() ? SW_HIDE : SW_SHOW);
+			::ShowWindow(g_searchEdit, g_log.IsToolbarVisible() ? SW_HIDE : SW_SHOW);
+			LayoutChildren(hwnd);
+			break;
+#ifdef DEMO_WTLHELPER
+		case ID_VIEW_DARKMODE:
+			WTLHelper::SwitchToMode(WTLHelper::IsDarkMode() ? DarkModeKind::Classic : DarkModeKind::Dark, hwnd);
+			break;
+#endif
 		case ID_FILTER_WHOLEWORD:
 			g_filterFlags ^= LGVFF_WHOLEWORD;
 			ApplyFilter();
@@ -472,6 +499,14 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			UpdateStatus();
 			break;
 		}
+		case LGVN_FILTERCHANGED:
+			SetEventText(L"Filter changed in the toolbar");
+			UpdateStatus();
+			break;
+		case LGVN_SEARCHCHANGED:
+			SetEventText(L"Search changed in the toolbar");
+			UpdateStatus();
+			break;
 		case LGVN_FILTERDONE:
 			SetEventText(L"Filter done");
 			UpdateStatus();
@@ -513,7 +548,7 @@ static void LayoutChildren(HWND hwnd) {
 	::SendMessage(g_status, WM_SIZE, 0, 0);
 	RECT rcStatus;
 	::GetWindowRect(g_status, &rcStatus);
-	int filterHeight = ::MulDiv(24, ::GetDpiForWindow(hwnd), 96);
+	int filterHeight = g_log.IsToolbarVisible() ? 0 : ::MulDiv(24, ::GetDpiForWindow(hwnd), 96);
 	::SetWindowPos(g_filterEdit, nullptr, 0, 0, rc.right / 2, filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 	::SetWindowPos(g_searchEdit, nullptr, rc.right / 2, 0, rc.right - rc.right / 2, filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 	g_log.SetWindowPos(nullptr, 0, filterHeight, rc.right, rc.bottom - (rcStatus.bottom - rcStatus.top) - filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -556,6 +591,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			// appended before the window exists: taken in when it's created
 			g_log.AppendLine(L"LogView demo. File > Start Stream appends from another thread; View > Virtual Mode shows 10 million lines.");
 			g_log.AppendLine(L"A tab\there, and\ttwo more\tstops.", LGVL_INFO);
+			g_log.ShowToolbar(true);
+			::ShowWindow(g_filterEdit, SW_HIDE);
+			::ShowWindow(g_searchEdit, SW_HIDE);
 			g_log.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN,
 				WS_EX_CLIENTEDGE, IDC_LOG);
 			AddLines(200);
@@ -619,6 +657,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	InitCommonControlsEx(&icc);
 
 	_Module.Init(nullptr, hInstance);
+#ifdef DEMO_WTLHELPER
+	WTLHelper::InitDarkMode(DarkModeKind::Classic);
+#endif
 
 	WNDCLASSEXW wc{};
 	wc.cbSize = sizeof(wc);
@@ -642,7 +683,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	HMENU hView = CreatePopupMenu();
 	AppendMenuW(hView, MF_STRING, ID_VIEW_FOLLOW, L"&Follow Tail\tCtrl+T");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_LINENUMBERS, L"&Line Numbers");
-	AppendMenuW(hView, MF_STRING, ID_VIEW_DARK, L"Dar&k Colors");
+	AppendMenuW(hView, MF_STRING, ID_VIEW_LOGTOOLBAR, L"Built-in Tool&bar");
+	AppendMenuW(hView, MF_STRING, ID_VIEW_DARK, L"Dar&k Colors (SetColors)");
+#ifdef DEMO_WTLHELPER
+	AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"WTLHelper Dark &Mode");
+#endif
 	AppendMenuW(hView, MF_STRING, ID_VIEW_TABS8, L"&Tab Size 8");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_LIMIT, L"Line Li&mit 100,000");
 	AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
@@ -708,7 +753,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 			OnCommand(hwnd, ::GetKeyState(VK_SHIFT) < 0 ? ID_SEARCH_PREV : ID_SEARCH_NEXT);
 			continue;
 		}
-		if (!TranslateAccelerator(hwnd, hAccel, &msg)) {
+		// the control's own keys while it has the focus and its toolbar: Ctrl+F, Ctrl+L, F3
+		HWND focus = ::GetFocus();
+		bool inLog = g_log.IsToolbarVisible() && (focus == g_log || ::IsChild(g_log, focus));
+		bool logKey = msg.message == WM_KEYDOWN && (msg.wParam == VK_F3 ||
+			(::GetKeyState(VK_CONTROL) < 0 && (msg.wParam == 'F' || msg.wParam == 'L')));
+		if ((inLog && logKey) || !TranslateAccelerator(hwnd, hAccel, &msg)) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}

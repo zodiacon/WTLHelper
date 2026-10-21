@@ -155,6 +155,7 @@ void CLogViewCtrl::Select(LGVPOS anchor, LGVPOS caret, bool notify, bool keepDes
 	if ((hadSelection || HasSelection()) && m_Text->IsWindow())
 		m_Text->Invalidate();
 	UpdateCaret();
+	NotifyCaretAccessible();
 	if (notify) {
 		NMHDR hdr{};
 		FireNotify(&hdr, LGVN_SELCHANGED);
@@ -454,6 +455,13 @@ LRESULT CLogViewCtrl::OnTextKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled)
 			else
 				MoveCaret(m_Caret, false, true);
 			break;
+		case 'F':
+		case 'L':
+			if (ctrl && m_ShowToolbar)
+				FocusBox(wParam == 'F');
+			else
+				bHandled = FALSE;
+			break;
 		case VK_F3:
 			if (ctrl) {
 				// the selected text (one line of it), or the word at the caret
@@ -648,6 +656,7 @@ LRESULT CLogViewCtrl::OnTextSetCursor(UINT, WPARAM, LPARAM lParam, BOOL& bHandle
 LRESULT CLogViewCtrl::OnTextFocus(UINT uMsg, WPARAM, LPARAM, BOOL& bHandled) {
 	if (uMsg == WM_SETFOCUS) {
 		CreateSystemCaret();
+		NotifyCaretAccessible();
 	}
 	else if (m_HasCaret) {
 		::DestroyCaret();

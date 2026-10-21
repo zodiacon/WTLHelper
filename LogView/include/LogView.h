@@ -146,6 +146,8 @@ struct LGVCOLORS {
 #define LGVN_SELCHANGED     (LGVN_FIRST - 4)   // NMHDR; the user moved the caret or changed the selection
 #define LGVN_FILTERDONE     (LGVN_FIRST - 5)   // NMHDR; SetFilter's pass over the lines is complete
 #define LGVN_SEARCHDONE     (LGVN_FIRST - 6)   // NMLGVSEARCH; FindNext (or F3) is done
+#define LGVN_FILTERCHANGED  (LGVN_FIRST - 7)   // NMHDR; the user changed the filter in the toolbar
+#define LGVN_SEARCHCHANGED  (LGVN_FIRST - 8)   // NMHDR; the user changed the search in the toolbar
 
 struct NMLGVLINE {
 	NMHDR  hdr;
@@ -182,6 +184,7 @@ class LgMatcher;
 class LgRowMap;
 struct LgRule;
 class LgTextWindow;
+class LgAccessible;
 
 class CLogViewCtrl : public ATL::CWindowImpl<CLogViewCtrl> {
 public:
@@ -190,6 +193,7 @@ public:
 	CLogViewCtrl();
 	~CLogViewCtrl();
 	friend class LgTextWindow;
+	friend class LgAccessible;
 
 	enum : UINT { WM_LGV_FLUSH = WM_USER + 100 };   // posted to itself: appended lines to take in
 
@@ -198,11 +202,20 @@ public:
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_PRINTCLIENT, OnPaint)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_SETFONT, OnSetFont)
 		MESSAGE_HANDLER(WM_GETFONT, OnGetFont)
 		MESSAGE_HANDLER(WM_LGV_FLUSH, OnFlush)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_COMMAND, OnCommand)
+		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColor)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnToolButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnToolButtonDown)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnToolMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnToolMouseLeave)
+		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
@@ -222,6 +235,7 @@ public:
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnTextCaptureChanged)
 		MESSAGE_HANDLER(WM_TIMER, OnTextTimer)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnTextSetCursor)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnTextGetObject)
 		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnTextRButtonDown)
 		MESSAGE_HANDLER(WM_CONTEXTMENU, OnTextContextMenu)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnTextMouseWheel)
@@ -315,6 +329,18 @@ public:
 	bool    IsSearching() const;
 	void    CancelSearch();                           // no notification
 
+	// ---- Toolbar ------------------------------------------------------------------------
+	//
+	// Optional, above the lines: a filter box and a search box, each with its options (match case, regex, and
+	// exclude or whole word), buttons that show or hide the errors, warnings, info and debug lines (the filter's
+	// level mask), and Follow. Ctrl+L goes to the filter box, Ctrl+F to the search box. In the search box Enter
+	// or F3 finds the next match, Shift+Enter or Shift+F3 the previous one; Escape clears a box, or when it's
+	// empty goes back to the lines. The toolbar sets the filter, search and following as the API does (and
+	// LGVN_FILTERCHANGED, LGVN_SEARCHCHANGED, LGVN_FOLLOWCHANGED tell), and shows what the app sets with them.
+
+	void    ShowToolbar(bool show);
+	bool    IsToolbarVisible() const;
+
 	// ---- Caret and selection ----------------------------------------------------------
 	//
 	// The selection runs from the anchor to the caret. Clicking places the caret, dragging or Shift selects;
@@ -355,6 +381,13 @@ private:
 	LRESULT OnGetFont(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnFlush(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCommand(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnToolButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnToolMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnToolMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 
@@ -370,6 +403,7 @@ private:
 	LRESULT OnTextCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTextGetObject(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextRButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextContextMenu(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTextMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
@@ -403,6 +437,27 @@ private:
 	bool    SearchStep(DWORD budgetMs);               // true when done
 	void    EndSearch(bool found, size_t line, size_t start, size_t end);
 	void    StartFind(bool forward, bool byUser);
+
+	// toolbar (LogViewToolbar.cpp)
+	enum class Tool { None, FilterCase, FilterRegex, FilterExclude, SearchCase, SearchWord, SearchRegex,
+		LevelError, LevelWarning, LevelInfo, LevelDebug, Follow, Count };
+	int     ToolbarHeight() const;
+	void    ToolLayout(RECT* tools, RECT* boxes) const;   // tools[Tool::Count], boxes[2] (filter, search)
+	RECT    GetToolRect(Tool tool) const;             // the control's client coords
+	RECT    GetBoxRect(bool search) const;            // a box's frame
+	static DWORD LevelBits(Tool tool);                // a level button's levels (1 << level)
+	Tool    ToolHitTest(POINT pt) const;
+	bool    IsToolOn(Tool tool) const;
+	void    CreateToolbar();
+	void    PositionToolbar();
+	void    PaintToolbar(WTL::CDCHandle dc, const LGVCOLORS& c);
+	void    InvalidateToolbar();
+	void    PressTool(Tool tool);
+	void    ApplyToolbarFilter(bool notify);
+	void    ApplyToolbarSearch(bool notify);
+	void    SyncToolbar(bool filter, bool search);    // the boxes show the filter and search in effect
+	void    FocusBox(bool search);
+	static LRESULT CALLBACK BoxSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 	// layout and scrolling
 	int     Scale(int dips) const;
@@ -439,6 +494,10 @@ private:
 	void    HandleCaretKey(WPARAM key, bool ctrl, bool shift);
 	LGVPOS  WordLeft(LGVPOS pos) const;
 	LGVPOS  WordRight(LGVPOS pos) const;
+
+	// accessibility (LogViewAccessible.cpp)
+	void    DisconnectAccessible();
+	void    NotifyCaretAccessible();                  // the caret's line is the focused item
 
 	// painting
 	void    Paint(WTL::CDCHandle dc, const RECT& rcPaint);
@@ -524,5 +583,23 @@ private:
 	LGVSTYLE                      m_LevelStyles[32];
 	std::wstring                  m_DrawBuffer;      // a line with its tabs expanded
 	mutable std::wstring          m_VirtualText;     // the last line the parent supplied
+
+	// toolbar
+	bool                          m_ShowToolbar = false;
+	HWND                          m_hFilterBox = nullptr;
+	HWND                          m_hSearchBox = nullptr;
+	HWND                          m_hToolTip = nullptr;
+	WTL::CFont                    m_UiFont;          // the toolbar's (the message font at the DPI)
+	int                           m_UiTextHeight = 16;
+	UINT                          m_FilterBoxFlags = 0;   // the boxes' options, kept when their regex is bad
+	UINT                          m_SearchBoxFlags = 0;
+	bool                          m_FilterBad = false;    // the box's regex doesn't compile: a red frame
+	bool                          m_SearchBad = false;
+	bool                          m_SettingBox = false;   // the toolbar sets a box's text: no EN_CHANGE round trip
+	Tool                          m_HotTool = Tool::None;
+	bool                          m_TrackingLeave = false;
+	WTL::CBrush                   m_BoxBrush;        // WM_CTLCOLOREDIT
+	LgAccessible*                 m_Accessible = nullptr;   // made on the first WM_GETOBJECT; cut off in OnDestroy
+	COLORREF                      m_BoxBrushColor = CLR_INVALID;
 	size_t                        m_SeenColumns = 0; // virtual mode: the widest line painted so far
 };

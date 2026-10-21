@@ -106,6 +106,8 @@
     <ClCompile Include="src\LogViewSelection.cpp" />
     <ClCompile Include="src\LogViewFilter.cpp" />
     <ClCompile Include="src\LogViewSearch.cpp" />
+    <ClCompile Include="src\LogViewToolbar.cpp" />
+    <ClCompile Include="src\LogViewAccessible.cpp" />
     <ClCompile Include="src\LogViewModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -17,6 +17,7 @@ BOOL CLogViewCtrl::SetSearch(const LGVSEARCH* search) {
 	*m_Search = std::move(next);
 	if (m_Text->IsWindow())
 		m_Text->Invalidate();
+	SyncToolbar(false, true);
 	return TRUE;
 }
 

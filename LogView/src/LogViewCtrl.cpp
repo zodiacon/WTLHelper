@@ -70,6 +70,8 @@ LRESULT CLogViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	UpdateFonts();
 	UpdateMetrics();
 	m_Text->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS);
+	if (m_ShowToolbar)
+		CreateToolbar();
 	Layout();
 	Flush();   // lines appended before the window existed
 	return 0;
@@ -77,6 +79,11 @@ LRESULT CLogViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CLogViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	m_ThreadId = 0;   // appending threads queue from now on
+	// a popup made with a child as its parent is owned by the top-level window: it would outlive the control
+	if (m_hToolTip)
+		::DestroyWindow(m_hToolTip);
+	m_hToolTip = m_hFilterBox = m_hSearchBox = nullptr;   // the boxes go with the control
+	DisconnectAccessible();
 	bHandled = FALSE;
 	return 0;
 }
@@ -92,7 +99,7 @@ LRESULT CLogViewCtrl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CLogViewCtrl::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
-	return 1;   // the text area covers it all, and paints through a memory DC
+	return 1;   // the toolbar and the text area paint all of it, through memory DCs
 }
 
 // ---- Metrics and fonts -------------------------------------------------------------
@@ -125,6 +132,17 @@ void CLogViewCtrl::UpdateFonts() {
 			m_Fonts[i].DeleteObject();
 		m_Fonts[i].CreateFontIndirect(&variant);
 	}
+
+	// the toolbar's: the message font
+	NONCLIENTMETRICSW ncm{ sizeof(ncm) };
+	::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, m_Dpi);
+	if (!m_UiFont.IsNull())
+		m_UiFont.DeleteObject();
+	m_UiFont.CreateFontIndirect(&ncm.lfMessageFont);
+	for (auto box : { m_hFilterBox, m_hSearchBox }) {
+		if (box)
+			::SendMessage(box, WM_SETFONT, (WPARAM)m_UiFont.m_hFont, TRUE);
+	}
 }
 
 void CLogViewCtrl::UpdateMetrics() {
@@ -134,7 +152,11 @@ void CLogViewCtrl::UpdateMetrics() {
 	dc.GetTextMetrics(&tm);
 	SIZE digit{};
 	dc.GetTextExtent(L"0", 1, &digit);
+	dc.SelectFont(m_UiFont);
+	TEXTMETRICW tmUi{};
+	dc.GetTextMetrics(&tmUi);
 	dc.SelectFont(old);
+	m_UiTextHeight = tmUi.tmHeight;
 
 	m_LineHeight = tm.tmHeight + Scale(1);
 	m_TextOffset = (m_LineHeight - tm.tmHeight) / 2;
@@ -188,6 +210,18 @@ LRESULT CLogViewCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 LRESULT CLogViewCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	if (m_Text->IsWindow())
 		m_Text->Invalidate();
+	Invalidate();   // the toolbar
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CLogViewCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	// the toolbar's font (and the default font's size doesn't come from the settings)
+	if (wParam == SPI_SETNONCLIENTMETRICS) {
+		UpdateFonts();
+		UpdateMetrics();
+		Layout();
+	}
 	bHandled = FALSE;
 	return 0;
 }
@@ -199,9 +233,12 @@ void CLogViewCtrl::Layout() {
 		return;
 	RECT rc;
 	GetClientRect(&rc);
+	rc.top = std::min((int)rc.bottom, ToolbarHeight());
 	m_Text->SetWindowPos(nullptr, &rc, SWP_NOZORDER | SWP_NOACTIVATE);
+	PositionToolbar();
 	UpdateScrollBars();
 	m_Text->Invalidate();
+	InvalidateToolbar();
 }
 
 LRESULT CLogViewCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
@@ -298,6 +335,7 @@ void CLogViewCtrl::SetFollow(bool follow, bool notify) {
 	if (follow == m_Follow)
 		return;
 	m_Follow = follow;
+	InvalidateToolbar();
 	if (notify) {
 		NMHDR hdr{};
 		FireNotify(&hdr, LGVN_FOLLOWCHANGED);

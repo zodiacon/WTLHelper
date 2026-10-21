@@ -67,6 +67,7 @@ BOOL CLogViewCtrl::SetFilter(const LGVFILTER* filter) {
 		UpdateScrollBars();
 		m_Text->Invalidate();
 	}
+	SyncToolbar(true, false);
 	return TRUE;
 }
 
