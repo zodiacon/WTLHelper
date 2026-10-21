@@ -126,7 +126,8 @@ PgNode* PgModel::Insert(PgNode* parent, const PRGITEMDESC& desc, PgNode* after) 
 			p += wcslen(p) + 1;
 		node->filter.assign(desc.pszFilter, p - desc.pszFilter);
 	}
-	node->expanded = (desc.flags & PRGF_COLLAPSED) == 0;
+	// a Flags item's flag rows are a detail: shown on request
+	node->expanded = (desc.flags & PRGF_COLLAPSED) == 0 && desc.kind != PRGK_FLAGS;
 	node->parent = parent;
 
 	auto result = node.get();
@@ -185,10 +186,29 @@ int PgModel::Count() const {
 
 // ---- Rows -----------------------------------------------------------------------
 
+bool PgHasSubRows(const PgNode* node) {
+	if (std::any_of(node->children.begin(), node->children.end(), [](auto& c) { return (c->flags & PRGF_HIDDEN) == 0; }))
+		return true;
+	return node->kind == PRGK_FLAGS
+		&& std::any_of(node->enumItems.begin(), node->enumItems.end(), [](auto& e) { return e.value != 0; });
+}
+
+bool PgIsFlagSet(LONGLONG mask, LONGLONG flag) {
+	return flag != 0 && (mask & flag) == flag;
+}
+
+LONGLONG PgSetFlag(LONGLONG mask, LONGLONG flag, bool set) {
+	return set ? mask | flag : mask & ~flag;
+}
+
 static void AddWithChildren(const PgNode* node, int level, std::vector<PgRow>& rows) {
 	rows.push_back({ const_cast<PgNode*>(node), level });
 	if (!node->expanded)
 		return;
+	if (node->kind == PRGK_FLAGS)
+		for (int i = 0; i < (int)node->enumItems.size(); i++)
+			if (node->enumItems[i].value != 0)
+				rows.push_back({ const_cast<PgNode*>(node), level + 1, i });
 	for (auto& c : node->children)
 		if ((c->flags & PRGF_HIDDEN) == 0)
 			AddWithChildren(c.get(), level + 1, rows);

@@ -1,5 +1,6 @@
 #include "PropertyGrid.h"
 #include "PropertyGridModel.h"
+#include "PropertyGridCheckList.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,13 +17,10 @@ static void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color) {
 	dc.ExtTextOut(0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
 }
 
-static bool HasShownChildren(const PgNode* node) {
-	return std::any_of(node->children.begin(), node->children.end(), [](auto& c) { return (c->flags & PRGF_HIDDEN) == 0; });
-}
-
 // ---- Construction ------------------------------------------------------------------
 
 CPropertyGridCtrl::CPropertyGridCtrl() : m_Model(std::make_unique<PgModel>()) {
+	std::fill(std::begin(m_CustomColors), std::end(m_CustomColors), RGB(255, 255, 255));
 }
 
 CPropertyGridCtrl::~CPropertyGridCtrl() {
@@ -52,6 +50,8 @@ LRESULT CPropertyGridCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	if (m_hErrorTip)
 		::DestroyWindow(m_hErrorTip);
 	m_hErrorTip = nullptr;
+	if (m_CheckList && m_CheckList->IsWindow())
+		m_CheckList->DestroyWindow();
 	bHandled = FALSE;
 	return 0;
 }
@@ -215,9 +215,10 @@ void CPropertyGridCtrl::Rebuild() {
 	m_RebuildPending = false;
 	m_Model->BuildRows(m_View, m_Rows);
 
-	if (m_Selected && RowOf(m_Selected) < 0) {
-		// hidden by a collapse or a view change: the nearest visible ancestor takes over
-		auto node = m_Selected->parent;
+	if (m_Selected && SelectedRow() < 0) {
+		// hidden by a collapse or a view change: the item's own row (for a flag row), or the nearest
+		// visible ancestor, takes over
+		auto node = m_SelFlag >= 0 ? m_Selected : m_Selected->parent;
 		while (node && node != &m_Model->root && RowOf(node) < 0)
 			node = node->parent;
 		SelectRow(node && node != &m_Model->root ? RowOf(node) : -1);
@@ -231,12 +232,19 @@ void CPropertyGridCtrl::Rebuild() {
 int CPropertyGridCtrl::RowOf(const PgNode* node) const {
 	if (!node)
 		return -1;
-	auto it = std::find_if(m_Rows.begin(), m_Rows.end(), [=](auto& r) { return r.node == node; });
+	auto it = std::find_if(m_Rows.begin(), m_Rows.end(), [=](auto& r) { return r.node == node && r.flag < 0; });
+	return it == m_Rows.end() ? -1 : (int)(it - m_Rows.begin());
+}
+
+int CPropertyGridCtrl::SelectedRow() const {
+	if (!m_Selected)
+		return -1;
+	auto it = std::find_if(m_Rows.begin(), m_Rows.end(), [=](auto& r) { return r.node == m_Selected && r.flag == m_SelFlag; });
 	return it == m_Rows.end() ? -1 : (int)(it - m_Rows.begin());
 }
 
 bool CPropertyGridCtrl::HasVisibleChildren(const PgNode* node) const {
-	return node && HasShownChildren(node);
+	return node && PgHasSubRows(node);
 }
 
 void CPropertyGridCtrl::ExpandAncestors(PgNode* node) {
@@ -259,18 +267,21 @@ bool CPropertyGridCtrl::SetExpanded(PgNode* node, bool expand, bool notify) {
 }
 
 void CPropertyGridCtrl::SelectRow(int row, bool notify) {
-	auto node = row >= 0 && row < (int)m_Rows.size() ? m_Rows[row].node : nullptr;
-	if (node == m_Selected)
+	bool valid = row >= 0 && row < (int)m_Rows.size();
+	auto node = valid ? m_Rows[row].node : nullptr;
+	int flag = valid ? m_Rows[row].flag : -1;
+	if (node == m_Selected && flag == m_SelFlag)
 		return;
 	if (m_Editing)
 		EndEditCore(true, true);   // a bad value is dropped, as when the focus goes elsewhere
 	auto old = m_Selected;
 	m_Selected = node;
+	m_SelFlag = flag;
 	if (node)
-		EnsureVisible(node);
+		EnsureRowVisible(row);
 	if (IsWindow())
 		Invalidate();
-	if (notify) {
+	if (notify && node != old) {   // moving among an item's flag rows keeps the item selected
 		NMPRGSELCHANGE nm{};
 		nm.hItemOld = old;
 		nm.hItemNew = node;
@@ -364,7 +375,7 @@ int CPropertyGridCtrl::TextLeft(const PgRow& row) const {
 void CPropertyGridCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, const PRGCOLORS& c) {
 	auto& r = m_Rows[row];
 	auto node = r.node;
-	bool selected = node == m_Selected;
+	bool selected = node == m_Selected && r.flag == m_SelFlag;
 	bool focused = ::GetFocus() == m_hWnd;
 	auto selBack = focused ? c.crSelBack : c.crSelBackInactive;
 	auto selText = focused ? c.crSelText : c.crSelTextInactive;
@@ -389,6 +400,28 @@ void CPropertyGridCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, con
 	RECT rcName{ m_Margin, rc.top, splitX, rc.bottom - 1 };
 	if (selected)
 		FillSolid(dc, rcName, selBack);
+	RECT line{ m_Margin, rc.bottom - 1, rc.right, rc.bottom };
+	RECT split{ splitX, rc.top, splitX + 1, rc.bottom };
+
+	if (r.flag >= 0) {
+		// a flag of a Flags item: its name and a check box
+		auto& e = node->enumItems[r.flag];
+		RECT rcText{ TextLeft(r), rc.top, splitX - m_Pad, rc.bottom - 1 };
+		dc.SetTextColor(selected ? selText : c.crText);
+		dc.DrawText(e.name.c_str(), (int)e.name.size(), &rcText, textFormat);
+		auto& v = node->value.value;
+		bool set = v.type == PRGVT_INT && PgIsFlagSet(v.llVal, e.value);
+		auto textColor = IsReadOnly(node) ? c.crDisabledText : c.crText;
+		auto box = GetCheckBoxRect(row);
+		DrawCheckBox(dc, box, set, textColor, c.crBack);
+		RECT rcValue{ box.right + m_Pad, rc.top, rc.right - m_Pad, rc.bottom - 1 };
+		dc.SetTextColor(textColor);
+		dc.DrawText(set ? L"True" : L"False", -1, &rcValue, textFormat);
+		FillSolid(dc, line, c.crGridLine);
+		FillSolid(dc, split, c.crGridLine);
+		return;
+	}
+
 	if (HasVisibleChildren(node))
 		DrawGlyph(dc, GlyphCenter(r), rc, node->expanded, selected && r.level > 0 ? selText : c.crText);
 	RECT rcText{ TextLeft(r), rc.top, splitX - m_Pad, rc.bottom - 1 };
@@ -415,6 +448,21 @@ void CPropertyGridCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, con
 		dc.FrameRect(&rcSwatch, frame);
 		rcValue.left = rcSwatch.right + m_Pad;
 	}
+	auto button = selected ? GetButton(node) : Button::None;
+	if (button != Button::None) {
+		auto rcButton = GetButtonRect(row);
+		FillSolid(dc, rcButton, c.crCategoryBack);
+		WTL::CBrush frame;
+		frame.CreateSolidBrush(c.crGridLine);
+		dc.FrameRect(&rcButton, frame);
+		if (button == Button::DropDown)
+			DrawGlyph(dc, (rcButton.left + rcButton.right) / 2, rcButton, true, c.crText);
+		else {
+			dc.SetTextColor(c.crText);
+			dc.DrawText(L"...", 3, &rcButton, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+		}
+		rcValue.right = rcButton.left - m_Pad;
+	}
 	if (node != m_Editing) {   // else the editor shows the text
 		auto text = PgFormatValue(*node);
 		auto old = modified ? dc.SelectFont(m_BoldFont) : nullptr;
@@ -425,9 +473,7 @@ void CPropertyGridCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, con
 	}
 
 	// grid lines
-	RECT line{ m_Margin, rc.bottom - 1, rc.right, rc.bottom };
 	FillSolid(dc, line, c.crGridLine);
-	RECT split{ splitX, rc.top, splitX + 1, rc.bottom };
 	FillSolid(dc, split, c.crGridLine);
 }
 
@@ -490,12 +536,14 @@ void CPropertyGridCtrl::PaintDescription(WTL::CDCHandle dc, const RECT& rc, cons
 	dc.SetTextColor(c.crDescText);
 	auto old = dc.SelectFont(m_BoldFont);
 	RECT rcName = rcText;
-	int height = dc.DrawText(m_Selected->name.c_str(), (int)m_Selected->name.size(), &rcName,
-		DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+	// a flag row: the flag's name, and which item it belongs to
+	auto& name = m_SelFlag >= 0 ? m_Selected->enumItems[m_SelFlag].name : m_Selected->name;
+	auto description = m_SelFlag >= 0 ? L"A flag of " + m_Selected->name + L"." : m_Selected->description;
+	int height = dc.DrawText(name.c_str(), (int)name.size(), &rcName, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 	dc.SelectFont(m_hFont);
 	rcText.top += height + m_Pad;
 	if (rcText.top < rcText.bottom)
-		dc.DrawText(m_Selected->description.c_str(), (int)m_Selected->description.size(), &rcText,
+		dc.DrawText(description.c_str(), (int)description.size(), &rcText,
 			DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
 	dc.SelectFont(old);
 }
@@ -503,8 +551,13 @@ void CPropertyGridCtrl::PaintDescription(WTL::CDCHandle dc, const RECT& rc, cons
 // ---- Hit testing ----------------------------------------------------------------------
 
 HPRGITEM CPropertyGridCtrl::HitTest(POINT pt, UINT* pFlags) const {
+	int row = HitRow(pt, pFlags);
+	return row >= 0 ? m_Rows[row].node : nullptr;
+}
+
+int CPropertyGridCtrl::HitRow(POINT pt, UINT* pFlags) const {
 	UINT flags = PRGHT_NOWHERE;
-	PgNode* node = nullptr;
+	int hit = -1;
 	auto grid = GetGridRect();
 	if (m_ShowDesc && pt.y >= grid.bottom) {
 		auto desc = GetDescRect();
@@ -514,14 +567,20 @@ HPRGITEM CPropertyGridCtrl::HitTest(POINT pt, UINT* pFlags) const {
 		int row = m_TopRow + (pt.y - grid.top) / m_RowHeight;
 		if (row < (int)m_Rows.size()) {
 			auto& r = m_Rows[row];
-			node = r.node;
+			auto node = r.node;
+			hit = row;
 			if (node->IsCategory())
 				flags = pt.x < m_Margin ? PRGHT_GLYPH : PRGHT_NAME;
 			else {
 				int splitX = GetSplitX();
+				RECT button{};
+				if (node == m_Selected && r.flag == m_SelFlag && r.flag < 0 && GetButton(node) != Button::None)
+					button = GetButtonRect(row);
 				if (std::abs(pt.x - splitX) <= m_SplitterGrip)
 					flags = PRGHT_SPLITTER;
-				else if (HasVisibleChildren(node) && std::abs(pt.x - GlyphCenter(r)) <= std::max(m_Indent, m_Margin) / 2)
+				else if (::PtInRect(&button, pt))
+					flags = PRGHT_BUTTON;
+				else if (r.flag < 0 && HasVisibleChildren(node) && std::abs(pt.x - GlyphCenter(r)) <= std::max(m_Indent, m_Margin) / 2)
 					flags = PRGHT_GLYPH;
 				else
 					flags = pt.x < splitX ? PRGHT_NAME : PRGHT_VALUE;
@@ -530,7 +589,7 @@ HPRGITEM CPropertyGridCtrl::HitTest(POINT pt, UINT* pFlags) const {
 	}
 	if (pFlags)
 		*pFlags = flags;
-	return node;
+	return hit;
 }
 
 // ---- Mouse ----------------------------------------------------------------------------
@@ -538,8 +597,10 @@ HPRGITEM CPropertyGridCtrl::HitTest(POINT pt, UINT* pFlags) const {
 LRESULT CPropertyGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	UINT flags;
-	auto node = HitTest(pt, &flags);
-	if (m_hEditor && node == m_Editing && flags == PRGHT_VALUE) {
+	int row = HitRow(pt, &flags);
+	auto node = row >= 0 ? m_Rows[row].node : nullptr;
+	int flag = row >= 0 ? m_Rows[row].flag : -1;
+	if (m_hEditor && node == m_Editing && flag < 0 && flags == PRGHT_VALUE) {
 		// around the editor, in its cell: keep editing
 		::SetFocus(m_hEditor);
 		return 0;
@@ -557,18 +618,25 @@ LRESULT CPropertyGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 			SetCapture();
 			break;
 		case PRGHT_GLYPH:
-			SelectRow(RowOf(node));
+			SelectRow(row);
 			SetExpanded(node, !node->expanded, true);
 			break;
 		case PRGHT_NAME:
-			SelectRow(RowOf(node));
+			SelectRow(row);
+			break;
+		case PRGHT_BUTTON:
+			PressButton(node);
 			break;
 		case PRGHT_VALUE: {
-			int row = RowOf(node);
 			SelectRow(row);
-			if (m_Selected != node)
+			if (m_Selected != node || m_SelFlag != flag)
 				break;
-			if (PgEditType(*node) == PRGVT_BOOL) {
+			if (flag >= 0) {
+				auto box = GetCheckBoxRect(row);
+				if (::PtInRect(&box, pt))
+					ToggleFlag(node, flag);
+			}
+			else if (PgEditType(*node) == PRGVT_BOOL) {
 				auto box = GetCheckBoxRect(row);
 				if (::PtInRect(&box, pt))
 					ToggleBool(node);
@@ -589,9 +657,12 @@ LRESULT CPropertyGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 LRESULT CPropertyGridCtrl::OnLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	UINT flags;
-	auto node = HitTest(pt, &flags);
+	int row = HitRow(pt, &flags);
+	auto node = row >= 0 ? m_Rows[row].node : nullptr;
 	bool onRow = flags == PRGHT_NAME || flags == PRGHT_VALUE;
-	if (onRow && !node->IsCategory() && PgEditType(*node) == PRGVT_BOOL)
+	if (onRow && m_Rows[row].flag >= 0)
+		ToggleFlag(node, m_Rows[row].flag);
+	else if (onRow && !node->IsCategory() && PgEditType(*node) == PRGVT_BOOL)
 		ToggleBool(node);
 	else if (flags == PRGHT_NAME && node->kind == PRGK_ENUM)
 		CycleEnum(node);
@@ -653,9 +724,9 @@ LRESULT CPropertyGridCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	SetFocus();
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	UINT flags;
-	auto node = HitTest(pt, &flags);
-	if (node)
-		SelectRow(RowOf(node));
+	int row = HitRow(pt, &flags);
+	if (row >= 0)
+		SelectRow(row);
 	return 0;
 }
 
@@ -747,7 +818,14 @@ LRESULT CPropertyGridCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	int count = (int)m_Rows.size();
 	auto node = m_Selected;
+	bool onFlag = m_SelFlag >= 0;   // a flag row of a Flags item: a check box
 	auto dropDown = [&] {
+		if (onFlag)
+			return;
+		if (GetButton(node) != Button::None) {
+			PressButton(node);   // a dialog, or a Flags item's check list
+			return;
+		}
 		if (!BeginEdit(node))
 			return;
 		if (m_Editor == Editor::Combo)
@@ -766,9 +844,10 @@ LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 		bHandled = FALSE;
 		return 0;
 	}
-	int row = RowOf(m_Selected);
+	int row = SelectedRow();
 	int page = GetPageRows();
-	bool isBool = node && !node->IsCategory() && PgEditType(*node) == PRGVT_BOOL;
+	bool isBool = node && !onFlag && !node->IsCategory() && PgEditType(*node) == PRGVT_BOOL;
+	bool canExpand = node && !onFlag && HasVisibleChildren(node);
 	switch (wParam) {
 		case VK_UP:    SelectRow(row < 0 ? 0 : std::max(row - 1, 0)); break;
 		case VK_DOWN:  SelectRow(std::min(row + 1, count - 1)); break;
@@ -777,13 +856,15 @@ LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 		case VK_HOME:  SelectRow(0); break;
 		case VK_END:   SelectRow(count - 1); break;
 		case VK_LEFT:
-			if (node && node->expanded && HasVisibleChildren(node))
+			if (onFlag)
+				SelectRow(RowOf(node));
+			else if (canExpand && node->expanded)
 				SetExpanded(node, false, true);
 			else if (node && RowOf(node->parent) >= 0)
 				SelectRow(RowOf(node->parent));
 			break;
 		case VK_RIGHT:
-			if (node && HasVisibleChildren(node)) {
+			if (canExpand) {
 				if (!node->expanded)
 					SetExpanded(node, true, true);
 				else
@@ -791,15 +872,15 @@ LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 			}
 			break;
 		case VK_ADD:
-			if (node && HasVisibleChildren(node))
+			if (canExpand)
 				SetExpanded(node, true, true);
 			break;
 		case VK_SUBTRACT:
-			if (node && HasVisibleChildren(node))
+			if (canExpand)
 				SetExpanded(node, false, true);
 			break;
 		case VK_MULTIPLY:
-			if (node) {
+			if (node && !onFlag) {
 				auto expand = [](auto& self, PgNode* n) -> void {
 					n->expanded = true;
 					for (auto& c : n->children)
@@ -810,21 +891,27 @@ LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 			}
 			break;
 		case VK_RETURN:
-			if (isBool)
+			if (onFlag)
+				ToggleFlag(node, m_SelFlag);
+			else if (isBool)
 				ToggleBool(node);
+			else if (node && PgEditType(*node) == PRGVT_FONT && GetButton(node) != Button::None)
+				PressButton(node);   // a font can't be typed in
 			else if (CanEdit(node))
 				BeginEdit(node);
 			else if (node && HasVisibleChildren(node))
 				SetExpanded(node, !node->expanded, true);
 			break;
 		case VK_SPACE:
-			if (isBool)
+			if (onFlag)
+				ToggleFlag(node, m_SelFlag);
+			else if (isBool)
 				ToggleBool(node);
 			else
 				bHandled = FALSE;   // WM_CHAR starts editing with it
 			break;
 		case VK_F2:
-			if (node)
+			if (node && !onFlag)
 				BeginEdit(node);
 			break;
 		case VK_F4:
@@ -840,7 +927,8 @@ LRESULT CPropertyGridCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 LRESULT CPropertyGridCtrl::OnChar(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	// typing on a selected property starts editing it with that character
 	auto node = m_Selected;
-	if (wParam < L' ' || !node || m_Editing || !CanEdit(node) || IsReadOnly(node))
+	if (wParam < L' ' || !node || m_SelFlag >= 0 || m_Editing || !CanEdit(node) || IsReadOnly(node)
+		|| PgEditType(*node) == PRGVT_FONT)
 		return 0;
 	if (!BeginEdit(node))
 		return 0;
@@ -886,7 +974,7 @@ BOOL CPropertyGridCtrl::DeleteItem(HPRGITEM hItem) {
 		// the row after the subtree, else the one before it
 		int row = RowOf(node);
 		int next = row + 1;
-		while (next < (int)m_Rows.size() && PgIsAncestor(node, m_Rows[next].node))
+		while (next < (int)m_Rows.size() && (m_Rows[next].node == node || PgIsAncestor(node, m_Rows[next].node)))
 			next++;
 		SelectRow(row < 0 ? -1 : next < (int)m_Rows.size() ? next : row - 1);
 	}
@@ -1120,7 +1208,10 @@ BOOL CPropertyGridCtrl::SelectItem(HPRGITEM hItem) {
 }
 
 void CPropertyGridCtrl::EnsureVisible(HPRGITEM hItem) {
-	int row = RowOf(Node(hItem));
+	EnsureRowVisible(RowOf(Node(hItem)));
+}
+
+void CPropertyGridCtrl::EnsureRowVisible(int row) {
 	if (row < 0 || !IsWindow())
 		return;
 	int page = GetPageRows();

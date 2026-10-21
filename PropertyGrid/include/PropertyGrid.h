@@ -43,12 +43,12 @@ enum : UINT {
 	PRGK_REAL,       // PRGVT_REAL; precision
 	PRGK_BOOL,       // PRGVT_BOOL; drawn as a check box
 	PRGK_ENUM,       // PRGVT_INT, one of the enum items
-	PRGK_FLAGS,      // PRGVT_INT, an OR of the enum items
-	PRGK_COLOR,      // PRGVT_COLOR; swatch + #RRGGBB
-	PRGK_FONT,       // PRGVT_FONT
-	PRGK_PATH,       // PRGVT_STRING; file (or folder with PRGF_FOLDER)
+	PRGK_FLAGS,      // PRGVT_INT, an OR of the enum items; expands into a check box per item
+	PRGK_COLOR,      // PRGVT_COLOR; swatch + #RRGGBB; "..." opens ChooseColor
+	PRGK_FONT,       // PRGVT_FONT; "..." opens ChooseFont
+	PRGK_PATH,       // PRGVT_STRING; "..." opens a file dialog (a folder one with PRGF_FOLDER)
 	PRGK_DATETIME,   // PRGVT_DATETIME
-	PRGK_CUSTOM,     // any value type; the app supplies the editing
+	PRGK_CUSTOM,     // any value type, edited as text; with PRGF_BUTTON the app supplies a dialog
 };
 
 // ---- Values -------------------------------------------------------------------
@@ -101,7 +101,7 @@ struct PRGENUMITEM {
 #define PRGF_EDITABLE   0x0020   // Enum: free text allowed besides the items
 #define PRGF_PASSWORD   0x0040   // String: masked
 #define PRGF_HIDDEN     0x0080   // not shown
-#define PRGF_COLLAPSED  0x0100   // starts collapsed (items with children start expanded otherwise)
+#define PRGF_COLLAPSED  0x0100   // starts collapsed (items with children start expanded otherwise; Flags always collapsed)
 #define PRGF_DATEONLY   0x0200   // DateTime: no time part
 
 // ---- Item description (InsertItem) ---------------------------------------------------
@@ -139,6 +139,7 @@ enum : UINT {
 	PRGHT_SPLITTER,     // between the name and value columns
 	PRGHT_DESCSPLITTER, // above the description pane
 	PRGHT_DESCRIPTION,
+	PRGHT_BUTTON,      // the selected item's "..." or drop-down button
 };
 
 // ---- Colors ---------------------------------------------------------------------------
@@ -167,6 +168,8 @@ struct PRGCOLORS {
 #define PRGN_BEGINEDIT      (PRGN_FIRST - 3)   // NMPRGITEM; nonzero = don't edit
 #define PRGN_VALUECHANGING  (PRGN_FIRST - 4)   // NMPRGVALUE; nonzero = reject (with szError), or change newValue
 #define PRGN_VALUECHANGED   (PRGN_FIRST - 5)   // NMPRGVALUE; the user changed a value
+#define PRGN_BUTTONCLICK    (PRGN_FIRST - 6)   // NMPRGITEM; pt: the button's bottom left, screen coords;
+                                               // nonzero = handled (else the kind's own dialog, if it has one)
 
 struct NMPRGITEM {
 	NMHDR    hdr;
@@ -204,6 +207,8 @@ struct NMPRGVALUE {
 
 struct PgModel;
 struct PgRow;
+class PgCheckList;
+struct PgStoredValue;
 
 class CPropertyGridCtrl : public ATL::CWindowImpl<CPropertyGridCtrl> {
 public:
@@ -211,6 +216,7 @@ public:
 
 	CPropertyGridCtrl();
 	~CPropertyGridCtrl();
+	friend class PgCheckList;
 
 	// posted to itself by the editing code
 	enum : UINT { WM_PRG_CHECKFOCUS = WM_USER + 100, WM_PRG_COMBOCLOSED };
@@ -314,7 +320,9 @@ public:
 	// The user edits a value by clicking it, pressing Enter or F2, or typing; F4 or Alt+Down opens a
 	// drop-down. Enter commits, Escape cancels, Tab commits and moves to the next property. Bool values
 	// toggle with a click on the check box, Space or a double click; a double click on an enum's name
-	// selects the next value.
+	// selects the next value. The selected item's "..." button (or F4, Alt+Down) opens its dialog: color,
+	// font, file or folder, or PRGN_BUTTONCLICK for PRGF_BUTTON; a Flags item's drop-down button opens a
+	// check list, and its flags are also check boxes in rows below it.
 
 	BOOL    BeginEdit(HPRGITEM hItem = nullptr);      // nullptr: the selected item; selects it
 	BOOL    EndEdit(bool commit = true);              // FALSE if the new value was rejected (the editor stays)
@@ -395,6 +403,18 @@ private:
 	bool    HandleEditorKey(HWND hWnd, UINT msg, WPARAM wParam);
 	static LRESULT CALLBACK EditorSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
+	// buttons, dialogs, flags
+	enum class Button { None, Ellipsis, DropDown };
+	Button  GetButton(const PgNode* node) const;
+	RECT    GetButtonRect(int row) const;
+	void    PressButton(PgNode* node);                // the "..." or drop-down button, by mouse or key
+	bool    RunDialog(PgNode* node, PgStoredValue& value);
+	void    ToggleFlag(PgNode* node, int flag);
+	void    OpenCheckList();
+	void    CloseCheckList(bool restoreText);
+	bool    IsCheckListOpen() const;
+	void    OnCheckListChanged(LONGLONG mask);
+
 	// layout
 	int     Scale(int dips) const;
 	void    UpdateMetrics();
@@ -413,6 +433,9 @@ private:
 	void    ExpandAncestors(PgNode* node);
 	bool    SetExpanded(PgNode* node, bool expand, bool notify);
 	void    SelectRow(int row, bool notify = true);
+	int     SelectedRow() const;                      // the row of m_Selected (and m_SelFlag)
+	void    EnsureRowVisible(int row);
+	int     HitRow(POINT pt, UINT* pFlags) const;     // -1 if not on a row
 	bool    HasVisibleChildren(const PgNode* node) const;
 
 	// painting
@@ -433,6 +456,7 @@ private:
 	std::unique_ptr<PgModel> m_Model;
 	std::vector<PgRow>       m_Rows;
 	PgNode*                  m_Selected = nullptr;
+	int                      m_SelFlag = -1;         // >= 0: one of m_Selected's flag rows
 	int                      m_TopRow = 0;
 	UINT                     m_View = PRGV_CATEGORIZED;
 	int                      m_UpdateCount = 0;
@@ -477,4 +501,7 @@ private:
 	int                      m_EditInitialIndex = -1;// combo box
 	SYSTEMTIME               m_EditInitialTime{};    // date picker, as it first reads back
 	bool                     m_Ending = false;       // EndEditCore running: focus changes it causes are ignored
+	std::unique_ptr<PgCheckList> m_CheckList;        // a Flags item's drop-down
+	std::wstring             m_CheckListInitialText;
+	COLORREF                 m_CustomColors[16];     // ChooseColor's, kept between uses
 };

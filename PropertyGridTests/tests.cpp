@@ -66,7 +66,9 @@ static std::wstring Rows(const PgModel& m, UINT view) {
 	for (auto& r : rows) {
 		if (!text.empty())
 			text += L' ';
-		text += r.node->name + L'/' + std::to_wstring(r.level);
+		// a flag row shows as [flag]
+		auto name = r.flag >= 0 ? L"[" + r.node->enumItems[r.flag].name + L"]" : r.node->name;
+		text += name + L'/' + std::to_wstring(r.level);
 	}
 	return text;
 }
@@ -240,6 +242,54 @@ TEST(Rows_CollapsedAndHidden) {
 	CHECK_STR(Rows(m, PRGV_CATEGORIZED), L"A/0 B/0 B1/0");
 	a->flags |= PRGF_HIDDEN;
 	CHECK_STR(Rows(m, PRGV_CATEGORIZED), L"B/0 B1/0");
+}
+
+TEST(Rows_FlagsExpandIntoFlagRows) {
+	PgModel m;
+	auto cat = AddCat(m, L"Cat");
+	PRGENUMITEM items[] = { { L"None", 0 }, { L"Read", 1 }, { L"Write", 2 } };
+	PRGITEMDESC d;
+	d.kind = PRGK_FLAGS;
+	d.pszName = L"Access";
+	d.value = PrgMakeInt(1);
+	d.enumItems = items;
+	d.enumCount = 3;
+	auto access = m.Insert(cat, d, PRG_LAST);
+	Add(m, access, L"Child");
+	Add(m, cat, L"After");
+	// collapsed at first, whatever PRGF_COLLAPSED says
+	CHECK(!access->expanded);
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED), L"Cat/0 Access/0 After/0");
+	// the flags (not the zero one) come before real children
+	access->expanded = true;
+	CHECK_STR(Rows(m, PRGV_CATEGORIZED), L"Cat/0 Access/0 [Read]/1 [Write]/1 Child/1 After/0");
+	CHECK_STR(Rows(m, PRGV_ALPHABETICAL), L"Access/0 [Read]/1 [Write]/1 Child/1 After/0");
+}
+
+TEST(Flags_Helpers) {
+	CHECK(PgIsFlagSet(3, 1));
+	CHECK(PgIsFlagSet(3, 3));
+	CHECK(!PgIsFlagSet(1, 3));   // all its bits
+	CHECK(!PgIsFlagSet(7, 0));   // a zero flag is never "set"
+	CHECK(PgSetFlag(1, 6, true) == 7);
+	CHECK(PgSetFlag(7, 6, false) == 1);
+	CHECK(PgSetFlag(1, 3, false) == 0);
+
+	PgModel m;
+	PRGENUMITEM zero[] = { { L"None", 0 } };
+	PRGITEMDESC d;
+	d.kind = PRGK_FLAGS;
+	d.pszName = L"F";
+	d.enumItems = zero;
+	d.enumCount = 1;
+	auto f = m.Insert(nullptr, d, PRG_LAST);
+	CHECK(!PgHasSubRows(f));     // only a zero flag: nothing to show
+	auto p = Add(m, nullptr, L"P");
+	CHECK(!PgHasSubRows(p));
+	Add(m, p, L"Hidden", PRGK_STRING, PRGF_HIDDEN);
+	CHECK(!PgHasSubRows(p));
+	Add(m, p, L"Shown");
+	CHECK(PgHasSubRows(p));
 }
 
 TEST(Rows_AlphabeticalDropsCategories) {
@@ -535,6 +585,8 @@ int wmain() {
 	Run_Rows_CategorizedPutsLoosePropertiesFirst();
 	Run_Rows_CollapsedAndHidden();
 	Run_Rows_AlphabeticalDropsCategories();
+	Run_Rows_FlagsExpandIntoFlagRows();
+	Run_Flags_Helpers();
 	Run_ValueFits();
 	Run_ValuesEqual();
 	Run_Format_Numbers();

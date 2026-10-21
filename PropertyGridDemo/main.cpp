@@ -144,7 +144,7 @@ static void Populate() {
 	d = {};
 	d.kind = PRGK_FLAGS;
 	d.pszName = L"Access";
-	d.pszDescription = L"A combination of flags. Bits without a name show as hex.";
+	d.pszDescription = L"A combination of flags: expand it for a check box per flag, or open the drop-down. Bits without a name show as hex.";
 	d.value = PrgMakeInt(1 | 4 | 0x100);
 	d.enumItems = access;
 	d.enumCount = (int)std::size(access);
@@ -173,6 +173,8 @@ static void Populate() {
 	Add(pos, PRGK_INTEGER, L"X", L"The horizontal coordinate.", PrgMakeInt(10));
 	auto y = Add(pos, PRGK_INTEGER, L"Y", L"The vertical coordinate.", PrgMakeInt(20));
 	Add(y, PRGK_STRING, L"Deeper", L"Sub-properties nest to any depth.", PrgMakeString(L"level 2"));
+	Add(misc, PRGK_CUSTOM, L"Shape", L"PRGF_BUTTON: the demo shows a menu (PRGN_BUTTONCLICK); the text can be typed too.",
+		PrgMakeString(L"Circle"), PRGF_BUTTON);
 	auto size = Add(misc, PRGK_CUSTOM, L"Size", L"Starts collapsed (PRGF_COLLAPSED).", PrgMakeString(L"300 x 200"), PRGF_COLLAPSED);
 	Add(size, PRGK_INTEGER, L"Width", nullptr, PrgMakeInt(300));
 	Add(size, PRGK_INTEGER, L"Height", nullptr, PrgMakeInt(200));
@@ -318,6 +320,24 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 				return TRUE;
 			}
 			break;
+		}
+		case PRGN_BUTTONCLICK: {
+			auto nm = (NMPRGITEM*)hdr;
+			if (g_grid.GetItemName(nm->hItem) != L"Shape")
+				return FALSE;   // the grid's own dialog
+			static const wchar_t* const shapes[] = { L"Circle", L"Square", L"Triangle" };
+			HMENU menu = CreatePopupMenu();
+			for (int i = 0; i < (int)std::size(shapes); i++)
+				AppendMenuW(menu, MF_STRING, i + 1, shapes[i]);
+			int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, nm->pt.x, nm->pt.y, 0, hwnd, nullptr);
+			DestroyMenu(menu);
+			if (cmd > 0) {
+				auto value = PrgMakeString(shapes[cmd - 1]);
+				g_grid.SetValue(nm->hItem, &value);
+				text.Format(L"Shape picked: %s", shapes[cmd - 1]);
+				Status(text);
+			}
+			return TRUE;
 		}
 		case PRGN_VALUECHANGED: {
 			auto nm = (NMPRGVALUE*)hdr;

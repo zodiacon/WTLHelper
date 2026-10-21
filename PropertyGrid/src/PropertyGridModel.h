@@ -47,10 +47,11 @@ struct PgNode {
 	bool IsCategory() const { return kind == PRGK_CATEGORY; }
 };
 
-// One line of the grid.
+// One line of the grid: an item, or one flag of a Flags item (a check box below it).
 struct PgRow {
 	PgNode* node;
-	int     level;   // properties right below a category (or at the top) are level 0
+	int     level;     // properties right below a category (or at the top) are level 0
+	int     flag = -1; // >= 0: the row of node->enumItems[flag]
 };
 
 struct PgModel {
@@ -72,6 +73,10 @@ UINT PgValueTypeOf(UINT kind);
 bool PgValueFits(UINT kind, const PRGVALUE& value);
 bool PgValuesEqual(const PRGVALUE& a, const PRGVALUE& b);
 bool PgIsAncestor(const PgNode* ancestor, const PgNode* node);
+// rows below the item when expanded: shown children, or a Flags item's flags (those with nonzero values)
+bool PgHasSubRows(const PgNode* node);
+bool PgIsFlagSet(LONGLONG mask, LONGLONG flag);   // all of its bits
+LONGLONG PgSetFlag(LONGLONG mask, LONGLONG flag, bool set);
 
 // the display text of a node's value (or of another value formatted the node's way)
 std::wstring PgFormatValue(const PgNode& node);

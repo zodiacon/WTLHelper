@@ -2,8 +2,16 @@
 
 #include "PropertyGrid.h"
 #include "PropertyGridModel.h"
+#include "PropertyGridCheckList.h"
 
 #include <algorithm>
+#include <commdlg.h>
+#include <shobjidl.h>
+
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
 
 static constexpr UINT_PTR EditorSubclassId = 1;
 
@@ -85,7 +93,7 @@ BOOL CPropertyGridCtrl::BeginEdit(HPRGITEM hItem) {
 		return TRUE;
 	if (m_Editing && !EndEditCore(true, false))
 		return FALSE;
-	if (node != m_Selected && !SelectItem(node))
+	if ((node != m_Selected || m_SelFlag >= 0) && !SelectItem(node))
 		return FALSE;
 	if (!CanEdit(node))
 		return FALSE;
@@ -185,17 +193,15 @@ bool CPropertyGridCtrl::CreateEditor(PgNode* node) {
 	}
 	else {
 		DWORD style = WS_CHILD | ES_AUTOHSCROLL;
-		if (readOnly)
-			style |= ES_READONLY;
+		if (readOnly || type == PRGVT_FONT)
+			style |= ES_READONLY;   // a font comes from its dialog
 		if ((node->flags & PRGF_PASSWORD) && type == PRGVT_STRING)
 			style |= ES_PASSWORD;
 		m_hEditor = ::CreateWindowExW(0, WC_EDITW, L"", style, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
 		if (m_hEditor) {
 			::SendMessage(m_hEditor, WM_SETFONT, (WPARAM)m_hFont, 0);
 			::SendMessage(m_hEditor, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
-			m_EditInitialText = PgEditText(*node);
-			::SetWindowTextW(m_hEditor, m_EditInitialText.c_str());
-			::SendMessage(m_hEditor, EM_SETSEL, 0, -1);
+			m_EditInitialText = PgEditText(*node);   // set once the edit has its size (below)
 			if (node->kind == PRGK_INTEGER && !readOnly && (node->minVal != LLONG_MIN || node->maxVal != LLONG_MAX)) {
 				// not a buddy: the arrows step the value in UDN_DELTAPOS, so any 64-bit range works
 				m_hSpin = ::CreateWindowExW(0, UPDOWN_CLASSW, nullptr, WS_CHILD, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
@@ -215,12 +221,18 @@ bool CPropertyGridCtrl::CreateEditor(PgNode* node) {
 	if (m_hEditorEdit)
 		::SetWindowSubclass(m_hEditorEdit, EditorSubclassProc, EditorSubclassId, (DWORD_PTR)this);
 	PositionEditor();
+	if (m_Editor == Editor::Edit) {
+		// with no width yet, selecting all would scroll the text to its end, and it would stay so
+		::SetWindowTextW(m_hEditor, m_EditInitialText.c_str());
+		::SendMessage(m_hEditor, EM_SETSEL, 0, -1);
+	}
 	::SetFocus(m_hEditor);
 	Invalidate();   // the value's text moves to the editor
 	return true;
 }
 
 void CPropertyGridCtrl::DestroyEditor() {
+	CloseCheckList(false);
 	HideError();
 	HWND editor = m_hEditor;
 	HWND spin = m_hSpin;
@@ -241,6 +253,7 @@ void CPropertyGridCtrl::DestroyEditor() {
 void CPropertyGridCtrl::PositionEditor() {
 	if (!m_hEditor)
 		return;
+	CloseCheckList(false);   // it would be left behind
 	int row = RowOf(m_Editing);
 	auto grid = GetGridRect();
 	auto rc = GetValueRect(row);
@@ -252,14 +265,15 @@ void CPropertyGridCtrl::PositionEditor() {
 		return;
 	}
 	const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+	int cellRight = GetButton(m_Editing) != Button::None ? GetButtonRect(row).left - 1 : rc.right;
 	switch (m_Editor) {
 		case Editor::Edit: {
 			int left = ValueTextLeft(m_Editing, rc);
-			int right = rc.right - m_Pad;
+			int right = cellRight - m_Pad;
 			if (m_hSpin) {
 				int width = ::GetSystemMetricsForDpi(SM_CXVSCROLL, m_Dpi);
-				::SetWindowPos(m_hSpin, nullptr, rc.right - width, rc.top, width, rc.bottom - rc.top, flags);
-				right = rc.right - width - 1;
+				::SetWindowPos(m_hSpin, nullptr, cellRight - width, rc.top, width, rc.bottom - rc.top, flags);
+				right = cellRight - width - 1;
 			}
 			int top = rc.top + (rc.bottom - rc.top - m_TextHeight) / 2;
 			::SetWindowPos(m_hEditor, nullptr, left, top, std::max(0, right - left), m_TextHeight, flags);
@@ -267,7 +281,7 @@ void CPropertyGridCtrl::PositionEditor() {
 		}
 		case Editor::Combo: {
 			// the height given is the list's; the selection field's comes from the item height
-			::SetWindowPos(m_hEditor, nullptr, rc.left, rc.top, rc.right - rc.left, m_RowHeight * 12, flags);
+			::SetWindowPos(m_hEditor, nullptr, rc.left, rc.top, cellRight - rc.left, m_RowHeight * 12, flags);
 			RECT field;
 			::GetWindowRect(m_hEditor, &field);
 			int top = rc.top + (rc.bottom - rc.top - (field.bottom - field.top)) / 2;
@@ -275,7 +289,7 @@ void CPropertyGridCtrl::PositionEditor() {
 			break;
 		}
 		case Editor::Date:
-			::SetWindowPos(m_hEditor, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, flags);
+			::SetWindowPos(m_hEditor, nullptr, rc.left, rc.top, cellRight - rc.left, rc.bottom - rc.top, flags);
 			break;
 	}
 }
@@ -408,10 +422,10 @@ void CPropertyGridCtrl::StepInteger(int delta) {
 }
 
 void CPropertyGridCtrl::MoveToProperty(int direction, bool edit) {
-	int row = RowOf(m_Selected);
+	int row = SelectedRow();
 	for (int r = row + direction; r >= 0 && r < (int)m_Rows.size(); r += direction) {
 		auto node = m_Rows[r].node;
-		if (node->IsCategory() || (edit && !CanEdit(node)))
+		if (node->IsCategory() || (edit && (m_Rows[r].flag >= 0 || !CanEdit(node))))
 			continue;
 		SelectRow(r);
 		if (edit)
@@ -428,7 +442,7 @@ void CPropertyGridCtrl::ShowError(const std::wstring& text) {
 	if (m_hEditor && ::IsWindowVisible(m_hEditor))
 		::GetWindowRect(m_hEditor, &rc);
 	else {
-		int row = RowOf(m_Selected);
+		int row = SelectedRow();
 		if (row < m_TopRow)
 			return;
 		rc = GetValueRect(row);
@@ -473,6 +487,7 @@ LRESULT CALLBACK CPropertyGridCtrl::EditorSubclassProc(HWND hWnd, UINT msg, WPAR
 			// Enter, Escape and Tab are the grid's, also in a dialog
 			return ::DefSubclassProc(hWnd, msg, wParam, lParam) | DLGC_WANTALLKEYS;
 		case WM_KEYDOWN:
+		case WM_SYSKEYDOWN:
 			self->HideError();
 			if (self->HandleEditorKey(hWnd, msg, wParam))
 				return 0;   // the editor may be gone by now
@@ -480,12 +495,54 @@ LRESULT CALLBACK CPropertyGridCtrl::EditorSubclassProc(HWND hWnd, UINT msg, WPAR
 		case WM_CHAR:
 			if (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB)
 				return 0;   // handled on WM_KEYDOWN; a single-line edit would beep
+			if (wParam == L' ' && self->IsCheckListOpen())
+				return 0;   // toggled a flag on WM_KEYDOWN
 			break;
 	}
 	return ::DefSubclassProc(hWnd, msg, wParam, lParam);
 }
 
-bool CPropertyGridCtrl::HandleEditorKey(HWND, UINT, WPARAM key) {
+bool CPropertyGridCtrl::HandleEditorKey(HWND, UINT msg, WPARAM key) {
+	if (IsCheckListOpen()) {
+		// the check list has no focus of its own: the edit's keys drive it
+		switch (key) {
+			case VK_UP:
+			case VK_DOWN:
+				if (msg == WM_SYSKEYDOWN)
+					CloseCheckList(false);   // Alt+Up, Alt+Down
+				else
+					m_CheckList->MoveCurrent(key == VK_UP ? -1 : 1);
+				return true;
+			case VK_SPACE:
+				m_CheckList->ToggleCurrent();
+				return true;
+			case VK_F4:
+				CloseCheckList(false);
+				return true;
+			case VK_ESCAPE:
+				CloseCheckList(true);   // the text as it was before the list opened
+				return true;
+			case VK_SHIFT:
+			case VK_CONTROL:
+			case VK_MENU:
+				return false;
+			default:
+				CloseCheckList(false);   // Enter and Tab then commit as usual; typing would make it stale
+				break;
+		}
+	}
+	bool hasButton = m_Editor == Editor::Edit && GetButton(m_Editing) != Button::None;
+	if (msg == WM_SYSKEYDOWN) {
+		if (key == VK_DOWN && hasButton) {
+			PressButton(m_Editing);
+			return true;
+		}
+		return false;
+	}
+	if (key == VK_F4 && hasButton) {
+		PressButton(m_Editing);
+		return true;
+	}
 	bool dropped = (m_Editor == Editor::Combo && ::SendMessage(m_hEditor, CB_GETDROPPEDSTATE, 0, 0))
 		|| (m_Editor == Editor::Date && DateTime_GetMonthCal(m_hEditor));
 	bool shift = ::GetKeyState(VK_SHIFT) < 0;
@@ -589,4 +646,226 @@ LRESULT CPropertyGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		m_EditorBrushColor = c.crBack;
 	}
 	return (LRESULT)m_EditorBrush.m_hBrush;
+}
+
+// ---- Buttons and dialogs -------------------------------------------------------------------
+
+CPropertyGridCtrl::Button CPropertyGridCtrl::GetButton(const PgNode* node) const {
+	if (!node || node->IsCategory() || IsReadOnly(node))
+		return Button::None;
+	if (node->flags & PRGF_BUTTON)
+		return Button::Ellipsis;
+	switch (node->kind) {
+		case PRGK_COLOR:
+		case PRGK_FONT:
+		case PRGK_PATH:
+			return Button::Ellipsis;
+		case PRGK_FLAGS:
+			return PgHasSubRows(node) ? Button::DropDown : Button::None;
+	}
+	return Button::None;
+}
+
+RECT CPropertyGridCtrl::GetButtonRect(int row) const {
+	auto rc = GetValueRect(row);
+	int width = std::min(m_RowHeight, Scale(22));
+	return { rc.right - width, rc.top, rc.right, rc.bottom };
+}
+
+void CPropertyGridCtrl::PressButton(PgNode* node) {
+	auto button = GetButton(node);
+	if (button == Button::DropDown) {
+		if (IsCheckListOpen()) {
+			CloseCheckList(false);
+			return;
+		}
+		if (m_Editing != node && !BeginEdit(node))
+			return;
+		if (m_Editor == Editor::Edit) {
+			::SetFocus(m_hEditor);
+			OpenCheckList();
+		}
+		return;
+	}
+	if (button != Button::Ellipsis)
+		return;
+	if (m_Editing && !EndEditCore(true, false))
+		return;   // the typed text first; it's bad
+	NMPRGITEM nm{};
+	nm.hItem = node;
+	nm.lParam = node->lParam;
+	int row = RowOf(node);
+	if (row >= 0) {
+		auto rc = GetButtonRect(row);
+		nm.pt = { rc.left, rc.bottom };
+		ClientToScreen(&nm.pt);
+	}
+	if (FireNotify(&nm.hdr, PRGN_BUTTONCLICK))
+		return;   // the parent's own dialog
+	PgStoredValue value;
+	if (!RunDialog(node, value))
+		return;
+	std::wstring error;
+	if (!CommitValue(node, value.value, error))
+		ShowError(error);
+}
+
+static bool PickPath(HWND owner, const PgNode& node, std::wstring& path) {
+	// the dialogs are COM objects, and the thread may not have COM yet
+	HRESULT init = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+	bool ok = false;
+	{
+		bool folder = (node.flags & PRGF_FOLDER) != 0;
+		bool save = (node.flags & PRGF_SAVEFILE) && !folder;
+		ATL::CComPtr<IFileDialog> dlg;
+		if (SUCCEEDED(dlg.CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog))) {
+			FILEOPENDIALOGOPTIONS options = 0;
+			dlg->GetOptions(&options);
+			dlg->SetOptions(options | FOS_FORCEFILESYSTEM | (folder ? FOS_PICKFOLDERS : 0));
+			dlg->SetTitle(node.name.c_str());
+
+			// the filter: name and pattern pairs, '\0' separated
+			std::vector<std::wstring> parts;
+			for (size_t start = 0; start < node.filter.size();) {
+				auto end = node.filter.find(L'\0', start);
+				if (end == node.filter.npos)
+					end = node.filter.size();
+				parts.push_back(node.filter.substr(start, end - start));
+				start = end + 1;
+			}
+			std::vector<COMDLG_FILTERSPEC> specs;
+			specs.reserve(parts.size() / 2);
+			for (size_t i = 0; i + 1 < parts.size(); i += 2)
+				specs.push_back({ parts[i].c_str(), parts[i + 1].c_str() });
+			if (!folder && !specs.empty())
+				dlg->SetFileTypes((UINT)specs.size(), specs.data());
+
+			// start at the current path
+			auto& current = node.value.value;
+			std::wstring currentPath = current.type == PRGVT_STRING && current.pszVal ? current.pszVal : L"";
+			auto slash = currentPath.find_last_of(L"\\/");
+			std::wstring dir = folder ? currentPath : slash == currentPath.npos ? L"" : currentPath.substr(0, slash);
+			if (!folder)
+				dlg->SetFileName(slash == currentPath.npos ? currentPath.c_str() : currentPath.c_str() + slash + 1);
+			ATL::CComPtr<IShellItem> start;
+			if (!dir.empty() && SUCCEEDED(::SHCreateItemFromParsingName(dir.c_str(), nullptr, IID_PPV_ARGS(&start))))
+				dlg->SetFolder(start);
+
+			ATL::CComPtr<IShellItem> result;
+			PWSTR name = nullptr;
+			if (SUCCEEDED(dlg->Show(owner)) && SUCCEEDED(dlg->GetResult(&result))
+				&& SUCCEEDED(result->GetDisplayName(SIGDN_FILESYSPATH, &name))) {
+				path = name;
+				::CoTaskMemFree(name);
+				ok = true;
+			}
+		}
+	}
+	if (SUCCEEDED(init))
+		::CoUninitialize();
+	return ok;
+}
+
+bool CPropertyGridCtrl::RunDialog(PgNode* node, PgStoredValue& value) {
+	auto owner = ::GetAncestor(m_hWnd, GA_ROOT);
+	auto& current = node->value.value;
+	switch (node->kind) {
+		case PRGK_COLOR: {
+			CHOOSECOLORW cc{ sizeof(cc) };
+			cc.hwndOwner = owner;
+			cc.rgbResult = current.type == PRGVT_COLOR ? current.clrVal : RGB(0, 0, 0);
+			cc.lpCustColors = m_CustomColors;
+			cc.Flags = CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR;
+			if (!::ChooseColorW(&cc))
+				return false;
+			value.Assign(PrgMakeColor(cc.rgbResult));
+			return true;
+		}
+		case PRGK_FONT: {
+			LOGFONTW lf{};
+			if (current.type == PRGVT_FONT)
+				lf = current.lfVal;
+			else {
+				::GetObjectW(m_hFont, sizeof(lf), &lf);
+				lf.lfHeight = ::MulDiv(lf.lfHeight, 96, m_Dpi);
+			}
+			// the dialog works in the screen DC's units, the value in 96-DPI ones
+			HDC screen = ::GetDC(nullptr);
+			int dpi = ::GetDeviceCaps(screen, LOGPIXELSY);
+			::ReleaseDC(nullptr, screen);
+			lf.lfHeight = ::MulDiv(lf.lfHeight, dpi, 96);
+			CHOOSEFONTW cf{ sizeof(cf) };
+			cf.hwndOwner = owner;
+			cf.lpLogFont = &lf;
+			cf.Flags = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS | CF_NOVERTFONTS;
+			if (!::ChooseFontW(&cf))
+				return false;
+			lf.lfHeight = ::MulDiv(lf.lfHeight, 96, dpi);
+			value.Assign(PrgMakeFont(lf));
+			return true;
+		}
+		case PRGK_PATH: {
+			std::wstring path;
+			if (!PickPath(owner, *node, path))
+				return false;
+			value.Assign(PrgMakeString(path.c_str()));
+			return true;
+		}
+	}
+	return false;   // PRGF_BUTTON on another kind: the parent's to handle
+}
+
+// ---- Flags -------------------------------------------------------------------------------
+
+void CPropertyGridCtrl::ToggleFlag(PgNode* node, int flag) {
+	if (IsReadOnly(node)) {
+		::MessageBeep(MB_OK);
+		return;
+	}
+	auto& v = node->value.value;
+	LONGLONG mask = v.type == PRGVT_INT ? v.llVal : 0;
+	auto bits = node->enumItems[flag].value;
+	std::wstring error;
+	if (!CommitValue(node, PrgMakeInt(PgSetFlag(mask, bits, !PgIsFlagSet(mask, bits))), error))
+		ShowError(error);
+}
+
+bool CPropertyGridCtrl::IsCheckListOpen() const {
+	return m_CheckList && m_CheckList->IsOpen();
+}
+
+void CPropertyGridCtrl::OpenCheckList() {
+	if (m_Editor != Editor::Edit || !m_Editing)
+		return;
+	// from the text as typed so far, if it parses
+	auto text = WindowText(m_hEditor);
+	PgStoredValue parsed;
+	std::wstring error;
+	auto& v = m_Editing->value.value;
+	LONGLONG mask = PgParseValue(*m_Editing, text, parsed, error) ? parsed.value.llVal : v.type == PRGVT_INT ? v.llVal : 0;
+	m_CheckListInitialText = text;
+	if (!m_CheckList)
+		m_CheckList = std::make_unique<PgCheckList>(*this);
+	auto rc = GetValueRect(RowOf(m_Editing));
+	::MapWindowPoints(m_hWnd, nullptr, (POINT*)&rc, 2);
+	m_CheckList->Open(m_Editing, mask, rc);
+}
+
+void CPropertyGridCtrl::CloseCheckList(bool restoreText) {
+	if (!IsCheckListOpen())
+		return;
+	m_CheckList->Close();
+	if (restoreText && m_Editor == Editor::Edit) {
+		::SetWindowTextW(m_hEditor, m_CheckListInitialText.c_str());
+		::SendMessage(m_hEditor, EM_SETSEL, 0, -1);
+	}
+}
+
+void CPropertyGridCtrl::OnCheckListChanged(LONGLONG mask) {
+	// the edit shows the flags as they're checked; Enter (or leaving) commits them as typed text would be
+	if (m_Editor != Editor::Edit || !m_Editing)
+		return;
+	auto text = PgFormatValue(*m_Editing, PrgMakeInt(mask));
+	::SetWindowTextW(m_hEditor, text.c_str());
+	::SendMessage(m_hEditor, EM_SETSEL, 0, -1);
 }

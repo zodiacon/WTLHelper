@@ -99,10 +99,12 @@
   <ItemGroup>
     <ClInclude Include="include\PropertyGrid.h" />
     <ClInclude Include="src\PropertyGridModel.h" />
+    <ClInclude Include="src\PropertyGridCheckList.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\PropertyGridCtrl.cpp" />
     <ClCompile Include="src\PropertyGridEdit.cpp" />
+    <ClCompile Include="src\PropertyGridCheckList.cpp" />
     <ClCompile Include="src\PropertyGridModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
