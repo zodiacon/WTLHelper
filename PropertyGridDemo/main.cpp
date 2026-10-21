@@ -37,6 +37,8 @@ enum {
 	ID_VIEW_DARK,
 	ID_VIEW_EXPANDALL,
 	ID_VIEW_COLLAPSEALL,
+	ID_VIEW_READONLY,
+	ID_ITEM_EDIT,
 };
 
 // ---- Globals ----------------------------------------------------------------
@@ -100,6 +102,7 @@ static void Populate() {
 	g_grid.InsertItem(app, &d);
 
 	static const PRGENUMITEM borders[] = { { L"None", 0 }, { L"Single", 1 }, { L"Double", 2 }, { L"Sunken", 3 } };
+	static const PRGENUMITEM sizes[] = { { L"Small", 16 }, { L"Medium", 24 }, { L"Large", 32 } };
 	d = {};
 	d.kind = PRGK_ENUM;
 	d.pszName = L"Border Style";
@@ -109,14 +112,24 @@ static void Populate() {
 	d.enumCount = (int)std::size(borders);
 	g_grid.InsertItem(app, &d);
 
+	d = {};
+	d.kind = PRGK_ENUM;
+	d.pszName = L"Icon Size";
+	d.pszDescription = L"An editable enum (PRGF_EDITABLE): pick a size or type any number.";
+	d.value = PrgMakeInt(24);
+	d.flags = PRGF_EDITABLE;
+	d.enumItems = sizes;
+	d.enumCount = (int)std::size(sizes);
+	g_grid.InsertItem(app, &d);
+
 	auto behavior = g_grid.AddCategory(L"Behavior");
-	Add(behavior, PRGK_STRING, L"Name", L"The object's name.", PrgMakeString(L"Sample Object"));
+	Add(behavior, PRGK_STRING, L"Name", L"The object's name. Can't be empty (checked in PRGN_VALUECHANGING).", PrgMakeString(L"Sample Object"));
 	Add(behavior, PRGK_STRING, L"Kind", L"Read-only: drawn gray.", PrgMakeString(L"Widget"), PRGF_READONLY);
 
 	d = {};
 	d.kind = PRGK_INTEGER;
 	d.pszName = L"Max Count";
-	d.pszDescription = L"An integer between 1 and 1000.";
+	d.pszDescription = L"An integer from 1 to 1000; the arrows (or Up and Down) step it.";
 	d.value = PrgMakeInt(250);
 	d.defValue = PrgMakeInt(100);
 	d.minVal = 1;
@@ -212,6 +225,7 @@ static void UpdateViewChecks(HMENU menu) {
 	CheckMenuRadioItem(menu, ID_VIEW_CATEGORIZED, ID_VIEW_ALPHABETICAL,
 		categorized ? ID_VIEW_CATEGORIZED : ID_VIEW_ALPHABETICAL, MF_BYCOMMAND);
 	CheckMenuItem(menu, ID_VIEW_DESCRIPTION, g_grid.IsDescriptionVisible() ? MF_CHECKED : MF_UNCHECKED);
+	CheckMenuItem(menu, ID_VIEW_READONLY, g_grid.IsReadOnly() ? MF_CHECKED : MF_UNCHECKED);
 }
 
 static void ShowAll(HPRGITEM parent) {
@@ -231,6 +245,13 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_FILE_CLEAR:    g_grid.DeleteAllItems(); break;
 		case ID_FILE_EXIT:     DestroyWindow(hwnd); break;
 
+		case ID_ITEM_EDIT:
+			if (sel)
+				g_grid.BeginEdit(sel);
+			break;
+		case ID_VIEW_READONLY:
+			g_grid.SetReadOnly(!g_grid.IsReadOnly());
+			break;
 		case ID_ITEM_RESET:
 			if (sel && !g_grid.ResetValue(sel))
 				Status(L"The item has no default value");
@@ -289,10 +310,26 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			Status(text);
 			break;
 		}
+		case PRGN_VALUECHANGING: {
+			auto nm = (NMPRGVALUE*)hdr;
+			if (g_grid.GetItemName(nm->hItem) == L"Name" && nm->newValue.type == PRGVT_STRING
+				&& wcsspn(nm->newValue.pszVal, L" ") == wcslen(nm->newValue.pszVal)) {
+				wcscpy_s(nm->szError, L"The name can't be empty.");
+				return TRUE;
+			}
+			break;
+		}
+		case PRGN_VALUECHANGED: {
+			auto nm = (NMPRGVALUE*)hdr;
+			text.Format(L"Changed: %s = %s", (PCWSTR)g_grid.GetItemName(nm->hItem), (PCWSTR)g_grid.GetValueText(nm->hItem));
+			Status(text);
+			break;
+		}
 		case PRGN_CONTEXTMENU: {
 			auto nm = (NMPRGITEM*)hdr;
 			HMENU menu = CreatePopupMenu();
 			UINT state = nm->hItem ? MF_STRING : MF_STRING | MF_GRAYED;
+			AppendMenuW(menu, state, ID_ITEM_EDIT, L"&Edit");
 			AppendMenuW(menu, state | (g_grid.IsModified(nm->hItem) ? 0 : MF_GRAYED), ID_ITEM_RESET, L"&Reset");
 			AppendMenuW(menu, state, ID_ITEM_READONLY, L"Toggle Read-&Only");
 			AppendMenuW(menu, state, ID_ITEM_HIDE, L"&Hide");
@@ -383,6 +420,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	AppendMenuW(hFile, MF_STRING, ID_FILE_EXIT, L"E&xit");
 
 	HMENU hItem = CreatePopupMenu();
+	AppendMenuW(hItem, MF_STRING, ID_ITEM_EDIT, L"&Edit\tF2");
 	AppendMenuW(hItem, MF_STRING, ID_ITEM_RESET, L"&Reset Value\tCtrl+R");
 	AppendMenuW(hItem, MF_STRING, ID_ITEM_READONLY, L"Toggle Read-&Only");
 	AppendMenuW(hItem, MF_STRING, ID_ITEM_HIDE, L"&Hide");
@@ -396,6 +434,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hView, MF_STRING, ID_VIEW_DESCRIPTION, L"&Description Pane");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_DARK, L"Dar&k Colors");
+	AppendMenuW(hView, MF_STRING, ID_VIEW_READONLY, L"&Read-Only Grid");
 	AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hView, MF_STRING, ID_VIEW_EXPANDALL, L"&Expand All");
 	AppendMenuW(hView, MF_STRING, ID_VIEW_COLLAPSEALL, L"C&ollapse All");
@@ -422,7 +461,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	MSG msg;
 	while (GetMessage(&msg, nullptr, 0, 0)) {
-		if (!TranslateAccelerator(hwnd, hAccel, &msg)) {
+		// no accelerators while a value is edited: Delete and Ctrl+R belong to the editor then
+		if (g_grid.IsEditing() || !TranslateAccelerator(hwnd, hAccel, &msg)) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}

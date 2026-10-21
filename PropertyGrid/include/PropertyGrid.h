@@ -13,6 +13,7 @@
 
 #include <climits>
 #include <memory>
+#include <string>
 #include <vector>
 
 // ---- Window class name -------------------------------------------------------
@@ -163,24 +164,40 @@ struct PRGCOLORS {
 #define PRGN_SELCHANGED     (PRGN_FIRST - 0)   // NMPRGSELCHANGE
 #define PRGN_ITEMEXPANDED   (PRGN_FIRST - 1)   // NMPRGEXPAND; by the user (mouse, keyboard)
 #define PRGN_CONTEXTMENU    (PRGN_FIRST - 2)   // NMPRGITEM; pt in screen coords, hItem may be nullptr
+#define PRGN_BEGINEDIT      (PRGN_FIRST - 3)   // NMPRGITEM; nonzero = don't edit
+#define PRGN_VALUECHANGING  (PRGN_FIRST - 4)   // NMPRGVALUE; nonzero = reject (with szError), or change newValue
+#define PRGN_VALUECHANGED   (PRGN_FIRST - 5)   // NMPRGVALUE; the user changed a value
 
 struct NMPRGITEM {
-	NMHDR   hdr;
+	NMHDR    hdr;
 	HPRGITEM hItem;
-	LPARAM  lParam;     // the item's data
-	POINT   pt;
+	LPARAM   lParam;     // the item's data
+	POINT    pt;
 };
 
 struct NMPRGSELCHANGE {
-	NMHDR   hdr;
+	NMHDR    hdr;
 	HPRGITEM hItemOld;   // nullptr if none
 	HPRGITEM hItemNew;   // nullptr if none
 };
 
 struct NMPRGEXPAND {
-	NMHDR   hdr;
+	NMHDR    hdr;
 	HPRGITEM hItem;
-	BOOL    expanded;
+	BOOL     expanded;
+};
+
+// Sent only for changes made by the user (editing, toggling), never for SetValue.
+// PRGN_VALUECHANGING: the value is parsed and range checked. The parent may replace newValue (a string
+// it points to has to last until the notification returns), or reject the change by returning nonzero,
+// optionally with a message in szError; the editor then stays open.
+struct NMPRGVALUE {
+	NMHDR    hdr;
+	HPRGITEM hItem;
+	LPARAM   lParam;
+	PRGVALUE oldValue;
+	PRGVALUE newValue;
+	WCHAR    szError[256];
 };
 
 // ---- Control class --------------------------------------------------------------------------
@@ -195,6 +212,9 @@ public:
 	CPropertyGridCtrl();
 	~CPropertyGridCtrl();
 
+	// posted to itself by the editing code
+	enum : UINT { WM_PRG_CHECKFOCUS = WM_USER + 100, WM_PRG_COMBOCLOSED };
+
 	BEGIN_MSG_MAP(CPropertyGridCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
@@ -208,6 +228,15 @@ public:
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnChar)
+		MESSAGE_HANDLER(WM_COMMAND, OnCommand)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColor)
+		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtlColor)
+		MESSAGE_HANDLER(WM_CTLCOLORLISTBOX, OnCtlColor)
+		MESSAGE_HANDLER(WM_PRG_CHECKFOCUS, OnCheckFocus)
+		MESSAGE_HANDLER(WM_PRG_COMBOCLOSED, OnComboClosed)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
@@ -280,6 +309,21 @@ public:
 	BOOL    GetItemRect(HPRGITEM hItem, RECT* prc) const;   // client coords; FALSE if not visible
 	HPRGITEM HitTest(POINT pt, UINT* pFlags = nullptr) const; // PRGHT_* in *pFlags
 
+	// ---- Editing ----------------------------------------------------------------------
+	//
+	// The user edits a value by clicking it, pressing Enter or F2, or typing; F4 or Alt+Down opens a
+	// drop-down. Enter commits, Escape cancels, Tab commits and moves to the next property. Bool values
+	// toggle with a click on the check box, Space or a double click; a double click on an enum's name
+	// selects the next value.
+
+	BOOL    BeginEdit(HPRGITEM hItem = nullptr);      // nullptr: the selected item; selects it
+	BOOL    EndEdit(bool commit = true);              // FALSE if the new value was rejected (the editor stays)
+	bool    IsEditing() const;
+	HPRGITEM GetEditItem() const;
+	HWND    GetEditorWindow() const;                  // the edit, combo box or date picker, while editing
+	void    SetReadOnly(bool readOnly);               // the whole grid: values can be selected and copied only
+	bool    IsReadOnly() const;
+
 	// ---- View -------------------------------------------------------------------------
 
 	void    SetView(UINT view);                       // PRGV_*
@@ -322,6 +366,34 @@ private:
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCommand(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCheckFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnComboClosed(UINT, WPARAM, LPARAM, BOOL&);
+
+	// editing
+	enum class Editor { None, Edit, Combo, Date };
+	bool    CanEdit(const PgNode* node) const;
+	bool    IsReadOnly(const PgNode* node) const;
+	bool    CreateEditor(PgNode* node);
+	void    DestroyEditor();
+	void    PositionEditor();
+	RECT    GetValueRect(int row) const;              // the value cell, client coords
+	int     ValueTextLeft(const PgNode* node, const RECT& rcValue) const;
+	RECT    GetCheckBoxRect(int row) const;
+	bool    CommitEditor(std::wstring& error);
+	bool    CommitValue(PgNode* node, const PRGVALUE& value, std::wstring& error);
+	bool    EndEditCore(bool commit, bool focusLost);
+	void    ToggleBool(PgNode* node);
+	void    CycleEnum(PgNode* node);
+	void    StepInteger(int delta);
+	void    MoveToProperty(int direction, bool edit); // Tab, Shift+Tab, Up/Down in an edit
+	void    ShowError(const std::wstring& text);
+	void    HideError();
+	bool    HandleEditorKey(HWND hWnd, UINT msg, WPARAM wParam);
+	static LRESULT CALLBACK EditorSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 	// layout
 	int     Scale(int dips) const;
@@ -382,11 +454,27 @@ private:
 	int                      m_Pad = 4;
 	int                      m_SplitterGrip = 3; // +/- around the column splitter
 	int                      m_DescSplitterHeight = 5;
+	int                      m_TextHeight = 16;
 
 	// fonts and colors
 	HFONT                    m_hFont = nullptr;      // in effect (owned if m_OwnFont)
 	bool                     m_OwnFont = true;
 	WTL::CFont               m_BoldFont;
 	bool                     m_SystemColors = true;
-	PRGCOLORS                 m_Colors{};
+	PRGCOLORS                m_Colors{};
+	WTL::CBrush              m_EditorBrush;          // WM_CTLCOLOR* background
+	COLORREF                 m_EditorBrushColor = CLR_INVALID;
+
+	// editing
+	bool                     m_ReadOnly = false;
+	PgNode*                  m_Editing = nullptr;
+	Editor                   m_Editor = Editor::None;
+	HWND                     m_hEditor = nullptr;    // the edit, combo box or date picker
+	HWND                     m_hEditorEdit = nullptr;// the edit inside an editable combo box
+	HWND                     m_hSpin = nullptr;      // integer with a range
+	HWND                     m_hErrorTip = nullptr;
+	std::wstring             m_EditInitialText;
+	int                      m_EditInitialIndex = -1;// combo box
+	SYSTEMTIME               m_EditInitialTime{};    // date picker, as it first reads back
+	bool                     m_Ending = false;       // EndEditCore running: focus changes it causes are ignored
 };

@@ -346,6 +346,184 @@ TEST(Format_Other) {
 	CHECK(full.size() > date.size());
 }
 
+// ---- Parsing ----------------------------------------------------------------------------
+
+// parses text for a node of the kind; returns the error, or "" with the value in *out
+static std::wstring Parse(const PgNode& node, const std::wstring& text, PRGVALUE* out = nullptr) {
+	static PgStoredValue value;   // keeps a parsed string alive for the check
+	std::wstring error;
+	if (!PgParseValue(node, text, value, error))
+		return error.empty() ? L"(no message)" : error;
+	if (out)
+		*out = value.value;
+	return L"";
+}
+
+// a PgNode can't be copied or moved (its stored strings point into it)
+static std::unique_ptr<PgNode> MakeNode(UINT kind, UINT flags = 0, std::vector<PgEnum> items = {}) {
+	auto node = std::make_unique<PgNode>();
+	node->kind = kind;
+	node->flags = flags;
+	node->enumItems = std::move(items);
+	return node;
+}
+
+TEST(Parse_Integers) {
+	auto owned = MakeNode(PRGK_INTEGER);
+	auto& node = *owned;
+	PRGVALUE v{};
+	CHECK_STR(Parse(node, L" 42 ", &v), L"");
+	CHECK(v.type == PRGVT_INT && v.llVal == 42);
+	CHECK_STR(Parse(node, L"-0x10", &v), L"");
+	CHECK(v.llVal == -16);
+	CHECK_STR(Parse(node, L"+7", &v), L"");
+	CHECK(v.llVal == 7);
+	CHECK_STR(Parse(node, L"9223372036854775807", &v), L"");
+	CHECK(v.llVal == LLONG_MAX);
+	CHECK_STR(Parse(node, L"-9223372036854775808", &v), L"");
+	CHECK(v.llVal == LLONG_MIN);
+	CHECK(Parse(node, L"9223372036854775808") != L"");   // decimal overflow
+	CHECK_STR(Parse(node, L"0xFFFFFFFFFFFFFFFF", &v), L"");   // as -1 is shown in hex
+	CHECK(v.llVal == -1);
+	CHECK_STR(Parse(node, L"12abc"), L"\"12abc\" is not a valid number.");
+	CHECK(Parse(node, L"") != L"");
+	CHECK(Parse(node, L"0x") != L"");
+	CHECK(Parse(node, L"1F") != L"");                     // bare hex only with PRGF_HEX
+	CHECK(Parse(node, L"\x0661") != L"");                 // non-ASCII digit
+
+	auto hexNode = MakeNode(PRGK_INTEGER, PRGF_HEX);
+	auto& hex = *hexNode;
+	CHECK_STR(Parse(hex, L"1F", &v), L"");
+	CHECK(v.llVal == 0x1F);
+	CHECK_STR(Parse(hex, L"0x7FF612340000", &v), L"");
+	CHECK(v.llVal == 0x7FF612340000);
+}
+
+TEST(Parse_IntegerRange) {
+	auto owned = MakeNode(PRGK_INTEGER);
+	auto& node = *owned;
+	node.minVal = 1;
+	node.maxVal = 1000;
+	CHECK_STR(Parse(node, L"1"), L"");
+	CHECK_STR(Parse(node, L"1000"), L"");
+	CHECK_STR(Parse(node, L"0"), L"Enter a number from 1 to 1000.");
+	CHECK_STR(Parse(node, L"1001"), L"Enter a number from 1 to 1000.");
+	node.maxVal = LLONG_MAX;
+	CHECK_STR(Parse(node, L"-5"), L"Enter a number of at least 1.");
+	node.minVal = LLONG_MIN;
+	node.maxVal = 0x10;
+	node.flags = PRGF_HEX;
+	CHECK_STR(Parse(node, L"20"), L"Enter a number of at most 0x10.");
+}
+
+TEST(Parse_Reals) {
+	auto owned = MakeNode(PRGK_REAL);
+	auto& node = *owned;
+	PRGVALUE v{};
+	CHECK_STR(Parse(node, L"0.85", &v), L"");
+	CHECK(v.type == PRGVT_REAL && v.dblVal == 0.85);
+	CHECK_STR(Parse(node, L"-1e3", &v), L"");
+	CHECK(v.dblVal == -1000);
+	CHECK_STR(Parse(node, L"+2.5", &v), L"");
+	CHECK(v.dblVal == 2.5);
+	CHECK(Parse(node, L"1,5") != L"");   // '.' only, as shown
+	CHECK(Parse(node, L"abc") != L"");
+	// what the grid shows parses back to the same value
+	node.precision = -1;
+	auto shown = PgFormatValue(node, PrgMakeReal(0.1 + 0.2));
+	CHECK_STR(Parse(node, shown, &v), L"");
+	CHECK(v.dblVal == 0.1 + 0.2);
+}
+
+TEST(Parse_EnumAndFlags) {
+	std::vector<PgEnum> items{ { L"None", 0 }, { L"Read", 1 }, { L"Write", 2 }, { L"Exec", 4 } };
+	auto eNode = MakeNode(PRGK_ENUM, 0, items);
+	auto& e = *eNode;
+	PRGVALUE v{};
+	CHECK_STR(Parse(e, L"write", &v), L"");
+	CHECK(v.llVal == 2);
+	CHECK_STR(Parse(e, L"4", &v), L"");                 // an item's number
+	CHECK(v.llVal == 4);
+	CHECK_STR(Parse(e, L"7"), L"\"7\" is not one of the values.");
+	CHECK(Parse(e, L"Other") != L"");
+	e.flags = PRGF_EDITABLE;
+	CHECK_STR(Parse(e, L"7", &v), L"");                 // editable: any number
+	CHECK(v.llVal == 7);
+	CHECK(Parse(e, L"Other") != L"");                    // but still not any name
+
+	auto fNode = MakeNode(PRGK_FLAGS, 0, items);
+	auto& f = *fNode;
+	CHECK_STR(Parse(f, L"Read | Exec | 0x100", &v), L"");
+	CHECK(v.llVal == (1 | 4 | 0x100));
+	CHECK_STR(Parse(f, L"read,write", &v), L"");
+	CHECK(v.llVal == 3);
+	CHECK_STR(Parse(f, L"", &v), L"");
+	CHECK(v.llVal == 0);
+	CHECK_STR(Parse(f, L"None", &v), L"");
+	CHECK(v.llVal == 0);
+	CHECK_STR(Parse(f, L"Read | Bogus"), L"\"Bogus\" is not a known flag.");
+	// round trip of the display text
+	auto shown = PgFormatValue(f, PrgMakeInt(5 | 0x20));
+	CHECK_STR(Parse(f, shown, &v), L"");
+	CHECK(v.llVal == (5 | 0x20));
+}
+
+TEST(Parse_Other) {
+	PRGVALUE v{};
+	auto bNode = MakeNode(PRGK_BOOL);
+	auto& b = *bNode;
+	CHECK_STR(Parse(b, L"TRUE", &v), L"");
+	CHECK(v.type == PRGVT_BOOL && v.boolVal);
+	CHECK_STR(Parse(b, L"no", &v), L"");
+	CHECK(!v.boolVal);
+	CHECK_STR(Parse(b, L"maybe"), L"Enter True or False.");
+
+	auto cNode = MakeNode(PRGK_COLOR);
+	auto& c = *cNode;
+	CHECK_STR(Parse(c, L"#12ABff", &v), L"");
+	CHECK(v.clrVal == RGB(0x12, 0xAB, 0xFF));
+	CHECK_STR(Parse(c, L"336699", &v), L"");
+	CHECK(v.clrVal == RGB(0x33, 0x66, 0x99));
+	CHECK_STR(Parse(c, L"255, 0, 10", &v), L"");
+	CHECK(v.clrVal == RGB(255, 0, 10));
+	CHECK(Parse(c, L"256, 0, 0") != L"");
+	CHECK(Parse(c, L"#12345") != L"");
+	CHECK(Parse(c, L"") != L"");
+
+	auto sNode = MakeNode(PRGK_STRING);
+	auto& s = *sNode;
+	CHECK_STR(Parse(s, L"  spaced  ", &v), L"");
+	CHECK_STR(v.pszVal, L"  spaced  ");                // strings as typed
+
+	CHECK(Parse(*MakeNode(PRGK_FONT), L"Arial") != L"");
+	CHECK(Parse(*MakeNode(PRGK_DATETIME), L"today") != L"");
+}
+
+TEST(Parse_CustomUsesTheValueType) {
+	auto owned = MakeNode(PRGK_CUSTOM);
+	auto& node = *owned;
+	CHECK(PgEditType(node) == PRGVT_STRING);
+	node.defValue.Assign(PrgMakeReal(1));
+	CHECK(PgEditType(node) == PRGVT_REAL);
+	node.value.Assign(PrgMakeInt(5));
+	CHECK(PgEditType(node) == PRGVT_INT);
+	PRGVALUE v{};
+	CHECK_STR(Parse(node, L"12", &v), L"");
+	CHECK(v.type == PRGVT_INT && v.llVal == 12);
+}
+
+TEST(EditText_UnmasksPasswords) {
+	auto owned = MakeNode(PRGK_STRING, PRGF_PASSWORD);
+	auto& node = *owned;
+	node.value.Assign(PrgMakeString(L"secret"));
+	CHECK_STR(PgEditText(node), L"secret");
+	CHECK_STR(PgFormatValue(node), L"\x25CF\x25CF\x25CF\x25CF\x25CF\x25CF");
+	auto nNode = MakeNode(PRGK_INTEGER, PRGF_HEX);
+	auto& n = *nNode;
+	n.value.Assign(PrgMakeInt(255));
+	CHECK_STR(PgEditText(n), L"0xFF");
+}
+
 int wmain() {
 	Run_Insert_RejectsInvalidDescriptions();
 	Run_Insert_FirstLastAndAfter();
@@ -362,6 +540,13 @@ int wmain() {
 	Run_Format_Numbers();
 	Run_Format_EnumAndFlags();
 	Run_Format_Other();
+	Run_Parse_Integers();
+	Run_Parse_IntegerRange();
+	Run_Parse_Reals();
+	Run_Parse_EnumAndFlags();
+	Run_Parse_Other();
+	Run_Parse_CustomUsesTheValueType();
+	Run_EditText_UnmasksPasswords();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

@@ -76,3 +76,11 @@ bool PgIsAncestor(const PgNode* ancestor, const PgNode* node);
 // the display text of a node's value (or of another value formatted the node's way)
 std::wstring PgFormatValue(const PgNode& node);
 std::wstring PgFormatValue(const PgNode& node, const PRGVALUE& value);
+
+// the value type an edit of the node produces: the kind's type, or for PRGK_CUSTOM the type of its value
+// (or default), else PRGVT_STRING
+UINT PgEditType(const PgNode& node);
+// the text an editor starts with: the display text, but a password unmasked
+std::wstring PgEditText(const PgNode& node);
+// text typed by the user to a value of PgEditType(node), range checked; false with a message on bad input
+bool PgParseValue(const PgNode& node, const std::wstring& text, PgStoredValue& value, std::wstring& error);

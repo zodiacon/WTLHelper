@@ -351,3 +351,215 @@ std::wstring PgFormatValue(const PgNode& node, const PRGVALUE& value) {
 std::wstring PgFormatValue(const PgNode& node) {
 	return PgFormatValue(node, node.value.value);
 }
+
+// ---- Parsing ----------------------------------------------------------------------
+
+UINT PgEditType(const PgNode& node) {
+	if (node.kind != PRGK_CUSTOM)
+		return PgValueTypeOf(node.kind);
+	if (node.value.value.type != PRGVT_EMPTY)
+		return node.value.value.type;
+	if (node.defValue.value.type != PRGVT_EMPTY)
+		return node.defValue.value.type;
+	return PRGVT_STRING;
+}
+
+std::wstring PgEditText(const PgNode& node) {
+	auto& v = node.value.value;
+	if (v.type == PRGVT_STRING)
+		return v.pszVal ? v.pszVal : L"";
+	return PgFormatValue(node);
+}
+
+static std::wstring Trim(const std::wstring& s) {
+	auto first = s.find_first_not_of(L" \t");
+	if (first == s.npos)
+		return {};
+	return s.substr(first, s.find_last_not_of(L" \t") - first + 1);
+}
+
+static std::vector<std::wstring> Split(const std::wstring& s, const wchar_t* separators) {
+	std::vector<std::wstring> parts;
+	size_t start = 0;
+	for (;;) {
+		auto pos = s.find_first_of(separators, start);
+		parts.push_back(Trim(s.substr(start, pos == s.npos ? s.npos : pos - start)));
+		if (pos == s.npos)
+			return parts;
+		start = pos + 1;
+	}
+}
+
+static bool ToAscii(const std::wstring& s, std::string& out) {
+	out.clear();
+	out.reserve(s.size());
+	for (auto c : s) {
+		if (c > 127)
+			return false;
+		out += (char)c;
+	}
+	return true;
+}
+
+// decimal, or hex with 0x (or bare with allowBareHex), signed; positive hex may use all 64 bits,
+// as -1 is shown 0xFFFFFFFFFFFFFFFF
+static bool ParseInt(const std::wstring& text, bool allowBareHex, LONGLONG& value) {
+	std::string s;
+	if (!ToAscii(text, s) || s.empty())
+		return false;
+	size_t i = 0;
+	bool negative = false;
+	if (s[0] == '+' || s[0] == '-') {
+		negative = s[0] == '-';
+		i = 1;
+	}
+	int base = allowBareHex ? 16 : 10;
+	if (s.size() - i > 2 && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+		base = 16;
+		i += 2;
+	}
+	if (i == s.size())
+		return false;
+	ULONGLONG magnitude;
+	auto [ptr, ec] = std::from_chars(s.data() + i, s.data() + s.size(), magnitude, base);
+	if (ec != std::errc() || ptr != s.data() + s.size())
+		return false;
+	if (negative) {
+		if (magnitude > (ULONGLONG)LLONG_MAX + 1)
+			return false;
+		value = (LONGLONG)(0 - magnitude);
+	}
+	else {
+		if (base == 10 && magnitude > (ULONGLONG)LLONG_MAX)
+			return false;
+		value = (LONGLONG)magnitude;
+	}
+	return true;
+}
+
+static bool ParseReal(const std::wstring& text, double& value) {
+	std::string s;
+	if (!ToAscii(text, s) || s.empty())
+		return false;
+	auto first = s.data() + (s[0] == '+' ? 1 : 0);
+	auto [ptr, ec] = std::from_chars(first, s.data() + s.size(), value);
+	return ec == std::errc() && ptr == s.data() + s.size();
+}
+
+static bool ParseColor(const std::wstring& text, COLORREF& color) {
+	auto s = text[0] == L'#' ? text.substr(1) : text;
+	if (s.size() == 6 && s.find_first_not_of(L"0123456789abcdefABCDEF") == s.npos) {
+		auto rgb = wcstoul(s.c_str(), nullptr, 16);
+		color = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+		return true;
+	}
+	auto parts = Split(text, L",");
+	if (parts.size() != 3)
+		return false;
+	LONGLONG c[3];
+	for (int i = 0; i < 3; i++)
+		if (!ParseInt(parts[i], false, c[i]) || c[i] < 0 || c[i] > 255)
+			return false;
+	color = RGB(c[0], c[1], c[2]);
+	return true;
+}
+
+static const PgEnum* FindEnum(const PgNode& node, const std::wstring& name) {
+	for (auto& e : node.enumItems)
+		if (_wcsicmp(e.name.c_str(), name.c_str()) == 0)
+			return &e;
+	return nullptr;
+}
+
+static std::wstring RangeMessage(const PgNode& node) {
+	bool hex = (node.flags & PRGF_HEX) != 0;
+	if (node.minVal != LLONG_MIN && node.maxVal != LLONG_MAX)
+		return L"Enter a number from " + FormatInt(node.minVal, hex) + L" to " + FormatInt(node.maxVal, hex) + L".";
+	if (node.minVal != LLONG_MIN)
+		return L"Enter a number of at least " + FormatInt(node.minVal, hex) + L".";
+	return L"Enter a number of at most " + FormatInt(node.maxVal, hex) + L".";
+}
+
+bool PgParseValue(const PgNode& node, const std::wstring& text, PgStoredValue& value, std::wstring& error) {
+	auto s = Trim(text);
+	bool hex = (node.flags & PRGF_HEX) != 0;
+	switch (PgEditType(node)) {
+		case PRGVT_STRING:
+			value.Assign(PrgMakeString(text.c_str()));   // as typed, spaces included
+			return true;
+
+		case PRGVT_INT: {
+			LONGLONG v = 0;
+			if (node.kind == PRGK_ENUM) {
+				if (auto e = FindEnum(node, s))
+					v = e->value;
+				else if (!ParseInt(s, hex, v) || ((node.flags & PRGF_EDITABLE) == 0
+					&& std::none_of(node.enumItems.begin(), node.enumItems.end(), [=](auto& e) { return e.value == v; }))) {
+					error = L"\"" + s + L"\" is not one of the values.";
+					return false;
+				}
+			}
+			else if (node.kind == PRGK_FLAGS) {
+				for (auto& part : Split(s, L"|,")) {
+					if (part.empty())
+						continue;
+					LONGLONG bits;
+					if (auto e = FindEnum(node, part))
+						bits = e->value;
+					else if (!ParseInt(part, hex, bits)) {
+						error = L"\"" + part + L"\" is not a known flag.";
+						return false;
+					}
+					v |= bits;
+				}
+			}
+			else {
+				if (!ParseInt(s, hex, v)) {
+					error = L"\"" + s + L"\" is not a valid number.";
+					return false;
+				}
+				if (v < node.minVal || v > node.maxVal) {
+					error = RangeMessage(node);
+					return false;
+				}
+			}
+			value.Assign(PrgMakeInt(v));
+			return true;
+		}
+
+		case PRGVT_REAL: {
+			double v;
+			if (!ParseReal(s, v)) {
+				error = L"\"" + s + L"\" is not a valid number.";
+				return false;
+			}
+			value.Assign(PrgMakeReal(v));
+			return true;
+		}
+
+		case PRGVT_BOOL: {
+			static const wchar_t* const yes[] = { L"true", L"yes", L"on", L"1" };
+			static const wchar_t* const no[] = { L"false", L"no", L"off", L"0" };
+			for (int i = 0; i < 4; i++) {
+				if (_wcsicmp(s.c_str(), yes[i]) == 0 || _wcsicmp(s.c_str(), no[i]) == 0) {
+					value.Assign(PrgMakeBool(_wcsicmp(s.c_str(), yes[i]) == 0));
+					return true;
+				}
+			}
+			error = L"Enter True or False.";
+			return false;
+		}
+
+		case PRGVT_COLOR: {
+			COLORREF color;
+			if (s.empty() || !ParseColor(s, color)) {
+				error = L"Enter a color as #RRGGBB or R, G, B.";
+				return false;
+			}
+			value.Assign(PrgMakeColor(color));
+			return true;
+		}
+	}
+	error = L"This value can't be typed in.";
+	return false;
+}
