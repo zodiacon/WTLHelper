@@ -449,7 +449,33 @@ LRESULT CLogViewCtrl::OnTextKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled)
 				Copy();
 			break;
 		case VK_ESCAPE:
-			MoveCaret(m_Caret, false, true);
+			if (IsSearching())
+				CancelSearch();
+			else
+				MoveCaret(m_Caret, false, true);
+			break;
+		case VK_F3:
+			if (ctrl) {
+				// the selected text (one line of it), or the word at the caret
+				LineData data;
+				if (!GetLine(m_Caret.line, data))
+					break;
+				LGVPOS s, e;
+				GetSelection(&s, &e);
+				size_t start = s.column, end = e.column;
+				if (s.line != e.line || start == end)
+					LgWordAt({ data.text, data.length }, m_Caret.column, start, end);
+				start = std::min(start, data.length);
+				end = std::min(end, data.length);
+				std::wstring text(data.text + start, end - start);
+				if (text.empty())
+					break;
+				LGVSEARCH search;
+				search.pszText = text.c_str();
+				SetSearch(&search);
+			}
+			if (!m_Search->Empty())
+				StartFind(!shift, true);
 			break;
 		case VK_RETURN:
 			if (IsLineShown(m_Caret.line)) {

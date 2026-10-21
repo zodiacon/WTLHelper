@@ -108,7 +108,8 @@ public:
 		size_t length;
 	};
 
-	bool   Set(std::wstring_view text, bool regex, bool matchCase);   // false: a bad regex (nothing changes)
+	// false: a bad regex (nothing changes). wholeWord: matches not next to a letter, digit or '_'
+	bool   Set(std::wstring_view text, bool regex, bool matchCase, bool wholeWord = false);
 	void   Clear();
 	bool   Empty() const { return m_Text.empty(); }
 	bool   Matches(std::wstring_view text) const;                   // an empty matcher matches everything
@@ -116,12 +117,18 @@ public:
 	const std::wstring& Text() const { return m_Text; }
 	bool   IsRegex() const { return m_Regex != nullptr; }
 	bool   MatchCase() const { return m_MatchCase; }
+	bool   WholeWord() const { return m_WholeWord; }
 
 private:
 	std::wstring                 m_Text;
 	bool                         m_MatchCase = false;
+	bool                         m_WholeWord = false;
 	std::shared_ptr<std::wregex> m_Regex;   // shared: matchers are copied, the compiled regex isn't changed
 };
+
+// The match to go to among a line's spans: forward the first, backward the last, of those starting in [lo, hi).
+// -1 if none.
+int LgPickMatch(const std::vector<LgMatcher::Span>& spans, bool forward, size_t lo, size_t hi);
 
 // Which lines a filter shows: those matching the text (or not matching it, with exclude) whose level is in the mask.
 struct LgFilter {

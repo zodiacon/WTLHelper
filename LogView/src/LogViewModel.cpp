@@ -92,7 +92,7 @@ void LgWordAt(std::wstring_view text, size_t index, size_t& start, size_t& end) 
 
 // ---- LgMatcher ---------------------------------------------------------------------
 
-bool LgMatcher::Set(std::wstring_view text, bool regex, bool matchCase) {
+bool LgMatcher::Set(std::wstring_view text, bool regex, bool matchCase, bool wholeWord) {
 	if (text.empty()) {
 		Clear();
 		return true;
@@ -111,6 +111,7 @@ bool LgMatcher::Set(std::wstring_view text, bool regex, bool matchCase) {
 	}
 	m_Text.assign(text);
 	m_MatchCase = matchCase;
+	m_WholeWord = wholeWord;
 	m_Regex = std::move(compiled);
 	return true;
 }
@@ -118,6 +119,7 @@ bool LgMatcher::Set(std::wstring_view text, bool regex, bool matchCase) {
 void LgMatcher::Clear() {
 	m_Text.clear();
 	m_MatchCase = false;
+	m_WholeWord = false;
 	m_Regex.reset();
 }
 
@@ -127,9 +129,19 @@ static int FindOrdinal(std::wstring_view text, const std::wstring& what, bool ma
 	return ::FindStringOrdinal(FIND_FROMSTART, text.data(), n, what.c_str(), (int)what.size(), !matchCase);
 }
 
+// whole word: not preceded or followed by a letter, digit or '_'
+static bool IsWholeWord(std::wstring_view text, size_t start, size_t length) {
+	return (start == 0 || CharClass(text[start - 1]) != 1) && (start + length >= text.size() || CharClass(text[start + length]) != 1);
+}
+
 bool LgMatcher::Matches(std::wstring_view text) const {
 	if (m_Text.empty())
 		return true;
+	if (m_WholeWord) {
+		std::vector<Span> spans;
+		FindAll(text, spans);
+		return !spans.empty();
+	}
 	if (m_Regex)
 		return std::regex_search(text.begin(), text.end(), *m_Regex);
 	return FindOrdinal(text, m_Text, m_MatchCase) >= 0;
@@ -142,7 +154,7 @@ void LgMatcher::FindAll(std::wstring_view text, std::vector<Span>& spans) const 
 	if (m_Regex) {
 		using Iterator = std::regex_iterator<std::wstring_view::const_iterator>;
 		for (Iterator it(text.begin(), text.end(), *m_Regex), end; it != end; ++it) {
-			if (it->length(0) > 0)
+			if (it->length(0) > 0 && (!m_WholeWord || IsWholeWord(text, it->position(0), it->length(0))))
 				spans.push_back({ (size_t)it->position(0), (size_t)it->length(0) });
 		}
 		return;
@@ -152,9 +164,25 @@ void LgMatcher::FindAll(std::wstring_view text, std::vector<Span>& spans) const 
 		int found = FindOrdinal(text.substr(pos), m_Text, m_MatchCase);
 		if (found < 0)
 			break;
+		if (m_WholeWord && !IsWholeWord(text, pos + found, m_Text.size())) {
+			pos += found + 1;   // a later occurrence may overlap this one
+			continue;
+		}
 		spans.push_back({ pos + found, m_Text.size() });
 		pos += found + m_Text.size();
 	}
+}
+
+int LgPickMatch(const std::vector<LgMatcher::Span>& spans, bool forward, size_t lo, size_t hi) {
+	int pick = -1;
+	for (int i = 0; i < (int)spans.size(); i++) {
+		if (spans[i].start < lo || spans[i].start >= hi)
+			continue;
+		pick = i;
+		if (forward)
+			break;
+	}
+	return pick;
 }
 
 // ---- LgRowMap ----------------------------------------------------------------------

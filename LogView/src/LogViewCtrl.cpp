@@ -51,7 +51,8 @@ static int Digits(ULONGLONG n) {
 // ---- Construction ------------------------------------------------------------------
 
 CLogViewCtrl::CLogViewCtrl() : m_Store(std::make_unique<LgStore>()), m_Text(std::make_unique<LgTextWindow>(this)),
-	m_Pending(std::make_unique<LgBatch>()), m_Filter(std::make_unique<LgFilter>()), m_Rows(std::make_unique<LgRowMap>()) {
+	m_Pending(std::make_unique<LgBatch>()), m_Filter(std::make_unique<LgFilter>()), m_Rows(std::make_unique<LgRowMap>()),
+	m_Search(std::make_unique<LgMatcher>()) {
 	for (BYTE level = 0; level < 32; level++)
 		m_LevelStyles[level] = DefaultLevelStyle(level);
 }
@@ -483,6 +484,7 @@ void CLogViewCtrl::Clear() {
 	::AcquireSRWLockExclusive(&m_PendingLock);
 	m_Pending->Clear();
 	::ReleaseSRWLockExclusive(&m_PendingLock);
+	CancelSearch();
 	m_Store->Clear();
 	m_Rows->Clear();
 	m_ScanSerial = 0;
@@ -582,6 +584,7 @@ void CLogViewCtrl::SetVirtualLineCount(size_t count) {
 		m_Rows->Clear();
 		m_ScanSerial = 0;
 	}
+	CancelSearch();
 	// fewer lines: the rows of those gone go; more: they're filtered
 	m_Rows->DropFrom(count);
 	m_ScanSerial = std::min<ULONGLONG>(m_ScanSerial, count);
@@ -679,6 +682,8 @@ LGVCOLORS CLogViewCtrl::GetColors() const {
 	c.crSelText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
 	c.crSelBackInactive = Blend(c.crBack, c.crText, 18);
 	c.crSelTextInactive = c.crText;
+	c.crMatchBack = Blend(c.crBack, RGB(0xFF, 0xB0, 0x00), 50);
+	c.crMatchText = c.crText;
 	return c;
 }
 
@@ -847,6 +852,18 @@ void CLogViewCtrl::PaintLine(WTL::CDCHandle dc, size_t line, const RECT& rc, con
 			if (rs.crBack != CLR_DEFAULT)
 				FillSolid(dc, r, rs.crBack);
 			draw(rs.crText != CLR_DEFAULT ? rs.crText : text, r);
+		}
+	}
+
+	// the search's matches
+	if (!m_Search->Empty() && data.length) {
+		m_Search->FindAll(view, spans);
+		for (auto& span : spans) {
+			auto r = spanRect(span.start, span.start + span.length, 0);
+			if (r.right <= r.left)
+				continue;
+			FillSolid(dc, r, c.crMatchBack);
+			draw(c.crMatchText, r);
 		}
 	}
 

@@ -455,6 +455,46 @@ TEST(Store_FirstSerial) {
 	CHECK(s.FirstSerial() == 0);
 }
 
+TEST(Matcher_WholeWord) {
+	LgMatcher m;
+	CHECK(m.Set(L"key", false, false, true));
+	CHECK(m.WholeWord());
+	CHECK(m.Matches(L"cache miss for key 12"));
+	CHECK(m.Matches(L"key"));
+	CHECK(m.Matches(L"(KEY)"));
+	CHECK(!m.Matches(L"keys and monkey"));
+	CHECK(!m.Matches(L"key_1"));
+	CHECK_STR(Spans(m, L"monkey key keyed key"), L"[key][key]");
+	// a rejected occurrence doesn't hide an overlapping one after it
+	CHECK(m.Set(L"aa", false, false, true));
+	CHECK_STR(Spans(m, L"aaa aa"), L"[aa]");
+	CHECK(m.Set(L"ab", false, false, true));
+	CHECK_STR(Spans(m, L"aab ab"), L"[ab]");
+	// regex
+	CHECK(m.Set(L"w\\w*", true, false, true));
+	CHECK_STR(Spans(m, L"worker 3, wow"), L"[worker][wow]");
+	CHECK(m.Set(L"ork", true, false, true));
+	CHECK(!m.Matches(L"worker"));
+	// without it
+	CHECK(m.Set(L"key", false, false));
+	CHECK(!m.WholeWord());
+	CHECK(m.Matches(L"monkey"));
+}
+
+TEST(PickMatch) {
+	std::vector<LgMatcher::Span> spans{ { 2, 3 }, { 10, 3 }, { 20, 3 } };
+	CHECK(LgPickMatch(spans, true, 0, SIZE_MAX) == 0);
+	CHECK(LgPickMatch(spans, false, 0, SIZE_MAX) == 2);
+	CHECK(LgPickMatch(spans, true, 5, SIZE_MAX) == 1);      // after the caret at 5
+	CHECK(LgPickMatch(spans, true, 10, SIZE_MAX) == 1);     // one starting at the caret counts
+	CHECK(LgPickMatch(spans, true, 21, SIZE_MAX) == -1);
+	CHECK(LgPickMatch(spans, false, 0, 10) == 0);           // before a selected match at 10
+	CHECK(LgPickMatch(spans, false, 0, 2) == -1);
+	CHECK(LgPickMatch(spans, false, 0, 21) == 2);
+	CHECK(LgPickMatch(spans, true, 0, 2) == -1);            // wrapped back: before the start column
+	CHECK(LgPickMatch({}, true, 0, SIZE_MAX) == -1);
+}
+
 int wmain() {
 	Run_Store_AppendKeepsTextAndAttributes();
 	Run_Store_EmbeddedNulsAreText();
@@ -477,6 +517,8 @@ int wmain() {
 	Run_Filter_Passes();
 	Run_RowMap();
 	Run_Store_FirstSerial();
+	Run_Matcher_WholeWord();
+	Run_PickMatch();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

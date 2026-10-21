@@ -27,6 +27,7 @@ enum {
 	IDC_LOG = 101,
 	IDC_STATUS = 102,
 	IDC_FILTER = 103,
+	IDC_SEARCH = 104,
 
 	ID_FILE_ADD = 201,
 	ID_FILE_ADDMILLION,
@@ -52,6 +53,13 @@ enum {
 	ID_RULES_CACHEMISS,
 	ID_RULES_NUMBERS,
 	ID_RULES_CLEAR,
+	ID_SEARCH_FOCUS,
+	ID_SEARCH_NEXT,
+	ID_SEARCH_PREV,
+	ID_SEARCH_MATCHCASE,
+	ID_SEARCH_REGEX,
+	ID_SEARCH_WHOLEWORD,
+	ID_FILTER_WHOLEWORD,
 };
 
 // ---- Globals ----------------------------------------------------------------
@@ -65,6 +73,8 @@ static size_t            g_menuLine = LGV_NOLINE;   // the context menu's line
 static CString           g_event;
 static HWND              g_filterEdit = nullptr;
 static UINT              g_filterFlags = 0;
+static HWND              g_searchEdit = nullptr;
+static UINT              g_searchFlags = 0;
 static bool              g_warningsOnly = false;
 
 constexpr BYTE STYLE_MARKED = 1;
@@ -210,6 +220,8 @@ static void ApplyColors() {
 	c.crSelText = RGB(255, 255, 255);
 	c.crSelBackInactive = RGB(58, 61, 65);
 	c.crSelTextInactive = RGB(220, 220, 220);
+	c.crMatchBack = RGB(0x61, 0x51, 0x1E);
+	c.crMatchText = RGB(240, 240, 240);
 	g_log.SetColors(&c);
 }
 
@@ -225,6 +237,16 @@ static void ApplyFilter() {
 		f.levelMask = (1u << LGVL_WARNING) | (1u << LGVL_ERROR) | (1u << LGVL_CRITICAL);
 	if (!g_log.SetFilter(&f))
 		SetEventText(L"Bad regex");
+}
+
+static void ApplySearch() {
+	wchar_t text[256] = L"";
+	::GetWindowTextW(g_searchEdit, text, (int)std::size(text));
+	LGVSEARCH search;
+	search.pszText = text;
+	search.flags = g_searchFlags;
+	if (!g_log.SetSearch(&search))
+		SetEventText(L"Bad search regex");
 }
 
 static void ToggleRule(LPCWSTR text, UINT flags, BYTE style) {
@@ -262,6 +284,10 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_FILTER_MATCHCASE, g_filterFlags & LGVFF_MATCHCASE);
 	check(ID_FILTER_EXCLUDE, g_filterFlags & LGVFF_EXCLUDE);
 	check(ID_FILTER_WARNINGS, g_warningsOnly);
+	check(ID_FILTER_WHOLEWORD, g_filterFlags & LGVFF_WHOLEWORD);
+	check(ID_SEARCH_MATCHCASE, g_searchFlags & LGVFF_MATCHCASE);
+	check(ID_SEARCH_REGEX, g_searchFlags & LGVFF_REGEX);
+	check(ID_SEARCH_WHOLEWORD, g_searchFlags & LGVFF_WHOLEWORD);
 }
 
 static void UpdateStatus() {
@@ -354,6 +380,31 @@ static void OnCommand(HWND hwnd, UINT id) {
 			g_filterFlags ^= LGVFF_EXCLUDE;
 			ApplyFilter();
 			break;
+		case ID_FILTER_WHOLEWORD:
+			g_filterFlags ^= LGVFF_WHOLEWORD;
+			ApplyFilter();
+			break;
+		case ID_SEARCH_FOCUS:
+			::SetFocus(g_searchEdit);
+			::SendMessage(g_searchEdit, EM_SETSEL, 0, -1);
+			break;
+		case ID_SEARCH_NEXT:
+		case ID_SEARCH_PREV:
+			if (!g_log.FindNext(id == ID_SEARCH_NEXT))
+				SetEventText(L"Nothing to search for");
+			break;
+		case ID_SEARCH_MATCHCASE:
+			g_searchFlags ^= LGVFF_MATCHCASE;
+			ApplySearch();
+			break;
+		case ID_SEARCH_REGEX:
+			g_searchFlags ^= LGVFF_REGEX;
+			ApplySearch();
+			break;
+		case ID_SEARCH_WHOLEWORD:
+			g_searchFlags ^= LGVFF_WHOLEWORD;
+			ApplySearch();
+			break;
 		case ID_FILTER_WARNINGS:
 			g_warningsOnly = !g_warningsOnly;
 			ApplyFilter();
@@ -406,6 +457,21 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 		case LGVN_SELCHANGED:
 			UpdateStatus();
 			break;
+		case LGVN_SEARCHDONE: {
+			auto nm = (NMLGVSEARCH*)hdr;
+			if (nm->found) {
+				LGVLINEINFO info;
+				g_log.GetLineInfo(nm->line, &info);
+				text.Format(L"Found on line %llu%s", info.number, nm->wrapped ? L" (wrapped)" : L"");
+				SetEventText(text);
+			}
+			else {
+				SetEventText(L"Not found");
+				::MessageBeep(MB_ICONASTERISK);
+			}
+			UpdateStatus();
+			break;
+		}
 		case LGVN_FILTERDONE:
 			SetEventText(L"Filter done");
 			UpdateStatus();
@@ -448,7 +514,8 @@ static void LayoutChildren(HWND hwnd) {
 	RECT rcStatus;
 	::GetWindowRect(g_status, &rcStatus);
 	int filterHeight = ::MulDiv(24, ::GetDpiForWindow(hwnd), 96);
-	::SetWindowPos(g_filterEdit, nullptr, 0, 0, rc.right, filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+	::SetWindowPos(g_filterEdit, nullptr, 0, 0, rc.right / 2, filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+	::SetWindowPos(g_searchEdit, nullptr, rc.right / 2, 0, rc.right - rc.right / 2, filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 	g_log.SetWindowPos(nullptr, 0, filterHeight, rc.right, rc.bottom - (rcStatus.bottom - rcStatus.top) - filterHeight, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -476,11 +543,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_filterEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_FILTER, _Module.GetModuleInstance(), nullptr);
 			::SendMessage(g_filterEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter (Ctrl+F)");
+			g_searchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+				0, 0, 0, 0, hwnd, (HMENU)IDC_SEARCH, _Module.GetModuleInstance(), nullptr);
+			::SendMessage(g_searchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search (Ctrl+E, Enter/F3, Shift+F3)");
 			{
 				NONCLIENTMETRICSW ncm{ sizeof(ncm) };
 				::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, ::GetDpiForWindow(hwnd));
 				static HFONT font = ::CreateFontIndirectW(&ncm.lfMessageFont);
 				::SendMessage(g_filterEdit, WM_SETFONT, (WPARAM)font, FALSE);
+				::SendMessage(g_searchEdit, WM_SETFONT, (WPARAM)font, FALSE);
 			}
 			// appended before the window exists: taken in when it's created
 			g_log.AppendLine(L"LogView demo. File > Start Stream appends from another thread; View > Virtual Mode shows 10 million lines.");
@@ -518,6 +589,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			if (LOWORD(wParam) == IDC_FILTER) {
 				if (HIWORD(wParam) == EN_CHANGE)
 					ApplyFilter();
+				return 0;
+			}
+			if (LOWORD(wParam) == IDC_SEARCH) {
+				if (HIWORD(wParam) == EN_CHANGE)
+					ApplySearch();
 				return 0;
 			}
 			OnCommand(hwnd, LOWORD(wParam));
@@ -577,6 +653,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	AppendMenuW(hFilter, MF_STRING, ID_FILTER_REGEX, L"&Regex");
 	AppendMenuW(hFilter, MF_STRING, ID_FILTER_MATCHCASE, L"Match &Case");
 	AppendMenuW(hFilter, MF_STRING, ID_FILTER_EXCLUDE, L"E&xclude Matches");
+	AppendMenuW(hFilter, MF_STRING, ID_FILTER_WHOLEWORD, L"W&hole Word");
 	AppendMenuW(hFilter, MF_STRING, ID_FILTER_WARNINGS, L"&Warnings and Errors Only");
 	AppendMenuW(hFilter, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hFilter, MF_STRING, ID_FILTER_CLEAR, L"C&lear Filter");
@@ -588,10 +665,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	AppendMenuW(hRules, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(hRules, MF_STRING, ID_RULES_CLEAR, L"&Clear Rules");
 
+	HMENU hSearch = CreatePopupMenu();
+	AppendMenuW(hSearch, MF_STRING, ID_SEARCH_FOCUS, L"&Edit Search\tCtrl+E");
+	AppendMenuW(hSearch, MF_STRING, ID_SEARCH_NEXT, L"Find &Next\tF3");
+	AppendMenuW(hSearch, MF_STRING, ID_SEARCH_PREV, L"Find &Previous\tShift+F3");
+	AppendMenuW(hSearch, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(hSearch, MF_STRING, ID_SEARCH_MATCHCASE, L"Match &Case");
+	AppendMenuW(hSearch, MF_STRING, ID_SEARCH_REGEX, L"&Regex");
+	AppendMenuW(hSearch, MF_STRING, ID_SEARCH_WHOLEWORD, L"&Whole Word");
+
 	HMENU hMenu = CreateMenu();
 	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
 	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
 	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFilter, L"F&ilter");
+	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSearch, L"&Search");
 	AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hRules, L"&Rules");
 
 	HWND hwnd = CreateWindowExW(0, L"LogViewDemoWnd", L"Log View Demo", WS_OVERLAPPEDWINDOW,
@@ -605,6 +692,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, 'O', ID_FILE_LOAD },
 		{ FVIRTKEY | FCONTROL, 'T', ID_VIEW_FOLLOW },
 		{ FVIRTKEY | FCONTROL, 'F', ID_FILTER_FOCUS },
+		{ FVIRTKEY | FCONTROL, 'E', ID_SEARCH_FOCUS },
+		{ FVIRTKEY, VK_F3, ID_SEARCH_NEXT },
+		{ FVIRTKEY | FSHIFT, VK_F3, ID_SEARCH_PREV },
 	};
 	HACCEL hAccel = CreateAcceleratorTable(accels, (int)std::size(accels));
 
@@ -613,6 +703,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	MSG msg;
 	while (GetMessage(&msg, nullptr, 0, 0)) {
+		// Enter in the search box finds the next match
+		if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && msg.hwnd == g_searchEdit) {
+			OnCommand(hwnd, ::GetKeyState(VK_SHIFT) < 0 ? ID_SEARCH_PREV : ID_SEARCH_NEXT);
+			continue;
+		}
 		if (!TranslateAccelerator(hwnd, hAccel, &msg)) {
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);

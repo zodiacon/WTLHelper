@@ -7,6 +7,7 @@
 #include <algorithm>
 
 constexpr UINT_PTR ScanTimer = 1;
+constexpr UINT_PTR SearchTimer = 2;
 
 // ---- Rows ------------------------------------------------------------------------------
 
@@ -44,11 +45,12 @@ BOOL CLogViewCtrl::SetFilter(const LGVFILTER* filter) {
 	LgFilter next;
 	if (filter) {
 		LPCWSTR text = filter->pszText ? filter->pszText : L"";
-		if (!next.matcher.Set(text, (filter->flags & LGVFF_REGEX) != 0, (filter->flags & LGVFF_MATCHCASE) != 0))
+		if (!next.matcher.Set(text, (filter->flags & LGVFF_REGEX) != 0, (filter->flags & LGVFF_MATCHCASE) != 0, (filter->flags & LGVFF_WHOLEWORD) != 0))
 			return FALSE;
 		next.exclude = (filter->flags & LGVFF_EXCLUDE) != 0;
 		next.levelMask = filter->levelMask;
 	}
+	CancelSearch();   // its place among the rows is gone
 	*m_Filter = std::move(next);
 	m_Rows->Clear();
 	m_ScanSerial = FirstSerial();
@@ -73,7 +75,8 @@ BOOL CLogViewCtrl::GetFilter(LGVFILTER* filter) const {
 		return FALSE;
 	auto& m = m_Filter->matcher;
 	filter->pszText = m.Text().c_str();
-	filter->flags = (m.IsRegex() ? LGVFF_REGEX : 0) | (m.MatchCase() ? LGVFF_MATCHCASE : 0) | (m_Filter->exclude ? LGVFF_EXCLUDE : 0);
+	filter->flags = (m.IsRegex() ? LGVFF_REGEX : 0) | (m.MatchCase() ? LGVFF_MATCHCASE : 0) | (m.WholeWord() ? LGVFF_WHOLEWORD : 0) |
+		(m_Filter->exclude ? LGVFF_EXCLUDE : 0);
 	filter->levelMask = m_Filter->levelMask;
 	return TRUE;
 }
@@ -120,6 +123,13 @@ void CLogViewCtrl::StartScan() {
 }
 
 LRESULT CLogViewCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam == SearchTimer) {
+		if (!m_SearchState.active)
+			KillTimer(SearchTimer);
+		else
+			SearchStep(25);   // ends the search (and its timer) when done
+		return 0;
+	}
 	if (wParam != ScanTimer) {
 		bHandled = FALSE;
 		return 0;
@@ -154,7 +164,7 @@ int CLogViewCtrl::AddRule(const LGVRULE* rule) {
 	if (!rule || !rule->pszText || !*rule->pszText)
 		return -1;
 	LgRule r;
-	if (!r.matcher.Set(rule->pszText, (rule->flags & LGVFF_REGEX) != 0, (rule->flags & LGVFF_MATCHCASE) != 0))
+	if (!r.matcher.Set(rule->pszText, (rule->flags & LGVFF_REGEX) != 0, (rule->flags & LGVFF_MATCHCASE) != 0, (rule->flags & LGVFF_WHOLEWORD) != 0))
 		return -1;
 	r.style = rule->style;
 	r.matchOnly = (rule->flags & LGVRF_MATCHONLY) != 0;

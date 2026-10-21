@@ -92,6 +92,7 @@ struct LGVPOS {
 #define LGVFF_MATCHCASE   0x0001
 #define LGVFF_REGEX       0x0002   // ECMAScript (std::wregex)
 #define LGVFF_EXCLUDE     0x0004   // filter: the lines that don't match the text
+#define LGVFF_WHOLEWORD   0x0008   // not next to a letter, digit or '_'
 #define LGVRF_MATCHONLY   0x0100   // rule: style the matched text only (its colors; bold and italic don't apply)
 
 #define LGV_ALLLEVELS     0xFFFFFFFF
@@ -100,6 +101,11 @@ struct LGVFILTER {
 	LPCWSTR pszText = nullptr;         // nullptr or "": any text
 	UINT    flags = 0;                 // LGVFF_*
 	DWORD   levelMask = LGV_ALLLEVELS; // 1 << level
+};
+
+struct LGVSEARCH {
+	LPCWSTR pszText = nullptr;         // nullptr or "": no search
+	UINT    flags = 0;                 // LGVFF_MATCHCASE, LGVFF_REGEX, LGVFF_WHOLEWORD
 };
 
 struct LGVRULE {
@@ -119,6 +125,8 @@ struct LGVCOLORS {
 	COLORREF crSelText;
 	COLORREF crSelBackInactive;
 	COLORREF crSelTextInactive;
+	COLORREF crMatchBack;              // the search's matches
+	COLORREF crMatchText;
 };
 
 // ---- Hit testing ----------------------------------------------------------------
@@ -137,11 +145,19 @@ struct LGVCOLORS {
 #define LGVN_FOLLOWCHANGED  (LGVN_FIRST - 3)   // NMHDR; the user's scrolling turned following the tail on or off
 #define LGVN_SELCHANGED     (LGVN_FIRST - 4)   // NMHDR; the user moved the caret or changed the selection
 #define LGVN_FILTERDONE     (LGVN_FIRST - 5)   // NMHDR; SetFilter's pass over the lines is complete
+#define LGVN_SEARCHDONE     (LGVN_FIRST - 6)   // NMLGVSEARCH; FindNext (or F3) is done
 
 struct NMLGVLINE {
 	NMHDR  hdr;
 	size_t line;
 	POINT  pt;
+};
+
+struct NMLGVSEARCH {
+	NMHDR  hdr;
+	BOOL   found;                      // the match is selected
+	BOOL   wrapped;                    // it went past the end (or the start, going back)
+	size_t line;                       // the match's; LGV_NOLINE if none
 };
 
 // Virtual mode: the parent points pszText at the line's text (cchText -1 if null-terminated), which has to
@@ -162,6 +178,7 @@ struct NMLGVDISPINFO {
 class LgStore;
 class LgBatch;
 struct LgFilter;
+class LgMatcher;
 class LgRowMap;
 struct LgRule;
 class LgTextWindow;
@@ -285,6 +302,19 @@ public:
 	void    ClearRules();
 	int     GetRuleCount() const;
 
+	// ---- Search -----------------------------------------------------------------------
+	//
+	// The search text's matches are highlighted in the lines shown. FindNext goes from the caret (the end of the
+	// selection, or its start going back) through the lines shown, around past the end, and selects the match;
+	// like the filter it works in slices, so LGVN_SEARCHDONE comes right away or a little later. Keys: F3 and
+	// Shift+F3 find the next and previous match, Ctrl+F3 searches for the selected text, Escape cancels.
+
+	BOOL    SetSearch(const LGVSEARCH* search);       // nullptr or no text: none. FALSE: a bad regex
+	BOOL    GetSearch(LGVSEARCH* search) const;       // pszText points into the control until the search changes
+	BOOL    FindNext(bool forward = true);            // FALSE if there's no search text
+	bool    IsSearching() const;
+	void    CancelSearch();                           // no notification
+
 	// ---- Caret and selection ----------------------------------------------------------
 	//
 	// The selection runs from the anchor to the caret. Clicking places the caret, dragging or Shift selects;
@@ -370,6 +400,9 @@ private:
 	bool    ScanStep(DWORD budgetMs);                 // filters the lines not seen yet; true when done
 	void    StartScan();
 	void    FilterDone();
+	bool    SearchStep(DWORD budgetMs);               // true when done
+	void    EndSearch(bool found, size_t line, size_t start, size_t end);
+	void    StartFind(bool forward, bool byUser);
 
 	// layout and scrolling
 	int     Scale(int dips) const;
@@ -445,6 +478,21 @@ private:
 	ULONGLONG                     m_ScanSerial = 0;  // the next line to filter
 	bool                          m_FilterDonePending = false;
 	bool                          m_CaretAfterFilter = false;   // scroll to the caret when the pass is done
+
+	// search
+	struct SearchState {
+		bool      active = false;
+		bool      forward = true;
+		bool      byUser = false;   // F3: the selection change is notified
+		bool      wrapped = false;
+		bool      firstVisit = true;// on the start line, the first time
+		ULONGLONG startSerial = 0;  // the line it started on, and the column
+		size_t    startColumn = 0;
+		ULONGLONG serial = 0;       // the line to look at next
+		size_t    remaining = 0;    // lines left to look at
+	};
+	std::unique_ptr<LgMatcher>    m_Search;
+	SearchState                   m_SearchState;
 
 	// caret and selection
 	LGVPOS                        m_Anchor{};
