@@ -59,6 +59,11 @@ LRESULT CPropertyGridCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	// a popup made with a child as its parent is owned by the top-level window: it would outlive the grid
 	if (m_hToolTip)
 		::DestroyWindow(m_hToolTip);
+	if (m_hTextTip)
+		::DestroyWindow(m_hTextTip);
+	m_hTextTip = nullptr;
+	m_TipRow = -1;
+	DisconnectAccessible();
 	m_hToolTip = m_hSearch = m_hScroll = nullptr;
 	m_ScrollVisible = false;
 	bHandled = FALSE;
@@ -222,6 +227,7 @@ void CPropertyGridCtrl::ScrollTo(int topRow) {
 	m_TopRow = topRow;
 	UpdateScrollBar();
 	if (m_TopRow != old) {
+		HideTextTip();
 		PositionEditor();
 		Invalidate();
 	}
@@ -240,6 +246,9 @@ void CPropertyGridCtrl::Rebuild() {
 		return;
 	}
 	m_RebuildPending = false;
+	HideTextTip();
+	if (!m_Filter.empty())
+		QueryAllValues();   // the filter looks at the values as shown
 	m_Model->BuildRows(m_View, m_Rows, m_Filter);
 
 	if (m_Selected && SelectedRow() < 0) {
@@ -254,6 +263,7 @@ void CPropertyGridCtrl::Rebuild() {
 		DestroyEditor();
 	if (IsWindow())
 		Layout();
+	NotifyAccessible(EVENT_OBJECT_REORDER, -1);
 }
 
 int CPropertyGridCtrl::RowOf(const PgNode* node) const {
@@ -284,6 +294,7 @@ bool CPropertyGridCtrl::SetExpanded(PgNode* node, bool expand, bool notify) {
 		return false;
 	node->expanded = expand;
 	Rebuild();
+	NotifyAccessible(EVENT_OBJECT_STATECHANGE, RowOf(node));
 	if (notify) {
 		NMPRGEXPAND nm{};
 		nm.hItem = node;
@@ -308,6 +319,11 @@ void CPropertyGridCtrl::SelectRow(int row, bool notify) {
 		EnsureRowVisible(row);
 	if (IsWindow())
 		Invalidate();
+	if (node) {
+		NotifyAccessible(EVENT_OBJECT_SELECTION, row);
+		if (::GetFocus() == m_hWnd)
+			NotifyAccessible(EVENT_OBJECT_FOCUS, row);
+	}
 	if (notify && node != old) {   // moving among an item's flag rows keeps the item selected
 		NMPRGSELCHANGE nm{};
 		nm.hItemOld = old;
@@ -409,6 +425,8 @@ int CPropertyGridCtrl::TextLeft(const PgRow& row) const {
 void CPropertyGridCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, const PRGCOLORS& c) {
 	auto& r = m_Rows[row];
 	auto node = r.node;
+	if (!node->IsCategory())
+		QueryValue(node);
 	bool selected = node == m_Selected && r.flag == m_SelFlag;
 	bool focused = ::GetFocus() == m_hWnd;
 	auto selBack = focused ? c.crSelBack : c.crSelBackInactive;
@@ -631,6 +649,7 @@ int CPropertyGridCtrl::HitRow(POINT pt, UINT* pFlags) const {
 // ---- Mouse ----------------------------------------------------------------------------
 
 LRESULT CPropertyGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	HideTextTip();
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	UINT flags;
 	int row = HitRow(pt, &flags);
@@ -737,6 +756,8 @@ LRESULT CPropertyGridCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CPropertyGridCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
+	if (m_Drag == Drag::None)
+		UpdateTextTip(pt);
 	if (m_Drag == Drag::Splitter) {
 		auto grid = GetGridRect();
 		int width = grid.right - m_Margin;
@@ -772,6 +793,7 @@ LRESULT CPropertyGridCtrl::OnSetCursor(UINT, WPARAM, LPARAM lParam, BOOL& bHandl
 }
 
 LRESULT CPropertyGridCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	HideTextTip();
 	SetFocus();
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	UINT flags;
@@ -861,8 +883,10 @@ LRESULT CPropertyGridCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	return code;
 }
 
-LRESULT CPropertyGridCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CPropertyGridCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	Invalidate();
+	if (uMsg == WM_SETFOCUS && m_Selected)
+		NotifyAccessible(EVENT_OBJECT_FOCUS, SelectedRow());
 	return 0;
 }
 
@@ -1064,6 +1088,7 @@ BOOL CPropertyGridCtrl::GetValue(HPRGITEM hItem, PRGVALUE* pValue) const {
 	auto node = Node(hItem);
 	if (!node || !pValue)
 		return FALSE;
+	QueryValue(node);
 	*pValue = node->value.value;
 	return TRUE;
 }
@@ -1108,12 +1133,18 @@ BOOL CPropertyGridCtrl::ResetValue(HPRGITEM hItem) {
 
 bool CPropertyGridCtrl::IsModified(HPRGITEM hItem) const {
 	auto node = Node(hItem);
-	return node && node->defValue.value.type != PRGVT_EMPTY && !PgValuesEqual(node->value.value, node->defValue.value);
+	if (!node)
+		return false;
+	QueryValue(node);
+	return node->defValue.value.type != PRGVT_EMPTY && !PgValuesEqual(node->value.value, node->defValue.value);
 }
 
 ATL::CString CPropertyGridCtrl::GetValueText(HPRGITEM hItem) const {
 	auto node = Node(hItem);
-	return node ? ATL::CString(PgFormatValue(*node).c_str()) : ATL::CString();
+	if (!node)
+		return {};
+	QueryValue(node);
+	return PgFormatValue(*node).c_str();
 }
 
 // ---- Attributes -----------------------------------------------------------------------
@@ -1373,4 +1404,140 @@ void CPropertyGridCtrl::EndUpdate() {
 	Rebuild();
 	if (IsWindow())
 		Invalidate();
+}
+
+// ---- Callback values ---------------------------------------------------------------------
+
+void CPropertyGridCtrl::QueryValue(PgNode* node) const {
+	if (!node || (node->flags & PRGF_CALLBACK) == 0 || !IsWindow())
+		return;
+	NMPRGDISPINFO nm{};
+	nm.hItem = node;
+	nm.lParam = node->lParam;
+	nm.value = node->value.value;   // the last one: unchanged if the parent fills nothing
+	const_cast<CPropertyGridCtrl*>(this)->FireNotify(&nm.hdr, PRGN_GETDISPINFO);
+	if (PgValueFits(node->kind, nm.value))
+		node->value.Assign(nm.value);
+}
+
+void CPropertyGridCtrl::QueryAllValues() {
+	auto query = [&](auto& self, PgNode* node) -> void {
+		for (auto& c : node->children) {
+			QueryValue(c.get());
+			self(self, c.get());
+		}
+		};
+	query(query, &m_Model->root);
+}
+
+void CPropertyGridCtrl::RefreshValues() {
+	if (!m_Filter.empty())
+		Rebuild();   // what matches may have changed
+	else if (IsWindow())
+		Invalidate();
+}
+
+// ---- Tooltip for a cut text ----------------------------------------------------------------
+//
+// Over a name or a value too long for its cell, the whole text shows in place, like a list view's.
+
+void CPropertyGridCtrl::UpdateTextTip(POINT pt) {
+	UINT part;
+	int row = HitRow(pt, &part);
+	if (part != PRGHT_NAME && part != PRGHT_VALUE)
+		row = -1;
+	if (row >= 0 && part == PRGHT_VALUE && (m_Rows[row].node == m_Editing || m_Rows[row].flag >= 0 || m_Rows[row].node->IsCategory()))
+		row = -1;   // the editor shows it, or there's no text to cut
+	if (row == m_TipRow && (row < 0 || part == m_TipPart))
+		return;
+	HideTextTip();
+	if (row < 0)
+		return;
+
+	if (!m_TrackingLeave) {
+		TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };
+		m_TrackingLeave = ::TrackMouseEvent(&tme) != FALSE;
+	}
+
+	// the text, where it's drawn and with which font
+	auto& r = m_Rows[row];
+	auto node = r.node;
+	auto grid = GetGridRect();
+	int top = grid.top + (row - m_TopRow) * m_RowHeight;
+	std::wstring text;
+	RECT rc{ 0, top, 0, top + m_RowHeight - 1 };
+	HFONT font = m_hFont;
+	if (part == PRGHT_NAME) {
+		text = RowName(row);
+		rc.left = TextLeft(r);
+		rc.right = node->IsCategory() ? grid.right - m_Pad : GetSplitX() - m_Pad;
+		if (node->IsCategory())
+			font = m_BoldFont;
+	}
+	else {
+		QueryValue(node);
+		text = PgFormatValue(*node);
+		auto value = GetValueRect(row);
+		rc.left = ValueTextLeft(node, value);
+		rc.right = (node == m_Selected && m_SelFlag < 0 && GetButton(node) != Button::None ? GetButtonRect(row).left : value.right) - m_Pad;
+		if (node->defValue.value.type != PRGVT_EMPTY && !PgValuesEqual(node->value.value, node->defValue.value))
+			font = m_BoldFont;
+	}
+	WTL::CClientDC dc(m_hWnd);
+	auto old = dc.SelectFont(font);
+	SIZE size{};
+	dc.GetTextExtent(text.c_str(), (int)text.size(), &size);
+	dc.SelectFont(old);
+	if (text.empty() || size.cx <= rc.right - rc.left)
+		return;   // not cut
+
+	if (!m_hTextTip) {
+		m_hTextTip = ::CreateWindowExW(WS_EX_TOPMOST | WS_EX_TRANSPARENT, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+			0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
+		if (!m_hTextTip)
+			return;
+		TTTOOLINFOW ti{ sizeof(ti) };
+		ti.uFlags = TTF_TRACK | TTF_ABSOLUTE | TTF_TRANSPARENT;   // clicks go through to the grid
+		ti.hwnd = m_hWnd;
+		ti.uId = 1;
+		ti.lpszText = const_cast<LPWSTR>(L"");
+		::SendMessage(m_hTextTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+	}
+	auto c = GetColors();
+	::SendMessage(m_hTextTip, TTM_SETTIPBKCOLOR, c.crBack, 0);
+	::SendMessage(m_hTextTip, TTM_SETTIPTEXTCOLOR, c.crText, 0);
+	::SendMessage(m_hTextTip, WM_SETFONT, (WPARAM)font, FALSE);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	ti.lpszText = const_cast<LPWSTR>(text.c_str());
+	::SendMessage(m_hTextTip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+
+	// over the cell's text exactly: from the text's rectangle to the tooltip window's
+	RECT tip{ rc.left, rc.top + (m_RowHeight - 1 - m_TextHeight) / 2, rc.left + size.cx, 0 };
+	tip.bottom = tip.top + m_TextHeight;
+	::MapWindowPoints(m_hWnd, nullptr, (POINT*)&tip, 2);
+	::SendMessage(m_hTextTip, TTM_ADJUSTRECT, TRUE, (LPARAM)&tip);
+	::SendMessage(m_hTextTip, TTM_TRACKPOSITION, 0, MAKELPARAM(tip.left, tip.top));
+	::SendMessage(m_hTextTip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+	m_TipRow = row;
+	m_TipPart = part;
+}
+
+void CPropertyGridCtrl::HideTextTip() {
+	if (m_TipRow < 0)
+		return;
+	m_TipRow = -1;
+	if (!m_hTextTip)
+		return;
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	::SendMessage(m_hTextTip, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+}
+
+LRESULT CPropertyGridCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
+	m_TrackingLeave = false;
+	HideTextTip();
+	return 0;
 }

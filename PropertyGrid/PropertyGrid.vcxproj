@@ -106,6 +106,7 @@
     <ClCompile Include="src\PropertyGridEdit.cpp" />
     <ClCompile Include="src\PropertyGridCheckList.cpp" />
     <ClCompile Include="src\PropertyGridToolbar.cpp" />
+    <ClCompile Include="src\PropertyGridAccessible.cpp" />
     <ClCompile Include="src\PropertyGridModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

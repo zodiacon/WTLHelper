@@ -47,6 +47,10 @@ enum {
 static CPropertyGridCtrl g_grid;
 static HWND              g_status = nullptr;
 static int               g_manyCount = 0;
+static LONGLONG          g_counter = 5;     // the "Counter" callback item's value, kept here
+
+// lParam of the callback items
+enum { LIVE_TICKS = 1, LIVE_NOW, LIVE_COUNTER };
 
 static void Status(LPCWSTR text) {
 	::SendMessage(g_status, SB_SETTEXT, 0, (LPARAM)text);
@@ -181,6 +185,33 @@ static void Populate() {
 	Add(size, PRGK_INTEGER, L"Height", nullptr, PrgMakeInt(200));
 	Add(misc, PRGK_STRING, L"A long value", L"Text too long for the column ends with an ellipsis.",
 		PrgMakeString(L"The quick brown fox jumps over the lazy dog, again and again and again and again."));
+	Add(misc, PRGK_STRING, L"A property with a name much too long for its column", L"Hover a cut name or value: the whole text shows.",
+		PrgMakeString(L"short"));
+
+	auto live = g_grid.AddCategory(L"Live", L"Values the demo gives in PRGN_GETDISPINFO (PRGF_CALLBACK), refreshed every second.");
+	d = {};
+	d.kind = PRGK_INTEGER;
+	d.pszName = L"Tick Count";
+	d.pszDescription = L"GetTickCount64, asked for each time it's drawn.";
+	d.flags = PRGF_CALLBACK | PRGF_READONLY;
+	d.lParam = LIVE_TICKS;
+	g_grid.InsertItem(live, &d);
+	d = {};
+	d.kind = PRGK_DATETIME;
+	d.pszName = L"Now";
+	d.pszDescription = L"The current time.";
+	d.flags = PRGF_CALLBACK | PRGF_READONLY;
+	d.lParam = LIVE_NOW;
+	g_grid.InsertItem(live, &d);
+	d = {};
+	d.kind = PRGK_INTEGER;
+	d.pszName = L"Counter";
+	d.pszDescription = L"Goes up every second. Kept by the demo: an edit is stored in PRGN_VALUECHANGED.";
+	d.flags = PRGF_CALLBACK;
+	d.lParam = LIVE_COUNTER;
+	d.minVal = 0;
+	d.maxVal = 1000000;
+	g_grid.InsertItem(live, &d);
 
 	g_grid.EndUpdate();
 	g_manyCount = 0;
@@ -352,8 +383,28 @@ static LRESULT OnNotify(HWND hwnd, NMHDR* hdr) {
 			text.Format(L"Filter: \"%s\"", (PCWSTR)g_grid.GetFilter());
 			Status(text);
 			break;
+		case PRGN_GETDISPINFO: {
+			auto nm = (NMPRGDISPINFO*)hdr;
+			switch (nm->lParam) {
+				case LIVE_TICKS:
+					nm->value = PrgMakeInt((LONGLONG)::GetTickCount64());
+					break;
+				case LIVE_NOW: {
+					FILETIME now;
+					::GetSystemTimeAsFileTime(&now);
+					nm->value = PrgMakeDateTime(now);
+					break;
+				}
+				case LIVE_COUNTER:
+					nm->value = PrgMakeInt(g_counter);
+					break;
+			}
+			break;
+		}
 		case PRGN_VALUECHANGED: {
 			auto nm = (NMPRGVALUE*)hdr;
+			if (nm->lParam == LIVE_COUNTER)
+				g_counter = nm->newValue.llVal;   // else the next PRGN_GETDISPINFO brings the old one back
 			text.Format(L"Changed: %s = %s", (PCWSTR)g_grid.GetItemName(nm->hItem), (PCWSTR)g_grid.GetValueText(nm->hItem));
 			Status(text);
 			break;
@@ -397,6 +448,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				WS_EX_CLIENTEDGE, IDC_GRID);
 			Populate();
 			g_grid.SetFocus();
+			SetTimer(hwnd, 1, 1000, nullptr);
+			return 0;
+
+		case WM_TIMER:
+			g_counter++;
+			g_grid.RefreshValues();
 			return 0;
 
 		case WM_SIZE:

@@ -132,6 +132,8 @@ bool CPropertyGridCtrl::EndEditCore(bool commit, bool focusLost) {
 }
 
 bool CPropertyGridCtrl::CreateEditor(PgNode* node) {
+	HideTextTip();
+	QueryValue(node);
 	bool readOnly = IsReadOnly(node);
 	auto type = PgEditType(*node);
 	auto& value = node->value.value;
@@ -347,6 +349,7 @@ bool CPropertyGridCtrl::CommitEditor(std::wstring& error) {
 }
 
 bool CPropertyGridCtrl::CommitValue(PgNode* node, const PRGVALUE& value, std::wstring& error) {
+	QueryValue(node);
 	if (PgValuesEqual(value, node->value.value))
 		return true;
 	NMPRGVALUE nm{};
@@ -367,6 +370,7 @@ bool CPropertyGridCtrl::CommitValue(PgNode* node, const PRGVALUE& value, std::ws
 	old.Assign(node->value.value);
 	node->value.Assign(nm.newValue);
 	Invalidate();
+	NotifyAccessible(EVENT_OBJECT_VALUECHANGE, RowOf(node));
 	nm.oldValue = old.value;
 	nm.newValue = node->value.value;
 	nm.szError[0] = 0;
@@ -375,6 +379,7 @@ bool CPropertyGridCtrl::CommitValue(PgNode* node, const PRGVALUE& value, std::ws
 }
 
 void CPropertyGridCtrl::ToggleBool(PgNode* node) {
+	QueryValue(node);
 	if (IsReadOnly(node)) {
 		::MessageBeep(MB_OK);
 		return;
@@ -387,6 +392,7 @@ void CPropertyGridCtrl::ToggleBool(PgNode* node) {
 }
 
 void CPropertyGridCtrl::CycleEnum(PgNode* node) {
+	QueryValue(node);
 	if (node->enumItems.empty())
 		return;
 	if (IsReadOnly(node)) {
@@ -708,6 +714,7 @@ void CPropertyGridCtrl::PressButton(PgNode* node) {
 	if (FireNotify(&nm.hdr, PRGN_BUTTONCLICK))
 		return;   // the parent's own dialog
 	PgStoredValue value;
+	QueryValue(node);
 	if (!RunDialog(node, value))
 		return;
 	std::wstring error;
@@ -823,6 +830,7 @@ bool CPropertyGridCtrl::RunDialog(PgNode* node, PgStoredValue& value) {
 // ---- Flags -------------------------------------------------------------------------------
 
 void CPropertyGridCtrl::ToggleFlag(PgNode* node, int flag) {
+	QueryValue(node);
 	if (IsReadOnly(node)) {
 		::MessageBeep(MB_OK);
 		return;

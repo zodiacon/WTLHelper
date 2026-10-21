@@ -103,6 +103,7 @@ struct PRGENUMITEM {
 #define PRGF_HIDDEN     0x0080   // not shown
 #define PRGF_COLLAPSED  0x0100   // starts collapsed (items with children start expanded otherwise; Flags always collapsed)
 #define PRGF_DATEONLY   0x0200   // DateTime: no time part
+#define PRGF_CALLBACK   0x0400   // the value comes from the parent (PRGN_GETDISPINFO) each time it's shown or used
 
 // ---- Item description (InsertItem) ---------------------------------------------------
 
@@ -173,6 +174,7 @@ struct PRGCOLORS {
                                                // nonzero = handled (else the kind's own dialog, if it has one)
 #define PRGN_VIEWCHANGED    (PRGN_FIRST - 7)   // NMHDR; by the toolbar's buttons
 #define PRGN_FILTERCHANGED  (PRGN_FIRST - 8)   // NMHDR; typed in the toolbar's search box
+#define PRGN_GETDISPINFO    (PRGN_FIRST - 9)   // NMPRGDISPINFO; a PRGF_CALLBACK item's value is needed
 
 struct NMPRGITEM {
 	NMHDR    hdr;
@@ -206,11 +208,23 @@ struct NMPRGVALUE {
 	WCHAR    szError[256];
 };
 
+// PRGF_CALLBACK: the parent fills value (which holds the last value it gave). A string it points to has to
+// last until the notification returns; the grid keeps a copy. The grid asks while painting, so the handler
+// must not change the grid's items. A change the user makes comes in PRGN_VALUECHANGING/CHANGED as usual;
+// the parent stores it, or the next PRGN_GETDISPINFO brings the old value back.
+struct NMPRGDISPINFO {
+	NMHDR    hdr;
+	HPRGITEM hItem;
+	LPARAM   lParam;
+	PRGVALUE value;
+};
+
 // ---- Control class --------------------------------------------------------------------------
 
 struct PgModel;
 struct PgRow;
 class PgCheckList;
+class PgAccessible;
 struct PgStoredValue;
 
 class CPropertyGridCtrl : public ATL::CWindowImpl<CPropertyGridCtrl> {
@@ -220,6 +234,7 @@ public:
 	CPropertyGridCtrl();
 	~CPropertyGridCtrl();
 	friend class PgCheckList;
+	friend class PgAccessible;
 
 	// posted to itself by the editing code
 	enum : UINT { WM_PRG_CHECKFOCUS = WM_USER + 100, WM_PRG_COMBOCLOSED };
@@ -251,6 +266,8 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnRButtonDown)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
@@ -284,6 +301,7 @@ public:
 	BOOL    ResetValue(HPRGITEM hItem);                        // back to the default, if there is one
 	bool    IsModified(HPRGITEM hItem) const;                  // has a default and differs from it
 	ATL::CString GetValueText(HPRGITEM hItem) const;           // as displayed
+	void    RefreshValues();                                   // repaints: PRGF_CALLBACK items are asked again
 
 	// ---- Attributes -------------------------------------------------------------------
 
@@ -391,6 +409,18 @@ private:
 	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCheckFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnComboClosed(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+
+	// callback values, tooltips for cut text, accessibility
+	void    QueryValue(PgNode* node) const;           // PRGF_CALLBACK: PRGN_GETDISPINFO into the node's value
+	void    QueryAllValues();
+	void    UpdateTextTip(POINT pt);
+	void    HideTextTip();
+	std::wstring RowName(int row) const;
+	std::wstring RowValue(int row) const;
+	void    NotifyAccessible(DWORD event, int row);   // row -1: the grid itself
+	void    DisconnectAccessible();
 
 	// editing
 	enum class Editor { None, Edit, Combo, Date };
@@ -533,6 +563,13 @@ private:
 	std::wstring             m_Filter;
 	HWND                     m_hScroll = nullptr;    // a child, beside the grid only (not the toolbar or description)
 	bool                     m_ScrollVisible = false;
+
+	// the tooltip over a name or value cut short, and accessibility
+	HWND                     m_hTextTip = nullptr;
+	int                      m_TipRow = -1;
+	UINT                     m_TipPart = 0;          // PRGHT_NAME or PRGHT_VALUE
+	bool                     m_TrackingLeave = false;
+	PgAccessible*            m_Accessible = nullptr; // made on the first WM_GETOBJECT; cut off from the grid in OnDestroy
 	std::wstring             m_CheckListInitialText;
 	COLORREF                 m_CustomColors[16];     // ChooseColor's, kept between uses
 };
