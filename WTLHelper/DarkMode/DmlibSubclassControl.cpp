@@ -422,7 +422,8 @@ LRESULT CALLBACK dmlib_subclass::ButtonSubclass(
 					::SetWindowPos(hWnd, nullptr, 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 				}
 			}
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_THEMECHANGED:
@@ -665,7 +666,8 @@ LRESULT CALLBACK dmlib_subclass::GroupboxSubclass(
 		case WM_DPICHANGED_AFTERPARENT:
 		{
 			themeData.closeTheme();
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_THEMECHANGED:
@@ -1108,7 +1110,8 @@ LRESULT CALLBACK dmlib_subclass::UpDownSubclass(
 		{
 			pUpDownData->updateRect(hWnd);
 			themeData.closeTheme();
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_THEMECHANGED:
@@ -1597,7 +1600,8 @@ LRESULT CALLBACK dmlib_subclass::CustomBorderSubclass(
 		{
 			pBorderMetricsData->setMetricsForDpi(dmlib_dpi::GetDpiForParent(hWnd));
 			DarkMode::redrawWindowFrame(hWnd);
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_MOUSEMOVE:
@@ -2127,7 +2131,8 @@ LRESULT CALLBACK dmlib_subclass::ComboBoxSubclass(
 		case WM_DPICHANGED_AFTERPARENT:
 		{
 			themeData.closeTheme();
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_THEMECHANGED:
@@ -2345,7 +2350,8 @@ LRESULT CALLBACK dmlib_subclass::ListViewSubclass(
 		case WM_DPICHANGED_AFTERPARENT:
 		{
 			DarkMode::setDarkListViewCheckboxes(hWnd);
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		// For edit control, which is created when renaming/editing items
@@ -2661,7 +2667,8 @@ LRESULT CALLBACK dmlib_subclass::HeaderSubclass(
 		case WM_DPICHANGED_AFTERPARENT:
 		{
 			themeData.closeTheme();
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_THEMECHANGED:
@@ -2951,7 +2958,7 @@ LRESULT CALLBACK dmlib_subclass::StatusBarSubclass(
 
 			if (uMsg != WM_THEMECHANGED)
 			{
-				return 0;
+				return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 			}
 			break;
 		}
@@ -3145,7 +3152,8 @@ LRESULT CALLBACK dmlib_subclass::ProgressBarSubclass(
 		case WM_DPICHANGED_AFTERPARENT:
 		{
 			themeData.closeTheme();
-			return 0;
+			// a notification: on to the subclasses installed before this one (WTLHelper: DPI scaling of list columns...)
+			return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
 		}
 
 		case WM_THEMECHANGED:
