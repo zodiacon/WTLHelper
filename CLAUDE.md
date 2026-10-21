@@ -21,11 +21,11 @@ NuGet dependencies (`packages.config`): Detours (`ThemeHelper.cpp` includes `<de
 
 ## Tests
 
-The only automated tests are in `GraphControlTests/tests.cpp`. It's a console exe with a hand-rolled harness and no framework. The process exit code is the number of failed checks.
+The automated tests are in `GraphControlTests/tests.cpp`, `WTLDockTests/` and `PropertyGridTests/tests.cpp`. Each is a console exe with a hand-rolled harness and no framework. The process exit code is the number of failed checks.
 
 - Add a test with `TEST(Name) { CHECK(...); }`, then add a `Run_Name();` call in `wmain`. Registration is manual, so a test you don't call never runs.
 - To run a single test, comment out the other `Run_*` calls in `wmain`. There is no filter argument.
-- The tests cover only the pure data model (`GraphData`, ring buffer, formatters). Anything that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `HexTest`, `BasicDemo`).
+- The tests mostly cover pure data models (`GraphData`, the dock layout, the property grid's item tree and formatters); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `HexTest`, `BasicDemo`).
 
 ## Architecture
 
@@ -44,4 +44,5 @@ The rest of `WTLHelper` is a grab bag of standalone helpers: list views (`Virtua
 - `NodeGraphControl`: node/edge graph editor (namespace `NodeGraphCtrl`). It notifies the parent via `WM_NOTIFY` `NGCN_*` codes.
 - `TreeListView`: tree+columns control registered as window class `WC_TreeListView`, with an opaque `HTLITEM` handle API in the style of common controls.
 - `HexControl`: hex editor control (`BufferManager`/`MemoryBuffer`/`Selection`).
+- `PropertyGrid`: categorized name/value editor (`CPropertyGridCtrl`, window class `WC_PropertyGrid`), self-drawn with GDI, with a C-style API: `HPRGITEM` handles, `PRGVALUE` tagged values, `PRGN_*` notifications. The `PRG` prefix avoids commctrl's Pager control, which owns `PGN_`/`PGF_`/`PGK_`. The window-free model (`src/PropertyGridModel.*`: the item tree, the rows of each view, formatting) is covered by `PropertyGridTests`; `PropertyGridDemo` is for checking by hand.
 - `MarkdownViewLib`: `CMarkdownView`, a WTL wrapper around a Direct2D markdown viewer/editor ("Tinta"). Message handlers are thin pass-throughs to free `handleXxx(App&)` functions. Keep logic in those functions and not in the window class.
