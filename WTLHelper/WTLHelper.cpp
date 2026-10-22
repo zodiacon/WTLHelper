@@ -222,6 +222,15 @@ void WTLHelper::ApplyMode(HWND hWnd) {
 		return;
 	DarkMode::setDarkTitleBarEx(hWnd, true);
 	DarkMode::setChildCtrlsTheme(hWnd);
+	// darkmodelib gives a list view the same theme name in both modes ("Explorer", dark allowed or not), and a list
+	// view that already has it keeps the old mode's theme data: a selected item went on being drawn light (black text)
+	// after switching to dark. A name of the mode's own makes it load the new data
+	::EnumChildWindows(hWnd, [](HWND hChild, LPARAM dark) -> BOOL {
+		WCHAR className[32];
+		if (::GetClassName(hChild, className, _countof(className)) && ::_wcsicmp(className, WC_LISTVIEW) == 0)
+			::SetWindowTheme(hChild, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+		return TRUE;
+		}, g_DarkModeType == DarkModeKind::Dark);
 
 	CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(g_DarkModeType));
 	::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
