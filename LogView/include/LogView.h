@@ -196,6 +196,8 @@ public:
 	friend class LgAccessible;
 
 	enum : UINT { WM_LGV_FLUSH = WM_USER + 100 };   // posted to itself: appended lines to take in
+	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
+	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
 
 	BEGIN_MSG_MAP(CLogViewCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -218,6 +220,7 @@ public:
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
+		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 	ALT_MSG_MAP(1)   // the text area, a child window
 		MESSAGE_HANDLER(WM_PAINT, OnTextPaint)
@@ -470,6 +473,7 @@ private:
 	size_t  MaxTopRow() const;
 	int     MaxLeft() const;
 	void    UpdateScrollBars();
+	void    UpdateScrollBarTheme();                   // dark scroll bars on a dark background
 	void    ScrollTo(size_t topLine, int left, bool byUser);
 	void    SetFollow(bool follow, bool notify);
 
@@ -578,6 +582,7 @@ private:
 	bool                          m_OwnFont = true;
 	WTL::CFont                    m_Fonts[3];        // bold, italic, bold italic
 	bool                          m_SystemColors = true;
+	int                           m_DarkScrollBars = -1;   // the theme set on the text window: 1 dark, 0 not, -1 none yet
 	LGVCOLORS                     m_Colors{};
 	LGVSTYLE                      m_Styles[256];     // [0] unused
 	LGVSTYLE                      m_LevelStyles[32];

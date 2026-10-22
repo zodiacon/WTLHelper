@@ -2,8 +2,12 @@
 #include "LogViewModel.h"
 #include "LogViewText.h"
 
+#include <uxtheme.h>
+
 #include <algorithm>
 #include <climits>
+
+#pragma comment(lib, "uxtheme.lib")
 
 // ---- Helpers -----------------------------------------------------------------------
 
@@ -72,6 +76,7 @@ LRESULT CLogViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Text->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPSIBLINGS);
 	if (m_ShowToolbar)
 		CreateToolbar();
+	UpdateScrollBarTheme();
 	Layout();
 	Flush();   // lines appended before the window existed
 	return 0;
@@ -208,6 +213,7 @@ LRESULT CLogViewCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 }
 
 LRESULT CLogViewCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	UpdateScrollBarTheme();
 	if (m_Text->IsWindow())
 		m_Text->Invalidate();
 	Invalidate();   // the toolbar
@@ -703,8 +709,24 @@ void CLogViewCtrl::SetColors(const LGVCOLORS* colors) {
 	m_SystemColors = colors == nullptr;
 	if (colors)
 		m_Colors = *colors;
+	UpdateScrollBarTheme();
 	if (m_Text->IsWindow())
 		m_Text->Invalidate();
+	InvalidateToolbar();
+}
+
+void CLogViewCtrl::UpdateScrollBarTheme() {
+	// the scroll bars are the text window's own (non-client): the dark Explorer theme on it makes them dark. Set only
+	// when it changes: SetWindowTheme sends WM_THEMECHANGED, which comes back here.
+	if (!m_Text->IsWindow())
+		return;
+	COLORREF back = GetColors().crBack;
+	int dark = GetRValue(back) * 299 + GetGValue(back) * 587 + GetBValue(back) * 114 < 128 * 1000 ? 1 : 0;
+	if (dark == m_DarkScrollBars)
+		return;
+	m_DarkScrollBars = dark;
+	::SetWindowTheme(m_Text->m_hWnd, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	::SetWindowPos(m_Text->m_hWnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 LGVCOLORS CLogViewCtrl::GetColors() const {
