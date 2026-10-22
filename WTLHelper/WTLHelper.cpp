@@ -246,39 +246,66 @@ bool WTLHelper::InitMenu(CMenuHandle menu, MenuItemData const* items, int count,
 	ATLASSERT(::IsMenu(menu));
 	ATLASSERT(size > 0);
 
-	// the item bitmaps, by icon (resource ID or handle), size and background color; never deleted, as menus don't
-	// delete their item bitmaps and these are shared by every menu (a few for each icon: sizes and dark/light)
-	using Key = std::tuple<int, HICON, int, COLORREF>;
+	// the item bitmaps, by icon (resource ID or handle), size, background color and checked state; never deleted, as
+	// menus don't delete their item bitmaps and these are shared by every menu (a few for each icon: sizes and
+	// dark/light, unchecked and checked)
+	using Key = std::tuple<int, HICON, int, COLORREF, bool>;
 	static std::map<Key, HBITMAP> s_Bitmaps;
 	static SRWLOCK s_Lock = SRWLOCK_INIT;
 
-	auto hBrush = WTLHelper::DarkModeType() == DarkModeKind::Classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush();
+	bool classic = WTLHelper::DarkModeType() == DarkModeKind::Classic;
+	auto hBrush = classic ? ::GetSysColorBrush(COLOR_MENU) : DarkMode::getCtrlBackgroundBrush();
 	LOGBRUSH lb{};
 	::GetObject(hBrush, sizeof(lb), &lb);
+	// a checked item's icon stands on a highlighted square, as a pressed toolbar button (the bitmap replaces the check
+	// mark, so it has to show the state): the dark mode's hot colors, or a pale version of the system's highlight
+	COLORREF checkedFill, checkedEdge;
+	if (classic) {
+		auto highlight = ::GetSysColor(COLOR_HIGHLIGHT);
+		auto blend = [&](int part, int with) { return (part * 3 + with * 7) / 10; };
+		checkedFill = RGB(blend(GetRValue(highlight), GetRValue(lb.lbColor)), blend(GetGValue(highlight), GetGValue(lb.lbColor)),
+			blend(GetBValue(highlight), GetBValue(lb.lbColor)));
+		checkedEdge = highlight;
+	}
+	else {
+		checkedFill = DarkMode::getHotBackgroundColor();
+		checkedEdge = DarkMode::getHotEdgeColor();
+	}
 
 	CClientDC dc(::GetDesktopWindow());
 	CDC mdc;
 	CRect rc(0, 0, size, size);
+	auto makeBitmap = [&](MenuItemData const& cmd, bool checked) {
+		auto& hBitmap = s_Bitmaps[Key(cmd.hIcon ? 0 : cmd.icon, cmd.hIcon, size, lb.lbColor, checked)];
+		if (hBitmap)
+			return hBitmap;
+		if (!mdc)
+			mdc.CreateCompatibleDC(dc);
+		// a checked item's icon a little smaller, inside the square's edge; resource icons are kept (for each size) too
+		int iconSize = checked ? size - 2 : size, offset = (size - iconSize) / 2;
+		auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::LoadCached(cmd.icon, iconSize);
+		ATLASSERT(hIcon);
+		CBitmap bmp;
+		bmp.CreateCompatibleBitmap(dc, size, size);
+		auto hOld = mdc.SelectBitmap(bmp);
+		mdc.FillRect(&rc, hBrush);
+		if (checked) {
+			mdc.FillSolidRect(&rc, checkedEdge);
+			CRect inner(rc);
+			inner.DeflateRect(1, 1);
+			mdc.FillSolidRect(&inner, checkedFill);
+		}
+		mdc.DrawIconEx(offset, offset, hIcon, iconSize, iconSize);
+		mdc.SelectBitmap(hOld);
+		hBitmap = bmp.Detach();
+		return hBitmap;
+	};
+
 	::AcquireSRWLockExclusive(&s_Lock);
 	for (int i = 0; i < count; i++) {
 		auto& cmd = items[i];
-		Key key(cmd.hIcon ? 0 : cmd.icon, cmd.hIcon, size, lb.lbColor);
-		auto& hBitmap = s_Bitmaps[key];
-		if (!hBitmap) {
-			if (!mdc)
-				mdc.CreateCompatibleDC(dc);
-			// resource icons are kept (for each size) too
-			auto hIcon = cmd.hIcon ? cmd.hIcon : IconHelper::LoadCached(cmd.icon, size);
-			ATLASSERT(hIcon);
-			CBitmap bmp;
-			bmp.CreateCompatibleBitmap(dc, size, size);
-			auto hOld = mdc.SelectBitmap(bmp);
-			mdc.FillRect(&rc, hBrush);
-			mdc.DrawIconEx(0, 0, hIcon, size, size);
-			mdc.SelectBitmap(hOld);
-			hBitmap = bmp.Detach();
-		}
-		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, hBitmap, hBitmap);
+		// Windows shows the checked bitmap while the item is checked
+		menu.SetMenuItemBitmaps(cmd.id, MF_BYCOMMAND, makeBitmap(cmd, false), makeBitmap(cmd, true));
 	}
 	::ReleaseSRWLockExclusive(&s_Lock);
 	return true;
