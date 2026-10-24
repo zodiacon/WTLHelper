@@ -436,7 +436,27 @@ int CCommandPaletteCtrl::AddFromMenu(HMENU menu, LPCWSTR category) {
 	return (int)(m_Items.size() - before);
 }
 
-void CCommandPaletteCtrl::RefreshMenus() {
+void CCommandPaletteCtrl::InitMenus(HWND window, HMENU menu) {
+	int count = ::GetMenuItemCount(menu);
+	for (int i = 0; i < count; i++) {
+		if (HMENU sub = ::GetSubMenu(menu, i)) {
+			::SendMessage(window, WM_INITMENUPOPUP, (WPARAM)sub, MAKELPARAM(i, FALSE));
+			InitMenus(window, sub);
+		}
+	}
+}
+
+void CCommandPaletteCtrl::RefreshMenus(HWND initMenus) {
+	if (initMenus) {
+		for (auto& source : m_Menus) {
+			if (!::IsMenu(source.menu))
+				continue;
+			// a popup menu given itself gets it too; a menu bar doesn't (it isn't a popup)
+			if (::GetMenu(initMenus) != source.menu)
+				::SendMessage(initMenus, WM_INITMENUPOPUP, (WPARAM)source.menu, 0);
+			InitMenus(initMenus, source.menu);
+		}
+	}
 	// the menus' commands as they are now: some may have gone, others come, states changed. Each menu is read into a
 	// list of its own, then put back where its commands were, so the order stays.
 	UINT selected = GetSelectedId();

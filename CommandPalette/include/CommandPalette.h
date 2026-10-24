@@ -65,6 +65,7 @@ struct CMDPCOLORS {
 #define CMDPN_SELCHANGED     (CMDPN_FIRST - 1)   // NMCMDPITEM; the selected row changed (id 0: none)
 #define CMDPN_CANCEL         (CMDPN_FIRST - 2)   // NMHDR; Escape in the box
 #define CMDPN_TEXTCHANGED    (CMDPN_FIRST - 3)   // NMHDR; the user changed the search text
+#define CMDPN_CLOSED         (CMDPN_FIRST - 4)   // NMHDR; the popup closed (from CCommandPalettePopup only)
 
 struct NMCMDPITEM {
 	NMHDR  hdr;
@@ -140,7 +141,9 @@ public:
 	// with no id or a submenu are skipped, the names lose their & marks, the text after a tab is the shortcut, and
 	// the items' grayed and checked states are kept. The menu is read again by RefreshMenus (it must outlive that).
 	int     AddFromMenu(HMENU menu, LPCWSTR category = nullptr);   // the number of commands added
-	void    RefreshMenus();                           // the menus' commands as they are now
+	// The menus' commands as they are now. With a window, it's first sent WM_INITMENUPOPUP for each submenu (as when
+	// the menu opens), so an app that sets the items' states then (WTL's CUpdateUI) has them current.
+	void    RefreshMenus(HWND initMenus = nullptr);
 	void    SetImageList(HIMAGELIST images);          // small icons; the control doesn't destroy it
 	HIMAGELIST GetImageList() const;
 
@@ -223,6 +226,7 @@ private:
 	void    Execute(int row);
 	LRESULT FireNotify(NMHDR* pnm, UINT code) const;
 	void    ReadMenu(HMENU menu, std::vector<std::wstring>& path, int source);
+	static void InitMenus(HWND window, HMENU menu);
 	int     FindItem(UINT id) const;
 
 	struct MenuSource {
@@ -263,4 +267,60 @@ private:
 	int     m_Top = 0;                                // the first row in view
 	int     m_WheelRemainder = 0;
 	bool    m_TrackingMouse = false;
+};
+
+// ---- The popup ------------------------------------------------------------------------------
+//
+// A command palette in a popup over the owner window, at the top of its client area, as tall as the results need (up
+// to a number of rows). It closes on Escape, when a command is picked, or when it loses the activation, and sends
+// CMDPN_CLOSED; the palette's notifications go on to the owner (CMDPN_EXECUTE's answer counts). Closing only hides
+// it: the commands and the recently used stay for the next Show. Showing reads the palette's menus again.
+
+class CCommandPalettePopup : public ATL::CWindowImpl<CCommandPalettePopup, ATL::CWindow, ATL::CWinTraits<WS_POPUP | WS_CLIPCHILDREN, WS_EX_TOOLWINDOW>> {
+public:
+	DECLARE_WND_CLASS_EX(L"CmpPopup", CS_DROPSHADOW, -1)
+
+	BEGIN_MSG_MAP(CCommandPalettePopup)
+		MESSAGE_HANDLER(WM_SIZE, OnSize)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
+		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_DPICHANGED, OnDpiChanged)
+		MESSAGE_HANDLER(CCommandPaletteCtrl::ThemeChangedMessage, OnThemeChanged)
+		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnThemeChanged)
+	END_MSG_MAP()
+
+	// owner: gets the notifications and WM_COMMAND (its top-level window owns the popup); id: the palette's, in them
+	BOOL    Create(HWND owner, UINT id = 1);
+	CCommandPaletteCtrl& Palette() {
+		return m_Palette;
+	}
+	// text: the search text to start with (selected, so typing replaces it); nullptr: the last one
+	BOOL    Show(LPCWSTR text = L"");
+	void    Close();                                  // as Escape
+	bool    IsOpen() const;
+	void    SetMaxRows(int rows);                     // default 12
+	void    SetWidth(int dips);                       // the most it takes (less in a narrow owner); default 600
+
+private:
+	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnActivate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnThemeChanged(UINT, WPARAM, LPARAM, BOOL&);
+
+	RECT    TargetRect() const;                       // where it goes, screen coords, sized to the results
+	void    UpdateFrame();                            // the window's corners, border and dark caption colors
+
+	CCommandPaletteCtrl m_Palette;
+	HWND    m_Owner = nullptr;
+	int     m_MaxRows = 12;
+	int     m_Width = 600;
+	int     m_Border = 1;                             // drawn by the popup (0 when Windows draws it)
+	bool    m_Closing = false;
 };

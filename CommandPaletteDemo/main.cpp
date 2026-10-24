@@ -29,6 +29,7 @@ CAppModule _Module;
 enum {
 	IDC_PALETTE = 101,
 	IDC_LOG,
+	IDC_POPUP,
 
 	// the menu bar's commands (what the palette lists)
 	CMD_FILE_NEW = 1001, CMD_FILE_OPEN, CMD_FILE_SAVE, CMD_FILE_SAVEAS, CMD_FILE_SAVEALL, CMD_FILE_CLOSE, CMD_FILE_PRINT,
@@ -37,7 +38,7 @@ enum {
 	CMD_EDIT_GOTOLINE, CMD_EDIT_SELECTALL, CMD_EDIT_TOUPPER, CMD_EDIT_TOLOWER, CMD_EDIT_COMMENT,
 	CMD_VIEW_TOOLBAR = 1201, CMD_VIEW_STATUSBAR, CMD_VIEW_LINENUMBERS, CMD_VIEW_WORDWRAP, CMD_VIEW_ZOOMIN, CMD_VIEW_ZOOMOUT,
 	CMD_VIEW_ZOOMRESET, CMD_VIEW_FULLSCREEN, CMD_VIEW_DARKMODE,
-	CMD_PAL_HIDEDISABLED = 1301, CMD_PAL_NORECENT, CMD_PAL_COLORS, CMD_PAL_CLEARRECENT, CMD_PAL_REFRESH,
+	CMD_PAL_HIDEDISABLED = 1301, CMD_PAL_NORECENT, CMD_PAL_COLORS, CMD_PAL_CLEARRECENT, CMD_PAL_REFRESH, CMD_PAL_SHOW,
 	CMD_HELP_DOCS = 1401, CMD_HELP_SHORTCUTS, CMD_HELP_ABOUT,
 
 	// added with AddCommand only
@@ -47,6 +48,7 @@ enum {
 // ---- State --------------------------------------------------------------------
 
 static CCommandPaletteCtrl g_palette;
+static CCommandPalettePopup g_popup;
 static HWND g_main, g_log;
 static HIMAGELIST g_images;
 static bool g_customColors;
@@ -102,7 +104,7 @@ static HMENU BuildMenu() {
 #endif
 	HMENU palette = popup({ { CMD_PAL_HIDEDISABLED, L"&Hide Disabled Commands" }, { CMD_PAL_NORECENT, L"&No Recently Used First" },
 		{ CMD_PAL_COLORS, L"&Custom Colors" }, { 0, nullptr }, { CMD_PAL_CLEARRECENT, L"C&lear Recently Used" },
-		{ CMD_PAL_REFRESH, L"&Read the Menus Again" } });
+		{ CMD_PAL_REFRESH, L"&Read the Menus Again" }, { 0, nullptr }, { CMD_PAL_SHOW, L"&Show Command Palette...\tCtrl+Shift+P" } });
 	HMENU help = popup({ { CMD_HELP_DOCS, L"&Documentation\tF1" }, { CMD_HELP_SHORTCUTS, L"&Keyboard Shortcuts" }, { 0, nullptr },
 		{ CMD_HELP_ABOUT, L"&About" } });
 	HMENU bar = ::CreateMenu();
@@ -163,7 +165,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 			g_palette.SetColors(g_customColors ? &g_colors : nullptr);
 			break;
 		case CMD_PAL_CLEARRECENT: g_palette.ClearRecent(); break;
-		case CMD_PAL_REFRESH: g_palette.RefreshMenus(); break;
+		case CMD_PAL_REFRESH: g_palette.RefreshMenus(hwnd); break;
+		case CMD_PAL_SHOW:
+			g_popup.Show();
+			return;
 		case CMD_VIEW_TOOLBAR:
 		case CMD_VIEW_STATUSBAR:
 		case CMD_VIEW_LINENUMBERS:
@@ -218,13 +223,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_main = hwnd;
 			g_palette.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER, 0, IDC_PALETTE);
 			g_images = BuildImages(hwnd);
-			g_palette.SetImageList(g_images);
-			g_palette.AddFromMenu(::GetMenu(hwnd));
-			g_palette.AddCommand(CMD_CMD_REFRESH, L"Refresh Everything", L"Developer", L"F5", 0);
-			g_palette.AddCommand(CMD_CMD_SEARCH, L"Search Files", L"Go", L"Ctrl+Shift+F", 1);
-			g_palette.AddCommand(CMD_CMD_SETTINGS, L"Open Settings", L"Preferences", L"Ctrl+,", 2);
-			g_palette.AddCommand(CMD_CMD_FOLDER, L"Reveal in File Explorer", L"File", nullptr, 3);
-			g_palette.AddCommand(CMD_CMD_SHIELD, L"Run as Administrator", nullptr, nullptr, 4);
+			g_popup.Create(hwnd, IDC_POPUP);
+			// the same commands in both: the embedded palette and the popup's
+			for (auto palette : { &g_palette, &g_popup.Palette() }) {
+				palette->SetImageList(g_images);
+				palette->AddFromMenu(::GetMenu(hwnd));
+				palette->AddCommand(CMD_CMD_REFRESH, L"Refresh Everything", L"Developer", L"F5", 0);
+				palette->AddCommand(CMD_CMD_SEARCH, L"Search Files", L"Go", L"Ctrl+Shift+F", 1);
+				palette->AddCommand(CMD_CMD_SETTINGS, L"Open Settings", L"Preferences", L"Ctrl+,", 2);
+				palette->AddCommand(CMD_CMD_FOLDER, L"Reveal in File Explorer", L"File", nullptr, 3);
+				palette->AddCommand(CMD_CMD_SHIELD, L"Run as Administrator", nullptr, nullptr, 4);
+			}
 			g_log = ::CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_LOG, nullptr, nullptr);
 			::SendMessage(g_log, WM_SETFONT, g_palette.SendMessage(WM_GETFONT), FALSE);
@@ -245,22 +254,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				OnCommand(hwnd, LOWORD(wParam));
 			return 0;
 
+		case WM_INITMENUPOPUP:
+			// as an app would before showing a menu (and the palettes, when they read it): Paste needs text to paste
+			if ((HMENU)wParam == ::GetSubMenu(::GetMenu(hwnd), 1))
+				::EnableMenuItem((HMENU)wParam, CMD_EDIT_PASTE, MF_BYCOMMAND | (::IsClipboardFormatAvailable(CF_UNICODETEXT) ? MF_ENABLED : MF_GRAYED));
+			return 0;
+
 		case WM_NOTIFY: {
 			auto hdr = (NMHDR*)lParam;
-			if (hdr->idFrom != IDC_PALETTE)
+			if (hdr->idFrom != IDC_PALETTE && hdr->idFrom != IDC_POPUP)
 				break;
+			LPCWSTR from = hdr->idFrom == IDC_POPUP ? L"popup" : L"embedded";
+			CString line;
 			switch (hdr->code) {
 				case CMDPN_CANCEL:
-					g_palette.SetSearchText(L"");
-					Log(L"CMDPN_CANCEL (Escape): the search cleared");
+					if (hdr->idFrom == IDC_PALETTE) {
+						g_palette.SetSearchText(L"");
+						Log(L"embedded: CMDPN_CANCEL (Escape), the search cleared");
+					}
+					else {
+						Log(L"popup: CMDPN_CANCEL (Escape)");
+					}
 					break;
-				case CMDPN_EXECUTE: {
-					auto nm = (NMCMDPITEM*)lParam;
-					CString line;
-					line.Format(L"CMDPN_EXECUTE %u", nm->id);
+				case CMDPN_EXECUTE:
+					line.Format(L"%s: CMDPN_EXECUTE %u", from, ((NMCMDPITEM*)lParam)->id);
 					Log(line);
 					break;
-				}
+				case CMDPN_CLOSED:
+					Log(L"popup: CMDPN_CLOSED");
+					break;
 			}
 			return 0;
 		}
@@ -299,13 +321,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	UpdateChecks(::GetMenu(hwnd));
 	::ShowWindow(hwnd, nCmdShow);
 
+	ACCEL accels[] = { { FVIRTKEY | FCONTROL | FSHIFT, 'P', CMD_PAL_SHOW } };
+	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));
 	MSG msg;
 	while (::GetMessage(&msg, nullptr, 0, 0)) {
+		if (::TranslateAccelerator(hwnd, hAccel, &msg))
+			continue;
 		if (!::IsDialogMessage(hwnd, &msg)) {
 			::TranslateMessage(&msg);
 			::DispatchMessage(&msg);
 		}
 	}
+	::DestroyAcceleratorTable(hAccel);
 	if (g_images)
 		::ImageList_Destroy(g_images);
 	_Module.Term();
