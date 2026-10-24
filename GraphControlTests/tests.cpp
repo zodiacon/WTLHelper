@@ -969,6 +969,88 @@ TEST(Cells_DefaultColors) {
     CHECK(DefaultsFor(RGB(204, 232, 255)).Line == light.Line);        // Explorer's light selection
 }
 
+TEST(Cells_Stats) {
+    auto series = MakeSeries({ 10, 40, MissingSample, 20, 30 }, 8);
+    auto all = Stats(series, 8);
+    CHECK(all.Count == 4);
+    CHECK_NEAR(all.Last, 30);
+    CHECK_NEAR(all.Min, 10);
+    CHECK_NEAR(all.Max, 40);
+    CHECK_NEAR(all.Average, 25);
+    // only the newest slots count; a missing newest sample: the last is the newest one there
+    auto two = Stats(series, 2);
+    CHECK(two.Count == 2 && two.Min == 20 && two.Max == 30);
+    auto gap = Stats(MakeSeries({ 5, MissingSample }, 4), 4);
+    CHECK(gap.Count == 1 && gap.Last == 5);
+    CHECK(Stats(MakeSeries({}, 4), 4).Count == 0);
+}
+
+TEST(Cells_DashedLine) {
+    std::vector<uint32_t> bits(20 * 5, 0xFFFFFF);
+    Pixels px{ bits.data(), 20, 5 };
+    DashedLine(px, 2.5f, 0, 20, 1, 3, 2, 0.5f);
+    CHECK(px.At(1, 2) != 0xFFFFFF);    // a dash
+    CHECK(px.At(4, 2) == 0xFFFFFF);    // a gap
+    CHECK(px.At(6, 2) != 0xFFFFFF);    // the next dash
+    CHECK(px.At(1, 0) == 0xFFFFFF && px.At(1, 4) == 0xFFFFFF);
+}
+
+TEST(Cells_SparklineThresholdsAndReference) {
+    // the newest sample, 90, picks red for the line and the fill
+    TestDc d(60, 20, 0xFFFFFF);
+    SparklineStyle s;
+    s.Padding = 0;
+    s.LineWidth = 2;
+    s.FillOpacity = 1;
+    CellThreshold t[] = { { 50, RGB(255, 0, 0) } };
+    s.Thresholds = t;
+    s.ThresholdCount = 1;
+    DrawSparkline(d.Dc, { 0, 0, 60, 20 }, MakeSeries({ 90, 90, 90, 90 }, 4), s);
+    CHECK(d.At(30, 17) == 0xFF0000);
+    // below every threshold: the default color, not red
+    TestDc e(60, 20, 0xFFFFFF);
+    DrawSparkline(e.Dc, { 0, 0, 60, 20 }, MakeSeries({ 10, 10, 10, 10 }, 4), s);
+    CHECK(e.At(30, 18) != 0xFF0000 && e.At(30, 18) != 0xFFFFFF);
+    // a reference line at 50 (the middle), above a line at 10
+    TestDc r(60, 20, 0xFFFFFF);
+    SparklineStyle rs;
+    rs.Padding = 0;
+    rs.LineWidth = 1;
+    rs.FillOpacity = 0;
+    rs.Reference = 50;
+    DrawSparkline(r.Dc, { 0, 0, 60, 20 }, MakeSeries({ 10, 10, 10, 10 }, 4), rs);
+    int dashed = 0;
+    for (int x = 0; x < 60; x++)
+        dashed += r.At(x, 10) != 0xFFFFFF || r.At(x, 9) != 0xFFFFFF;
+    CHECK(dashed > 20 && dashed < 50);   // dashes, not a solid line
+}
+
+TEST(Cells_MeterText) {
+    // the text's pixels: a color over the track that's neither the background nor its tint
+    TestDc plain(120, 20, 0xFFFFFF), text(120, 20, 0xFFFFFF);
+    MeterStyle s;
+    s.Padding = 0;
+    s.BarColor = RGB(0, 0, 255);
+    DrawMeter(plain.Dc, { 0, 0, 120, 20 }, 0, s);
+    s.TextAlign = DT_RIGHT;
+    DrawMeter(text.Dc, { 0, 0, 120, 20 }, 0, L"MMMM", s);
+    int changed = 0;
+    for (int x = 60; x < 120; x++) {
+        for (int y = 0; y < 20; y++)
+            changed += plain.At(x, y) != text.At(x, y);
+    }
+    CHECK(changed > 10);
+    // the left half (no text there, right aligned) is the same
+    int left = 0;
+    for (int x = 0; x < 40; x++)
+        left += plain.At(x, 10) != text.At(x, 10);
+    CHECK(left == 0);
+    // a null or empty text: as without
+    TestDc none(120, 20, 0xFFFFFF);
+    DrawMeter(none.Dc, { 0, 0, 120, 20 }, 0, L"", s);
+    CHECK(none.At(100, 10) == plain.At(100, 10));
+}
+
 int wmain() {
     wprintf(L"GraphControl data model tests\n\n");
 
@@ -1023,6 +1105,10 @@ int wmain() {
     Run_Cells_DrawStacked();
     Run_Cells_CellBackground();
     Run_Cells_DefaultColors();
+    Run_Cells_Stats();
+    Run_Cells_DashedLine();
+    Run_Cells_SparklineThresholdsAndReference();
+    Run_Cells_MeterText();
 
     wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures;

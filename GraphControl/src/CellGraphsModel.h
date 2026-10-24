@@ -39,6 +39,16 @@ ValueRange ScaleRange(const Series& series, size_t slots, float min, float max, 
 // y of a value in the area: Max at the top, Min at the bottom, clamped
 float ValueToY(float value, ValueRange range, const RectF& area);
 
+// the newest `slots` samples (missing ones skipped): the newest, lowest, highest and average; Count 0: none
+struct CellStats {
+    float  Last    = 0;
+    float  Min     = 0;
+    float  Max     = 0;
+    float  Average = 0;
+    size_t Count   = 0;
+};
+CellStats Stats(const Series& series, size_t slots);
+
 // ---- Line sparkline ------------------------------------------------------------------
 //
 // slots samples across the area, the newest at the right edge: a series still filling up grows from the right.
@@ -113,6 +123,10 @@ struct DefaultColors {
     COLORREF Fill;
 };
 DefaultColors DefaultsFor(COLORREF background);
+
+// a horizontal dashed line from x0 to x1 centered on y, `dash` on and `gap` off, tinting what's under it (like
+// TintRect), so it reads on any background
+void DashedLine(const Pixels& px, float y, float x0, float x1, float width, float dash, float gap, float strength);
 
 // a dot (a run of one point)
 void FillDot(const Pixels& px, PointF center, float radius, COLORREF color, float alpha = 1);

@@ -2,6 +2,7 @@
 #include "CellGraphsModel.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace GraphCtrl {
 
@@ -106,6 +107,19 @@ COLORREF Resolve(COLORREF color, const Pixels& px, int w, int h, bool fill = fal
     return fill ? defaults.Fill : defaults.Line;
 }
 
+// black or white, whichever reads on the color
+COLORREF Contrast(COLORREF color) {
+    return GetRValue(color) * 299 + GetGValue(color) * 587 + GetBValue(color) * 114 < 128 * 1000 ? RGB(255, 255, 255) : RGB(0, 0, 0);
+}
+
+// a dashed line at a value, if it's in the range
+void Reference(const Pixels& px, float value, ValueRange range, const RectF& area, UINT dpi) {
+    if (IsMissing(value) || value < range.Min || value > range.Max)
+        return;
+    float y = ValueToY(value, range, area);
+    DashedLine(px, y, area.Left, area.Right, std::max(1.0f, Dips(1, dpi)), Dips(3, dpi), Dips(2, dpi), 0.45f);
+}
+
 void Track(const Pixels& px, const RectF& rc, COLORREF color) {
     if (color == CLR_DEFAULT)
         TintRect(px, rc, 0.12f);
@@ -154,9 +168,16 @@ void DrawSparkline(HDC hdc, const RECT& cell, const Series& series, const Sparkl
         size_t slots = style.Slots ? style.Slots : series.Capacity();
         auto range = ScaleRange(series, slots, style.Min, style.Max, style.AutoScale, style.MinSpan);
         auto runs = SparkRuns(series, slots, range, area);
+        COLORREF line = Resolve(style.LineColor, px, w, h), fill = Resolve(style.FillColor, px, w, h, true);
+        Reference(px, style.Reference, range, area, dpi);
         if (runs.empty())
             return;
-        COLORREF line = Resolve(style.LineColor, px, w, h), fill = Resolve(style.FillColor, px, w, h, true);
+        if (style.ThresholdCount) {
+            auto stats = Stats(series, slots);
+            COLORREF color = ThresholdColor(stats.Count ? stats.Last : MissingSample, style.Thresholds, style.ThresholdCount, CLR_DEFAULT);
+            if (color != CLR_DEFAULT)
+                line = fill = color;
+        }
         if (style.FillOpacity > 0) {
             for (auto& run : runs)
                 FillArea(px, run, area.Bottom, fill, style.FillOpacity);
@@ -175,9 +196,8 @@ void DrawColumns(HDC hdc, const RECT& cell, const Series& series, const ColumnSt
         size_t slots = style.Slots ? style.Slots : series.Capacity();
         auto range = ScaleRange(series, slots, style.Min, style.Max, style.AutoScale, style.MinSpan);
         auto bars = ColumnBars(series, slots, range, area, Dips(style.Gap, dpi));
-        if (bars.empty())
-            return;
         COLORREF standard = Resolve(CLR_DEFAULT, px, w, h);
+        Reference(px, style.Reference, range, area, dpi);
         for (auto& bar : bars) {
             COLORREF color = ThresholdColor(series.AtFromEnd(bar.Slot), style.Thresholds, style.ThresholdCount, style.Color);
             if (color == CLR_DEFAULT)
@@ -188,17 +208,51 @@ void DrawColumns(HDC hdc, const RECT& cell, const Series& series, const ColumnSt
 }
 
 void DrawMeter(HDC hdc, const RECT& cell, float value, const MeterStyle& style, UINT dpi) {
+    DrawMeter(hdc, cell, value, nullptr, style, dpi);
+}
+
+void DrawMeter(HDC hdc, const RECT& cell, float value, const wchar_t* text, const MeterStyle& style, UINT dpi) {
     Paint(hdc, cell, [&](const Pixels& px, int w, int h) {
         auto bar = BarRect(w, h, style.Padding, style.BarHeight, dpi);
         if (bar.Width() <= 0 || bar.Height() <= 0)
             return;
-        // the color by the background before the track tints it
-        COLORREF color = Resolve(ThresholdColor(value, style.Thresholds, style.ThresholdCount, style.BarColor), px, w, h);
+        // the colors by the background, before the track tints it
+        COLORREF background = AverageColor(px, w, h);
+        COLORREF color = ThresholdColor(value, style.Thresholds, style.ThresholdCount, style.BarColor);
+        if (color == CLR_DEFAULT)
+            color = DefaultsFor(background).Line;
         Track(px, bar, style.TrackColor);
         float fraction = MeterFraction(value, style.Min, style.Max);
-        if (fraction > 0) {
-            FillRect(px, { bar.Left, bar.Top, bar.Left + fraction * bar.Width(), bar.Bottom }, color);
+        RectF filled{ bar.Left, bar.Top, bar.Left + fraction * bar.Width(), bar.Bottom };
+        if (fraction > 0)
+            FillRect(px, filled, color);
+        if (!text || !*text)
+            return;
+
+        // GDI text into the canvas, in two parts: over the filled bar, and over the rest
+        HDC dc = t_Canvas.Dc;
+        int saved = ::SaveDC(dc);
+        ::SelectObject(dc, ::GetCurrentObject(hdc, OBJ_FONT));
+        ::SetBkMode(dc, TRANSPARENT);
+        int inset = (int)std::lround(Dips(4, dpi));
+        RECT rc{ (int)bar.Left + inset, 0, (int)bar.Right - inset, h };
+        UINT format = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS |
+            (style.TextAlign & (DT_CENTER | DT_RIGHT));
+        RECT fill{ (int)std::lround(filled.Left), (int)std::lround(filled.Top), (int)std::lround(filled.Right), (int)std::lround(filled.Bottom) };
+        // over the bar
+        if (fill.right > fill.left) {
+            ::SaveDC(dc);
+            ::IntersectClipRect(dc, fill.left, fill.top, fill.right, fill.bottom);
+            ::SetTextColor(dc, style.TextColor != CLR_DEFAULT ? style.TextColor : Contrast(color));
+            ::DrawTextW(dc, text, -1, &rc, format);
+            ::RestoreDC(dc, -1);
         }
+        // over the track and the background
+        ::IntersectClipRect(dc, 0, 0, w, h);
+        ::ExcludeClipRect(dc, fill.left, fill.top, fill.right, fill.bottom);
+        ::SetTextColor(dc, style.TextColor != CLR_DEFAULT ? style.TextColor : Contrast(background));
+        ::DrawTextW(dc, text, -1, &rc, format);
+        ::RestoreDC(dc, saved);
     });
 }
 

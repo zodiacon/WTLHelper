@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -23,7 +24,7 @@ namespace GraphCtrl {
 // DIPs, scaled by dpi. Called in a list's custom draw for the sub-item (its post-paint stage, after the list
 // painted the cell), or anywhere else with any DC that can be read back (not a printer's).
 
-// a meter's (or a column's) color from a value up, in ascending order of From
+// a color from a value up, in ascending order of From (a meter's, a column's, a sparkline's by its newest sample)
 struct CellThreshold {
     float    From;
     COLORREF Color;
@@ -35,6 +36,8 @@ struct CellThreshold {
 struct SparklineStyle {
     COLORREF LineColor   = CLR_DEFAULT;
     COLORREF FillColor   = CLR_DEFAULT;
+    const CellThreshold* Thresholds = nullptr;   // the line and the fill colored by the newest sample
+    size_t   ThresholdCount = 0;
     float    FillOpacity = 0.35f;     // under the line; 0: the line only
     float    LineWidth   = 1.5f;      // DIPs
     size_t   Slots       = 0;         // samples across the cell; 0: the series' capacity
@@ -42,6 +45,7 @@ struct SparklineStyle {
     float    Max         = 100;
     bool     AutoScale   = false;     // up to the highest sample shown (from Min, or a lower sample)
     float    MinSpan     = 0;         // auto scale: at least Min + MinSpan at the top
+    float    Reference   = MissingSample;   // a dashed line at this value (a limit); missing: none
     int      Padding     = 2;         // DIPs inside the cell
 };
 
@@ -55,6 +59,7 @@ struct ColumnStyle {
     bool     AutoScale   = false;
     float    MinSpan     = 0;
     float    Gap         = 1;         // DIPs between bars, when they're at least three times as wide
+    float    Reference   = MissingSample;   // a dashed line at this value; missing: none
     int      Padding     = 2;
 };
 
@@ -67,6 +72,9 @@ struct MeterStyle {
     COLORREF TrackColor  = CLR_DEFAULT;   // the empty part; CLR_DEFAULT: a tint of the cell's background
     int      BarHeight   = 0;         // DIPs, centered; 0: the cell's height less the padding
     int      Padding     = 2;
+    // text over the bar (DrawMeter's text), in the DC's font: DT_LEFT, DT_CENTER or DT_RIGHT
+    UINT     TextAlign   = DT_CENTER;
+    COLORREF TextColor   = CLR_DEFAULT;   // CLR_DEFAULT: black or white, whichever reads on what's under it
 };
 
 struct StackedStyle {
@@ -81,6 +89,8 @@ struct StackedStyle {
 void DrawSparkline(HDC hdc, const RECT& cell, const Series& series, const SparklineStyle& style = {}, UINT dpi = 96);
 void DrawColumns(HDC hdc, const RECT& cell, const Series& series, const ColumnStyle& style = {}, UINT dpi = 96);
 void DrawMeter(HDC hdc, const RECT& cell, float value, const MeterStyle& style = {}, UINT dpi = 96);
+// with text over the bar ("512 MB"), in the font selected into hdc
+void DrawMeter(HDC hdc, const RECT& cell, float value, const wchar_t* text, const MeterStyle& style = {}, UINT dpi = 96);
 void DrawStacked(HDC hdc, const RECT& cell, const float* values, size_t count, const StackedStyle& style = {}, UINT dpi = 96);
 
 // ---- List views --------------------------------------------------------------------
@@ -99,9 +109,10 @@ enum class CellKind {
     Stacked,
 };
 
-// the cell being painted
+// the cell being painted (or under the mouse, for a tooltip)
 struct CellRef {
-    HWND     Window;      // the control sending the custom draw (a list view, a TreeListView)
+    HWND     Window;      // the control sending the custom draw (a list view, a TreeListView); for a tooltip, the
+                          // list view given to EnableTooltips
     UINT_PTR Item;        // a list view's row index, a TreeListView's HTLITEM
     LPARAM   ItemParam;   // a list view item's lParam (0 in a virtual list)
     int      Column;
@@ -113,7 +124,11 @@ struct CellData {
     float         Value   = MissingSample;   // meter
     const float*  Values  = nullptr;         // stacked
     size_t        Count   = 0;
+    const wchar_t* Text    = nullptr;        // meter: over the bar
+    const wchar_t* Tooltip = nullptr;        // instead of the one made from the data (see EnableTooltips)
 };
+// The pointers need to stay valid only until the callback's caller is done with them (the cell is drawn, the
+// tooltip's text is copied): a buffer the callback reuses is fine.
 
 class CellGraphs {
 public:
@@ -130,6 +145,15 @@ public:
     void     RemoveColumn(int column);
     void     ClearColumns() { m_Columns.clear(); }
     CellKind GetKind(int column) const;
+    // how a column's values read in its tooltip (GraphCtrl::Format::Percent, say); none: "12.5"
+    void     SetFormat(int column, ValueFormatFn format);
+
+    // Tooltips over the graph cells of a list view: a sparkline's or columns' last, lowest, highest and average
+    // of the samples shown, a meter's value (its text, if it has one), a stacked bar's values; or the data's
+    // Tooltip. For a TreeListView, its GetListCtrl(), with rowToItem mapping a row to the item the custom draw
+    // passes (GetVisibleItem). One list at a time; the tooltip goes when the list does.
+    void EnableTooltips(HWND list, std::function<UINT_PTR(int row)> rowToItem = {});
+    void DisableTooltips();
 
     // A list view's NM_CUSTOMDRAW, from the parent: pass what the handler would return otherwise (after setting
     // any colors it wants) and return what this returns.
@@ -138,6 +162,11 @@ public:
     // item. TreeListView's NMTLVCUSTOMDRAW:
     //     CustomDraw(&cd->nmcd, cd->iSubItem, (UINT_PTR)cd->hItem, result)
     LRESULT CustomDraw(NMCUSTOMDRAW* cd, int subItem, UINT_PTR item, LRESULT result = CDRF_DODEFAULT);
+
+    CellGraphs() = default;
+    CellGraphs(const CellGraphs&) = delete;
+    CellGraphs& operator=(const CellGraphs&) = delete;
+    ~CellGraphs() { DisableTooltips(); }
 
 private:
     struct Column {
@@ -148,16 +177,28 @@ private:
         StackedStyle   Stacked;
         std::vector<CellThreshold> Thresholds;
         std::vector<COLORREF>      Colors;
+        ValueFormatFn              Format;
     };
 
     Column& Set(int column, CellKind kind);
     void    Draw(const Column& column, const CellRef& cell, HDC hdc, const RECT& rc);
+    std::wstring TipText();
+    void    TrackTip(POINT pt);
+    static LRESULT CALLBACK ListProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
     std::vector<Column>   m_Columns;   // by column index
     DataCallback          m_Data;
     // the cell being painted, before the list painted it, and after
     std::vector<uint32_t> m_Before, m_After;
     RECT                  m_BeforeRect{};
+    // the tooltip, and the cell it's for
+    HWND                  m_TipList = nullptr;
+    HWND                  m_Tip     = nullptr;
+    std::function<UINT_PTR(int)> m_RowToItem;
+    int                   m_TipRow    = -1;
+    int                   m_TipColumn = -1;
+    UINT_PTR              m_TipItem   = 0;
+    std::wstring          m_TipText;
 };
 
 // ---- Per-row history ----------------------------------------------------------------

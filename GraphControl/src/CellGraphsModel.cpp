@@ -165,6 +165,36 @@ void TintRect(const Pixels& px, const RectF& rc, float strength) {
     }
 }
 
+CellStats Stats(const Series& series, size_t slots) {
+    CellStats stats;
+    size_t count = std::min(slots, series.Count());
+    double sum = 0;
+    for (size_t k = 0; k < count; k++) {
+        float v = series.AtFromEnd(k);
+        if (IsMissing(v))
+            continue;
+        if (stats.Count == 0) {
+            stats.Last = stats.Min = stats.Max = v;
+        }
+        else {
+            stats.Min = std::min(stats.Min, v);
+            stats.Max = std::max(stats.Max, v);
+        }
+        sum += v;
+        stats.Count++;
+    }
+    if (stats.Count)
+        stats.Average = (float)(sum / stats.Count);
+    return stats;
+}
+
+void DashedLine(const Pixels& px, float y, float x0, float x1, float width, float dash, float gap, float strength) {
+    if (dash <= 0 || x1 <= x0)
+        return;
+    for (float x = x0; x < x1; x += dash + gap)
+        TintRect(px, { x, y - width / 2, std::min(x + dash, x1), y + width / 2 }, strength);
+}
+
 void CellBackground(const uint32_t* before, uint32_t* after, int w, int h) {
     if (w <= 0 || h <= 0)
         return;

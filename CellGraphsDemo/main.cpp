@@ -155,26 +155,42 @@ static const Process* FindProcess(int pid) {
 static const CellThreshold g_cpuThresholds[] = { { 0, RGB(60, 170, 60) }, { 50, RGB(230, 160, 0) }, { 80, RGB(220, 60, 60) } };
 static const CellThreshold g_memThresholds[] = { { 0, CLR_DEFAULT }, { 1024, RGB(220, 150, 0) }, { 1536, RGB(200, 40, 40) } };
 
+// the values in the tooltips
+static void FormatKBPerSec(float value, wchar_t* buffer, size_t cch) {
+	Format::BytesPerSec(value * 1024, buffer, cch);
+}
+
+static void FormatMB(float value, wchar_t* buffer, size_t cch) {
+	Format::Bytes(value * 1024 * 1024, buffer, cch);
+}
+
 static void SetupGraphs() {
+	// the line turns orange and red with the CPU, with a dashed line at 80%
 	SparklineStyle cpu;
 	cpu.Min = 0;
 	cpu.Max = 100;
+	cpu.Reference = 80;
+	cpu.Thresholds = g_cpuThresholds + 1;   // the default blue below 50%
+	cpu.ThresholdCount = std::size(g_cpuThresholds) - 1;
 	g_listCells.SetSparkline(COL_CPUHISTORY, cpu);
+	g_listCells.SetFormat(COL_CPUHISTORY, Format::Percent);
+	g_treeCells.SetFormat(TCOL_CPUHISTORY, Format::Percent);
 	ColumnStyle cpuBars;
 	cpuBars.Slots = 30;
 	cpuBars.Thresholds = g_cpuThresholds;
 	cpuBars.ThresholdCount = std::size(g_cpuThresholds);
+	cpuBars.Reference = 80;
 	g_treeCells.SetColumns(TCOL_CPUHISTORY, cpuBars);
 
 	ColumnStyle io;
 	io.AutoScale = true;
 	io.MinSpan = 500;
 	g_listCells.SetColumns(COL_IO, io);
+	g_listCells.SetFormat(COL_IO, FormatKBPerSec);
 
 	MeterStyle mem;
 	mem.Max = MemoryMax;
-	mem.BarHeight = 12;
-	g_listCells.SetMeter(COL_MEMORY, mem);
+	g_listCells.SetMeter(COL_MEMORY, mem);   // the whole height, with its text
 	mem.Thresholds = g_memThresholds;
 	mem.ThresholdCount = std::size(g_memThresholds);
 	g_treeCells.SetMeter(TCOL_MEMORY, mem);
@@ -183,12 +199,15 @@ static void SetupGraphs() {
 	parts.Total = MemoryMax;
 	parts.BarHeight = 12;
 	g_listCells.SetStacked(COL_MEMPARTS, parts);
+	g_listCells.SetFormat(COL_MEMPARTS, FormatMB);
 
 	g_listCells.SetDataCallback([](const CellRef& cell, CellData& data) {
 		if (cell.Item >= g_procs.size())
 			return false;
 		auto& p = g_procs[cell.Item];
 		static float parts[3];
+		static wchar_t text[64];
+		static std::wstring tip;
 		switch (cell.Column) {
 			case COL_CPUHISTORY:
 				data.Samples = g_cpuHistory.Find(p.Pid);
@@ -198,6 +217,8 @@ static void SetupGraphs() {
 				break;
 			case COL_MEMORY:
 				data.Value = p.Memory();
+				FormatMB(data.Value, text, std::size(text));
+				data.Text = text;
 				break;
 			case COL_MEMPARTS:
 				parts[0] = p.Private;
@@ -205,6 +226,14 @@ static void SetupGraphs() {
 				parts[2] = p.Image;
 				data.Values = parts;
 				data.Count = 3;
+				// a tooltip of its own, with the parts' names
+				tip.clear();
+				for (int i = 0; i < 3; i++) {
+					static const wchar_t* names[] = { L"Private", L"Shared", L"Image" };
+					FormatMB(parts[i], text, std::size(text));
+					tip += std::wstring(i ? L"\n" : L"") + names[i] + L": " + text;
+				}
+				data.Tooltip = tip.c_str();
 				break;
 		}
 		return true;
@@ -214,10 +243,15 @@ static void SetupGraphs() {
 		auto p = FindProcess((int)g_tree.GetItemData((HTLITEM)cell.Item));
 		if (!p)
 			return false;   // a group
-		if (cell.Column == TCOL_CPUHISTORY)
+		static wchar_t text[64];
+		if (cell.Column == TCOL_CPUHISTORY) {
 			data.Samples = g_cpuHistory.Find(p->Pid);
-		else
+		}
+		else {
 			data.Value = p->Memory();
+			FormatMB(data.Value, text, std::size(text));
+			data.Text = text;
+		}
 		return true;
 	});
 }
@@ -389,6 +423,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				Simulate();
 			Update();
 			g_tree.ExpandAll();
+			g_listCells.EnableTooltips(g_list);
+			g_treeCells.EnableTooltips(g_tree.GetListCtrl(), [](int row) { return (UINT_PTR)g_tree.GetVisibleItem(row); });
 			::SetTimer(hwnd, IDT_UPDATE, 500, nullptr);
 			g_list.SetFocus();
 			return 0;
