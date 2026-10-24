@@ -71,6 +71,7 @@ LRESULT CDiffViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CDiffViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	CancelCompare();   // its result has no window to go to
+	DisconnectAccessible();
 	bHandled = FALSE;
 	return 0;
 }
@@ -333,6 +334,7 @@ void CDiffViewCtrl::SetAnchor(const Anchor& anchor) {
 
 void CDiffViewCtrl::BuildRows() {
 	m_Doc->BuildRows(m_Layout == DFVL_UNIFIED ? DfLayout::Unified : DfLayout::SideBySide, m_Context);
+	NotifyRowsAccessible();
 }
 
 void CDiffViewCtrl::Recompute() {
@@ -786,11 +788,40 @@ void CDiffViewCtrl::SetColors(const DFVCOLORS* colors) {
 		Invalidate();
 }
 
+void CDiffViewCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	UpdateScrollBarTheme();
+	if (IsWindow())
+		Invalidate();
+}
+
+bool CDiffViewCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
 DFVCOLORS CDiffViewCtrl::GetColors() const {
+	DFVCOLORS c;
+	if (IsHighContrast()) {
+		// the system's colors only: no tints; the markers, the framed words and the hatching tell the changes
+		c.crBack = ::GetSysColor(COLOR_WINDOW);
+		c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crGutterBack = c.crBack;
+		c.crGutterText = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crDeletedBack = c.crInsertedBack = c.crBack;
+		c.crDeletedMark = c.crInsertedMark = ::GetSysColor(COLOR_HIGHLIGHT);
+		c.crFiller = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crFoldBack = c.crTitleBack = ::GetSysColor(COLOR_BTNFACE);
+		c.crFoldText = c.crTitleText = ::GetSysColor(COLOR_BTNTEXT);
+		c.crSelBack = c.crSelBackInactive = ::GetSysColor(COLOR_HIGHLIGHT);
+		c.crSelText = c.crSelTextInactive = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
-	DFVCOLORS c;
 	c.crBack = ::GetSysColor(COLOR_WINDOW);
 	c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
 	bool dark = IsDark(c.crBack);
@@ -843,6 +874,7 @@ LRESULT CDiffViewCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 
 void CDiffViewCtrl::Paint(WTL::CDCHandle dc, const RECT& rcPaint) {
 	auto c = GetColors();
+	m_PaintHighContrast = IsHighContrast();
 	auto rc = GetRowsRect();
 	// the filler's hatching lines up across paints of parts of the window
 	dc.SetBrushOrg((8 - rcPaint.left % 8) % 8, (8 - rcPaint.top % 8) % 8);
@@ -1094,8 +1126,17 @@ void CDiffViewCtrl::PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_vi
 	if (spans) {
 		for (auto& span : *spans) {
 			auto r = clipped(ColumnToX(dc, line, span.start), ColumnToX(dc, line, span.start + span.length));
-			if (r.right > r.left)
+			if (r.right <= r.left)
+				continue;
+			if (m_PaintHighContrast) {
+				// framed: a fill would need its own text color
+				WTL::CBrush frame;
+				frame.CreateSolidBrush(markBack);
+				dc.FrameRect(&r, frame);
+			}
+			else {
 				FillSolid(dc, r, markBack);
+			}
 		}
 	}
 

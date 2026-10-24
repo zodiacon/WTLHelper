@@ -149,6 +149,7 @@ struct DfSpan;
 struct DfJob;
 class DfLines;
 struct DfUndoStack;
+class DfAccessible;
 
 class CDiffViewCtrl : public ATL::CWindowImpl<CDiffViewCtrl> {
 public:
@@ -156,6 +157,7 @@ public:
 
 	CDiffViewCtrl();
 	~CDiffViewCtrl();
+	friend class DfAccessible;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -186,6 +188,7 @@ public:
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_MOUSEHWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_VSCROLL, OnVScroll)
@@ -300,8 +303,11 @@ public:
 	// The default font is Consolas, 10 points at the window's DPI; WM_SETFONT replaces it (the app then
 	// replaces it for a new DPI).
 
+	// In high contrast the system's colors are used even over colors the app set: changes show by the gutter's
+	// markers and the overview, the changed words framed rather than shaded.
 	void    SetColors(const DFVCOLORS* colors);       // nullptr: from the system colors (follows WTLHelper dark mode)
 	DFVCOLORS GetColors() const;                      // the colors in effect
+	void    ForceHighContrast(int on);                // for testing: 1 on, 0 off, -1 (the default) as Windows says
 
 private:
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
@@ -326,6 +332,7 @@ private:
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnVScroll(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnHScroll(UINT, WPARAM, LPARAM, BOOL&);
@@ -393,6 +400,13 @@ private:
 	void    DragTo(POINT pt);
 	void    MoveByKey(UINT vk, bool shift, bool ctrl);
 
+	bool    IsHighContrast() const;
+
+	// accessibility (DiffViewAccessible.cpp)
+	void    DisconnectAccessible();
+	void    NotifyCaretAccessible();                  // the caret's row is the focused item
+	void    NotifyRowsAccessible();                   // the rows were built again
+
 	// merging and comparing (DiffViewMerge.cpp)
 	const DfDocument& Latest() const;                 // the document being compared, or else the one shown
 	void    Compare(DfLines&& left, DfLines&& right);
@@ -456,4 +470,7 @@ private:
 	std::shared_ptr<DfJob> m_Job;                     // the compare running on the worker thread
 	WPARAM  m_JobNumber = 0;
 	size_t  m_BackgroundThreshold = 100000;
+	int     m_ForceHighContrast = -1;
+	bool    m_PaintHighContrast = false;              // while painting
+	DfAccessible* m_Accessible = nullptr;             // made on the first WM_GETOBJECT; cut off in OnDestroy
 };

@@ -81,6 +81,7 @@ void CDiffViewCtrl::SelectAll() {
 	m_Caret = ToDfv(end);
 	m_DesiredX = -1;
 	UpdateCaret();
+	NotifyCaretAccessible();
 	if (IsWindow())
 		Invalidate();
 }
@@ -137,6 +138,7 @@ void CDiffViewCtrl::MoveCaret(DFVPOS pos, bool extend, bool notify) {
 		InvalidateRect(&rc, FALSE);
 		EnsureCaretVisible();
 		UpdateCaret();
+		NotifyCaretAccessible();
 	}
 	if (notify)
 		FireSelChanged();
@@ -238,8 +240,10 @@ void CDiffViewCtrl::EnsureCaretVisible() {
 }
 
 LRESULT CDiffViewCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
-	if (uMsg == WM_SETFOCUS)
+	if (uMsg == WM_SETFOCUS) {
 		CreateSystemCaret();
+		NotifyCaretAccessible();
+	}
 	else {
 		::DestroyCaret();
 		m_HasCaret = false;

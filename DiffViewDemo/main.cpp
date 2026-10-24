@@ -52,6 +52,7 @@ enum {
 	ID_VIEW_DARKMODE,
 	ID_VIEW_OVERVIEW,
 	ID_VIEW_EXPANDALL,
+	ID_VIEW_HIGHCONTRAST,
 
 	ID_COMPARE_IGNORECASE = 401,
 	ID_COMPARE_IGNORESPACECHANGE,
@@ -77,6 +78,7 @@ static HWND g_main;
 static CString g_paths[2];
 static bool g_customColors;
 static bool g_askMerge;
+static bool g_highContrast;         // View > High Contrast: the control's drawing for it, without Windows' setting
 static ULONGLONG g_compareStart;    // the tick a compare started (shown when it's done)
 
 static const DFVCOLORS g_colors = {
@@ -322,6 +324,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_NUMBERS, g_diff.AreLineNumbersShown());
 	check(ID_VIEW_COLORS, g_customColors);
 	check(ID_VIEW_OVERVIEW, g_diff.IsOverviewShown());
+	check(ID_VIEW_HIGHCONTRAST, g_highContrast);
 	check(ID_MERGE_ENABLE, g_diff.GetMergeFlags() != 0);
 	check(ID_MERGE_ASK, g_askMerge);
 	check(ID_MERGE_BACKGROUND, g_diff.GetBackgroundThreshold() != SIZE_MAX);
@@ -379,6 +382,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case ID_VIEW_OVERVIEW: g_diff.ShowOverview(!g_diff.IsOverviewShown()); break;
 		case ID_VIEW_EXPANDALL: g_diff.ExpandAll(); break;
+		case ID_VIEW_HIGHCONTRAST:
+			g_highContrast = !g_highContrast;
+			g_diff.ForceHighContrast(g_highContrast ? 1 : -1);
+			break;
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
 		case ID_MERGE_ENABLE: g_diff.EnableMerge(g_diff.GetMergeFlags() ? 0 : DFVMF_TORIGHT | DFVMF_TOLEFT); break;
@@ -528,6 +535,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_NUMBERS, L"Line &Numbers");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_OVERVIEW, L"&Overview");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_COLORS, L"&Custom Colors");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_HIGHCONTRAST, L"&High Contrast Drawing");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
 #endif
