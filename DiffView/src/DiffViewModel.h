@@ -173,19 +173,68 @@ void DfMerge(DfLines& left, DfLines& right, const DfBlock& block, bool toRight);
 std::wstring DfUnifiedText(const DfLines& left, const DfLines& right, const DfDiff& diff, int context = 3,
 	std::wstring_view leftName = L"a", std::wstring_view rightName = L"b", std::wstring_view eol = L"\n");
 
+// ---- Words and columns ----------------------------------------------------------------------
+
+size_t DfWordRight(std::wstring_view line, size_t index);   // the start of the next word (or the end)
+size_t DfWordLeft(std::wstring_view line, size_t index);    // the start of this word or the one before
+void   DfWordAt(std::wstring_view line, size_t index, size_t& start, size_t& end);   // the run around index
+// the character boundary nearest to a column (fractional: a click inside a character)
+size_t DfIndexAtColumn(std::wstring_view line, double column, int tabSize);
+
 // ---- The control's document ------------------------------------------------------------------
+
+struct DfPos {                          // a place between characters of a line of one side
+	bool   right = false;
+	size_t line = 0;
+	size_t column = 0;                  // a character index, 0..length
+	bool operator==(const DfPos&) const = default;
+};
+
+struct DfChangeRows {                   // where a changed block's rows are
+	size_t first = 0;
+	size_t count = 0;
+	bool   left = false;                // it has lines on the left
+	bool   right = false;
+};
 
 struct DfDocument {
 	DfLines left;
 	DfLines right;
 	DfDiff  diff;
 	std::vector<size_t> changeBlocks;   // the changed blocks' indexes, in order
+	DfLayout layout = DfLayout::SideBySide;
 	std::vector<DfRow> rows;
+	std::vector<DfChangeRows> changeRows;   // by change, as changeBlocks
+	std::vector<int> leftRows, rightRows;   // by line: the row showing it, or the fold hiding it
 	std::vector<uint8_t> expanded;      // by block: folds the user opened
 	size_t  maxColumns = 0;             // the widest line of either side, tabs expanded
 
 	void Compute(const DfOptions& options, int tabSize);
 	void UpdateColumns(int tabSize);
+	void BuildRows(DfLayout layout, int context);
 	// the index in changeBlocks of a block, or -1 if it isn't a change
 	int ChangeOfBlock(size_t block) const;
+
+	const DfLines& Lines(bool rightSide) const {
+		return rightSide ? right : left;
+	}
+	int RowOf(bool rightSide, size_t line) const;   // -1 if there's no such line
+	int RowOf(const DfPos& pos) const {
+		return RowOf(pos.right, pos.line);
+	}
+	// The line a row shows on a side (side by side), or the row's line (unified: its left line if it has one,
+	// else its right); false for a fold, a filler or no such row.
+	bool LineOfRow(size_t row, bool rightSide, DfPos& pos) const;
+	// From a row, delta rows (negative: up) that show a line (of the side, side by side), stopping at the last
+	// one that does; -1 if no row does.
+	int  StepRow(int row, int delta, bool rightSide) const;
+	// a position moved into the text (an existing line of its side, a column within it)
+	DfPos Clamp(DfPos pos) const;
+	// Orders two positions: side by side by line (they're on one side), unified by row.
+	bool Less(const DfPos& a, const DfPos& b) const;
+	// The text from one position to the other (in either order), lines joined with eol. Side by side: the lines
+	// of a's side; unified: the rows, a fold's lines included.
+	std::wstring Text(DfPos a, DfPos b, std::wstring_view eol = L"\r\n") const;
+	// the whole of a side (side by side) or of every row (unified)
+	void All(bool rightSide, DfPos& start, DfPos& end) const;
 };

@@ -518,6 +518,114 @@ TEST(Document) {
 	CHECK(doc.maxColumns == 17);
 }
 
+TEST(Words) {
+	std::wstring_view s = L"int  count = total(x);";
+	CHECK(DfWordRight(s, 0) == 5);
+	CHECK(DfWordRight(s, 5) == 11);
+	CHECK(DfWordRight(s, 11) == 13);   // "=" then the space
+	CHECK(DfWordRight(s, 18) == 19);   // "(" alone
+	CHECK(DfWordRight(s, 22) == 22);
+	CHECK(DfWordLeft(s, 11) == 5);
+	CHECK(DfWordLeft(s, 5) == 0);
+	CHECK(DfWordLeft(s, 0) == 0);
+	CHECK(DfWordLeft(s, 22) == 20);   // ");" is one run
+	size_t a, b;
+	DfWordAt(s, 7, a, b);
+	CHECK(a == 5 && b == 10);
+	DfWordAt(s, 3, a, b);   // the spaces
+	CHECK(a == 3 && b == 5);
+	DfWordAt(s, 99, a, b);   // past the end: the last run
+	CHECK(a == 20 && b == 22);
+	DfWordAt(L"", 0, a, b);
+	CHECK(a == 0 && b == 0);
+}
+
+TEST(IndexAtColumn) {
+	CHECK(DfIndexAtColumn(L"abc", 0, 4) == 0);
+	CHECK(DfIndexAtColumn(L"abc", 0.4, 4) == 0);
+	CHECK(DfIndexAtColumn(L"abc", 0.6, 4) == 1);
+	CHECK(DfIndexAtColumn(L"abc", 9, 4) == 3);
+	CHECK(DfIndexAtColumn(L"\tx", 1.9, 4) == 0);   // the first half of the tab
+	CHECK(DfIndexAtColumn(L"\tx", 2.1, 4) == 1);
+	CHECK(DfIndexAtColumn(L"\tx", 4.6, 4) == 2);
+}
+
+// a document of the letters' lines, its rows built
+static DfDocument Doc(std::wstring_view left, std::wstring_view right, DfLayout layout, int context = -1) {
+	DfDocument doc;
+	doc.left = Letters(left);
+	doc.right = Letters(right);
+	doc.Compute({}, 4);
+	doc.BuildRows(layout, context);
+	return doc;
+}
+
+TEST(Document_Rows) {
+	// a b c d e f g h ; a X c d e f g h Y : changes at 1 and the end
+	auto doc = Doc(L"abcdefgh", L"aXcdefghY", DfLayout::SideBySide, 1);
+	CHECK_STR(Rows(doc.rows), L"0:0 1~1 2:2 F4 7:7 .~8");
+	CHECK(doc.changeRows.size() == 2);
+	CHECK(doc.changeRows[0].first == 1 && doc.changeRows[0].count == 1 && doc.changeRows[0].left && doc.changeRows[0].right);
+	CHECK(doc.changeRows[1].first == 5 && !doc.changeRows[1].left && doc.changeRows[1].right);
+	CHECK(doc.RowOf(false, 4) == 3 && doc.RowOf(true, 6) == 3);   // in the fold
+	CHECK(doc.RowOf(false, 7) == 4 && doc.RowOf(true, 8) == 5);
+	CHECK(doc.RowOf(false, 8) == -1);
+
+	DfPos pos;
+	CHECK(doc.LineOfRow(5, true, pos) && pos.right && pos.line == 8);
+	CHECK(!doc.LineOfRow(5, false, pos));   // filler
+	CHECK(!doc.LineOfRow(3, false, pos));   // fold
+
+	// stepping skips folds and fillers
+	CHECK(doc.StepRow(2, 1, false) == 4);
+	CHECK(doc.StepRow(4, 1, false) == 4);   // nothing below on the left
+	CHECK(doc.StepRow(4, 1, true) == 5);
+	CHECK(doc.StepRow(5, -2, true) == 2);
+	CHECK(doc.StepRow(5, 0, false) == 4);   // the nearest
+	CHECK(doc.StepRow(0, 100, true) == 5);
+	CHECK(doc.StepRow(3, 0, true) == 4);
+
+	auto unified = Doc(L"abcdefgh", L"aXcdefghY", DfLayout::Unified, 1);
+	CHECK_STR(Rows(unified.rows), L"0:0 1~. .~1 2:2 F4 7:7 .~8");
+	CHECK(unified.changeRows[0].first == 1 && unified.changeRows[0].count == 2);
+	CHECK(unified.LineOfRow(2, false, pos) && pos.right && pos.line == 1);   // unified: the row's line
+	CHECK(unified.StepRow(1, 1, false) == 2);
+	CHECK(unified.StepRow(3, 1, false) == 5);
+}
+
+TEST(Document_Text) {
+	DfDocument doc;
+	doc.left = DfLines(L"one\ntwo\nthree\nfour\nfive\nsix\n");
+	doc.right = DfLines(L"one\n2\nthree\nfour\nfive\nsix\nseven\n");
+	doc.Compute({}, 4);
+	doc.BuildRows(DfLayout::SideBySide, -1);
+	CHECK_STR(doc.Text({ false, 0, 1 }, { false, 2, 2 }), L"ne\r\ntwo\r\nth");
+	CHECK_STR(doc.Text({ false, 2, 2 }, { false, 0, 1 }), L"ne\r\ntwo\r\nth");   // either order
+	CHECK_STR(doc.Text({ true, 1, 0 }, { true, 1, 1 }, L"\n"), L"2");
+	CHECK_STR(doc.Text({ false, 3, 9 }, { false, 4, 0 }), L"\r\n");
+	DfPos start, end;
+	doc.All(true, start, end);
+	CHECK(start == (DfPos{ true, 0, 0 }) && end == (DfPos{ true, 6, 5 }));
+
+	// unified: the rows, the hidden lines of a fold too
+	doc.BuildRows(DfLayout::Unified, 1);
+	CHECK_STR(Rows(doc.rows), L"0:0 1~. .~1 2:2 F2 5:5 .~6");
+	CHECK_STR(doc.Text({ false, 1, 1 }, { true, 1, 1 }, L"|"), L"wo|2");
+	CHECK_STR(doc.Text({ false, 2, 0 }, { false, 5, 2 }, L"|"), L"three|four|five|si");
+	CHECK_STR(doc.Text({ false, 3, 2 }, { false, 4, 1 }, L"|"), L"ur|f");   // inside the fold
+	CHECK(doc.Less({ false, 1, 3 }, { true, 1, 0 }));   // by row
+	CHECK(doc.Less({ true, 2, 0 }, { false, 3, 0 }));   // an equal line on the right: its row
+	doc.All(false, start, end);
+	CHECK(start == (DfPos{ false, 0, 0 }) && end == (DfPos{ true, 6, 5 }));
+
+	CHECK(doc.Clamp({ false, 99, 99 }) == (DfPos{ false, 5, 3 }));
+	DfDocument empty;
+	empty.BuildRows(DfLayout::SideBySide, -1);
+	CHECK(empty.Clamp({ true, 3, 3 }) == (DfPos{ true, 0, 0 }));
+	CHECK(empty.Text({ false, 0, 0 }, { false, 0, 0 }).empty());
+	CHECK(empty.StepRow(0, 1, false) == -1);
+}
+
 // ---- Rows ----------------------------------------------------------------------------------
 
 TEST(Rows_SideBySide) {
@@ -656,6 +764,10 @@ int wmain() {
 
 	Run_Tabs();
 	Run_Document();
+	Run_Words();
+	Run_IndexAtColumn();
+	Run_Document_Rows();
+	Run_Document_Text();
 
 	Run_Rows_SideBySide();
 	Run_Rows_Folds();

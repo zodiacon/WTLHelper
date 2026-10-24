@@ -890,6 +890,65 @@ size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize) {
 	return DfColumns(line.substr(0, std::min(index, line.size())), tabSize);
 }
 
+// ---- Words and columns ----------------------------------------------------------------------
+
+namespace {
+	int CharClass(wchar_t c) {
+		return IsSpace(c) ? 0 : IsWordChar(c) ? 1 : 2;
+	}
+}
+
+size_t DfWordRight(std::wstring_view line, size_t index) {
+	if (index >= line.size())
+		return line.size();
+	int cls = CharClass(line[index]);
+	if (cls != 0) {
+		while (index < line.size() && CharClass(line[index]) == cls)
+			index++;
+	}
+	while (index < line.size() && CharClass(line[index]) == 0)
+		index++;
+	return index;
+}
+
+size_t DfWordLeft(std::wstring_view line, size_t index) {
+	index = std::min(index, line.size());
+	while (index > 0 && CharClass(line[index - 1]) == 0)
+		index--;
+	if (index == 0)
+		return 0;
+	int cls = CharClass(line[index - 1]);
+	while (index > 0 && CharClass(line[index - 1]) == cls)
+		index--;
+	return index;
+}
+
+void DfWordAt(std::wstring_view line, size_t index, size_t& start, size_t& end) {
+	if (line.empty()) {
+		start = end = 0;
+		return;
+	}
+	size_t i = std::min(index, line.size() - 1);
+	int cls = CharClass(line[i]);
+	start = i;
+	end = i + 1;
+	while (start > 0 && CharClass(line[start - 1]) == cls)
+		start--;
+	while (end < line.size() && CharClass(line[end]) == cls)
+		end++;
+}
+
+size_t DfIndexAtColumn(std::wstring_view line, double column, int tabSize) {
+	size_t col = 0;
+	for (size_t i = 0; i < line.size(); i++) {
+		size_t next = line[i] == L'\t' ? (col / tabSize + 1) * tabSize : col + 1;
+		if (column < (col + next) / 2.0)
+			return i;
+		col = next;
+	}
+	return line.size();
+}
+
 // ---- The control's document ------------------------------------------------------------------
 
 void DfDocument::Compute(const DfOptions& options, int tabSize) {
@@ -910,7 +969,193 @@ void DfDocument::UpdateColumns(int tabSize) {
 			maxColumns = std::max(maxColumns, DfColumns((*lines)[i], tabSize));
 }
 
+void DfDocument::BuildRows(DfLayout rowLayout, int context) {
+	layout = rowLayout;
+	rows = DfBuildRows(diff, layout, context, expanded);
+	leftRows.assign(left.size(), -1);
+	rightRows.assign(right.size(), -1);
+	changeRows.assign(changeBlocks.size(), {});
+	int change = -1;
+	uint32_t changeBlock = UINT32_MAX;
+	for (size_t r = 0; r < rows.size(); r++) {
+		auto& row = rows[r];
+		if (row.kind == DfRowKind::Fold) {
+			for (uint32_t k = 0; k < row.hidden; k++) {
+				leftRows[row.left + k] = int(r);
+				rightRows[row.right + k] = int(r);
+			}
+			continue;
+		}
+		if (row.left >= 0)
+			leftRows[row.left] = int(r);
+		if (row.right >= 0)
+			rightRows[row.right] = int(r);
+		if (row.kind != DfRowKind::Changed)
+			continue;
+		if (row.block != changeBlock) {
+			changeBlock = row.block;
+			change = ChangeOfBlock(row.block);
+			changeRows[change].first = r;
+		}
+		auto& cr = changeRows[change];
+		cr.count++;
+		cr.left = cr.left || row.left >= 0;
+		cr.right = cr.right || row.right >= 0;
+	}
+}
+
 int DfDocument::ChangeOfBlock(size_t block) const {
 	auto it = std::lower_bound(changeBlocks.begin(), changeBlocks.end(), block);
 	return it != changeBlocks.end() && *it == block ? int(it - changeBlocks.begin()) : -1;
+}
+
+int DfDocument::RowOf(bool rightSide, size_t line) const {
+	auto& map = rightSide ? rightRows : leftRows;
+	return line < map.size() ? map[line] : -1;
+}
+
+bool DfDocument::LineOfRow(size_t row, bool rightSide, DfPos& pos) const {
+	if (row >= rows.size() || rows[row].kind == DfRowKind::Fold)
+		return false;
+	auto& r = rows[row];
+	if (layout == DfLayout::Unified) {
+		pos = r.left >= 0 ? DfPos{ false, size_t(r.left), 0 } : DfPos{ true, size_t(r.right), 0 };
+		return true;
+	}
+	int line = rightSide ? r.right : r.left;
+	if (line < 0)
+		return false;
+	pos = { rightSide, size_t(line), 0 };
+	return true;
+}
+
+int DfDocument::StepRow(int row, int delta, bool rightSide) const {
+	const int count = int(rows.size());
+	if (count == 0)
+		return -1;
+	row = std::clamp(row, 0, count - 1);
+	DfPos pos;
+	auto shows = [&](int r) { return LineOfRow(size_t(r), rightSide, pos); };
+	int result = shows(row) ? row : -1;
+	int step = delta < 0 ? -1 : 1;
+	for (int r = row, remaining = std::abs(delta); remaining > 0;) {
+		r += step;
+		if (r < 0 || r >= count)
+			break;
+		if (shows(r)) {
+			result = r;
+			remaining--;
+		}
+	}
+	if (result >= 0)
+		return result;
+	// nothing that way: the nearest row that shows a line
+	for (int d = 1; d < count; d++) {
+		if (row + d < count && shows(row + d))
+			return row + d;
+		if (row - d >= 0 && shows(row - d))
+			return row - d;
+	}
+	return -1;
+}
+
+DfPos DfDocument::Clamp(DfPos pos) const {
+	auto& lines = Lines(pos.right);
+	if (lines.empty())
+		return { pos.right, 0, 0 };
+	pos.line = std::min(pos.line, lines.size() - 1);
+	pos.column = std::min(pos.column, lines[pos.line].size());
+	return pos;
+}
+
+bool DfDocument::Less(const DfPos& a, const DfPos& b) const {
+	if (layout == DfLayout::Unified) {
+		int ra = RowOf(a), rb = RowOf(b);
+		if (ra != rb)
+			return ra < rb;
+		if (a.right == b.right && a.line != b.line)
+			return a.line < b.line;   // both in a fold
+		return a.column < b.column;
+	}
+	if (a.right != b.right)
+		return !a.right;
+	return a.line != b.line ? a.line < b.line : a.column < b.column;
+}
+
+std::wstring DfDocument::Text(DfPos a, DfPos b, std::wstring_view eol) const {
+	if (Less(b, a))
+		std::swap(a, b);
+	a = Clamp(a);
+	b = Clamp(b);
+	std::wstring text;
+	auto part = [&](const DfLines& lines, size_t line, size_t from, size_t to) {
+		auto s = lines[line];
+		size_t end = std::min(to, s.size());
+		from = std::min(from, end);
+		text += s.substr(from, end - from);
+	};
+	if (layout == DfLayout::SideBySide) {
+		auto& lines = Lines(a.right);
+		if (lines.empty())
+			return text;
+		size_t last = b.right == a.right ? b.line : lines.size() - 1;
+		for (size_t line = a.line; line <= last; line++) {
+			if (line > a.line)
+				text += eol;
+			part(lines, line, line == a.line ? a.column : 0, line == b.line && b.right == a.right ? b.column : SIZE_MAX);
+		}
+		return text;
+	}
+	int ra = RowOf(a), rb = RowOf(b);
+	if (ra < 0 || rb < 0)
+		return text;
+	for (int r = ra; r <= rb; r++) {
+		if (r > ra)
+			text += eol;
+		auto& row = rows[r];
+		if (row.kind == DfRowKind::Fold) {
+			// the hidden lines, from a or to b if they're in it
+			size_t first = r == ra && !a.right ? a.line : size_t(row.left);
+			size_t last = r == rb && !b.right ? b.line : size_t(row.left) + row.hidden - 1;
+			for (size_t line = first; line <= last; line++) {
+				if (line > first)
+					text += eol;
+				part(left, line, r == ra && line == a.line ? a.column : 0, r == rb && line == b.line ? b.column : SIZE_MAX);
+			}
+			continue;
+		}
+		DfPos pos;
+		if (r == ra)
+			pos = a;
+		else if (r == rb)
+			pos = b;
+		else
+			LineOfRow(size_t(r), false, pos);
+		part(Lines(pos.right), pos.line, r == ra ? a.column : 0, r == rb ? b.column : SIZE_MAX);
+	}
+	return text;
+}
+
+void DfDocument::All(bool rightSide, DfPos& start, DfPos& end) const {
+	start = end = { rightSide, 0, 0 };
+	if (layout == DfLayout::SideBySide) {
+		auto& lines = Lines(rightSide);
+		if (!lines.empty())
+			end = { rightSide, lines.size() - 1, lines[lines.size() - 1].size() };
+		return;
+	}
+	if (rows.empty())
+		return;
+	auto edge = [&](const DfRow& row, bool last) {
+		if (row.kind == DfRowKind::Fold) {
+			size_t line = row.left + (last ? row.hidden - 1 : 0);
+			return DfPos{ false, line, last ? left[line].size() : 0 };
+		}
+		DfPos pos = row.left >= 0 ? DfPos{ false, size_t(row.left), 0 } : DfPos{ true, size_t(row.right), 0 };
+		if (last)
+			pos.column = Lines(pos.right)[pos.line].size();
+		return pos;
+	};
+	start = edge(rows.front(), false);
+	end = edge(rows.back(), true);
 }

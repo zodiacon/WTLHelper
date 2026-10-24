@@ -50,6 +50,8 @@ enum {
 	ID_VIEW_NUMBERS,
 	ID_VIEW_COLORS,
 	ID_VIEW_DARKMODE,
+	ID_VIEW_OVERVIEW,
+	ID_VIEW_EXPANDALL,
 
 	ID_COMPARE_IGNORECASE = 401,
 	ID_COMPARE_IGNORESPACECHANGE,
@@ -58,6 +60,9 @@ enum {
 
 	ID_GO_NEXT = 501,
 	ID_GO_PREV,
+
+	ID_DEMO_COPY = 601,
+	ID_DEMO_SELECTALL,
 };
 
 // ---- State --------------------------------------------------------------------
@@ -65,13 +70,13 @@ enum {
 static CDiffViewCtrl g_diff;
 static HWND g_main;
 static CString g_paths[2];
-static int g_change = -1;           // Go's current change
 static bool g_customColors;
 
 static const DFVCOLORS g_colors = {
 	RGB(0xFB, 0xF8, 0xF1), RGB(0x30, 0x30, 0x40), RGB(0xEE, 0xE8, 0xDA), RGB(0x9A, 0x90, 0x80),
 	RGB(0xF6, 0xD9, 0xD0), RGB(0xE9, 0xA8, 0x98), RGB(0xD8, 0xEC, 0xF4), RGB(0x9C, 0xCB, 0xE0),
 	RGB(0xD8, 0xD0, 0xC0), RGB(0xEC, 0xE4, 0xF2), RGB(0x78, 0x68, 0x90), RGB(0xE2, 0xDA, 0xC8), RGB(0x40, 0x38, 0x30),
+	RGB(0x5A, 0x4A, 0x7A), RGB(0xFF, 0xFF, 0xFF), RGB(0xD8, 0xD0, 0xE0), RGB(0x30, 0x30, 0x40),
 };
 
 // ---- Texts ------------------------------------------------------------------------
@@ -198,6 +203,14 @@ static void UpdateTitle() {
 		title.Format(L"DiffView Demo - identical (%zu lines)", info.leftLines);
 	else
 		title.Format(L"DiffView Demo - %zu changes, %zu lines deleted, %zu inserted", info.changes, info.deleted, info.inserted);
+	// where the caret is
+	auto caret = g_diff.GetCaret();
+	title.AppendFormat(L" - %s line %zu, column %zu", caret.right ? L"right" : L"left", caret.line + 1, caret.column + 1);
+	int change = g_diff.GetCurrentChange();
+	if (change >= 0)
+		title.AppendFormat(L", change %d of %zu", change + 1, info.changes);
+	if (g_diff.HasSelection())
+		title.AppendFormat(L", %d characters selected", g_diff.GetSelectedText().GetLength());
 	::SetWindowTextW(g_main, title);
 }
 
@@ -205,7 +218,6 @@ static void LoadSample() {
 	g_paths[0] = g_paths[1] = L"";
 	g_diff.SetTitles(L"Words.cpp (old)", L"Words.cpp (new)");
 	g_diff.SetTexts(g_sampleLeft, g_sampleRight);
-	g_change = -1;
 	UpdateTitle();
 }
 
@@ -241,7 +253,6 @@ static void LoadLarge() {
 	auto start = ::GetTickCount64();
 	g_diff.SetTexts(left.c_str(), right.c_str(), (int)left.size(), (int)right.size());
 	auto ms = ::GetTickCount64() - start;
-	g_change = -1;
 	UpdateTitle();
 	CString title;
 	::GetWindowTextW(g_main, title.GetBuffer(256), 256);
@@ -259,7 +270,6 @@ static void LoadFile(int side, LPCWSTR path) {
 	g_paths[side] = path;
 	g_diff.SetText(side == 1, text.c_str(), (int)text.size());
 	g_diff.SetTitles(g_paths[0].IsEmpty() ? L"" : ::PathFindFileNameW(g_paths[0]), g_paths[1].IsEmpty() ? L"" : ::PathFindFileNameW(g_paths[1]));
-	g_change = -1;
 	UpdateTitle();
 }
 
@@ -301,6 +311,7 @@ static void UpdateChecks(HMENU menu) {
 		context == 3 ? ID_VIEW_CONTEXT3 : context == 10 ? ID_VIEW_CONTEXT10 : ID_VIEW_CONTEXTALL, MF_BYCOMMAND);
 	check(ID_VIEW_NUMBERS, g_diff.AreLineNumbersShown());
 	check(ID_VIEW_COLORS, g_customColors);
+	check(ID_VIEW_OVERVIEW, g_diff.IsOverviewShown());
 	UINT options = g_diff.GetOptions();
 	check(ID_COMPARE_IGNORECASE, (options & DFVF_IGNORECASE) != 0);
 	check(ID_COMPARE_IGNORESPACECHANGE, (options & DFVF_IGNORESPACECHANGE) != 0);
@@ -313,7 +324,6 @@ static void UpdateChecks(HMENU menu) {
 
 static void ToggleOption(UINT flag) {
 	g_diff.SetOptions(g_diff.GetOptions() ^ flag);
-	g_change = -1;
 	UpdateTitle();
 }
 
@@ -349,16 +359,30 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_COMPARE_IGNORESPACE: ToggleOption(DFVF_IGNORESPACE); break;
 		case ID_COMPARE_INTRALINE: ToggleOption(DFVF_NOINTRALINE); break;
 		case ID_GO_NEXT:
-		case ID_GO_PREV: {
-			int count = (int)g_diff.GetChangeCount();
-			if (count == 0)
-				break;
-			g_change = id == ID_GO_NEXT ? std::min(g_change + 1, count - 1) : std::max(g_change - 1, 0);
-			g_diff.EnsureChangeVisible(g_change);
+		case ID_GO_PREV:
+			g_diff.NextChange(id == ID_GO_NEXT);
+			UpdateTitle();
 			break;
-		}
+		case ID_VIEW_OVERVIEW: g_diff.ShowOverview(!g_diff.IsOverviewShown()); break;
+		case ID_VIEW_EXPANDALL: g_diff.ExpandAll(); break;
+		case ID_DEMO_COPY: g_diff.Copy(); break;
+		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
 	}
 	UpdateChecks(::GetMenu(hwnd));
+}
+
+static void ShowContextMenu(HWND hwnd, const NMDFVCONTEXTMENU* nm) {
+	HMENU menu = ::CreatePopupMenu();
+	::AppendMenuW(menu, MF_STRING | (g_diff.HasSelection() ? 0 : MF_GRAYED), ID_DEMO_COPY, L"&Copy");
+	::AppendMenuW(menu, MF_STRING, ID_DEMO_SELECTALL, L"Select &All");
+	::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(menu, MF_STRING, ID_GO_NEXT, L"&Next Change");
+	::AppendMenuW(menu, MF_STRING, ID_GO_PREV, L"&Previous Change");
+	::AppendMenuW(menu, MF_STRING, ID_VIEW_EXPANDALL, L"&Expand All Folds");
+	::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(menu, MF_STRING, ID_FILE_COPYDIFF, L"Copy &Unified Diff");
+	::TrackPopupMenu(menu, TPM_RIGHTBUTTON, nm->pt.x, nm->pt.y, 0, hwnd, nullptr);
+	::DestroyMenu(menu);
 }
 
 // ---- Main window ------------------------------------------------------------------
@@ -384,6 +408,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_COMMAND:
 			OnCommand(hwnd, LOWORD(wParam));
 			return 0;
+
+		case WM_NOTIFY: {
+			auto hdr = (NMHDR*)lParam;
+			if (hdr->idFrom != IDC_DIFF)
+				break;
+			switch (hdr->code) {
+				case DFVN_SELCHANGED:
+				case DFVN_FOLDEXPANDED:
+					UpdateTitle();
+					break;
+				case DFVN_CONTEXTMENU:
+					ShowContextMenu(hwnd, (NMDFVCONTEXTMENU*)lParam);
+					break;
+			}
+			return 0;
+		}
 
 		case WM_DROPFILES: {
 			// one file: the right side; two: both
@@ -437,6 +477,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_FILE_EXIT, L"E&xit");
 
+	HMENU hEdit = ::CreatePopupMenu();
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COPY, L"&Copy\tCtrl+C");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_SELECTALL, L"Select &All\tCtrl+A");
+
 	HMENU hView = ::CreatePopupMenu();
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SIDEBYSIDE, L"&Side by Side");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_UNIFIED, L"&Unified");
@@ -445,7 +489,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_CONTEXT3, L"&3 Lines of Context");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_CONTEXT10, L"&10 Lines of Context");
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_EXPANDALL, L"&Expand All Folds");
+	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_NUMBERS, L"Line &Numbers");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_OVERVIEW, L"&Overview");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_COLORS, L"&Custom Colors");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
@@ -464,6 +511,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	HMENU hMenu = ::CreateMenu();
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
+	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hCompare, L"&Compare");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hGo, L"&Go");

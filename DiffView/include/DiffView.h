@@ -71,11 +71,55 @@ struct DFVCOLORS {
 	COLORREF crFoldText;
 	COLORREF crTitleBack;      // the titles above the panes
 	COLORREF crTitleText;
+	COLORREF crSelBack;
+	COLORREF crSelText;
+	COLORREF crSelBackInactive;
+	COLORREF crSelTextInactive;
+};
+
+// ---- Positions ----------------------------------------------------------------
+//
+// A place between characters of a line of one side: column is a character index in the line (a tab is one
+// character), 0..length. Side by side a selection is in one pane: both its ends are on the same side. Unified, an
+// unchanged line is on the left.
+
+struct DFVPOS {
+	BOOL   right;
+	size_t line;
+	size_t column;
+};
+
+// ---- Hit testing ----------------------------------------------------------------
+
+#define DFVHT_NOWHERE   0
+#define DFVHT_TITLE     1
+#define DFVHT_GUTTER    2   // pos: the line, column 0
+#define DFVHT_TEXT      3   // pos: the character boundary nearest to the point (also past the end of the line)
+#define DFVHT_FILLER    4   // where the side has no line; pos: the nearest line of the side
+#define DFVHT_FOLD      5   // pos: the first hidden line (of the left side, unified)
+#define DFVHT_OVERVIEW  6   // the strip beside the scroll bar; row: the row there
+#define DFVHT_BELOW     7   // under the last row
+
+struct DFVHITTEST {
+	POINT  pt;                 // in: client coords
+	UINT   part;               // out: DFVHT_*
+	size_t row;                // the row, if on one
+	DFVPOS pos;
 };
 
 // ---- Notifications -------------------------------------------------------------
 
 #define DFVN_FIRST          (0U - 3000U)   // outside the common controls ranges
+#define DFVN_SELCHANGED     (DFVN_FIRST - 0)   // NMHDR; the user moved the caret or changed the selection
+#define DFVN_CONTEXTMENU    (DFVN_FIRST - 1)   // NMDFVCONTEXTMENU
+#define DFVN_FOLDEXPANDED   (DFVN_FIRST - 2)   // NMHDR; the user opened a fold (a click, or Enter next to it)
+
+struct NMDFVCONTEXTMENU {
+	NMHDR  hdr;
+	POINT  pt;                 // screen coords; from the keyboard, below the caret
+	UINT   part;               // DFVHT_* where it was asked for (the caret's: DFVHT_TEXT)
+	DFVPOS pos;
+};
 
 // ---- Control class --------------------------------------------------------------------------
 
@@ -101,7 +145,18 @@ public:
 		MESSAGE_HANDLER(WM_SETFONT, OnSetFont)
 		MESSAGE_HANDLER(WM_GETFONT, OnGetFont)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnRButtonDown)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_MOUSEHWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_VSCROLL, OnVScroll)
@@ -159,6 +214,33 @@ public:
 	int     GetVisibleRowCount() const;               // whole rows that fit
 	void    EnsureLineVisible(bool right, size_t line);   // a folded line shows its fold
 	void    EnsureChangeVisible(size_t index);        // as much of the change as fits, its start first
+	void    ExpandAll();                              // opens every fold (until the context lines are set again)
+	// the overview beside the scroll bar: every change's place in the whole, and the part in view
+	void    ShowOverview(bool show);
+	bool    IsOverviewShown() const;
+	BOOL    HitTest(DFVHITTEST* pHit) const;
+
+	// ---- Caret and selection ----------------------------------------------------------
+	//
+	// The selection runs from the anchor to the caret. Clicking places the caret, dragging or Shift selects, the
+	// gutter selects whole lines, a double click a word; side by side, the selection stays in the pane it started
+	// in. Keys: arrows, Home/End, Page Up/Down, Ctrl+Home/End, with Ctrl moving by words and Shift extending;
+	// Ctrl+Up/Down scroll without moving the caret; F6 moves to the other pane; F7 and Shift+F7 go to the
+	// next and previous change; Enter opens the fold next to the caret; Ctrl+A selects all (the
+	// pane's text, side by side); Ctrl+C or Ctrl+Insert copies (the caret's line when nothing is selected). Setting
+	// the texts keeps the positions' lines and columns, as far as they go.
+
+	DFVPOS  GetCaret() const;
+	void    SetCaret(DFVPOS pos, bool extend = false);   // scrolls it into view; no notification
+	void    GetSelection(DFVPOS* pStart, DFVPOS* pEnd) const;   // in order; equal if nothing is selected
+	void    SetSelection(DFVPOS anchor, DFVPOS caret);   // the caret is scrolled into view; no notification
+	void    SelectAll();
+	bool    HasSelection() const;
+	ATL::CString GetSelectedText() const;             // lines joined with CR LF
+	BOOL    Copy();                                   // as Ctrl+C
+	int     GetCurrentChange() const;                 // the change the caret is in; -1 if none
+	BOOL    GoToChange(size_t index);                 // the caret to the change's first line, scrolled into view
+	BOOL    NextChange(bool forward = true);          // from the caret, as F7 and Shift+F7; FALSE if there's none
 
 	// ---- Appearance -------------------------------------------------------------------
 	//
@@ -176,7 +258,17 @@ private:
 	LRESULT OnSetFont(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetFont(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnRButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnVScroll(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnHScroll(UINT, WPARAM, LPARAM, BOOL&);
@@ -205,7 +297,13 @@ private:
 	void    UpdateScrollBars();
 	void    UpdateScrollBarTheme();
 	void    ScrollTo(size_t topRow, int left);
-	RECT    GetRowsRect() const;                      // below the titles
+	RECT    GetRowsRect() const;                      // below the titles, left of the overview
+	RECT    GetOverviewRect() const;
+	int     OverviewWidth() const;
+	void    PaintOverview(WTL::CDCHandle dc, const DFVCOLORS& c);
+	void    ScrollToOverview(int y);                  // centers the row at y of the overview
+	void    ExpandFold(size_t row, bool notify);
+	void    BuildRows();                              // the document's rows for the layout and context
 	int     TitleHeight() const;
 	int     GutterWidth() const;
 	int     PageRows() const;
@@ -216,9 +314,27 @@ private:
 	void    Paint(WTL::CDCHandle dc, const RECT& rcPaint);
 	void    PaintTitles(WTL::CDCHandle dc, const DFVCOLORS& c);
 	void    PaintRow(WTL::CDCHandle dc, size_t row, int y, const DFVCOLORS& c, int right);
-	void    PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_view line, const std::vector<DfSpan>* spans, COLORREF text, COLORREF markBack);
+	void    PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_view line, const std::vector<DfSpan>* spans, COLORREF text, COLORREF markBack,
+		size_t row, bool rightSide, const DFVCOLORS& c);
 	void    PaintNumber(WTL::CDCHandle dc, int right, int y, int line, COLORREF color);
 	void    FillHatch(WTL::CDCHandle dc, const RECT& rc, COLORREF back, COLORREF hatch);
+	bool    SelectionIn(size_t row, bool rightSide, size_t length, size_t& from, size_t& to, bool& lineBreak) const;
+	int     ColumnToX(WTL::CDCHandle dc, std::wstring_view line, size_t index) const;   // from the text's origin
+
+	// caret and selection (DiffViewSelection.cpp)
+	void    MoveCaret(DFVPOS pos, bool extend, bool notify);
+	void    UpdateCaret();
+	void    CreateSystemCaret();
+	void    EnsureCaretVisible();
+	void    ClampPositions();
+	void    FireSelChanged();
+	DFVPOS  PosFromPoint(POINT pt, bool rightSide, UINT* pPart) const;
+	bool    PaneSideAt(int x) const;                  // side by side: the pane x is over (the center strip: the nearer)
+	int     CaretRow() const;
+	size_t  IndexAtX(bool rightSide, size_t line, int x) const;   // x from the text's origin
+	LRESULT FireNotify(NMHDR* pnm, UINT code) const;
+	void    DragTo(POINT pt);
+	void    MoveByKey(UINT vk, bool shift, bool ctrl);
 
 	std::unique_ptr<DfDocument> m_Doc;
 	DFVLAYOUT m_Layout = DFVL_SIDEBYSIDE;
@@ -250,4 +366,16 @@ private:
 	int     m_WheelRemainder = 0;
 	int     m_HWheelRemainder = 0;
 	std::wstring m_DrawBuffer;
+	mutable std::wstring m_MeasureBuffer;
+
+	DFVPOS  m_Anchor{};
+	DFVPOS  m_Caret{};
+	int     m_DesiredX = -1;                          // up and down keep the caret near this x (pixels), -1: none
+	bool    m_HasCaret = false;
+	bool    m_ShowOverview = true;
+	enum class Drag { None, Select, Words, Lines, Overview } m_Drag = Drag::None;
+	DFVPOS  m_DragStart{};                            // a word or line drag: the first word or line
+	DFVPOS  m_DragEnd{};
+	POINT   m_DragPoint{};
+	int     m_SelRows[2] = { -1, -1 };                // unified, while painting: the selection's first and last rows
 };

@@ -101,6 +101,7 @@
   <ItemGroup>
     <ClCompile Include="src\DiffViewCtrl.cpp" />
     <ClCompile Include="src\DiffViewModel.cpp" />
+    <ClCompile Include="src\DiffViewSelection.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
