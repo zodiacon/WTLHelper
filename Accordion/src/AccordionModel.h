@@ -93,6 +93,10 @@ struct AcdHit {
 // edge: how close (pixels) to a body's bottom counts as its edge
 AcdHit AcdHitTest(const AcdLayout& layout, const std::vector<AcdSection>& sections, POINT pt, int edge);
 
+// A header's buttons: count squares size wide, gap apart, the last ending at right, centered in the header's
+// height. Ones that would start left of minLeft are left out (empty rects), from the first.
+std::vector<RECT> AcdButtonRects(const RECT& header, int count, int size, int gap, int right, int minLeft);
+
 // ---- Resizing ------------------------------------------------------------------------------
 //
 // Dragging the bottom edge of an open body. A fixed or fit section becomes fixed at the new height. A fill

@@ -149,6 +149,19 @@ AcdHit AcdHitTest(const AcdLayout& layout, const std::vector<AcdSection>& sectio
 	return {};
 }
 
+std::vector<RECT> AcdButtonRects(const RECT& header, int count, int size, int gap, int right, int minLeft) {
+	std::vector<RECT> rects(std::max(0, count), RECT{});
+	int top = (header.top + header.bottom - size) / 2;
+	int x = right;
+	for (int i = count - 1; i >= 0; i--) {
+		if (x - size < minLeft)
+			break;
+		rects[i] = { x - size, top, x, top + size };
+		x -= size + gap;
+	}
+	return rects;
+}
+
 // ---- Resizing ------------------------------------------------------------------------------
 
 constexpr size_t k_None = (size_t)-1;

@@ -25,6 +25,7 @@ constexpr wchar_t WC_ACCORDION[] = L"WC_Accordion";
 
 #define ACDS_SINGLEEXPAND  0x0001   // opening a section closes the others
 #define ACDS_NOANIMATION   0x0002   // sections open and close at once (they do anyway with animations off in Windows)
+#define ACDS_ALWAYSANIMATE 0x0004   // animate even with animations off in Windows (ACDS_NOANIMATION still wins)
 
 // ---- Sections --------------------------------------------------------------------
 
@@ -60,6 +61,13 @@ struct ACDSECTION {
 	LPARAM  lParam;
 };
 
+// a button in a section's header, left of its info text
+struct ACDBUTTON {
+	UINT    id;          // the app's, in ACDN_BUTTONCLICK
+	int     iImage;      // in the image list; -1: the text instead
+	LPCWSTR pszText;     // shown without an image (a short "+" or "..."), and the tooltip either way
+};
+
 // ---- Colors -----------------------------------------------------------------------
 
 struct ACDCOLORS {
@@ -74,12 +82,35 @@ struct ACDCOLORS {
 
 #define ACDN_FIRST          (0U - 2950U)   // outside the common controls ranges
 #define ACDN_GETFITHEIGHT   (ACDN_FIRST - 0)   // NMACDFITHEIGHT: an ACDH_FIT section's body height
+// The user opening or closing a section (a click, a key): ACDN_EXPANDING first, which a non-zero return vetoes,
+// then ACDN_EXPANDED for it and for each section that closed with it (ACDS_SINGLEEXPAND). The API sends neither.
+#define ACDN_EXPANDING      (ACDN_FIRST - 1)   // NMACDEXPAND
+#define ACDN_EXPANDED       (ACDN_FIRST - 2)   // NMACDEXPAND
+#define ACDN_BUTTONCLICK    (ACDN_FIRST - 3)   // NMACDBUTTON: a header button
+// a right click or the menu key on a header, or on no section (hSection nullptr); a non-zero return: handled
+#define ACDN_CONTEXTMENU    (ACDN_FIRST - 4)   // NMACDCONTEXTMENU
 
 struct NMACDSECTION {
 	NMHDR       hdr;
 	HACDSECTION hSection;
 	UINT        id;
 	LPARAM      lParam;
+};
+
+struct NMACDEXPAND {
+	NMACDSECTION section;
+	BOOL         expand;     // opening (TRUE) or closing
+};
+
+struct NMACDBUTTON {
+	NMACDSECTION section;
+	UINT         idButton;
+	RECT         rcButton;   // client coords: a menu can drop down from it
+};
+
+struct NMACDCONTEXTMENU {
+	NMACDSECTION section;    // hSection nullptr: not on a section
+	POINT        ptScreen;   // where the menu goes (the header's corner for the menu key)
 };
 
 struct NMACDFITHEIGHT {
@@ -89,6 +120,8 @@ struct NMACDFITHEIGHT {
 };
 
 // ---- The control ------------------------------------------------------------------
+
+class AcdFocusWindow;
 
 class CAccordionCtrl : public ATL::CWindowImpl<CAccordionCtrl> {
 public:
@@ -123,12 +156,27 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_STYLECHANGED, OnStyleChanged)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+	ALT_MSG_MAP(1)   // the headers' focus: a child window with no size, first in the tab order
+		MESSAGE_HANDLER(WM_SETFOCUS, OnHeaderFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnHeaderFocus)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnHeaderGetDlgCode)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnHeaderKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnHeaderChar)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
+		MESSAGE_HANDLER(WM_UPDATEUISTATE, OnHeaderUpdateUIState)
 	END_MSG_MAP()
 
 	// ---- Sections ------------------------------------------------------------------
@@ -153,9 +201,11 @@ public:
 	BOOL        SetSectionData(HACDSECTION hSection, LPARAM lParam);
 	LPARAM      GetSectionData(HACDSECTION hSection) const;
 	BOOL        SetSectionCollapsible(HACDSECTION hSection, bool collapsible);   // not collapsible: opened
+	// the header's buttons, right to left before the info text (count 0: none); the strings are copied
+	BOOL        SetSectionButtons(HACDSECTION hSection, const ACDBUTTON* buttons, int count);
 
-	// Opening and closing from the API sends no notifications. With ACDS_SINGLEEXPAND, opening one closes the
-	// others.
+	// Opening and closing from the API sends no notifications (and animates, like the user's). With
+	// ACDS_SINGLEEXPAND, opening one closes the others.
 	BOOL        Expand(HACDSECTION hSection, bool expand = true);
 	bool        IsExpanded(HACDSECTION hSection) const;
 	void        ExpandAll(bool expand);               // with ACDS_SINGLEEXPAND, expanding opens the first one only
@@ -165,6 +215,11 @@ public:
 	BOOL        GetSectionRect(HACDSECTION hSection, RECT* pHeader, RECT* pBody) const;
 	void        EnsureVisible(HACDSECTION hSection);  // scrolls its header (and as much of its body) into view
 	int         GetScrollPos() const;
+
+	// the header with the keyboard focus (when the headers have it); nullptr with no sections
+	HACDSECTION GetFocusSection() const;
+	void        SetFocusSection(HACDSECTION hSection);   // moves the focus cue; doesn't take the focus
+	HWND        GetHeaderFocusWindow() const;            // the child that takes the focus for the headers
 
 	// ---- Looks ---------------------------------------------------------------------
 
@@ -187,6 +242,18 @@ private:
 	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnHeaderFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnHeaderGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnHeaderKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnHeaderChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnHeaderUpdateUIState(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnStyleChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -200,7 +267,19 @@ private:
 	void    SetScroll(int pos);
 	void    PositionBodies();
 	void    PaintHeader(HDC hdc, size_t index, const ACDCOLORS& c);
-	void    Toggle(size_t index);
+	std::vector<RECT> ButtonRects(size_t index) const;   // client coords; empty rects for buttons with no room
+	int     ButtonAt(size_t index, POINT pt) const;     // -1 if none
+	void    InvalidateHeader(int index);
+	void    SetHot(int index, int button);
+	void    UpdateToolTip();
+	void    UserToggle(size_t index, bool expand);      // with the notifications
+	void    Changed(const std::vector<size_t>& changed);  // animates, or snaps; the focus leaves bodies that close
+	bool    Animates() const;
+	void    StartAnimation();
+	void    FocusHeader(size_t index);                  // the focus cue there, and the focus to the headers
+	void    Notify(NMACDSECTION& nm, UINT code, size_t index);   // the parent's answer in m_LastNotifyResult
+	bool    ContextMenu(int index, POINT ptScreen);
+	bool    HeadersFocused() const;
 
 	// top to bottom: the sections' text and windows, and the model's side of them (AccordionModel.h), in the same order
 	std::vector<std::unique_ptr<AcdNode>> m_Nodes;
@@ -220,4 +299,13 @@ private:
 	int         m_FitWidth = -1;                   // the width the fit heights were asked for
 	bool        m_InLayout = false;
 	std::unique_ptr<AcdLayout> m_Layout;              // as last laid out
+	std::unique_ptr<AcdFocusWindow> m_FocusWindow;
+	int         m_Focus = 0;                       // the header with the focus cue
+	int         m_Hot = -1;                        // the header under the mouse, and its button there (-1: none)
+	int         m_HotButton = -1;
+	int         m_Pressed = -1;                    // the button the mouse went down on (in m_Hot's header)
+	bool        m_Tracking = false;                // TrackMouseEvent for WM_MOUSELEAVE
+	HWND        m_hToolTip = nullptr;              // the header buttons' tooltips
+	ULONGLONG   m_AnimationTick = 0;               // the last animation step
+	LRESULT     m_LastNotifyResult = 0;
 };

@@ -231,6 +231,18 @@ TEST(HitTest_Parts) {
 	CHECK(hit.part == AcdPart::Header && hit.index == 1);
 }
 
+TEST(HeaderButtons) {
+	RECT header{ 0, 10, 200, 40 };
+	auto rects = AcdButtonRects(header, 2, 20, 4, 190, 0);
+	CHECK(rects.size() == 2);
+	CHECK(rects[1].left == 170 && rects[1].right == 190 && rects[1].top == 15 && rects[1].bottom == 35);
+	CHECK(rects[0].left == 146 && rects[0].right == 166);
+	// not enough room: the first ones go
+	rects = AcdButtonRects(header, 3, 20, 4, 190, 150);
+	CHECK(rects[0].right == 0 && rects[1].right == 0 && rects[2].left == 170);
+	CHECK(AcdButtonRects(header, 0, 20, 4, 190, 0).empty());
+}
+
 TEST(Resize_Fixed) {
 	std::vector<AcdSection> s{ Fixed(1, 50), Fixed(2, 50) };
 	s[0].minHeight = 30;
@@ -339,6 +351,7 @@ int wmain() {
 	Run_Layout_Empty();
 
 	Run_HitTest_Parts();
+	Run_HeaderButtons();
 	Run_Resize_Fixed();
 	Run_Resize_Fill();
 	Run_Reorder();

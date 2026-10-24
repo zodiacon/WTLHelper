@@ -9,12 +9,45 @@
 
 // a section's side the model doesn't need: what the header shows, and the body window
 struct AcdNode {
+	struct Button {
+		UINT         Id;
+		int          Image;
+		std::wstring Text;
+	};
+
 	std::wstring Text;
 	std::wstring Info;
 	int          Image = -1;
 	HWND         Body = nullptr;
 	LPARAM       Data = 0;
+	std::vector<Button> Buttons;
+	bool         Clipped = false;   // a window region shows part of the body (while it opens or closes)
 };
+
+// The headers' keyboard focus: a child window with no size, first among the children, so the headers are one tab
+// stop before the bodies (the control is a WS_EX_CONTROLPARENT container, which the dialog manager tabs into
+// rather than to). Its messages are handled in the control's ALT_MSG_MAP(1).
+class AcdFocusWindow : public ATL::CWindowImpl<AcdFocusWindow> {
+public:
+	DECLARE_WND_CLASS_EX(L"AcdHeaderFocus", 0, -1)
+
+	explicit AcdFocusWindow(CAccordionCtrl* owner) : m_Owner(owner) {}
+
+	BEGIN_MSG_MAP(AcdFocusWindow)
+		CHAIN_MSG_MAP_ALT_MEMBER((*m_Owner), 1)
+	END_MSG_MAP()
+
+private:
+	CAccordionCtrl* m_Owner;
+};
+
+namespace {
+
+constexpr UINT_PTR k_AnimationTimer = 1;
+constexpr double   k_AnimationMs = 150;
+constexpr UINT_PTR k_TipTool = 1;
+
+} // namespace
 
 namespace {
 
@@ -72,7 +105,7 @@ void Chevron(HDC hdc, const RECT& rc, bool open, int size, int thickness, COLORR
 
 } // namespace
 
-CAccordionCtrl::CAccordionCtrl() : m_Layout(std::make_unique<AcdLayout>()) {
+CAccordionCtrl::CAccordionCtrl() : m_Layout(std::make_unique<AcdLayout>()), m_FocusWindow(std::make_unique<AcdFocusWindow>(this)) {
 }
 
 CAccordionCtrl::~CAccordionCtrl() {
@@ -103,13 +136,37 @@ LRESULT CAccordionCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	// Tab goes into the bodies; painting leaves them alone
 	ModifyStyleEx(0, WS_EX_CONTROLPARENT);
 	ModifyStyle(0, WS_CLIPCHILDREN);
+	// a tab stop itself only through the headers' focus window
+	ModifyStyle(WS_TABSTOP, 0);
+	RECT none{};
+	m_FocusWindow->Create(m_hWnd, none, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP);
+	m_hToolTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+		0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.uFlags = TTF_SUBCLASS | TTF_TRANSPARENT;
+	ti.hwnd = m_hWnd;
+	ti.uId = k_TipTool;
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	::SendMessage(m_hToolTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 	UpdateFont();
 	Layout();
 	return 0;
 }
 
 LRESULT CAccordionCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	KillTimer(k_AnimationTimer);
+	// a popup made with a child as its parent is owned by the top-level window: it'd outlive the control
+	if (m_hToolTip)
+		::DestroyWindow(m_hToolTip);
+	m_hToolTip = nullptr;
 	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CAccordionCtrl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	// the control given the focus: the headers take it
+	if (m_FocusWindow->IsWindow())
+		m_FocusWindow->SetFocus();
 	return 0;
 }
 
@@ -151,12 +208,10 @@ LRESULT CAccordionCtrl::OnStyleChanged(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 		// one open section: the first that is stays
 		for (size_t i = 0; i < m_Sections.size(); i++) {
 			if (m_Sections[i].collapsible && m_Sections[i].expanded) {
-				AcdSetExpanded(m_Sections, i, true, true);
+				Changed(AcdSetExpanded(m_Sections, i, true, true));
 				break;
 			}
 		}
-		AcdSnap(m_Sections);
-		Layout();
 	}
 	bHandled = FALSE;
 	return 0;
@@ -270,21 +325,50 @@ void CAccordionCtrl::Layout() {
 }
 
 void CAccordionCtrl::PositionBodies() {
-	auto defer = ::BeginDeferWindowPos((int)m_Nodes.size());
+	// The bodies follow the headers' focus window in the z-order, top to bottom: the tab order. One opening or
+	// closing is at its full height with a region showing its part, so its content doesn't reflow every frame.
+	struct Clip {
+		HWND Body;
+		int  Width, Height;   // Height -1: no region
+	};
+	std::vector<Clip> clips;
+	auto defer = ::BeginDeferWindowPos((int)m_Nodes.size() + 1);
+	HWND after = HWND_TOP;
+	if (m_FocusWindow->IsWindow()) {
+		RECT focus = (size_t)m_Focus < m_Layout->items.size() ? m_Layout->items[m_Focus].header : RECT{};
+		if (defer)
+			defer = ::DeferWindowPos(defer, *m_FocusWindow, HWND_TOP, focus.left, focus.top, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+		after = *m_FocusWindow;
+	}
 	for (size_t i = 0; i < m_Nodes.size() && i < m_Layout->items.size(); i++) {
-		HWND body = m_Nodes[i]->Body;
+		auto& node = *m_Nodes[i];
+		HWND body = node.Body;
 		if (!body || !::IsWindow(body))
 			continue;
-		const RECT& rc = m_Layout->items[i].body;
-		bool show = rc.bottom > rc.top;
-		UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE);
+		const auto& item = m_Layout->items[i];
+		RECT rc = item.body;
+		int visible = rc.bottom - rc.top;
+		bool partial = visible > 0 && item.fullHeight > visible && m_Sections[i].progress > 0 && m_Sections[i].progress < 1;
+		if (partial) {
+			rc.bottom = rc.top + item.fullHeight;
+			clips.push_back({ body, rc.right - rc.left, visible });
+			node.Clipped = true;
+		}
+		else if (node.Clipped) {
+			clips.push_back({ body, 0, -1 });
+			node.Clipped = false;
+		}
+		UINT flags = SWP_NOACTIVATE | (visible > 0 ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE);
 		if (defer)
-			defer = ::DeferWindowPos(defer, body, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, flags);
+			defer = ::DeferWindowPos(defer, body, after, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, flags);
 		else
-			::SetWindowPos(body, nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, flags);
+			::SetWindowPos(body, after, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, flags);
+		after = body;
 	}
 	if (defer)
 		::EndDeferWindowPos(defer);
+	for (const auto& clip : clips)
+		::SetWindowRgn(clip.Body, clip.Height < 0 ? nullptr : ::CreateRectRgn(0, 0, clip.Width, clip.Height), TRUE);
 }
 
 // ---- Scrolling ------------------------------------------------------------------------------
@@ -367,6 +451,17 @@ void CAccordionCtrl::EnsureVisible(HACDSECTION hSection) {
 // ---- The bodies' messages ---------------------------------------------------------------------
 
 LRESULT CAccordionCtrl::OnForward(UINT msg, WPARAM wParam, LPARAM lParam, BOOL&) {
+	if (msg == WM_NOTIFY) {
+		auto hdr = (NMHDR*)lParam;
+		if (hdr->hwndFrom == m_hToolTip) {
+			if (hdr->code == TTN_GETDISPINFOW && m_Hot >= 0 && m_HotButton >= 0 && (size_t)m_Hot < m_Nodes.size()) {
+				auto& buttons = m_Nodes[m_Hot]->Buttons;
+				if ((size_t)m_HotButton < buttons.size())
+					((NMTTDISPINFOW*)lParam)->lpszText = buttons[m_HotButton].Text.data();
+			}
+			return 0;
+		}
+	}
 	return ::SendMessage(GetParent(), msg, wParam, lParam);
 }
 
@@ -424,7 +519,8 @@ void CAccordionCtrl::PaintHeader(HDC hdc, size_t index, const ACDCOLORS& c) {
 	const auto& node = *m_Nodes[index];
 	const auto& section = m_Sections[index];
 	RECT rc = m_Layout->items[index].header;
-	FillSolid(hdc, rc, c.crHeaderBack);
+	bool hot = (int)index == m_Hot && m_HotButton < 0 && section.collapsible;
+	FillSolid(hdc, rc, hot ? Blend(c.crHeaderBack, c.crHeaderText, 6) : c.crHeaderBack);
 	// a line above (but on the first) and below
 	if (index > 0)
 		FillSolid(hdc, { rc.left, rc.top, rc.right, rc.top + 1 }, c.crBorder);
@@ -445,6 +541,27 @@ void CAccordionCtrl::PaintHeader(HDC hdc, size_t index, const ACDCOLORS& c) {
 	}
 	::SetBkMode(hdc, TRANSPARENT);
 	auto old = ::SelectObject(hdc, m_hFont);
+	// the buttons, at the right
+	auto buttons = ButtonRects(index);
+	for (size_t b = 0; b < buttons.size(); b++) {
+		const RECT& br = buttons[b];
+		if (br.right <= br.left)
+			continue;
+		right = std::min<int>(right, br.left - Scale(4));
+		if ((int)index == m_Hot && (int)b == m_HotButton)
+			FillSolid(hdc, br, Blend(c.crHeaderBack, c.crHeaderText, m_Pressed == (int)b ? 24 : 12));
+		const auto& button = node.Buttons[b];
+		if (m_hImageList && button.Image >= 0) {
+			int cx, cy;
+			::ImageList_GetIconSize(m_hImageList, &cx, &cy);
+			::ImageList_Draw(m_hImageList, button.Image, hdc, (br.left + br.right - cx) / 2, (br.top + br.bottom - cy) / 2, ILD_TRANSPARENT);
+		}
+		else {
+			RECT text = br;
+			::SetTextColor(hdc, c.crHeaderText);
+			::DrawTextW(hdc, button.Text.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+		}
+	}
 	if (!node.Info.empty()) {
 		RECT measure{};
 		::DrawTextW(hdc, node.Info.c_str(), -1, &measure, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
@@ -460,6 +577,43 @@ void CAccordionCtrl::PaintHeader(HDC hdc, size_t index, const ACDCOLORS& c) {
 	::SetTextColor(hdc, c.crHeaderText);
 	::DrawTextW(hdc, node.Text.c_str(), -1, &title, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 	::SelectObject(hdc, old);
+
+	// the focus cue, unless the keyboard hasn't been used (UISF_HIDEFOCUS)
+	if ((int)index == m_Focus && HeadersFocused() && !(m_FocusWindow->SendMessage(WM_QUERYUISTATE) & UISF_HIDEFOCUS)) {
+		RECT focus = rc;
+		::InflateRect(&focus, -Scale(2), -Scale(2));
+		::SetTextColor(hdc, c.crHeaderText);
+		::SetBkColor(hdc, c.crHeaderBack);
+		::DrawFocusRect(hdc, &focus);
+	}
+}
+
+std::vector<RECT> CAccordionCtrl::ButtonRects(size_t index) const {
+	if (index >= m_Nodes.size() || index >= m_Layout->items.size() || m_Nodes[index]->Buttons.empty())
+		return {};
+	const RECT& rc = m_Layout->items[index].header;
+	// room for the chevron, the icon and some of the title before them
+	int left = rc.left + Scale(8) + (m_Sections[index].collapsible ? Scale(18) : 0) + Scale(48);
+	if (m_hImageList && m_Nodes[index]->Image >= 0) {
+		int cx, cy;
+		::ImageList_GetIconSize(m_hImageList, &cx, &cy);
+		left += cx + Scale(6);
+	}
+	return AcdButtonRects(rc, (int)m_Nodes[index]->Buttons.size(), m_HeaderHeight - Scale(8), Scale(2), rc.right - Scale(4), left);
+}
+
+int CAccordionCtrl::ButtonAt(size_t index, POINT pt) const {
+	auto rects = ButtonRects(index);
+	for (size_t b = 0; b < rects.size(); b++) {
+		if (::PtInRect(&rects[b], pt))
+			return (int)b;
+	}
+	return -1;
+}
+
+void CAccordionCtrl::InvalidateHeader(int index) {
+	if (index >= 0 && (size_t)index < m_Layout->items.size())
+		InvalidateRect(&m_Layout->items[index].header, FALSE);
 }
 
 // ---- Mouse ----------------------------------------------------------------------------------
@@ -467,15 +621,330 @@ void CAccordionCtrl::PaintHeader(HDC hdc, size_t index, const ACDCOLORS& c) {
 LRESULT CAccordionCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	auto hit = AcdHitTest(*m_Layout, m_Sections, pt, -1);
-	if (hit.part == AcdPart::Header && m_Sections[hit.index].collapsible)
-		Toggle(hit.index);
+	if (hit.part != AcdPart::Header)
+		return 0;
+	FocusHeader(hit.index);
+	int button = ButtonAt(hit.index, pt);
+	if (button >= 0) {
+		// clicked when it's let go over it
+		SetHot((int)hit.index, button);
+		m_Pressed = button;
+		SetCapture();
+		InvalidateHeader(m_Hot);
+	}
+	else if (m_Sections[hit.index].collapsible) {
+		UserToggle(hit.index, !m_Sections[hit.index].expanded);
+	}
 	return 0;
 }
 
-void CAccordionCtrl::Toggle(size_t index) {
-	AcdSetExpanded(m_Sections, index, !m_Sections[index].expanded, (GetStyle() & ACDS_SINGLEEXPAND) != 0);
-	AcdSnap(m_Sections);
+LRESULT CAccordionCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	if (m_Pressed < 0)
+		return 0;
+	int pressed = m_Pressed, index = m_Hot;
+	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	bool over = index >= 0 && ButtonAt(index, pt) == pressed;
+	m_Pressed = -1;
+	ReleaseCapture();
+	InvalidateHeader(index);
+	if (over) {
+		NMACDBUTTON nm{};
+		nm.idButton = m_Nodes[index]->Buttons[pressed].Id;
+		nm.rcButton = ButtonRects(index)[pressed];
+		Notify(nm.section, ACDN_BUTTONCLICK, index);
+	}
+	return 0;
+}
+
+LRESULT CAccordionCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_Pressed >= 0) {
+		m_Pressed = -1;
+		InvalidateHeader(m_Hot);
+	}
+	return 0;
+}
+
+LRESULT CAccordionCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	if (!m_Tracking) {
+		TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };
+		m_Tracking = ::TrackMouseEvent(&tme) != FALSE;
+	}
+	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	if (m_Pressed >= 0) {
+		// the pressed button shows pressed only while the mouse is over it
+		bool over = ButtonAt(m_Hot, pt) == m_Pressed;
+		if (over != (m_HotButton == m_Pressed)) {
+			m_HotButton = over ? m_Pressed : -1;
+			InvalidateHeader(m_Hot);
+		}
+		return 0;
+	}
+	auto hit = AcdHitTest(*m_Layout, m_Sections, pt, -1);
+	if (hit.part == AcdPart::Header)
+		SetHot((int)hit.index, ButtonAt(hit.index, pt));
+	else
+		SetHot(-1, -1);
+	return 0;
+}
+
+LRESULT CAccordionCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
+	m_Tracking = false;
+	if (m_Pressed < 0)
+		SetHot(-1, -1);
+	return 0;
+}
+
+void CAccordionCtrl::SetHot(int index, int button) {
+	if (index == m_Hot && button == m_HotButton)
+		return;
+	InvalidateHeader(m_Hot);
+	bool newButton = index != m_Hot || button != m_HotButton;
+	m_Hot = index;
+	m_HotButton = button;
+	InvalidateHeader(m_Hot);
+	if (newButton)
+		UpdateToolTip();
+}
+
+// the tooltip's tool is the hot button (an empty rectangle without one)
+void CAccordionCtrl::UpdateToolTip() {
+	if (!m_hToolTip)
+		return;
+	::SendMessage(m_hToolTip, TTM_POP, 0, 0);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = m_hWnd;
+	ti.uId = k_TipTool;
+	if (m_Hot >= 0 && m_HotButton >= 0) {
+		auto rects = ButtonRects(m_Hot);
+		if ((size_t)m_HotButton < rects.size())
+			ti.rect = rects[m_HotButton];
+	}
+	::SendMessage(m_hToolTip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+}
+
+LRESULT CAccordionCtrl::OnContextMenu(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	// a body's goes on to the parent
+	if ((HWND)wParam != m_hWnd && (HWND)wParam != m_FocusWindow->m_hWnd) {
+		bHandled = FALSE;
+		return 0;
+	}
+	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	int index = -1;
+	if (pt.x == -1 && pt.y == -1) {
+		// the menu key: the focused header, at its bottom left
+		if ((size_t)m_Focus < m_Layout->items.size()) {
+			index = m_Focus;
+			const RECT& header = m_Layout->items[index].header;
+			pt = { header.left + Scale(8), header.bottom };
+		}
+		else {
+			pt = {};
+		}
+		ClientToScreen(&pt);
+	}
+	else {
+		POINT client = pt;
+		ScreenToClient(&client);
+		auto hit = AcdHitTest(*m_Layout, m_Sections, client, -1);
+		if (hit.part == AcdPart::Header)
+			index = (int)hit.index;
+	}
+	ContextMenu(index, pt);
+	return 0;
+}
+
+bool CAccordionCtrl::ContextMenu(int index, POINT ptScreen) {
+	NMACDCONTEXTMENU nm{};
+	nm.ptScreen = ptScreen;
+	if (index >= 0) {
+		Notify(nm.section, ACDN_CONTEXTMENU, index);
+		return m_LastNotifyResult != 0;
+	}
+	nm.section.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), ACDN_CONTEXTMENU };
+	return ::SendMessage(GetParent(), WM_NOTIFY, nm.section.hdr.idFrom, (LPARAM)&nm) != 0;
+}
+
+// ---- Notifications and changes ------------------------------------------------------------------
+
+void CAccordionCtrl::Notify(NMACDSECTION& nm, UINT code, size_t index) {
+	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), code };
+	nm.hSection = m_Nodes[index].get();
+	nm.id = m_Sections[index].id;
+	nm.lParam = m_Nodes[index]->Data;
+	m_LastNotifyResult = ::SendMessage(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
+void CAccordionCtrl::UserToggle(size_t index, bool expand) {
+	if (index >= m_Sections.size() || m_Sections[index].expanded == expand || (!expand && !m_Sections[index].collapsible))
+		return;
+	HACDSECTION handle = m_Nodes[index].get();
+	NMACDEXPAND nm{};
+	nm.expand = expand;
+	Notify(nm.section, ACDN_EXPANDING, index);
+	if (m_LastNotifyResult)
+		return;
+	// the parent may have changed the sections
+	int i = IndexOf(handle);
+	if (i < 0)
+		return;
+	auto changed = AcdSetExpanded(m_Sections, i, expand, (GetStyle() & ACDS_SINGLEEXPAND) != 0);
+	std::vector<HACDSECTION> handles;
+	for (auto c : changed)
+		handles.push_back(m_Nodes[c].get());
+	Changed(changed);
+	for (auto h : handles) {
+		int k = IndexOf(h);
+		if (k < 0)
+			continue;
+		NMACDEXPAND done{};
+		done.expand = m_Sections[k].expanded;
+		Notify(done.section, ACDN_EXPANDED, k);
+	}
+}
+
+void CAccordionCtrl::Changed(const std::vector<size_t>& changed) {
+	// the focus in a body that closes goes to its header
+	HWND focus = ::GetFocus();
+	for (auto i : changed) {
+		HWND body = m_Nodes[i]->Body;
+		if (!m_Sections[i].expanded && body && focus && (focus == body || ::IsChild(body, focus)))
+			FocusHeader(i);
+	}
+	if (Animates())
+		StartAnimation();
+	else
+		AcdSnap(m_Sections);
 	Layout();
+}
+
+bool CAccordionCtrl::Animates() const {
+	DWORD style = GetStyle();
+	if ((style & ACDS_NOANIMATION) || !IsWindowVisible())
+		return false;
+	if (style & ACDS_ALWAYSANIMATE)
+		return true;
+	BOOL on = TRUE;
+	::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &on, 0);
+	return on != FALSE;
+}
+
+void CAccordionCtrl::StartAnimation() {
+	m_AnimationTick = ::GetTickCount64();
+	SetTimer(k_AnimationTimer, 10);
+}
+
+LRESULT CAccordionCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam != k_AnimationTimer) {
+		bHandled = FALSE;
+		return 0;
+	}
+	ULONGLONG now = ::GetTickCount64();
+	bool moving = AcdAnimate(m_Sections, (double)(now - m_AnimationTick), k_AnimationMs);
+	m_AnimationTick = now;
+	if (!moving)
+		KillTimer(k_AnimationTimer);
+	Layout();
+	return 0;
+}
+
+// ---- The keyboard -----------------------------------------------------------------------------
+
+bool CAccordionCtrl::HeadersFocused() const {
+	return m_FocusWindow->IsWindow() && ::GetFocus() == m_FocusWindow->m_hWnd;
+}
+
+void CAccordionCtrl::FocusHeader(size_t index) {
+	if (index >= m_Nodes.size())
+		return;
+	InvalidateHeader(m_Focus);
+	m_Focus = (int)index;
+	InvalidateHeader(m_Focus);
+	EnsureVisible(m_Nodes[index].get());
+	if (!HeadersFocused())
+		m_FocusWindow->SetFocus();
+}
+
+HACDSECTION CAccordionCtrl::GetFocusSection() const {
+	return (size_t)m_Focus < m_Nodes.size() ? m_Nodes[m_Focus].get() : nullptr;
+}
+
+void CAccordionCtrl::SetFocusSection(HACDSECTION hSection) {
+	int i = IndexOf(hSection);
+	if (i < 0)
+		return;
+	InvalidateHeader(m_Focus);
+	m_Focus = i;
+	InvalidateHeader(m_Focus);
+	EnsureVisible(hSection);
+}
+
+HWND CAccordionCtrl::GetHeaderFocusWindow() const {
+	return m_FocusWindow->m_hWnd;
+}
+
+LRESULT CAccordionCtrl::OnHeaderFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	if (!m_Nodes.empty())
+		m_Focus = std::clamp(m_Focus, 0, (int)m_Nodes.size() - 1);
+	InvalidateHeader(m_Focus);
+	return 0;
+}
+
+LRESULT CAccordionCtrl::OnHeaderUpdateUIState(UINT msg, WPARAM wParam, LPARAM lParam, BOOL&) {
+	LRESULT result = m_FocusWindow->DefWindowProc(msg, wParam, lParam);
+	InvalidateHeader(m_Focus);   // the focus cue shown or hidden
+	return result;
+}
+
+LRESULT CAccordionCtrl::OnHeaderGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	LRESULT code = DLGC_WANTARROWS | DLGC_WANTCHARS;
+	// Enter toggles here rather than pressing the dialog's default button
+	auto msg = (const MSG*)lParam;
+	if (msg && msg->message == WM_KEYDOWN && msg->wParam == VK_RETURN)
+		code |= DLGC_WANTMESSAGE;
+	return code;
+}
+
+LRESULT CAccordionCtrl::OnHeaderKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	int n = (int)m_Nodes.size();
+	if (n == 0) {
+		bHandled = FALSE;
+		return 0;
+	}
+	int focus = std::clamp(m_Focus, 0, n - 1);
+	bool collapsible = m_Sections[focus].collapsible;
+	switch (wParam) {
+		case VK_UP:     FocusHeader(std::max(0, focus - 1)); break;
+		case VK_DOWN:   FocusHeader(std::min(n - 1, focus + 1)); break;
+		case VK_HOME:   FocusHeader(0); break;
+		case VK_END:    FocusHeader(n - 1); break;
+		case VK_SPACE:
+		case VK_RETURN:
+			if (collapsible)
+				UserToggle(focus, !m_Sections[focus].expanded);
+			break;
+		case VK_RIGHT:
+		case VK_ADD:
+		case VK_OEM_PLUS:
+			UserToggle(focus, true);
+			break;
+		case VK_LEFT:
+		case VK_SUBTRACT:
+		case VK_OEM_MINUS:
+			UserToggle(focus, false);
+			break;
+		default:
+			bHandled = FALSE;
+			break;
+	}
+	return 0;
+}
+
+LRESULT CAccordionCtrl::OnHeaderChar(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	// the keys handled on WM_KEYDOWN: no beep
+	if (wParam == L' ' || wParam == L'+' || wParam == L'-' || wParam == L'\r' || wParam == L'=')
+		return 0;
+	bHandled = FALSE;
+	return 0;
 }
 
 // ---- Sections -------------------------------------------------------------------------------
@@ -521,9 +990,16 @@ HACDSECTION CAccordionCtrl::InsertSection(const ACDSECTION* section, HACDSECTION
 	HACDSECTION handle = node.get();
 	m_Nodes.insert(m_Nodes.begin() + index, std::move(node));
 	m_Sections.insert(m_Sections.begin() + index, s);
-	if (s.expanded)
-		AcdSetExpanded(m_Sections, index, true, (GetStyle() & ACDS_SINGLEEXPAND) != 0);
-	AcdSnap(m_Sections);
+	SetHot(-1, -1);
+	if ((int)index <= m_Focus && m_Nodes.size() > 1)
+		m_Focus++;
+	// a new section is there at once; the ones it closes (ACDS_SINGLEEXPAND) go as usual
+	m_Sections[index].progress = s.expanded ? 1 : 0;
+	if (s.expanded) {
+		auto changed = AcdSetExpanded(m_Sections, index, true, (GetStyle() & ACDS_SINGLEEXPAND) != 0);
+		if (!changed.empty())
+			Changed(changed);
+	}
 	if (s.mode == AcdHeight::Fit)
 		m_FitWidth = -1;
 	SetSectionWindow(handle, section->hwndBody);
@@ -535,22 +1011,38 @@ BOOL CAccordionCtrl::DeleteSection(HACDSECTION hSection) {
 	int i = IndexOf(hSection);
 	if (i < 0)
 		return FALSE;
-	if (HWND body = m_Nodes[i]->Body; body && ::IsWindow(body))
+	HWND focus = ::GetFocus();
+	bool hadFocus = false;
+	if (HWND body = m_Nodes[i]->Body; body && ::IsWindow(body)) {
+		hadFocus = focus && (focus == body || ::IsChild(body, focus));
+		if (m_Nodes[i]->Clipped)
+			::SetWindowRgn(body, nullptr, FALSE);
 		::ShowWindow(body, SW_HIDE);
+	}
 	m_Nodes.erase(m_Nodes.begin() + i);
 	m_Sections.erase(m_Sections.begin() + i);
+	SetHot(-1, -1);
+	if (m_Focus > i || m_Focus >= (int)m_Nodes.size())
+		m_Focus = std::max(0, m_Focus - 1);
 	Layout();
+	if (hadFocus)
+		m_FocusWindow->SetFocus();
 	return TRUE;
 }
 
 void CAccordionCtrl::DeleteAllSections() {
 	for (auto& node : m_Nodes) {
-		if (node->Body && ::IsWindow(node->Body))
+		if (node->Body && ::IsWindow(node->Body)) {
+			if (node->Clipped)
+				::SetWindowRgn(node->Body, nullptr, FALSE);
 			::ShowWindow(node->Body, SW_HIDE);
+		}
 	}
 	m_Nodes.clear();
 	m_Sections.clear();
 	m_ScrollPos = 0;
+	m_Focus = 0;
+	SetHot(-1, -1);
 	Layout();
 }
 
@@ -695,10 +1187,28 @@ BOOL CAccordionCtrl::SetSectionCollapsible(HACDSECTION hSection, bool collapsibl
 	if (i < 0)
 		return FALSE;
 	m_Sections[i].collapsible = collapsible;
-	if (!collapsible)
+	if (!collapsible && !m_Sections[i].expanded) {
 		m_Sections[i].expanded = true;
-	AcdSnap(m_Sections);
-	Layout();
+		Changed({ (size_t)i });
+	}
+	else {
+		Layout();
+	}
+	return TRUE;
+}
+
+BOOL CAccordionCtrl::SetSectionButtons(HACDSECTION hSection, const ACDBUTTON* buttons, int count) {
+	int i = IndexOf(hSection);
+	if (i < 0 || (count > 0 && !buttons))
+		return FALSE;
+	auto& list = m_Nodes[i]->Buttons;
+	list.clear();
+	list.reserve(std::max(0, count));
+	for (int b = 0; b < count; b++)
+		list.push_back({ buttons[b].id, buttons[b].iImage, buttons[b].pszText ? buttons[b].pszText : L"" });
+	if (i == m_Hot)
+		SetHot(-1, -1);
+	InvalidateHeader(i);
 	return TRUE;
 }
 
@@ -706,9 +1216,9 @@ BOOL CAccordionCtrl::Expand(HACDSECTION hSection, bool expand) {
 	int i = IndexOf(hSection);
 	if (i < 0)
 		return FALSE;
-	AcdSetExpanded(m_Sections, i, expand, (GetStyle() & ACDS_SINGLEEXPAND) != 0);
-	AcdSnap(m_Sections);
-	Layout();
+	auto changed = AcdSetExpanded(m_Sections, i, expand, (GetStyle() & ACDS_SINGLEEXPAND) != 0);
+	if (!changed.empty())
+		Changed(changed);
 	return TRUE;
 }
 
@@ -719,15 +1229,19 @@ bool CAccordionCtrl::IsExpanded(HACDSECTION hSection) const {
 
 void CAccordionCtrl::ExpandAll(bool expand) {
 	bool single = (GetStyle() & ACDS_SINGLEEXPAND) != 0;
+	std::vector<size_t> changed;
 	for (size_t i = 0; i < m_Sections.size(); i++) {
 		if (!m_Sections[i].collapsible)
 			continue;
-		AcdSetExpanded(m_Sections, i, expand, single);
+		for (auto c : AcdSetExpanded(m_Sections, i, expand, single)) {
+			if (std::find(changed.begin(), changed.end(), c) == changed.end())
+				changed.push_back(c);
+		}
 		if (expand && single)
 			break;
 	}
-	AcdSnap(m_Sections);
-	Layout();
+	if (!changed.empty())
+		Changed(changed);
 }
 
 void CAccordionCtrl::UpdateFitHeight(HACDSECTION) {

@@ -35,6 +35,9 @@ enum {
 	ID_VIEW_ICONS,
 	ID_VIEW_COLORS,
 	ID_VIEW_DARKMODE,
+	ID_VIEW_LOCKDETAILS,
+	ID_VIEW_NOANIMATION,
+	ID_VIEW_ALWAYSANIMATE,
 
 	ID_SECTION_EXPANDALL = 401,
 	ID_SECTION_COLLAPSEALL,
@@ -42,6 +45,14 @@ enum {
 	ID_SECTION_REMOVE,
 	ID_SECTION_MORE,       // more options: the fit section grows
 	ID_SECTION_SCROLLEND,
+
+	ID_MENU_TOGGLE = 501,   // the header context menu
+	ID_MENU_ONLY,
+	ID_MENU_SORT,           // the Files "..." button's menu
+	ID_MENU_CLEAR,
+
+	BTN_ADDFILE = 1,        // the Files header's buttons
+	BTN_MORE,
 };
 
 // the sections' ids (the saved state finds them by these)
@@ -62,7 +73,9 @@ static HIMAGELIST g_images;
 static HWND g_options;          // the fit section's body
 static int g_optionCount = 4;
 static int g_added;
-static bool g_icons = true, g_customColors;
+static bool g_icons = true, g_customColors, g_lockDetails;
+static HWND g_files;
+static HWND g_main;
 
 static const ACDCOLORS g_colors = { RGB(0xF4, 0xF1, 0xEA), RGB(0x2F, 0x4F, 0x6F), RGB(0xFF, 0xFF, 0xFF),
 	RGB(0xC8, 0xD8, 0xE8), RGB(0x1F, 0x3F, 0x5F) };
@@ -131,6 +144,19 @@ static HWND MakeEdit(HWND parent, LPCWSTR text) {
 	return edit;
 }
 
+// what the accordion said last, in the title
+static void ShowEvent(LPCWSTR text) {
+	CString title;
+	title.Format(L"Accordion Demo - %s", text);
+	::SetWindowTextW(g_main, title);
+}
+
+static void UpdateFileCount() {
+	CString info;
+	info.Format(L"%d items", ListView_GetItemCount(g_files));
+	g_acc.SetSectionInfoText(g_acc.FindSection(SEC_FILES), info);
+}
+
 static HWND MakeFileList(HWND parent) {
 	CListViewCtrl list;
 	list.Create(parent, CWindow::rcDefault, nullptr, WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOCOLUMNHEADER);
@@ -152,11 +178,14 @@ static void AddSections(HWND hwnd) {
 	s.pszText = L"Files";
 	s.pszInfo = L"30 items";
 	s.iImage = 0;
-	s.hwndBody = MakeFileList(g_acc);
+	g_files = MakeFileList(g_acc);
+	s.hwndBody = g_files;
 	s.heightMode = ACDH_FILL;
 	s.minHeight = 80;
 	s.state = ACDSS_EXPANDED;
-	g_acc.InsertSection(&s);
+	auto files = g_acc.InsertSection(&s);
+	ACDBUTTON buttons[] = { { BTN_ADDFILE, -1, L"+" }, { BTN_MORE, -1, L"..." } };
+	g_acc.SetSectionButtons(files, buttons, (int)std::size(buttons));
 
 	s = {};
 	s.id = SEC_DETAILS;
@@ -227,6 +256,9 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_SINGLE, (g_acc.GetStyle() & ACDS_SINGLEEXPAND) != 0);
 	check(ID_VIEW_ICONS, g_icons);
 	check(ID_VIEW_COLORS, g_customColors);
+	check(ID_VIEW_LOCKDETAILS, g_lockDetails);
+	check(ID_VIEW_NOANIMATION, (g_acc.GetStyle() & ACDS_NOANIMATION) != 0);
+	check(ID_VIEW_ALWAYSANIMATE, (g_acc.GetStyle() & ACDS_ALWAYSANIMATE) != 0);
 #ifdef DEMO_WTLHELPER
 	check(ID_VIEW_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -242,6 +274,21 @@ static void OnCommand(HWND hwnd, UINT id) {
 				g_acc.ModifyStyle(ACDS_SINGLEEXPAND, 0);
 			else
 				g_acc.ModifyStyle(0, ACDS_SINGLEEXPAND);
+			break;
+		case ID_VIEW_LOCKDETAILS:
+			g_lockDetails = !g_lockDetails;
+			break;
+		case ID_VIEW_NOANIMATION:
+			if (g_acc.GetStyle() & ACDS_NOANIMATION)
+				g_acc.ModifyStyle(ACDS_NOANIMATION, 0);
+			else
+				g_acc.ModifyStyle(0, ACDS_NOANIMATION);
+			break;
+		case ID_VIEW_ALWAYSANIMATE:
+			if (g_acc.GetStyle() & ACDS_ALWAYSANIMATE)
+				g_acc.ModifyStyle(ACDS_ALWAYSANIMATE, 0);
+			else
+				g_acc.ModifyStyle(0, ACDS_ALWAYSANIMATE);
 			break;
 		case ID_VIEW_ICONS:
 			g_icons = !g_icons;
@@ -314,6 +361,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	switch (msg) {
 		case WM_CREATE:
+			g_main = hwnd;
 			UpdateFont(hwnd);
 			MakeImages(hwnd);
 			g_acc.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, IDC_ACCORDION);
@@ -335,10 +383,90 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_NOTIFY:
 		{
 			auto hdr = (NMHDR*)lParam;
-			if (hdr->idFrom == IDC_ACCORDION && hdr->code == ACDN_GETFITHEIGHT) {
-				auto nm = (NMACDFITHEIGHT*)lParam;
-				if (nm->section.id == SEC_OPTIONS)
-					nm->height = OptionsHeight(hwnd);
+			if (hdr->idFrom != IDC_ACCORDION) {
+				// the bodies' notifications come through the accordion as if they were the window's children
+				if (hdr->hwndFrom == g_files && hdr->code == NM_DBLCLK)
+					ShowEvent(L"double click in Files (forwarded)");
+				return 0;
+			}
+			switch (hdr->code) {
+				case ACDN_GETFITHEIGHT:
+				{
+					auto nm = (NMACDFITHEIGHT*)lParam;
+					if (nm->section.id == SEC_OPTIONS)
+						nm->height = OptionsHeight(hwnd);
+					return 0;
+				}
+				case ACDN_EXPANDING:
+				{
+					auto nm = (NMACDEXPAND*)lParam;
+					if (g_lockDetails && nm->section.id == SEC_DETAILS) {
+						ShowEvent(L"Details is locked (ACDN_EXPANDING vetoed)");
+						return 1;
+					}
+					return 0;
+				}
+				case ACDN_EXPANDED:
+				{
+					auto nm = (NMACDEXPAND*)lParam;
+					ACDSECTION info{};
+					g_acc.GetSectionInfo(nm->section.hSection, &info);
+					CString text;
+					text.Format(L"%s %s", info.pszText, nm->expand ? L"opened" : L"closed");
+					ShowEvent(text);
+					return 0;
+				}
+				case ACDN_BUTTONCLICK:
+				{
+					auto nm = (NMACDBUTTON*)lParam;
+					if (nm->idButton == BTN_ADDFILE) {
+						CString name;
+						name.Format(L"New document %d.txt", ListView_GetItemCount(g_files) + 1);
+						LVITEMW item{ LVIF_TEXT };
+						item.iItem = 0;
+						item.pszText = name.GetBuffer();
+						ListView_InsertItem(g_files, &item);
+						UpdateFileCount();
+						ShowEvent(L"+ clicked: a file added");
+					}
+					else {
+						// a menu dropping down from the button
+						POINT pt{ nm->rcButton.left, nm->rcButton.bottom };
+						::ClientToScreen(hdr->hwndFrom, &pt);
+						HMENU menu = ::CreatePopupMenu();
+						::AppendMenuW(menu, MF_STRING, ID_MENU_SORT, L"&Sort by Name");
+						::AppendMenuW(menu, MF_STRING, ID_MENU_CLEAR, L"&Clear");
+						UINT cmd = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+						::DestroyMenu(menu);
+						if (cmd == ID_MENU_CLEAR) {
+							ListView_DeleteAllItems(g_files);
+							UpdateFileCount();
+						}
+						ShowEvent(cmd == ID_MENU_SORT ? L"... menu: sort" : cmd == ID_MENU_CLEAR ? L"... menu: cleared" : L"... menu: nothing");
+					}
+					return 0;
+				}
+				case ACDN_CONTEXTMENU:
+				{
+					auto nm = (NMACDCONTEXTMENU*)lParam;
+					if (!nm->section.hSection)
+						return 0;
+					auto section = nm->section.hSection;
+					HMENU menu = ::CreatePopupMenu();
+					::AppendMenuW(menu, MF_STRING, ID_MENU_TOGGLE, g_acc.IsExpanded(section) ? L"&Collapse" : L"&Expand");
+					::AppendMenuW(menu, MF_STRING, ID_MENU_ONLY, L"&Only This One Open");
+					UINT cmd = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, nm->ptScreen.x, nm->ptScreen.y, 0, hwnd, nullptr);
+					::DestroyMenu(menu);
+					if (cmd == ID_MENU_TOGGLE) {
+						g_acc.Expand(section, !g_acc.IsExpanded(section));
+					}
+					else if (cmd == ID_MENU_ONLY) {
+						for (int i = 0; i < g_acc.GetSectionCount(); i++)
+							g_acc.Expand(g_acc.GetSection(i), g_acc.GetSection(i) == section);
+					}
+					ShowEvent(L"header context menu");
+					return 1;
+				}
 			}
 			return 0;
 		}
@@ -387,6 +515,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SINGLE, L"&One Section Open at a Time");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_ICONS, L"&Icons");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_COLORS, L"&Custom Colors");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_NOANIMATION, L"&No Animation");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_ALWAYSANIMATE, L"&Always Animate (Even with Windows' Animations Off)");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_LOCKDETAILS, L"&Lock Details (Veto Expanding)");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
