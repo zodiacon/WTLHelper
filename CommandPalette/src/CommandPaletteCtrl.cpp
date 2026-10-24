@@ -1,4 +1,5 @@
 #include "CommandPalette.h"
+#include "CommandPaletteList.h"
 #include "CommandPaletteModel.h"
 
 #include <commctrl.h>
@@ -8,25 +9,6 @@
 
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "comctl32.lib")
-
-// ---- The list ---------------------------------------------------------------------------
-//
-// A child window, so its scroll bar runs beside the rows only (the search box is above). Its messages are handled in
-// the control's ALT_MSG_MAP(2).
-
-class CmpListWindow : public ATL::CWindowImpl<CmpListWindow> {
-public:
-	DECLARE_WND_CLASS_EX(L"CmpList", CS_DBLCLKS, -1)
-
-	explicit CmpListWindow(CCommandPaletteCtrl* owner) : m_Owner(owner) {}
-
-	BEGIN_MSG_MAP(CmpListWindow)
-		CHAIN_MSG_MAP_ALT_MEMBER((*m_Owner), 2)
-	END_MSG_MAP()
-
-private:
-	CCommandPaletteCtrl* m_Owner;
-};
 
 // ---- Helpers -----------------------------------------------------------------------
 
@@ -78,8 +60,15 @@ LRESULT CCommandPaletteCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Box.SetCueBannerText(m_Placeholder, TRUE);
 	m_List->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPSIBLINGS);
 	UpdateScrollBarTheme();
+	NameAccessible();
 	Layout();
 	Filter();
+	return 0;
+}
+
+LRESULT CCommandPaletteCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	DisconnectAccessible();
+	bHandled = FALSE;
 	return 0;
 }
 
@@ -692,11 +681,15 @@ void CCommandPaletteCtrl::Search(DWORD ms) {
 		if (it != results.end())
 			row = (int)(it - results.begin());
 	}
+	bool moved = row != m_Selected;
 	m_Selected = row;
 	EnsureVisible(row);
 	UpdateScrollBar();
 	if (m_List->IsWindow())
 		m_List->Invalidate();
+	NotifyResultsAccessible();
+	if (moved)
+		NotifySelectionAccessible();
 	if (IsWindow()) {
 		// the progress line under the box
 		auto box = GetBoxRect();
@@ -853,6 +846,7 @@ void CCommandPaletteCtrl::Select(int row, bool notify) {
 	EnsureVisible(row);
 	if (m_List->IsWindow())
 		m_List->Invalidate();
+	NotifySelectionAccessible();
 	if (notify) {
 		m_UserSelected = true;
 		NotifyItem(CMDPN_SELCHANGED, row);
@@ -1005,9 +999,11 @@ LRESULT CCommandPaletteCtrl::OnBoxGetDlgCode(UINT uMsg, WPARAM wParam, LPARAM lP
 	return code;
 }
 
-LRESULT CCommandPaletteCtrl::OnBoxFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+LRESULT CCommandPaletteCtrl::OnBoxFocus(UINT uMsg, WPARAM, LPARAM, BOOL& bHandled) {
 	auto box = GetBoxRect();
 	InvalidateRect(&box, FALSE);   // the frame's focus color
+	if (uMsg == WM_SETFOCUS)
+		NotifySelectionAccessible();   // after the box's own focus event: the selected row
 	bHandled = FALSE;
 	return 0;
 }
@@ -1083,11 +1079,37 @@ void CCommandPaletteCtrl::SetColors(const CMDPCOLORS* colors) {
 	}
 }
 
+void CCommandPaletteCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow()) {
+		Invalidate();
+		m_List->Invalidate();
+		m_Box.Invalidate();
+	}
+}
+
+bool CCommandPaletteCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
 CMDPCOLORS CCommandPaletteCtrl::GetColors() const {
+	CMDPCOLORS c;
+	if (IsHighContrast()) {
+		// the system's colors only; the matched letters are bold in the row's own color
+		c.crBack = c.crBoxBack = ::GetSysColor(COLOR_WINDOW);
+		c.crText = c.crBoxText = c.crMatch = c.crBoxBorder = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crDimText = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crSelBack = c.crBoxFocusBorder = ::GetSysColor(COLOR_HIGHLIGHT);
+		c.crSelText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+		c.crHotBack = c.crBack;
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
-	CMDPCOLORS c;
 	c.crBack = ::GetSysColor(COLOR_WINDOW);
 	c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
 	bool dark = IsDark(c.crBack);
@@ -1159,6 +1181,7 @@ LRESULT CCommandPaletteCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 LRESULT CCommandPaletteCtrl::OnListPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 	auto paint = [&](WTL::CDCHandle dc, const RECT& rcPaint) {
 		auto c = GetColors();
+		m_PaintHighContrast = IsHighContrast();
 		RECT rc;
 		m_List->GetClientRect(&rc);
 		auto oldFont = dc.SelectFont(m_hFont);
@@ -1220,7 +1243,9 @@ void CCommandPaletteCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, c
 		dc.SelectPen(oldPen);
 	}
 	COLORREF text = disabled ? c.crDimText : selected ? c.crSelText : c.crText;
-	COLORREF dim = c.crDimText;
+	// high contrast: the selected row all in the highlight's text color
+	COLORREF dim = m_PaintHighContrast && selected ? c.crSelText : c.crDimText;
+	COLORREF match = m_PaintHighContrast && selected ? c.crSelText : c.crMatch;
 	int x = rc.left + 2 * m_Pad;
 	const int textY = rc.top + (rc.bottom - rc.top - m_TextHeight) / 2;
 
@@ -1272,7 +1297,7 @@ void CCommandPaletteCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, c
 		while (j < label.size() && matched[j] == matched[i] && (j < nameStart) == (i < nameStart))
 			j++;
 		dc.SelectFont(matched[i] ? (HFONT)m_BoldFont : m_hFont);
-		dc.SetTextColor(matched[i] && !disabled ? c.crMatch : i < nameStart ? dim : text);
+		dc.SetTextColor(matched[i] && !disabled ? match : i < nameStart ? dim : text);
 		SIZE size{};
 		dc.GetTextExtent(label.c_str() + i, (int)(j - i), &size);
 		dc.ExtTextOut(x, textY, ETO_CLIPPED, &clip, label.c_str() + i, (UINT)(j - i), nullptr);

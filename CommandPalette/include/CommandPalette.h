@@ -134,6 +134,7 @@ struct CmpProvider;
 class CmpRecent;
 class CmpSearch;
 class CmpListWindow;
+class CmpAccessible;
 
 class CCommandPaletteCtrl : public ATL::CWindowImpl<CCommandPaletteCtrl> {
 public:
@@ -142,12 +143,14 @@ public:
 	CCommandPaletteCtrl();
 	~CCommandPaletteCtrl();
 	friend class CmpListWindow;
+	friend class CmpAccessible;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
 
 	BEGIN_MSG_MAP(CCommandPaletteCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
@@ -182,6 +185,7 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnListLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnListLButtonUp)
 		MESSAGE_HANDLER(WM_MOUSEACTIVATE, OnListMouseActivate)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnListGetObject)
 	END_MSG_MAP()
 
 	// ---- Commands -----------------------------------------------------------------------
@@ -242,11 +246,14 @@ public:
 	// DPI).
 
 	void    SetColors(const CMDPCOLORS* colors);      // nullptr: from the system colors (follows WTLHelper dark mode)
-	CMDPCOLORS GetColors() const;
+	CMDPCOLORS GetColors() const;                     // high contrast: the system's, even over colors the app set
+	void    ForceHighContrast(int on);                // for testing: 1 on, 0 off, -1 (the default) as Windows says
 	int     GetIdealHeight(int rows) const;           // the height that shows the box and that many rows
 
 private:
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnListGetObject(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
@@ -288,6 +295,13 @@ private:
 	CmpProvider* FindProvider(int id) const;
 	void    BuildHelp();                              // the '?' list
 	LRESULT NotifyItem(UINT code, int row);           // NMCMDPITEM for a row
+	bool    IsHighContrast() const;
+
+	// accessibility (CommandPaletteAccessible.cpp)
+	void    DisconnectAccessible();
+	void    NameAccessible();                         // the box's and the list's names
+	void    NotifySelectionAccessible();              // the selected row: focused (the box's active descendant)
+	void    NotifyResultsAccessible();                // the rows changed
 	void    UpdateScrollBar();
 	void    UpdateScrollBarTheme();
 	void    ScrollTo(int top);
@@ -317,6 +331,9 @@ private:
 	std::wstring m_QueryText;
 	bool    m_InQuery = false;                        // in CMDPN_QUERY: the app may set the count, which doesn't filter
 	bool    m_UserSelected = false;                   // the user moved the selection while the search goes on
+	int     m_ForceHighContrast = -1;
+	bool    m_PaintHighContrast = false;              // while painting
+	CmpAccessible* m_Accessible = nullptr;            // made on the first WM_GETOBJECT; cut off in OnDestroy
 	std::unique_ptr<CmpRecent> m_Recent;
 	std::vector<MenuSource> m_Menus;
 	ATL::CContainedWindowT<WTL::CEdit> m_Box;

@@ -96,9 +96,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\CommandPalette.h" />
+    <ClInclude Include="src\CommandPaletteList.h" />
     <ClInclude Include="src\CommandPaletteModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CommandPaletteAccessible.cpp" />
     <ClCompile Include="src\CommandPaletteCtrl.cpp" />
     <ClCompile Include="src\CommandPaletteModel.cpp" />
     <ClCompile Include="src\CommandPalettePopup.cpp" />

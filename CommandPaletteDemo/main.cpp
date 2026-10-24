@@ -40,7 +40,7 @@ enum {
 	CMD_EDIT_GOTOLINE, CMD_EDIT_SELECTALL, CMD_EDIT_TOUPPER, CMD_EDIT_TOLOWER, CMD_EDIT_COMMENT,
 	CMD_VIEW_TOOLBAR = 1201, CMD_VIEW_STATUSBAR, CMD_VIEW_LINENUMBERS, CMD_VIEW_WORDWRAP, CMD_VIEW_ZOOMIN, CMD_VIEW_ZOOMOUT,
 	CMD_VIEW_ZOOMRESET, CMD_VIEW_FULLSCREEN, CMD_VIEW_DARKMODE,
-	CMD_PAL_HIDEDISABLED = 1301, CMD_PAL_NORECENT, CMD_PAL_COLORS, CMD_PAL_CLEARRECENT, CMD_PAL_REFRESH, CMD_PAL_SHOW,
+	CMD_PAL_HIDEDISABLED = 1301, CMD_PAL_NORECENT, CMD_PAL_COLORS, CMD_PAL_CLEARRECENT, CMD_PAL_REFRESH, CMD_PAL_SHOW, CMD_PAL_HIGHCONTRAST,
 	CMD_HELP_DOCS = 1401, CMD_HELP_SHORTCUTS, CMD_HELP_ABOUT,
 
 	// added with AddCommand only
@@ -54,6 +54,7 @@ static CCommandPalettePopup g_popup;
 static HWND g_main, g_log;
 static HIMAGELIST g_images;
 static bool g_customColors;
+static bool g_highContrast;           // Palette > High Contrast Drawing: the palettes drawn for it, without the setting
 
 // ---- Providers -------------------------------------------------------------------
 //
@@ -167,7 +168,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_VIEW_DARKMODE, L"&Dark Mode");
 #endif
 	HMENU palette = popup({ { CMD_PAL_HIDEDISABLED, L"&Hide Disabled Commands" }, { CMD_PAL_NORECENT, L"&No Recently Used First" },
-		{ CMD_PAL_COLORS, L"&Custom Colors" }, { 0, nullptr }, { CMD_PAL_CLEARRECENT, L"C&lear Recently Used" },
+		{ CMD_PAL_COLORS, L"&Custom Colors" }, { CMD_PAL_HIGHCONTRAST, L"&High Contrast Drawing" }, { 0, nullptr }, { CMD_PAL_CLEARRECENT, L"C&lear Recently Used" },
 		{ CMD_PAL_REFRESH, L"&Read the Menus Again" }, { 0, nullptr }, { CMD_PAL_SHOW, L"&Show Command Palette...\tCtrl+Shift+P" } });
 	HMENU help = popup({ { CMD_HELP_DOCS, L"&Documentation\tF1" }, { CMD_HELP_SHORTCUTS, L"&Keyboard Shortcuts" }, { 0, nullptr },
 		{ CMD_HELP_ABOUT, L"&About" } });
@@ -188,7 +189,7 @@ static HMENU BuildMenu() {
 static HIMAGELIST BuildImages(HWND hwnd) {
 	int size = ::GetSystemMetricsForDpi(SM_CXSMICON, ::GetDpiForWindow(hwnd));
 	HIMAGELIST images = ::ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 5, 0);
-	for (auto id : { SIID_FIND, SIID_FIND, SIID_SETTINGS, SIID_FOLDER, SIID_SHIELD }) {
+	for (auto id : { SIID_FIND, SIID_FIND, SIID_APPLICATION, SIID_FOLDER, SIID_SHIELD }) {
 		SHSTOCKICONINFO info{ sizeof(info) };
 		if (SUCCEEDED(::SHGetStockIconInfo(id, SHGSI_ICON | SHGSI_SMALLICON, &info))) {
 			::ImageList_AddIcon(images, info.hIcon);
@@ -203,6 +204,7 @@ static void UpdateChecks(HMENU menu) {
 	check(CMD_PAL_HIDEDISABLED, (g_palette.GetStyle() & CMDPS_HIDEDISABLED) != 0);
 	check(CMD_PAL_NORECENT, (g_palette.GetStyle() & CMDPS_NORECENT) != 0);
 	check(CMD_PAL_COLORS, g_customColors);
+	check(CMD_PAL_HIGHCONTRAST, g_highContrast);
 #ifdef DEMO_WTLHELPER
 	check(CMD_VIEW_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -229,6 +231,11 @@ static void OnCommand(HWND hwnd, UINT id) {
 			g_palette.SetColors(g_customColors ? &g_colors : nullptr);
 			break;
 		case CMD_PAL_CLEARRECENT: g_palette.ClearRecent(); break;
+		case CMD_PAL_HIGHCONTRAST:
+			g_highContrast = !g_highContrast;
+			g_palette.ForceHighContrast(g_highContrast ? 1 : -1);
+			g_popup.Palette().ForceHighContrast(g_highContrast ? 1 : -1);
+			break;
 		case CMD_PAL_REFRESH: g_palette.RefreshMenus(hwnd); break;
 		case CMD_PAL_SHOW:
 			g_popup.Show();
@@ -423,6 +430,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
 	::InitCommonControlsEx(&icc);
 
+	::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // the palettes name their parts with IAccPropServices
 	_Module.Init(nullptr, hInstance);
 #ifdef DEMO_WTLHELPER
 	WTLHelper::InitDarkMode(DarkModeKind::Classic);
@@ -458,5 +466,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	if (g_images)
 		::ImageList_Destroy(g_images);
 	_Module.Term();
+	::CoUninitialize();
 	return 0;
 }
