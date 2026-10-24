@@ -38,6 +38,8 @@ enum {
 	ID_VIEW_LOCKDETAILS,
 	ID_VIEW_NOANIMATION,
 	ID_VIEW_ALWAYSANIMATE,
+	ID_VIEW_RESIZE,
+	ID_VIEW_REORDER,
 
 	ID_SECTION_EXPANDALL = 401,
 	ID_SECTION_COLLAPSEALL,
@@ -45,6 +47,9 @@ enum {
 	ID_SECTION_REMOVE,
 	ID_SECTION_MORE,       // more options: the fit section grows
 	ID_SECTION_SCROLLEND,
+	ID_SECTION_SAVE,
+	ID_SECTION_RESTORE,
+	ID_SECTION_LASTTOTOP,
 
 	ID_MENU_TOGGLE = 501,   // the header context menu
 	ID_MENU_ONLY,
@@ -76,6 +81,7 @@ static int g_added;
 static bool g_icons = true, g_customColors, g_lockDetails;
 static HWND g_files;
 static HWND g_main;
+static CString g_saved;         // Save Layout's text
 
 static const ACDCOLORS g_colors = { RGB(0xF4, 0xF1, 0xEA), RGB(0x2F, 0x4F, 0x6F), RGB(0xFF, 0xFF, 0xFF),
 	RGB(0xC8, 0xD8, 0xE8), RGB(0x1F, 0x3F, 0x5F) };
@@ -259,6 +265,9 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_LOCKDETAILS, g_lockDetails);
 	check(ID_VIEW_NOANIMATION, (g_acc.GetStyle() & ACDS_NOANIMATION) != 0);
 	check(ID_VIEW_ALWAYSANIMATE, (g_acc.GetStyle() & ACDS_ALWAYSANIMATE) != 0);
+	check(ID_VIEW_RESIZE, (g_acc.GetStyle() & ACDS_NORESIZE) == 0);
+	check(ID_VIEW_REORDER, (g_acc.GetStyle() & ACDS_NOREORDER) == 0);
+	::EnableMenuItem(menu, ID_SECTION_RESTORE, MF_BYCOMMAND | (g_saved.IsEmpty() ? MF_GRAYED : MF_ENABLED));
 #ifdef DEMO_WTLHELPER
 	check(ID_VIEW_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -290,6 +299,16 @@ static void OnCommand(HWND hwnd, UINT id) {
 			else
 				g_acc.ModifyStyle(0, ACDS_ALWAYSANIMATE);
 			break;
+		case ID_VIEW_RESIZE:
+		case ID_VIEW_REORDER:
+		{
+			DWORD style = id == ID_VIEW_RESIZE ? ACDS_NORESIZE : ACDS_NOREORDER;
+			if (g_acc.GetStyle() & style)
+				g_acc.ModifyStyle(style, 0);
+			else
+				g_acc.ModifyStyle(0, style);
+			break;
+		}
 		case ID_VIEW_ICONS:
 			g_icons = !g_icons;
 			g_acc.SetImageList(g_icons ? g_images : nullptr);
@@ -352,6 +371,20 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_SECTION_SCROLLEND:
 			g_acc.EnsureVisible(g_acc.GetSection(g_acc.GetSectionCount() - 1));
 			break;
+		case ID_SECTION_SAVE:
+		{
+			int length = g_acc.GetState(nullptr, 0);
+			g_acc.GetState(g_saved.GetBuffer(length), length);
+			g_saved.ReleaseBuffer();
+			ShowEvent(L"saved: " + g_saved);
+			break;
+		}
+		case ID_SECTION_RESTORE:
+			ShowEvent(g_acc.SetState(g_saved) ? L"layout restored" : L"the saved layout couldn't be read");
+			break;
+		case ID_SECTION_LASTTOTOP:
+			g_acc.MoveSection(g_acc.GetSection(g_acc.GetSectionCount() - 1), ACD_FIRST);
+			break;
 		default:
 			return;
 	}
@@ -413,6 +446,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 					g_acc.GetSectionInfo(nm->section.hSection, &info);
 					CString text;
 					text.Format(L"%s %s", info.pszText, nm->expand ? L"opened" : L"closed");
+					ShowEvent(text);
+					return 0;
+				}
+				case ACDN_SECTIONMOVED:
+				case ACDN_SECTIONRESIZED:
+				{
+					auto nm = (NMACDSECTION*)lParam;
+					ACDSECTION info{};
+					g_acc.GetSectionInfo(nm->hSection, &info);
+					CString text;
+					text.Format(L"%s %s", info.pszText, hdr->code == ACDN_SECTIONMOVED ? L"moved" : L"resized");
 					ShowEvent(text);
 					return 0;
 				}
@@ -518,6 +562,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_NOANIMATION, L"&No Animation");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_ALWAYSANIMATE, L"&Always Animate (Even with Windows' Animations Off)");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_LOCKDETAILS, L"&Lock Details (Veto Expanding)");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_RESIZE, L"&Resizing (Drag an Edge)");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_REORDER, L"Reo&rdering (Drag a Header)");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
@@ -531,6 +577,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hSection, MF_STRING, ID_SECTION_REMOVE, L"&Remove the Last Section");
 	::AppendMenuW(hSection, MF_STRING, ID_SECTION_MORE, L"&More Options (the Fit Section Grows)");
 	::AppendMenuW(hSection, MF_STRING, ID_SECTION_SCROLLEND, L"&Show the Last Section");
+	::AppendMenuW(hSection, MF_STRING, ID_SECTION_LASTTOTOP, L"Move the Last Section to the &Top");
+	::AppendMenuW(hSection, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hSection, MF_STRING, ID_SECTION_SAVE, L"Sa&ve Layout");
+	::AppendMenuW(hSection, MF_STRING, ID_SECTION_RESTORE, L"Res&tore Layout");
 
 	HMENU hMenu = ::CreateMenu();
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");

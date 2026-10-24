@@ -99,9 +99,11 @@ std::vector<RECT> AcdButtonRects(const RECT& header, int count, int size, int ga
 
 // ---- Resizing ------------------------------------------------------------------------------
 //
-// Dragging the bottom edge of an open body. A fixed or fit section becomes fixed at the new height. A fill
-// section trades its height with the next open fill section below it (their weights become their heights), so
-// it can be resized only if there is one.
+// Dragging the bottom edge of an open body: the edge follows the mouse when something below can give or take
+// the space. A fixed or fit section becomes fixed at the new height; an open fill section below takes up the
+// difference, or else the nearest open fixed or fit section below trades height with it (and becomes fixed).
+// A fill section trades with the next open fill section below (their weights become their heights), or else
+// with the nearest open fixed or fit section below; it can't be resized with neither.
 
 bool AcdCanResize(const std::vector<AcdSection>& sections, size_t index);
 // height: the body's new height in pixels, as dragged (kept to the minimums); layout: the one the drag started on

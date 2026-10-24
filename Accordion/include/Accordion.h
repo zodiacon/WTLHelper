@@ -26,6 +26,8 @@ constexpr wchar_t WC_ACCORDION[] = L"WC_Accordion";
 #define ACDS_SINGLEEXPAND  0x0001   // opening a section closes the others
 #define ACDS_NOANIMATION   0x0002   // sections open and close at once (they do anyway with animations off in Windows)
 #define ACDS_ALWAYSANIMATE 0x0004   // animate even with animations off in Windows (ACDS_NOANIMATION still wins)
+#define ACDS_NORESIZE      0x0008   // no dragging a body's bottom edge to resize it
+#define ACDS_NOREORDER     0x0010   // no dragging headers to reorder the sections
 
 // ---- Sections --------------------------------------------------------------------
 
@@ -89,6 +91,9 @@ struct ACDCOLORS {
 #define ACDN_BUTTONCLICK    (ACDN_FIRST - 3)   // NMACDBUTTON: a header button
 // a right click or the menu key on a header, or on no section (hSection nullptr); a non-zero return: handled
 #define ACDN_CONTEXTMENU    (ACDN_FIRST - 4)   // NMACDCONTEXTMENU
+// the user dragged a body's edge (when the drag ends) or a header to another place; the API sends neither
+#define ACDN_SECTIONRESIZED (ACDN_FIRST - 5)   // NMACDSECTION
+#define ACDN_SECTIONMOVED   (ACDN_FIRST - 6)   // NMACDSECTION
 
 struct NMACDSECTION {
 	NMHDR       hdr;
@@ -122,6 +127,7 @@ struct NMACDFITHEIGHT {
 // ---- The control ------------------------------------------------------------------
 
 class AcdFocusWindow;
+class AcdDragImage;
 
 class CAccordionCtrl : public ATL::CWindowImpl<CAccordionCtrl> {
 public:
@@ -160,6 +166,7 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
@@ -183,6 +190,7 @@ public:
 
 	HACDSECTION InsertSection(const ACDSECTION* section, HACDSECTION insertAfter = ACD_LAST);
 	BOOL        DeleteSection(HACDSECTION hSection);   // its window is hidden, not destroyed
+	BOOL        MoveSection(HACDSECTION hSection, HACDSECTION insertAfter);   // ACD_FIRST, ACD_LAST or a section
 	void        DeleteAllSections();
 	int         GetSectionCount() const;
 	HACDSECTION GetSection(int index) const;           // top to bottom; nullptr if out of range
@@ -221,6 +229,15 @@ public:
 	void        SetFocusSection(HACDSECTION hSection);   // moves the focus cue; doesn't take the focus
 	HWND        GetHeaderFocusWindow() const;            // the child that takes the focus for the headers
 
+	// ---- Saved state -------------------------------------------------------------------
+	//
+	// The sections' order, which are open, and the sizes the user dragged them to, as text to keep in the app's
+	// settings. Sections are matched by id; ones the text doesn't name keep their place after the others.
+	// SetState doesn't animate or notify, and returns FALSE (changing nothing) for text it can't read.
+
+	int         GetState(LPWSTR text, int cch) const;   // the length with the terminator; text may be nullptr
+	BOOL        SetState(LPCWSTR text);
+
 	// ---- Looks ---------------------------------------------------------------------
 
 	HIMAGELIST  SetImageList(HIMAGELIST hImageList);   // the header icons; not destroyed by the control
@@ -246,6 +263,7 @@ private:
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
@@ -280,6 +298,14 @@ private:
 	void    Notify(NMACDSECTION& nm, UINT code, size_t index);   // the parent's answer in m_LastNotifyResult
 	bool    ContextMenu(int index, POINT ptScreen);
 	bool    HeadersFocused() const;
+	int     EdgeSize() const;                           // the resize edge's reach (-1: none, with ACDS_NORESIZE)
+	size_t  MoveAt(size_t from, size_t before);         // the section and its node; returns the new index
+	void    EndDrag(bool cancel);
+	int     DropLineY() const;                          // where the reorder line goes; INT_MIN: nowhere
+	void    ShowDragImage();                            // the dragged header, following the mouse
+	void    MoveDragImage(POINT pt);
+	void    HideDragImage();
+	void    UpdateComposited();                         // WS_EX_COMPOSITED while bodies resize (a drag, an animation)
 
 	// top to bottom: the sections' text and windows, and the model's side of them (AccordionModel.h), in the same order
 	std::vector<std::unique_ptr<AcdNode>> m_Nodes;
@@ -308,4 +334,18 @@ private:
 	HWND        m_hToolTip = nullptr;              // the header buttons' tooltips
 	ULONGLONG   m_AnimationTick = 0;               // the last animation step
 	LRESULT     m_LastNotifyResult = 0;
+	// a drag: a header pressed (a click, or a reorder once it moves), a header being moved, an edge being dragged
+	enum class Drag { None, Pending, Reorder, Resize };
+	Drag        m_Drag = Drag::None;
+	size_t      m_DragIndex = 0;
+	POINT       m_DragStart{};
+	int         m_DragHeight = 0;                  // resize: the body's height when it started
+	size_t      m_DropIndex = 0;                   // reorder: where it goes (AcdDropIndex)
+	std::unique_ptr<AcdLayout> m_DragLayout;       // resize: the layout it started on
+	std::vector<AcdSection> m_DragSaved;           // resize: the sections before it, for Escape
+	int         m_DragGrab = 0;                    // reorder: where the header was taken, from its top
+	std::unique_ptr<AcdDragImage> m_DragImage;     // reorder: the header following the mouse
+	bool        m_Animating = false;
+	bool        m_Composited = false;              // WS_EX_COMPOSITED is on for a resize or an animation
+	bool        m_AppComposited = false;           // the app had it on already
 };

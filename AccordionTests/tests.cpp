@@ -250,14 +250,39 @@ TEST(Resize_Fixed) {
 	auto layout = AcdLayoutSections(s, 100, 500, 0, m);
 	AcdResize(s, 0, 160, layout, m);
 	CHECK(s[0].height == 80);   // DIPs
+	CHECK(s[1].height == 20);   // the one below gave the room: 200 pixels between them
 	AcdResize(s, 0, 10, layout, m);
-	CHECK(s[0].height == 30);   // not under the minimum
-	// a fit section becomes fixed
+	CHECK(s[0].height == 30 && s[1].height == 70);   // not under the minimum
+	// a fit section (the last: nothing below to trade with) becomes fixed
 	s[1].mode = AcdHeight::Fit;
 	s[1].fitHeight = 40;
 	layout = AcdLayoutSections(s, 100, 500, 0, m);
 	AcdResize(s, 1, 100, layout, m);
 	CHECK(s[1].mode == AcdHeight::Fixed && s[1].height == 50);
+}
+
+TEST(Resize_FillBelowOrAbove) {
+	// a fill section below takes the difference: the fixed one alone changes
+	std::vector<AcdSection> s{ Fixed(1, 50), Fixed(2, 30), Fill(3) };
+	auto layout = AcdLayoutSections(s, 100, 400, 0, k_Metrics);
+	AcdResize(s, 0, 80, layout, k_Metrics);
+	CHECK(s[0].height == 80 && s[1].height == 30);
+	// a fill section above: the edge follows the mouse when the fixed one below trades (it'd push the header
+	// down otherwise)
+	std::vector<AcdSection> t{ Fill(1), Fixed(2, 90), Fixed(3, 40, false), Fixed(4, 40) };
+	layout = AcdLayoutSections(t, 100, 400, 0, k_Metrics);
+	int edge = layout.items[1].body.bottom;
+	AcdResize(t, 1, 30, layout, k_Metrics);
+	CHECK(t[1].height == 30 && t[3].height == 100);
+	layout = AcdLayoutSections(t, 100, 400, 0, k_Metrics);
+	CHECK(layout.items[1].body.bottom == edge - 60);
+	// a fill section with a fixed one below (and no fill): the fixed one gives or takes, the fill one follows
+	std::vector<AcdSection> u{ Fill(1), Fixed(2, 100) };
+	CHECK(AcdCanResize(u, 0));
+	layout = AcdLayoutSections(u, 100, 400, 0, k_Metrics);   // fill 260, fixed 100
+	AcdResize(u, 0, 200, layout, k_Metrics);
+	layout = AcdLayoutSections(u, 100, 400, 0, k_Metrics);
+	CHECK(u[1].height == 160 && Height(layout.items[0].body) == 200);
 }
 
 TEST(Resize_Fill) {
@@ -353,6 +378,7 @@ int wmain() {
 	Run_HitTest_Parts();
 	Run_HeaderButtons();
 	Run_Resize_Fixed();
+	Run_Resize_FillBelowOrAbove();
 	Run_Resize_Fill();
 	Run_Reorder();
 

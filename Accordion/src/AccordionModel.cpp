@@ -166,10 +166,11 @@ std::vector<RECT> AcdButtonRects(const RECT& header, int count, int size, int ga
 
 constexpr size_t k_None = (size_t)-1;
 
-// the next open fill section after index, or k_None
-static size_t NextFill(const std::vector<AcdSection>& sections, size_t index) {
+// the next open section after index, a fill one or a fixed or fit one; k_None if none
+static size_t NextOpen(const std::vector<AcdSection>& sections, size_t index, bool fill) {
 	for (size_t j = index + 1; j < sections.size(); j++) {
-		if (sections[j].mode == AcdHeight::Fill && sections[j].expanded && sections[j].progress >= 1)
+		const auto& s = sections[j];
+		if (s.expanded && s.progress >= 1 && (s.mode == AcdHeight::Fill) == fill)
 			return j;
 	}
 	return k_None;
@@ -181,7 +182,7 @@ bool AcdCanResize(const std::vector<AcdSection>& sections, size_t index) {
 	const auto& s = sections[index];
 	if (!s.expanded || s.progress < 1)
 		return false;
-	return s.mode != AcdHeight::Fill || NextFill(sections, index) != k_None;
+	return s.mode != AcdHeight::Fill || NextOpen(sections, index, true) != k_None || NextOpen(sections, index, false) != k_None;
 }
 
 void AcdResize(std::vector<AcdSection>& sections, size_t index, int height, const AcdLayout& layout, const AcdMetrics& metrics) {
@@ -189,23 +190,39 @@ void AcdResize(std::vector<AcdSection>& sections, size_t index, int height, cons
 		return;
 	auto& s = sections[index];
 	int minimum = AcdScale(s.minHeight, metrics.dpi);
-	if (s.mode != AcdHeight::Fill) {
+	auto heightOf = [&](size_t k) { return k < layout.items.size() ? layout.items[k].body.bottom - layout.items[k].body.top : 0; };
+	size_t fill = NextOpen(sections, index, true);
+	size_t fixed = NextOpen(sections, index, false);
+
+	// a fill section below takes the difference: this one just changes
+	if (s.mode != AcdHeight::Fill && (fill != k_None || fixed == k_None)) {
 		s.mode = AcdHeight::Fixed;
 		s.height = AcdUnscale(std::max(height, minimum), metrics.dpi);
 		return;
 	}
-	// the two trade pixels; their weights become their heights, in the units of their weights so far
-	size_t j = NextFill(sections, index);
+
+	// a trade between this one and the one below
+	size_t j = s.mode == AcdHeight::Fill && fill != k_None ? fill : fixed;
 	auto& other = sections[j];
-	auto heightOf = [&](size_t k) { return layout.items[k].body.bottom - layout.items[k].body.top; };
 	int a = heightOf(index), b = heightOf(j), total = a + b;
 	int otherMinimum = AcdScale(other.minHeight, metrics.dpi);
 	if (total <= 0 || total - otherMinimum < minimum)
 		return;
 	height = std::clamp(height, minimum, total - otherMinimum);
-	double perPixel = (s.weight + other.weight) / total;
-	s.weight = (float)(height * perPixel);
-	other.weight = (float)((total - height) * perPixel);
+	if (s.mode == AcdHeight::Fill && other.mode == AcdHeight::Fill) {
+		// their weights become their heights, in the units of their weights so far
+		double perPixel = (s.weight + other.weight) / total;
+		s.weight = (float)(height * perPixel);
+		other.weight = (float)((total - height) * perPixel);
+		return;
+	}
+	// the one below becomes fixed at what's left; a fill section here gets the room it leaves (or gives)
+	other.mode = AcdHeight::Fixed;
+	other.height = AcdUnscale(total - height, metrics.dpi);
+	if (s.mode != AcdHeight::Fill) {
+		s.mode = AcdHeight::Fixed;
+		s.height = AcdUnscale(height, metrics.dpi);
+	}
 }
 
 // ---- Reordering ----------------------------------------------------------------------------
