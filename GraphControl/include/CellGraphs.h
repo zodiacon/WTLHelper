@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <vector>
 
 #include "GraphData.h"
 
@@ -28,9 +29,12 @@ struct CellThreshold {
     COLORREF Color;
 };
 
+// A color left at CLR_DEFAULT is picked by the cell's background: a darker blue on a light one, a lighter one on a
+// dark one, white or black on a blue one (a selection highlight). A threshold's color may be CLR_DEFAULT too.
+
 struct SparklineStyle {
-    COLORREF LineColor   = RGB(17, 125, 187);
-    COLORREF FillColor   = RGB(105, 185, 235);
+    COLORREF LineColor   = CLR_DEFAULT;
+    COLORREF FillColor   = CLR_DEFAULT;
     float    FillOpacity = 0.35f;     // under the line; 0: the line only
     float    LineWidth   = 1.5f;      // DIPs
     size_t   Slots       = 0;         // samples across the cell; 0: the series' capacity
@@ -42,7 +46,7 @@ struct SparklineStyle {
 };
 
 struct ColumnStyle {
-    COLORREF Color       = RGB(17, 125, 187);
+    COLORREF Color       = CLR_DEFAULT;
     const CellThreshold* Thresholds = nullptr;   // each bar colored by its value
     size_t   ThresholdCount = 0;
     size_t   Slots       = 0;         // 0: the series' capacity
@@ -57,7 +61,7 @@ struct ColumnStyle {
 struct MeterStyle {
     float    Min         = 0;
     float    Max         = 100;
-    COLORREF BarColor    = RGB(17, 125, 187);
+    COLORREF BarColor    = CLR_DEFAULT;
     const CellThreshold* Thresholds = nullptr;   // the bar's color by the value (else BarColor)
     size_t   ThresholdCount = 0;
     COLORREF TrackColor  = CLR_DEFAULT;   // the empty part; CLR_DEFAULT: a tint of the cell's background
@@ -78,6 +82,83 @@ void DrawSparkline(HDC hdc, const RECT& cell, const Series& series, const Sparkl
 void DrawColumns(HDC hdc, const RECT& cell, const Series& series, const ColumnStyle& style = {}, UINT dpi = 96);
 void DrawMeter(HDC hdc, const RECT& cell, float value, const MeterStyle& style = {}, UINT dpi = 96);
 void DrawStacked(HDC hdc, const RECT& cell, const float* values, size_t count, const StackedStyle& style = {}, UINT dpi = 96);
+
+// ---- List views --------------------------------------------------------------------
+//
+// Graphs in the columns of a list view (report view) or a TreeListView, drawn from the parent's handling of their
+// NM_CUSTOMDRAW. The app gives a column a kind and a style, and a callback supplies a cell's data when it's
+// painted. The list paints the cell as usual (its selection, hot and background colors), and the graph replaces
+// the text it drew there; the text stays the item's, for screen readers, sorting and copying.
+// Column 0 can't have a graph.
+
+enum class CellKind {
+    None,
+    Sparkline,
+    Columns,
+    Meter,
+    Stacked,
+};
+
+// the cell being painted
+struct CellRef {
+    HWND     Window;      // the control sending the custom draw (a list view, a TreeListView)
+    UINT_PTR Item;        // a list view's row index, a TreeListView's HTLITEM
+    LPARAM   ItemParam;   // a list view item's lParam (0 in a virtual list)
+    int      Column;
+};
+
+// what a cell shows, by the column's kind
+struct CellData {
+    const Series* Samples = nullptr;         // sparkline, columns
+    float         Value   = MissingSample;   // meter
+    const float*  Values  = nullptr;         // stacked
+    size_t        Count   = 0;
+};
+
+class CellGraphs {
+public:
+    // fills in a cell's data; false leaves the cell empty
+    using DataCallback = std::function<bool(const CellRef& cell, CellData& data)>;
+
+    void SetDataCallback(DataCallback callback) { m_Data = std::move(callback); }
+
+    // a column's graph (the thresholds and colors a style points to are copied)
+    void     SetSparkline(int column, const SparklineStyle& style = {});
+    void     SetColumns(int column, const ColumnStyle& style = {});
+    void     SetMeter(int column, const MeterStyle& style = {});
+    void     SetStacked(int column, const StackedStyle& style = {});
+    void     RemoveColumn(int column);
+    void     ClearColumns() { m_Columns.clear(); }
+    CellKind GetKind(int column) const;
+
+    // A list view's NM_CUSTOMDRAW, from the parent: pass what the handler would return otherwise (after setting
+    // any colors it wants) and return what this returns.
+    LRESULT CustomDraw(NMLVCUSTOMDRAW* cd, LRESULT result = CDRF_DODEFAULT);
+    // The same for a control relaying a list view's custom draw, with its sub-item and its own handle for the
+    // item. TreeListView's NMTLVCUSTOMDRAW:
+    //     CustomDraw(&cd->nmcd, cd->iSubItem, (UINT_PTR)cd->hItem, result)
+    LRESULT CustomDraw(NMCUSTOMDRAW* cd, int subItem, UINT_PTR item, LRESULT result = CDRF_DODEFAULT);
+
+private:
+    struct Column {
+        CellKind       Kind = CellKind::None;
+        SparklineStyle Sparkline;
+        ColumnStyle    Columns;
+        MeterStyle     Meter;
+        StackedStyle   Stacked;
+        std::vector<CellThreshold> Thresholds;
+        std::vector<COLORREF>      Colors;
+    };
+
+    Column& Set(int column, CellKind kind);
+    void    Draw(const Column& column, const CellRef& cell, HDC hdc, const RECT& rc);
+
+    std::vector<Column>   m_Columns;   // by column index
+    DataCallback          m_Data;
+    // the cell being painted, before the list painted it, and after
+    std::vector<uint32_t> m_Before, m_After;
+    RECT                  m_BeforeRect{};
+};
 
 // ---- Per-row history ----------------------------------------------------------------
 //

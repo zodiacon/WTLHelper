@@ -17,6 +17,8 @@ msbuild WTLHelper.sln /p:Configuration=Debug /p:Platform=x64 /m
 msbuild WTLHelper\WTLHelper.vcxproj /p:Configuration=Debug /p:Platform=x64
 ```
 
+Every project uses the static C runtime (`/MT`, `/MTd`) in every configuration; a library on the DLL runtime fails to link (LNK2038) with the others.
+
 NuGet dependencies (`packages.config`): Detours (`ThemeHelper.cpp` includes `<detours/detours.h>`), WIL and the `wtl` package. Restore them before building (`nuget restore WTLHelper.sln`). The WTL headers are also vendored in `WTL/`, which `WTLHelper` and `HexControl` add to their include path.
 
 ## Tests
@@ -25,7 +27,7 @@ The automated tests are in `GraphControlTests/tests.cpp`, `WTLDockTests/`, `Prop
 
 - Add a test with `TEST(Name) { CHECK(...); }`, then add a `Run_Name();` call in `wmain`. Registration is manual, so a test you don't call never runs.
 - To run a single test, comment out the other `Run_*` calls in `wmain`. There is no filter argument.
-- The tests mostly cover pure data models (`GraphData`, the dock layout, the property grid's item tree and formatters, the log view's line storage, the color picker's conversions and pixels); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `LogViewDemo`, `ColorPickerDemo`, `HexTest`, `BasicDemo`).
+- The tests mostly cover pure data models (`GraphData` and the cell graphs, the dock layout, the property grid's item tree and formatters, the log view's line storage, the color picker's conversions and pixels); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `CellGraphsDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `LogViewDemo`, `ColorPickerDemo`, `HexTest`, `BasicDemo`).
 
 ## Architecture
 
@@ -40,7 +42,7 @@ The rest of `WTLHelper` is a grab bag of standalone helpers: list views (`Virtua
 
 **2. Standalone control libraries**: each is a static lib with a public header in `include/`, implementation in `src/`, and usually a matching demo exe. They don't depend on `WTLHelper`.
 
-- `GraphControl`: time-series graph (Direct2D/DirectWrite, namespace `GraphCtrl`). `GraphData` is a separate pure model, which is what the tests target.
+- `GraphControl`: time-series graph (Direct2D/DirectWrite, namespace `GraphCtrl`). `GraphData` is a separate pure model, which is what the tests target. It also has the cell graphs (`include/CellGraphs.h`, no window): line and column sparklines, meters and stacked bars drawn in list view and TreeListView cells. `DrawSparkline`/`DrawColumns`/`DrawMeter`/`DrawStacked` draw in software over a cell's pixels (copied into a per-thread DIB section and back). `CellHistory<Key>` keeps a `Series` per row and drops the rows a refresh didn't see. The `CellGraphs` helper gives columns a kind and a style, and draws them from the parent's `NM_CUSTOMDRAW`, with the cells' data from a callback. It copies a cell before the list paints it (sub-item pre-paint) and after (sub-item post-paint): the list keeps painting its own selection, hot and background colors, and `Cells::CellBackground` takes the text out before the graph goes on. That works both when a themed list (Explorer, dark mode) draws the row's background first and when a list fills each cell itself (the classic highlight). TreeListView relays the sub-item post-paint stage for this. Colors left at `CLR_DEFAULT` follow the cell's background. The window-free parts (`src/CellGraphsModel.*`: scaling, geometry, the rasterizer, `CellBackground`) are covered by `GraphControlTests`; `CellGraphsDemo` is for checking by hand.
 - `NodeGraphControl`: node/edge graph editor (namespace `NodeGraphCtrl`). It notifies the parent via `WM_NOTIFY` `NGCN_*` codes.
 - `TreeListView`: tree+columns control registered as window class `WC_TreeListView`, with an opaque `HTLITEM` handle API in the style of common controls.
 - `HexControl`: hex editor control (`BufferManager`/`MemoryBuffer`/`Selection`).

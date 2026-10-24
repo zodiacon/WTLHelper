@@ -98,6 +98,14 @@ RectF BarRect(int w, int h, int padding, int barHeight, UINT dpi) {
     return rc;
 }
 
+// a style's color, or for CLR_DEFAULT the default for the cell's background
+COLORREF Resolve(COLORREF color, const Pixels& px, int w, int h, bool fill = false) {
+    if (color != CLR_DEFAULT)
+        return color;
+    auto defaults = DefaultsFor(AverageColor(px, w, h));
+    return fill ? defaults.Fill : defaults.Line;
+}
+
 void Track(const Pixels& px, const RectF& rc, COLORREF color) {
     if (color == CLR_DEFAULT)
         TintRect(px, rc, 0.12f);
@@ -106,6 +114,35 @@ void Track(const Pixels& px, const RectF& rc, COLORREF color) {
 }
 
 } // namespace
+
+namespace Cells {
+
+bool ReadCell(HDC hdc, const RECT& cell, std::vector<uint32_t>& pixels) {
+    int w = cell.right - cell.left, h = cell.bottom - cell.top;
+    if (w <= 0 || h <= 0 || !t_Canvas.Ensure(w, h))
+        return false;
+    auto& c = t_Canvas;
+    if (!::BitBlt(c.Dc, 0, 0, w, h, hdc, cell.left, cell.top, SRCCOPY))
+        return false;
+    ::GdiFlush();
+    pixels.resize((size_t)w * h);
+    for (int y = 0; y < h; y++)
+        std::copy_n(c.Bits + (size_t)y * c.Width, w, pixels.data() + (size_t)y * w);
+    return true;
+}
+
+void WriteCell(HDC hdc, const RECT& cell, const std::vector<uint32_t>& pixels) {
+    int w = cell.right - cell.left, h = cell.bottom - cell.top;
+    if (w <= 0 || h <= 0 || pixels.size() != (size_t)w * h || !t_Canvas.Ensure(w, h))
+        return;
+    auto& c = t_Canvas;
+    ::GdiFlush();
+    for (int y = 0; y < h; y++)
+        std::copy_n(pixels.data() + (size_t)y * w, w, c.Bits + (size_t)y * c.Width);
+    ::BitBlt(hdc, cell.left, cell.top, w, h, c.Dc, 0, 0, SRCCOPY);
+}
+
+} // namespace Cells
 
 void DrawSparkline(HDC hdc, const RECT& cell, const Series& series, const SparklineStyle& style, UINT dpi) {
     Paint(hdc, cell, [&](const Pixels& px, int w, int h) {
@@ -117,12 +154,15 @@ void DrawSparkline(HDC hdc, const RECT& cell, const Series& series, const Sparkl
         size_t slots = style.Slots ? style.Slots : series.Capacity();
         auto range = ScaleRange(series, slots, style.Min, style.Max, style.AutoScale, style.MinSpan);
         auto runs = SparkRuns(series, slots, range, area);
+        if (runs.empty())
+            return;
+        COLORREF line = Resolve(style.LineColor, px, w, h), fill = Resolve(style.FillColor, px, w, h, true);
         if (style.FillOpacity > 0) {
             for (auto& run : runs)
-                FillArea(px, run, area.Bottom, style.FillColor, style.FillOpacity);
+                FillArea(px, run, area.Bottom, fill, style.FillOpacity);
         }
         for (auto& run : runs)
-            DrawPolyline(px, run, width, style.LineColor);
+            DrawPolyline(px, run, width, line);
     });
 }
 
@@ -134,8 +174,14 @@ void DrawColumns(HDC hdc, const RECT& cell, const Series& series, const ColumnSt
             return;
         size_t slots = style.Slots ? style.Slots : series.Capacity();
         auto range = ScaleRange(series, slots, style.Min, style.Max, style.AutoScale, style.MinSpan);
-        for (auto& bar : ColumnBars(series, slots, range, area, Dips(style.Gap, dpi))) {
+        auto bars = ColumnBars(series, slots, range, area, Dips(style.Gap, dpi));
+        if (bars.empty())
+            return;
+        COLORREF standard = Resolve(CLR_DEFAULT, px, w, h);
+        for (auto& bar : bars) {
             COLORREF color = ThresholdColor(series.AtFromEnd(bar.Slot), style.Thresholds, style.ThresholdCount, style.Color);
+            if (color == CLR_DEFAULT)
+                color = standard;
             FillRect(px, bar.Rect, color);
         }
     });
@@ -146,10 +192,11 @@ void DrawMeter(HDC hdc, const RECT& cell, float value, const MeterStyle& style, 
         auto bar = BarRect(w, h, style.Padding, style.BarHeight, dpi);
         if (bar.Width() <= 0 || bar.Height() <= 0)
             return;
+        // the color by the background before the track tints it
+        COLORREF color = Resolve(ThresholdColor(value, style.Thresholds, style.ThresholdCount, style.BarColor), px, w, h);
         Track(px, bar, style.TrackColor);
         float fraction = MeterFraction(value, style.Min, style.Max);
         if (fraction > 0) {
-            COLORREF color = ThresholdColor(value, style.Thresholds, style.ThresholdCount, style.BarColor);
             FillRect(px, { bar.Left, bar.Top, bar.Left + fraction * bar.Width(), bar.Bottom }, color);
         }
     });

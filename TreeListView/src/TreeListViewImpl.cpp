@@ -819,6 +819,8 @@ LRESULT CTreeListViewCtrl::RelayCustomDraw(NMLVCUSTOMDRAW* plvcd) {
 
 	LRESULT lr = ::SendMessage(GetParent(), WM_NOTIFY,
 		(WPARAM)GetDlgCtrlID(), (LPARAM)&tlvcd);
+	if (stage & CDDS_POSTPAINT)
+		return lr;
 
 	// Mirror color overrides back so ListView uses them for non-column-0 subitems.
 	plvcd->clrText = tlvcd.clrText;
@@ -1087,6 +1089,10 @@ LRESULT CTreeListViewCtrl::OnCustomDraw(int, LPNMHDR pnmh, BOOL&) {
 	}
 
 	if (stage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM))
+		return RelayCustomDraw(plvcd);
+
+	// sent when the parent asked for it in the sub-item's pre-paint (to draw over the cell)
+	if (stage == (CDDS_ITEMPOSTPAINT | CDDS_SUBITEM))
 		return RelayCustomDraw(plvcd);
 
 	if (stage == CDDS_ITEMPOSTPAINT) {

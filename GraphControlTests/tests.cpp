@@ -16,6 +16,8 @@
 #include "CellGraphsModel.h"
 
 #include <vector>
+#include <algorithm>
+#include <iterator>
 
 using namespace GraphCtrl;
 
@@ -939,6 +941,34 @@ TEST(Cells_DrawStacked) {
     DrawStacked(d.Dc, { 0, 0, 100, 10 }, nullptr, 0, s);
 }
 
+TEST(Cells_CellBackground) {
+    // a themed list: the background was there before, only text changed -> the text is gone
+    uint32_t before[] = { 1, 1, 1, 1,  1, 1, 1, 1,  1, 1, 1, 1 };
+    uint32_t text[]   = { 1, 1, 1, 1,  1, 1, 9, 1,  1, 1, 1, 1 };
+    CellBackground(before, text, 4, 3);
+    CHECK(std::equal(std::begin(text), std::end(text), std::begin(before)));
+    // a list filling the cell (5) with text on it (9, and 1: white text on what was white), and a grid line (7)
+    // it didn't touch
+    uint32_t grid[]   = { 1, 1, 1, 1, 7,  1, 1, 1, 1, 7,  1, 1, 1, 1, 7 };
+    uint32_t filled[] = { 5, 5, 5, 5, 7,  5, 5, 9, 1, 7,  5, 5, 5, 5, 7 };
+    CellBackground(grid, filled, 5, 3);
+    uint32_t expect[] = { 5, 5, 5, 5, 7,  5, 5, 5, 5, 7,  5, 5, 5, 5, 7 };
+    CHECK(std::equal(std::begin(filled), std::end(filled), std::begin(expect)));
+}
+
+TEST(Cells_DefaultColors) {
+    std::vector<uint32_t> bits(40 * 20, 0xFFFFFF);
+    Pixels px{ bits.data(), 40, 20 };
+    CHECK(AverageColor(px, 40, 20) == RGB(255, 255, 255));
+    std::fill(bits.begin(), bits.end(), 0x102030);
+    CHECK(AverageColor(px, 40, 20) == RGB(0x10, 0x20, 0x30));
+    auto light = DefaultsFor(RGB(255, 255, 255)), dark = DefaultsFor(RGB(32, 32, 32));
+    CHECK(light.Line != dark.Line);
+    CHECK(GetGValue(dark.Line) > GetGValue(light.Line));      // lighter on dark
+    CHECK(DefaultsFor(RGB(0, 120, 215)).Line == RGB(255, 255, 255));   // a selection highlight
+    CHECK(DefaultsFor(RGB(204, 232, 255)).Line == light.Line);        // Explorer's light selection
+}
+
 int wmain() {
     wprintf(L"GraphControl data model tests\n\n");
 
@@ -991,6 +1021,8 @@ int wmain() {
     Run_Cells_DrawMeter();
     Run_Cells_DrawSparklineAndColumns();
     Run_Cells_DrawStacked();
+    Run_Cells_CellBackground();
+    Run_Cells_DefaultColors();
 
     wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures;

@@ -96,7 +96,31 @@ void DrawPolyline(const Pixels& px, const std::vector<PointF>& points, float wid
 // the pixels under the rectangle shifted toward black on a light background, white on a dark one (each pixel by
 // its own lightness, so it reads the same over a selection highlight): a track that suits any background
 void TintRect(const Pixels& px, const RectF& rc, float strength);
+// A list cell's background without the text the list drew in it, written over `after` (w x h, top-down). `before`
+// is the cell before the list drew it: a themed list (Explorer, dark mode) has drawn the row's background by then
+// (its selection and hot highlight too) and draws only the text. A list that fills each cell itself (a classic
+// selection highlight, a background color set for the cell) changes the pixel at (1, h / 2), which text doesn't
+// reach: then the cell becomes that fill, but for the border pixels it left alone (a grid line).
+void CellBackground(const uint32_t* before, uint32_t* after, int w, int h);
+
+// the average color of the w x h pixels at the top left (of a sample of them)
+COLORREF AverageColor(const Pixels& px, int w, int h);
+
+// The colors CLR_DEFAULT stands for, by the background: a darker blue on a light one, a lighter blue on a dark one,
+// and white or black on one close to those (a blue selection highlight).
+struct DefaultColors {
+    COLORREF Line;
+    COLORREF Fill;
+};
+DefaultColors DefaultsFor(COLORREF background);
+
 // a dot (a run of one point)
 void FillDot(const Pixels& px, PointF center, float radius, COLORREF color, float alpha = 1);
+
+// ---- Cell pixels on a DC (CellGraphs.cpp) ------------------------------------------------
+
+// a cell's pixels, w x h top-down
+bool ReadCell(HDC hdc, const RECT& cell, std::vector<uint32_t>& pixels);
+void WriteCell(HDC hdc, const RECT& cell, const std::vector<uint32_t>& pixels);
 
 } // namespace GraphCtrl::Cells

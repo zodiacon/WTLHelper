@@ -165,6 +165,58 @@ void TintRect(const Pixels& px, const RectF& rc, float strength) {
     }
 }
 
+void CellBackground(const uint32_t* before, uint32_t* after, int w, int h) {
+    if (w <= 0 || h <= 0)
+        return;
+    size_t probe = (size_t)(h / 2) * w + std::min(1, w - 1);
+    if (after[probe] == before[probe]) {
+        std::copy(before, before + (size_t)w * h, after);
+        return;
+    }
+    // the cell's own pixels become the fill, the text too (white text can match what was there before); a grid
+    // line on the border that the list didn't paint over stays
+    uint32_t fill = after[probe];
+    for (int y = 0; y < h; y++) {
+        bool edgeRow = y == 0 || y == h - 1;
+        for (int x = 0; x < w; x++) {
+            size_t i = (size_t)y * w + x;
+            if (!(edgeRow || x == 0 || x == w - 1) || after[i] != before[i])
+                after[i] = fill;
+        }
+    }
+}
+
+COLORREF AverageColor(const Pixels& px, int w, int h) {
+    w = std::min(w, px.Width);
+    h = std::min(h, px.Height);
+    if (w <= 0 || h <= 0)
+        return RGB(255, 255, 255);
+    // a grid of 8 x 4 pixels is plenty for a background
+    int r = 0, g = 0, b = 0;
+    for (int j = 0; j < 4; j++) {
+        int y = (2 * j + 1) * h / 8;
+        for (int i = 0; i < 8; i++) {
+            uint32_t p = px.At((2 * i + 1) * w / 16, y);
+            r += (p >> 16) & 0xFF;
+            g += (p >> 8) & 0xFF;
+            b += p & 0xFF;
+        }
+    }
+    return RGB(r / 32, g / 32, b / 32);
+}
+
+DefaultColors DefaultsFor(COLORREF background) {
+    int r = GetRValue(background), g = GetGValue(background), b = GetBValue(background);
+    bool dark = r * 299 + g * 587 + b * 114 < 128 * 1000;
+    DefaultColors colors = dark ? DefaultColors{ RGB(80, 175, 240), RGB(60, 150, 220) } :
+        DefaultColors{ RGB(17, 125, 187), RGB(105, 185, 235) };
+    // too close to the background (a blue selection highlight): white or black
+    int dr = r - GetRValue(colors.Line), dg = g - GetGValue(colors.Line), db = b - GetBValue(colors.Line);
+    if (dr * dr + dg * dg + db * db < 140 * 140)
+        colors = dark ? DefaultColors{ RGB(255, 255, 255), RGB(255, 255, 255) } : DefaultColors{ RGB(0, 0, 0), RGB(0, 0, 0) };
+    return colors;
+}
+
 void FillArea(const Pixels& px, const std::vector<PointF>& run, float baseY, COLORREF color, float alpha) {
     if (run.size() < 2)
         return;
