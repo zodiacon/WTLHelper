@@ -1,0 +1,223 @@
+#pragma once
+
+// Accordion: a vertical stack of sections, each a header that opens and closes the body under it. A body is a
+// window the app gives the section (a list, a property grid, a dialog), which the control places and shows. Any
+// number of sections can be open at once, or one (ACDS_SINGLEEXPAND). A body is a fixed height, a share of the
+// space the others leave (fill), or the height its content asks for (fit); when the open sections don't fit,
+// the control scrolls. The API follows the common controls: C-style structures, section handles, and WM_NOTIFY
+// codes (ACDN_*) sent to the parent.
+
+#include <atlbase.h>
+#include <atlapp.h>
+#include <atlwin.h>
+#include <atlgdi.h>
+#include <atlctrls.h>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+// ---- Window class name -------------------------------------------------------
+
+constexpr wchar_t WC_ACCORDION[] = L"WC_Accordion";
+
+// ---- Styles ------------------------------------------------------------------
+
+#define ACDS_SINGLEEXPAND  0x0001   // opening a section closes the others
+#define ACDS_NOANIMATION   0x0002   // sections open and close at once (they do anyway with animations off in Windows)
+
+// ---- Sections --------------------------------------------------------------------
+
+struct AcdNode;
+typedef AcdNode* HACDSECTION;
+
+struct AcdSection;   // AccordionModel.h
+struct AcdLayout;
+
+#define ACD_FIRST  ((HACDSECTION)(ULONG_PTR)-2)   // InsertSection: at the top
+#define ACD_LAST   ((HACDSECTION)(ULONG_PTR)-1)   // InsertSection: at the bottom
+
+// how a body's height is set
+#define ACDH_FIXED  0   // height DIPs
+#define ACDH_FILL   1   // a share (weight) of the space the other sections leave
+#define ACDH_FIT    2   // its content's: asked with ACDN_GETFITHEIGHT
+
+// section state
+#define ACDSS_EXPANDED    0x0001
+#define ACDSS_NOCOLLAPSE  0x0002   // always open, with no chevron
+
+struct ACDSECTION {
+	UINT    id;          // the app's; kept in the saved state, so it should be unique (0: the control picks one)
+	LPCWSTR pszText;     // the title
+	LPCWSTR pszInfo;     // right-aligned in the header ("12 items"); may be nullptr
+	int     iImage;      // in the image list; -1 for none
+	HWND    hwndBody;    // the body: a child of the accordion (it's made one); may be nullptr
+	UINT    heightMode;  // ACDH_*
+	int     height;      // ACDH_FIXED: DIPs (0: 120)
+	float   weight;      // ACDH_FILL: its share among the open fill sections (0: 1)
+	int     minHeight;   // DIPs: the body's least
+	UINT    state;       // ACDSS_*
+	LPARAM  lParam;
+};
+
+// ---- Colors -----------------------------------------------------------------------
+
+struct ACDCOLORS {
+	COLORREF crBack;          // behind the sections (where a body has no window, or there's no section)
+	COLORREF crHeaderBack;
+	COLORREF crHeaderText;
+	COLORREF crInfoText;      // the header's right-aligned text
+	COLORREF crBorder;        // the line under each header
+};
+
+// ---- Notifications -------------------------------------------------------------
+
+#define ACDN_FIRST          (0U - 2950U)   // outside the common controls ranges
+#define ACDN_GETFITHEIGHT   (ACDN_FIRST - 0)   // NMACDFITHEIGHT: an ACDH_FIT section's body height
+
+struct NMACDSECTION {
+	NMHDR       hdr;
+	HACDSECTION hSection;
+	UINT        id;
+	LPARAM      lParam;
+};
+
+struct NMACDFITHEIGHT {
+	NMACDSECTION section;
+	int          width;      // the body's, in pixels
+	int          height;     // set it: pixels (it comes in as the last height given)
+};
+
+// ---- The control ------------------------------------------------------------------
+
+class CAccordionCtrl : public ATL::CWindowImpl<CAccordionCtrl> {
+public:
+	DECLARE_WND_CLASS_EX(L"WC_Accordion", CS_DBLCLKS, -1)
+
+	CAccordionCtrl();
+	~CAccordionCtrl();
+
+	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
+
+	BEGIN_MSG_MAP(CAccordionCtrl)
+		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		MESSAGE_HANDLER(WM_SIZE, OnSize)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_PRINTCLIENT, OnPaint)
+		MESSAGE_HANDLER(WM_SETFONT, OnSetFont)
+		MESSAGE_HANDLER(WM_GETFONT, OnGetFont)
+		MESSAGE_HANDLER(WM_VSCROLL, OnVScroll)
+		MESSAGE_HANDLER(WM_HSCROLL, OnForward)
+		// the bodies' messages go to the parent, as if the bodies were its children
+		MESSAGE_HANDLER(WM_COMMAND, OnForward)
+		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnForward)
+		MESSAGE_HANDLER(WM_MEASUREITEM, OnForward)
+		MESSAGE_HANDLER(WM_COMPAREITEM, OnForward)
+		MESSAGE_HANDLER(WM_DELETEITEM, OnForward)
+		MESSAGE_HANDLER(WM_VKEYTOITEM, OnForward)
+		MESSAGE_HANDLER(WM_CHARTOITEM, OnForward)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnCtlColor)
+		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
+		MESSAGE_HANDLER(WM_STYLECHANGED, OnStyleChanged)
+		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
+		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
+		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
+		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
+		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+	END_MSG_MAP()
+
+	// ---- Sections ------------------------------------------------------------------
+
+	HACDSECTION InsertSection(const ACDSECTION* section, HACDSECTION insertAfter = ACD_LAST);
+	BOOL        DeleteSection(HACDSECTION hSection);   // its window is hidden, not destroyed
+	void        DeleteAllSections();
+	int         GetSectionCount() const;
+	HACDSECTION GetSection(int index) const;           // top to bottom; nullptr if out of range
+	int         GetSectionIndex(HACDSECTION hSection) const;   // -1 if not a section
+	HACDSECTION FindSection(UINT id) const;
+	// the section as it is; the strings stay valid until the section's text changes or it's deleted
+	BOOL        GetSectionInfo(HACDSECTION hSection, ACDSECTION* section) const;
+
+	BOOL        SetSectionText(HACDSECTION hSection, LPCWSTR text);
+	BOOL        SetSectionInfoText(HACDSECTION hSection, LPCWSTR text);
+	BOOL        SetSectionImage(HACDSECTION hSection, int image);
+	BOOL        SetSectionWindow(HACDSECTION hSection, HWND hwndBody);   // the old one is hidden
+	HWND        GetSectionWindow(HACDSECTION hSection) const;
+	BOOL        SetSectionHeight(HACDSECTION hSection, UINT heightMode, int height = 0, float weight = 0);
+	BOOL        SetSectionMinHeight(HACDSECTION hSection, int minHeight);
+	BOOL        SetSectionData(HACDSECTION hSection, LPARAM lParam);
+	LPARAM      GetSectionData(HACDSECTION hSection) const;
+	BOOL        SetSectionCollapsible(HACDSECTION hSection, bool collapsible);   // not collapsible: opened
+
+	// Opening and closing from the API sends no notifications. With ACDS_SINGLEEXPAND, opening one closes the
+	// others.
+	BOOL        Expand(HACDSECTION hSection, bool expand = true);
+	bool        IsExpanded(HACDSECTION hSection) const;
+	void        ExpandAll(bool expand);               // with ACDS_SINGLEEXPAND, expanding opens the first one only
+	void        UpdateFitHeight(HACDSECTION hSection = nullptr);   // ask again (nullptr: every fit section)
+
+	// header and body, client coords (the body as it shows: empty when closed)
+	BOOL        GetSectionRect(HACDSECTION hSection, RECT* pHeader, RECT* pBody) const;
+	void        EnsureVisible(HACDSECTION hSection);  // scrolls its header (and as much of its body) into view
+	int         GetScrollPos() const;
+
+	// ---- Looks ---------------------------------------------------------------------
+
+	HIMAGELIST  SetImageList(HIMAGELIST hImageList);   // the header icons; not destroyed by the control
+	HIMAGELIST  GetImageList() const;
+	void        SetColors(const ACDCOLORS* colors);   // nullptr: system colors (follows WTLHelper dark mode)
+	ACDCOLORS   GetColors() const;                    // the colors in effect
+	int         GetHeaderHeight() const;              // pixels, from the font
+
+private:
+	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetFont(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetFont(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnVScroll(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnStyleChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+
+	int     Scale(int dips) const;
+	int     IndexOf(HACDSECTION hSection) const;   // -1 if not a section
+	void    UpdateFont();
+	void    Layout();                               // the sections, the scroll bar and the bodies
+	void    AskFitHeights(int width, bool all);
+	void    SetScroll(int pos);
+	void    PositionBodies();
+	void    PaintHeader(HDC hdc, size_t index, const ACDCOLORS& c);
+	void    Toggle(size_t index);
+
+	// top to bottom: the sections' text and windows, and the model's side of them (AccordionModel.h), in the same order
+	std::vector<std::unique_ptr<AcdNode>> m_Nodes;
+	std::vector<AcdSection> m_Sections;
+	UINT        m_NextId = 1;
+	UINT        m_Dpi = 96;
+	HFONT       m_hFont = nullptr;
+	HFONT       m_hTitleFont = nullptr;            // the font, semibold
+	bool        m_OwnFont = true;
+	HIMAGELIST  m_hImageList = nullptr;
+	ACDCOLORS   m_Colors{};
+	bool        m_SystemColors = true;
+	int         m_HeaderHeight = 24;
+	HBRUSH      m_hBackBrush = nullptr;            // crBack, for the bodies the parent doesn't color
+	COLORREF    m_BackBrushColor = CLR_INVALID;
+	int         m_ScrollPos = 0;
+	int         m_FitWidth = -1;                   // the width the fit heights were asked for
+	bool        m_InLayout = false;
+	std::unique_ptr<AcdLayout> m_Layout;              // as last laid out
+};

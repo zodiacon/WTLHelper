@@ -95,9 +95,11 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\Accordion.h" />
     <ClInclude Include="src\AccordionModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\AccordionCtrl.cpp" />
     <ClCompile Include="src\AccordionModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
