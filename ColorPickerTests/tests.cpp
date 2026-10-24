@@ -348,8 +348,11 @@ TEST(Pixels_Ring) {
 TEST(Panel_Layout) {
 	CpPanelMetrics m;   // label 28, field 64, height 22, row gap 6, col gap 10, swatch 56 + 12
 	CHECK(CpPanelWidth(m) == 2 * (28 + 64) + 10);
-	auto p = CpComputePanel(100, 8, m, true, true, true);
+	CpPanelOptions o;
+	o.eyedropper = false;
+	auto p = CpComputePanel(100, 8, m, o);
 	CHECK(p.swatch.left == 100 && p.swatch.top == 8 && p.swatch.right == 100 + CpPanelWidth(m) && p.swatch.bottom == 64);
+	CHECK(::IsRectEmpty(&p.eyedropper));
 	// the first column: H S V A; the second: R G B Hex
 	CHECK(p.label[CpH].left == 100 && p.label[CpH].top == 76 && p.frame[CpH].left == 128 && p.frame[CpH].right == 192);
 	CHECK(p.frame[CpS].top == 76 + 28 && p.frame[CpA].top == 76 + 3 * 28);
@@ -357,14 +360,80 @@ TEST(Panel_Layout) {
 	CHECK(p.frame[CpHex].top == p.frame[CpA].top && p.frame[CpHex].right == p.swatch.right);
 
 	// no alpha: no A field; no swatch: the fields start at the top
-	auto q = CpComputePanel(0, 0, m, false, true, false);
+	auto q = CpComputePanel(0, 0, m, { false, false, true, false, false, 0 });
 	CHECK(::IsRectEmpty(&q.swatch) && ::IsRectEmpty(&q.frame[CpA]) && ::IsRectEmpty(&q.label[CpA]));
 	CHECK(q.frame[CpH].top == 0 && !::IsRectEmpty(&q.frame[CpHex]));
 	// no fields
-	auto s = CpComputePanel(0, 0, m, true, false, true);
+	auto s = CpComputePanel(0, 0, m, { true, false, false, true, false, 24 });
 	CHECK(!::IsRectEmpty(&s.swatch));
 	for (int f = 0; f < CpFieldCount; f++)
 		CHECK(::IsRectEmpty(&s.frame[f]));
+	for (int g = 0; g < CpGroupCount; g++)
+		CHECK(::IsRectEmpty(&s.group[g]));
+}
+
+TEST(Panel_EyedropperAndGroups) {
+	CpPanelMetrics m;   // width 194, field height 22, button gap 6, cell gap 3, group gap 8
+	auto p = CpComputePanel(0, 0, m, { true, true, true, true, true, 24 });
+	CHECK(p.eyedropper.right == 194 && p.eyedropper.left == 194 - 22 && p.eyedropper.bottom == 56);
+	CHECK(p.swatch.right == 194 - 22 - 6);
+	// cells: (194 - 11 * 3) / 12 = 13
+	CHECK(p.cell == 13);
+	int fieldsBottom = 68 + 4 * 28 - 6;
+	CHECK(p.group[CpPalette].top == fieldsBottom + 12);
+	CHECK(p.group[CpPalette].bottom - p.group[CpPalette].top == 2 * 13 + 3);
+	CHECK(p.group[CpPalette].right == 12 * 13 + 11 * 3);
+	CHECK(p.group[CpCustom].top == p.group[CpPalette].bottom + 8 && p.group[CpCustom].bottom - p.group[CpCustom].top == 13);
+	CHECK(p.group[CpRecent].top == p.group[CpCustom].bottom + 8);
+	CHECK(CpGroupRows(CpPalette, 25) == 3 && CpGroupRows(CpPalette, 1000) == 4 && CpGroupRows(CpCustom, 24) == 1);
+
+	auto c = CpSwatchCell(p, CpPalette, 13, 3);   // second row, second column
+	CHECK(c.left == 16 && c.top == p.group[CpPalette].top + 16 && c.right - c.left == 13);
+	POINT in{ c.left + 5, c.top + 5 };
+	CHECK(CpSwatchAt(p, CpPalette, 24, 3, in) == 13);
+	CHECK(CpSwatchAt(p, CpPalette, 13, 3, in) == -1);   // past the count
+	CHECK(CpSwatchAt(p, CpPalette, 24, 3, { c.right + 1, c.top + 5 }) == -1);   // in a gap
+	CHECK(CpSwatchAt(p, CpCustom, 12, 3, in) == -1);
+	auto r = CpSwatchCell(p, CpRecent, 11, 3);
+	CHECK(CpSwatchAt(p, CpRecent, 12, 3, { r.right - 1, r.bottom - 1 }) == 11);
+
+	// no palette rows: custom and recent stay, starting where the palette would
+	auto n = CpComputePanel(0, 0, m, { true, true, true, true, true, 0 });
+	CHECK(::IsRectEmpty(&n.group[CpPalette]) && n.group[CpCustom].top == p.group[CpPalette].top && !::IsRectEmpty(&n.group[CpRecent]));
+
+	int count = 0;
+	auto palette = CpDefaultPalette(&count);
+	CHECK(count == 24 && palette[0] == RGB(0, 0, 0));
+}
+
+TEST(Recent) {
+	std::vector<COLORREF> recent;
+	CpAddRecent(recent, RGB(1, 0, 0), 3);
+	CpAddRecent(recent, RGB(2, 0, 0), 3);
+	CpAddRecent(recent, RGB(3, 0, 0), 3);
+	CHECK(recent.size() == 3 && recent[0] == RGB(3, 0, 0) && recent[2] == RGB(1, 0, 0));
+	CpAddRecent(recent, RGB(1, 0, 0), 3);   // to the front, once
+	CHECK(recent.size() == 3 && recent[0] == RGB(1, 0, 0) && recent[1] == RGB(3, 0, 0));
+	CpAddRecent(recent, RGB(4, 0, 0), 3);   // the oldest goes
+	CHECK(recent.size() == 3 && recent[0] == RGB(4, 0, 0) && recent[2] == RGB(3, 0, 0));
+	CpAddRecent(recent, 0xFF000004, 3);     // high byte ignored
+	CHECK(recent.size() == 3 && recent[0] == RGB(4, 0, 0));
+}
+
+TEST(Magnifier_Placement) {
+	RECT work{ 0, 0, 1000, 800 };
+	SIZE size{ 120, 140 };
+	auto pt = CpPlaceMagnifier({ 100, 100 }, size, work, 20);
+	CHECK(pt.x == 120 && pt.y == 120);
+	pt = CpPlaceMagnifier({ 950, 100 }, size, work, 20);   // flipped left
+	CHECK(pt.x == 950 - 20 - 120 && pt.y == 120);
+	pt = CpPlaceMagnifier({ 100, 750 }, size, work, 20);   // flipped up
+	CHECK(pt.y == 750 - 20 - 140);
+	pt = CpPlaceMagnifier({ 50, 50 }, { 1200, 900 }, work, 20);   // bigger than the work area
+	CHECK(pt.x == 0 && pt.y == 0);
+	RECT second{ -1920, 0, 0, 1080 };
+	pt = CpPlaceMagnifier({ -10, 500 }, size, second, 20);
+	CHECK(pt.x == -10 - 20 - 120 && pt.y == 520);
 }
 
 TEST(Panel_Pieces) {
@@ -479,6 +548,9 @@ int wmain() {
 	Run_Pixels_Ring();
 	Run_Panel_Layout();
 	Run_Panel_Pieces();
+	Run_Panel_EyedropperAndGroups();
+	Run_Recent();
+	Run_Magnifier_Placement();
 	Run_Fields_Text();
 	Run_Fields_Parse();
 	Run_Fields_Apply();

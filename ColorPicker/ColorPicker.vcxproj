@@ -100,10 +100,12 @@
     <ClInclude Include="include\ColorPicker.h" />
     <ClInclude Include="src\ColorPickerModel.h" />
     <ClInclude Include="src\ColorPickerGradient.h" />
+    <ClInclude Include="src\ColorPickerMagnifier.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\ColorPickerCtrl.cpp" />
     <ClCompile Include="src\ColorPickerFields.cpp" />
+    <ClCompile Include="src\ColorPickerSwatches.cpp" />
     <ClCompile Include="src\ColorPickerModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

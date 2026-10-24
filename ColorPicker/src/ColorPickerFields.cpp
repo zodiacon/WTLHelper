@@ -88,7 +88,9 @@ void CColorPickerCtrl::PositionFields() {
 		rc = {};
 	for (auto& rc : m_Frames)
 		rc = {};
-	m_Swatch = {};
+	for (auto& rc : m_Groups)
+		rc = {};
+	m_Swatch = m_Eyedropper = {};
 	RECT client;
 	GetClientRect(&client);
 
@@ -120,15 +122,28 @@ void CColorPickerCtrl::PositionFields() {
 	pm.swatchHeight = Scale(56);
 	pm.swatchGap = Scale(12);
 	pm.spinWidth = m_SpinWidth;
+	pm.buttonGap = Scale(6);
+	pm.cellGap = m_CellGap = std::max(2, Scale(3));
+	pm.groupGap = Scale(8);
 
-	bool fields = HasFields(), swatch = HasSwatch();
-	if (fields || swatch) {
+	CpPanelOptions o;
+	o.swatch = HasSwatch();
+	o.eyedropper = (GetStyle() & CPKS_NOEYEDROPPER) == 0;
+	o.fields = HasFields();
+	o.alpha = HasAlpha();
+	o.groups = HasGroups();
+	o.paletteCount = (int)m_Palette.size();
+	if (o.swatch || o.fields || o.groups) {
 		int left = std::max(m_Pad, (int)client.right - m_Pad - CpPanelWidth(pm));
-		auto p = CpComputePanel(left, m_Pad, pm, swatch, fields, HasAlpha());
+		auto p = CpComputePanel(left, m_Pad, pm, o);
 		m_Swatch = p.swatch;
+		m_Eyedropper = p.eyedropper;
 		std::copy(std::begin(p.label), std::end(p.label), m_Labels);
 		std::copy(std::begin(p.frame), std::end(p.frame), m_Frames);
+		std::copy(std::begin(p.group), std::end(p.group), m_Groups);
+		m_Cell = p.cell;
 	}
+	UpdateToolTips();
 
 	HWND focus = ::GetFocus();
 	for (int f = 0; f < CpFieldCount; f++) {
@@ -399,22 +414,48 @@ LRESULT CColorPickerCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL
 		InvalidateField(field);
 		return 0;
 	}
-	if (HitTest(pt) == CPKHT_OLDCOLOR && m_HasOriginal) {
-		auto c = CpUpdateHsv({ m_Hsv.h, m_Hsv.s, m_Hsv.v }, m_Original);
-		Hsv n{ c.h, c.s, c.v };
-		if (!SameState(n, m_OriginalAlpha)) {
-			SetState(n, m_OriginalAlpha);
-			Notify(CPKN_COLORCHANGING, CPKHT_OLDCOLOR);
-			Notify(CPKN_COLORCHANGED, CPKHT_OLDCOLOR);
-		}
+	int index;
+	UINT part = HitTest(pt, &index);
+	switch (part) {
+		case CPKHT_OLDCOLOR:
+			if (m_HasOriginal) {
+				auto c = CpUpdateHsv({ m_Hsv.h, m_Hsv.s, m_Hsv.v }, m_Original);
+				Hsv n{ c.h, c.s, c.v };
+				if (!SameState(n, m_OriginalAlpha)) {
+					SetState(n, m_OriginalAlpha);
+					Notify(CPKN_COLORCHANGING, CPKHT_OLDCOLOR);
+					Notify(CPKN_COLORCHANGED, CPKHT_OLDCOLOR);
+				}
+			}
+			break;
+		case CPKHT_EYEDROPPER:
+			StartEyedropper();
+			break;
+		case CPKHT_PALETTE:
+		case CPKHT_RECENT:
+			PickSwatch(part, index);
+			break;
+		case CPKHT_CUSTOM:
+			// an empty slot (or Ctrl) saves the color; a full one is picked
+			if (m_Custom[index] == CLR_NONE || (wParam & MK_CONTROL))
+				SaveCustom(index, GetColor());
+			else
+				PickSwatch(part, index);
+			break;
 	}
 	return 0;
 }
 
 LRESULT CColorPickerCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	if (m_SpinField < 0)
-		return 0;
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
+	if (m_SpinField < 0) {
+		int index;
+		UINT part = HitTest(pt, &index);
+		if (part != CPKHT_EYEDROPPER && (part < CPKHT_PALETTE || part > CPKHT_RECENT))
+			part = CPKHT_NOWHERE;
+		SetHot(part, index);
+		return 0;
+	}
 	int field, dir;
 	bool pressed = SpinHitTest(pt, &field, &dir) && field == m_SpinField && dir == m_SpinDir;
 	if (pressed != m_SpinPressed) {
@@ -512,6 +553,9 @@ void CColorPickerCtrl::PaintPanel(HDC hdc, const RECT& rcPaint) {
 				CpRenderSwatch(px, m_Original, m_OriginalAlpha, cell, c.crCheck1, c.crCheck2);
 			});
 	}
+
+	PaintEyedropperButton(hdc, c);
+	PaintSwatches(hdc, c);
 
 	// the fields: labels, frames, spin buttons (the edits paint the rest)
 	auto oldFont = ::SelectObject(hdc, m_hFont);

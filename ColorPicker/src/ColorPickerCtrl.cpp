@@ -1,6 +1,9 @@
 #include "ColorPicker.h"
 #include "ColorPickerGradient.h"
+#include "ColorPickerMagnifier.h"
 #include "ColorPickerModel.h"
+
+#include <commctrl.h>
 
 #include <algorithm>
 #include <cmath>
@@ -22,7 +25,10 @@ static bool IsEmpty(const RECT& rc) {
 
 // ---- Construction ------------------------------------------------------------------
 
-CColorPickerCtrl::CColorPickerCtrl() : m_Grad(std::make_unique<CpGradientWindow>(this)) {
+CColorPickerCtrl::CColorPickerCtrl() : m_Grad(std::make_unique<CpGradientWindow>(this)), m_Custom(CPK_CUSTOMCOLORS, CLR_NONE) {
+	int count;
+	auto palette = CpDefaultPalette(&count);
+	m_Palette.assign(palette, palette + count);
 }
 
 CColorPickerCtrl::~CColorPickerCtrl() {
@@ -38,12 +44,22 @@ LRESULT CColorPickerCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	UpdateFont();
 	m_Grad->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS);
 	CreateFields();
+	m_hToolTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+		0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
 	Layout();
 	UpdateFields(-1);
 	return 0;
 }
 
 LRESULT CColorPickerCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	EndEyedropper(true);
+	// popups made with a child as their parent are owned by the top-level window: they'd outlive the control
+	if (m_hToolTip)
+		::DestroyWindow(m_hToolTip);
+	m_hToolTip = nullptr;
+	m_ToolIds.clear();
+	if (m_Magnifier && m_Magnifier->IsWindow())
+		m_Magnifier->DestroyWindow();
 	for (auto& edit : m_Edits)
 		edit = nullptr;   // they go with the control
 	bHandled = FALSE;
@@ -182,9 +198,12 @@ void CColorPickerCtrl::Layout() {
 	// the panel on the right, then the gradients take the rest
 	PositionFields();
 	int gradWidth = rc.right;
-	if (HasFields() || HasSwatch()) {
+	if (HasFields() || HasSwatch() || HasGroups()) {
 		int left = rc.right;
 		for (auto& r : m_Labels)
+			if (!IsEmpty(r))
+				left = std::min(left, (int)r.left);
+		for (auto& r : m_Groups)
 			if (!IsEmpty(r))
 				left = std::min(left, (int)r.left);
 		if (!IsEmpty(m_Swatch))
@@ -224,7 +243,11 @@ BOOL CColorPickerCtrl::GetPartRect(UINT part, RECT* prc) const {
 	return !IsEmpty(*prc);
 }
 
-UINT CColorPickerCtrl::HitTest(POINT pt) const {
+UINT CColorPickerCtrl::HitTest(POINT pt, int* pIndex) const {
+	int index = -1;
+	if (!pIndex)
+		pIndex = &index;
+	*pIndex = -1;
 	// a little around each gradient grabs it too: the markers stick out
 	int slack = Scale(4);
 	RECT grad{};
@@ -247,6 +270,19 @@ UINT CColorPickerCtrl::HitTest(POINT pt) const {
 	for (auto& rc : m_Frames) {
 		if (::PtInRect(&rc, pt))
 			return CPKHT_FIELD;
+	}
+	if (::PtInRect(&m_Eyedropper, pt))
+		return CPKHT_EYEDROPPER;
+	CpPanel p;
+	std::copy(std::begin(m_Groups), std::end(m_Groups), p.group);
+	p.cell = m_Cell;
+	static const UINT parts[] = { CPKHT_PALETTE, CPKHT_CUSTOM, CPKHT_RECENT };
+	for (int g = 0; g < CpGroupCount; g++) {
+		int i = CpSwatchAt(p, (CpGroup)g, g == CpRecent ? CPK_MAXRECENT : GroupCount(g), m_CellGap, pt);
+		if (i >= 0) {
+			*pIndex = i;
+			return parts[g];
+		}
 	}
 	return CPKHT_NOWHERE;
 }
@@ -292,6 +328,12 @@ void CColorPickerCtrl::SetState(const Hsv& hsv, BYTE alpha, int skipField) {
 	m_Grad->Invalidate();
 	auto swatch = PartRect(CPKHT_NEWCOLOR);
 	InvalidateRect(&swatch);
+	for (auto& rc : m_Groups) {
+		// the cell marked as the color
+		RECT around = rc;
+		::InflateRect(&around, 2, 2);
+		InvalidateRect(&around, FALSE);
+	}
 	UpdateFields(skipField);
 }
 
@@ -427,13 +469,16 @@ LRESULT CColorPickerCtrl::OnGradFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	// tabbing in starts at the first part, Shift+Tab at the last
 	if (uMsg == WM_SETFOCUS && ::GetKeyState(VK_TAB) < 0)
 		m_Focus = ::GetKeyState(VK_SHIFT) < 0 ? (HasAlpha() ? CPKHT_ALPHA : CPKHT_HUE) : CPKHT_SV;
+	// the eyedropper keeps the focus here for Escape; the focus going (another app) ends it
+	if (uMsg == WM_KILLFOCUS && m_Picking)
+		CancelEyedropper();
 	m_Grad->Invalidate();
 	return 0;
 }
 
 LRESULT CColorPickerCtrl::OnGradGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	if (m_Drag != CPKHT_NOWHERE)
-		return DLGC_WANTALLKEYS;   // Escape cancels the drag
+	if (m_Drag != CPKHT_NOWHERE || m_Picking)
+		return DLGC_WANTALLKEYS;   // Escape cancels the drag or the eyedropper
 	LRESULT code = DLGC_WANTARROWS;
 	// Tab moves between the parts, and leaves from the first or last one
 	auto msg = (const MSG*)lParam;
@@ -445,6 +490,11 @@ LRESULT CColorPickerCtrl::OnGradGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
 
 LRESULT CColorPickerCtrl::OnGradKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	bool shift = ::GetKeyState(VK_SHIFT) < 0;
+	if (m_Picking) {
+		if (wParam == VK_ESCAPE)
+			CancelEyedropper();
+		return 0;
+	}
 	if (wParam == VK_ESCAPE && m_Drag != CPKHT_NOWHERE) {
 		EndDrag(true);
 		return 0;

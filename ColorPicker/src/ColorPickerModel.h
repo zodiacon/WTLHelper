@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // ---- Colors ------------------------------------------------------------------------
 
@@ -55,6 +56,16 @@ CpLayout CpComputeLayout(int width, int height, const CpMetrics& m, bool alpha);
 
 enum CpField { CpH, CpS, CpV, CpA, CpR, CpG, CpB, CpHex, CpFieldCount };   // also the tab order
 
+// Under the fields, the swatch groups: the palette's rows, a row of custom colors and a row of recent ones,
+// all in CpSwatchColumns columns.
+
+constexpr int CpSwatchColumns = 12;
+constexpr int CpMaxPalette = 4 * CpSwatchColumns;
+constexpr int CpMaxCustom = CpSwatchColumns;
+constexpr int CpMaxRecent = CpSwatchColumns;
+
+enum CpGroup { CpPalette, CpCustom, CpRecent, CpGroupCount };
+
 struct CpPanelMetrics {    // pixels at the window's DPI
 	int labelWidth = 28;
 	int fieldWidth = 64;   // the frame, spin buttons included
@@ -62,18 +73,43 @@ struct CpPanelMetrics {    // pixels at the window's DPI
 	int rowGap = 6;
 	int colGap = 10;
 	int swatchHeight = 56;
-	int swatchGap = 12;    // between the swatch and the fields
+	int swatchGap = 12;    // between the swatch, the fields and the swatch groups
 	int spinWidth = 14;
+	int buttonGap = 6;     // between the swatch and the eyedropper button (fieldHeight wide)
+	int cellGap = 3;       // between swatch cells
+	int groupGap = 8;      // between swatch groups
+};
+
+struct CpPanelOptions {
+	bool swatch = true;
+	bool eyedropper = true;            // beside the swatch (not without it)
+	bool fields = true;
+	bool alpha = true;
+	bool groups = false;               // the swatch groups
+	int  paletteCount = 0;             // 0: no palette rows (the custom and recent ones stay)
 };
 
 struct CpPanel {
 	RECT swatch{};                     // empty without it
+	RECT eyedropper{};
 	RECT label[CpFieldCount]{};        // empty for a field not shown
 	RECT frame[CpFieldCount]{};
+	RECT group[CpGroupCount]{};        // the cells' bounds; all empty with no palette
+	int  cell = 0;                     // a cell's side
 };
 
 int      CpPanelWidth(const CpPanelMetrics& m);
-CpPanel  CpComputePanel(int left, int top, const CpPanelMetrics& m, bool swatch, bool fields, bool alpha);
+CpPanel  CpComputePanel(int left, int top, const CpPanelMetrics& m, const CpPanelOptions& o);
+int      CpGroupRows(CpGroup group, int paletteCount);
+RECT     CpSwatchCell(const CpPanel& p, CpGroup group, int index, int cellGap);
+// the cell under pt (-1 if none); count: the cells there are
+int      CpSwatchAt(const CpPanel& p, CpGroup group, int count, int cellGap, POINT pt);
+const COLORREF* CpDefaultPalette(int* pCount);
+// color to the front, once; at most max
+void     CpAddRecent(std::vector<COLORREF>& recent, COLORREF color, size_t max = CpMaxRecent);
+
+// the eyedropper's magnifier: below and right of the cursor, flipped to stay in the work area
+POINT    CpPlaceMagnifier(POINT cursor, SIZE size, const RECT& work, int offset);
 bool     CpHasSpin(CpField field);         // all but Hex
 // the spin buttons inside a field's frame: the upper and lower halves
 void     CpSpinRects(const RECT& frame, int spinWidth, RECT* pUp, RECT* pDown);

@@ -177,24 +177,101 @@ int CpPanelWidth(const CpPanelMetrics& m) {
 	return 2 * (m.labelWidth + m.fieldWidth) + m.colGap;
 }
 
-CpPanel CpComputePanel(int left, int top, const CpPanelMetrics& m, bool swatch, bool fields, bool alpha) {
+CpPanel CpComputePanel(int left, int top, const CpPanelMetrics& m, const CpPanelOptions& o) {
 	CpPanel p;
-	if (swatch) {
-		p.swatch = { left, top, left + CpPanelWidth(m), top + m.swatchHeight };
+	int width = CpPanelWidth(m);
+	if (o.swatch) {
+		int right = left + width;
+		if (o.eyedropper) {
+			p.eyedropper = { right - m.fieldHeight, top, right, top + m.swatchHeight };
+			right -= m.fieldHeight + m.buttonGap;
+		}
+		p.swatch = { left, top, right, top + m.swatchHeight };
 		top += m.swatchHeight + m.swatchGap;
 	}
-	if (!fields)
-		return p;
-	for (int f = 0; f < CpFieldCount; f++) {
-		if (f == CpA && !alpha)
-			continue;
-		int col = f < CpR ? 0 : 1, row = f < CpR ? f : f - CpR;
-		int x = left + col * (m.labelWidth + m.fieldWidth + m.colGap);
-		int y = top + row * (m.fieldHeight + m.rowGap);
-		p.label[f] = { x, y, x + m.labelWidth, y + m.fieldHeight };
-		p.frame[f] = { x + m.labelWidth, y, x + m.labelWidth + m.fieldWidth, y + m.fieldHeight };
+	if (o.fields) {
+		for (int f = 0; f < CpFieldCount; f++) {
+			if (f == CpA && !o.alpha)
+				continue;
+			int col = f < CpR ? 0 : 1, row = f < CpR ? f : f - CpR;
+			int x = left + col * (m.labelWidth + m.fieldWidth + m.colGap);
+			int y = top + row * (m.fieldHeight + m.rowGap);
+			p.label[f] = { x, y, x + m.labelWidth, y + m.fieldHeight };
+			p.frame[f] = { x + m.labelWidth, y, x + m.labelWidth + m.fieldWidth, y + m.fieldHeight };
+		}
+		// four rows: Hex is in the fourth even without A
+		top += 4 * (m.fieldHeight + m.rowGap) - m.rowGap + m.swatchGap;
+	}
+	if (o.groups) {
+		p.cell = std::max(1, (width - (CpSwatchColumns - 1) * m.cellGap) / CpSwatchColumns);
+		int groupWidth = CpSwatchColumns * p.cell + (CpSwatchColumns - 1) * m.cellGap;
+		for (int g = 0; g < CpGroupCount; g++) {
+			int rows = CpGroupRows((CpGroup)g, o.paletteCount);
+			if (rows == 0)
+				continue;
+			int height = rows * p.cell + (rows - 1) * m.cellGap;
+			p.group[g] = { left, top, left + groupWidth, top + height };
+			top += height + m.groupGap;
+		}
 	}
 	return p;
+}
+
+int CpGroupRows(CpGroup group, int paletteCount) {
+	if (group != CpPalette)
+		return 1;
+	int count = std::clamp(paletteCount, 0, CpMaxPalette);
+	return (count + CpSwatchColumns - 1) / CpSwatchColumns;
+}
+
+RECT CpSwatchCell(const CpPanel& p, CpGroup group, int index, int cellGap) {
+	const RECT& g = p.group[group];
+	int x = g.left + (index % CpSwatchColumns) * (p.cell + cellGap);
+	int y = g.top + (index / CpSwatchColumns) * (p.cell + cellGap);
+	return { x, y, x + p.cell, y + p.cell };
+}
+
+int CpSwatchAt(const CpPanel& p, CpGroup group, int count, int cellGap, POINT pt) {
+	const RECT& g = p.group[group];
+	if (p.cell <= 0 || !::PtInRect(&g, pt))
+		return -1;
+	int step = p.cell + cellGap;
+	int col = (pt.x - g.left) / step, row = (pt.y - g.top) / step;
+	if ((pt.x - g.left) % step >= p.cell || (pt.y - g.top) % step >= p.cell || col >= CpSwatchColumns)
+		return -1;   // in a gap
+	int index = row * CpSwatchColumns + col;
+	return index < count ? index : -1;
+}
+
+const COLORREF* CpDefaultPalette(int* pCount) {
+	// two rows: grays and dark tones, then bright ones
+	static const COLORREF palette[] = {
+		RGB(0, 0, 0), RGB(64, 64, 64), RGB(128, 128, 128), RGB(192, 192, 192), RGB(255, 255, 255), RGB(128, 0, 0),
+		RGB(128, 64, 0), RGB(128, 128, 0), RGB(0, 128, 0), RGB(0, 128, 128), RGB(0, 0, 128), RGB(128, 0, 128),
+		RGB(255, 0, 0), RGB(255, 128, 0), RGB(255, 192, 0), RGB(255, 255, 0), RGB(128, 255, 0), RGB(0, 192, 0),
+		RGB(0, 255, 192), RGB(0, 192, 255), RGB(0, 96, 255), RGB(0, 0, 255), RGB(160, 0, 255), RGB(255, 0, 192),
+	};
+	*pCount = (int)std::size(palette);
+	return palette;
+}
+
+void CpAddRecent(std::vector<COLORREF>& recent, COLORREF color, size_t max) {
+	color &= 0xFFFFFF;
+	std::erase(recent, color);
+	recent.insert(recent.begin(), color);
+	if (recent.size() > max)
+		recent.resize(max);
+}
+
+POINT CpPlaceMagnifier(POINT cursor, SIZE size, const RECT& work, int offset) {
+	POINT pt{ cursor.x + offset, cursor.y + offset };
+	if (pt.x + size.cx > work.right)
+		pt.x = cursor.x - offset - size.cx;
+	if (pt.y + size.cy > work.bottom)
+		pt.y = cursor.y - offset - size.cy;
+	pt.x = std::clamp(pt.x, work.left, std::max(work.left, work.right - size.cx));
+	pt.y = std::clamp(pt.y, work.top, std::max(work.top, work.bottom - size.cy));
+	return pt;
 }
 
 bool CpHasSpin(CpField field) {

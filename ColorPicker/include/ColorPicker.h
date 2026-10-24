@@ -23,7 +23,18 @@ constexpr wchar_t WC_COLORPICKER[] = L"WC_ColorPicker";
 
 #define CPKS_NOALPHA   0x0001   // no alpha bar or field (the alpha stays as set)
 #define CPKS_NOFIELDS  0x0002   // no fields
-#define CPKS_NOSWATCH  0x0004   // no new/original swatch
+#define CPKS_NOSWATCH  0x0004   // no new/original swatch (and no eyedropper button)
+#define CPKS_NOPALETTE 0x0008   // no palette, custom or recent colors
+#define CPKS_NOEYEDROPPER 0x0010   // no eyedropper button (StartEyedropper still works)
+
+// ---- Swatches ------------------------------------------------------------------
+//
+// Under the fields, in rows of 12: the palette (up to 4 rows), the custom colors (12 slots) and the recent ones
+// (up to 12, the latest first). They're RGB colors: picking one keeps the alpha.
+
+#define CPK_MAXPALETTE    48
+#define CPK_CUSTOMCOLORS  12
+#define CPK_MAXRECENT     12
 
 // ---- Colors -----------------------------------------------------------------------
 
@@ -51,17 +62,24 @@ struct CPKCOLORS {
 #define CPKHT_FIELD     4   // a field (its frame, spin buttons included)
 #define CPKHT_NEWCOLOR  5   // the swatch's new color
 #define CPKHT_OLDCOLOR  6   // the swatch's original color (clicking it goes back to it)
+#define CPKHT_EYEDROPPER 7  // the eyedropper button (and the color picked with it)
+#define CPKHT_PALETTE   8   // a palette color (the index: HitTest's *pIndex)
+#define CPKHT_CUSTOM    9   // a custom color slot
+#define CPKHT_RECENT    10  // a recent color
 
 // ---- Notifications -------------------------------------------------------------
 //
 // While the user drags, types or presses keys, every change sends CPKN_COLORCHANGING; the end of the change
 // (the mouse button released, a key, or a field that was typed in losing the focus or getting Enter) sends
 // CPKN_COLORCHANGED. Escape during a drag goes back to the color it started with and sends CPKN_COLORCHANGING
-// with that color, and no CPKN_COLORCHANGED. Setting the color with the API sends neither.
+// with that color, and no CPKN_COLORCHANGED; so do Escape and a right click with the eyedropper, which
+// otherwise changes the color as it moves and sends CPKN_COLORCHANGED on the click that picks. Setting the color
+// with the API sends neither.
 
 #define CPKN_FIRST          (0U - 2900U)   // outside the common controls ranges
 #define CPKN_COLORCHANGING  (CPKN_FIRST - 0)   // NMCOLORPICKER
 #define CPKN_COLORCHANGED   (CPKN_FIRST - 1)   // NMCOLORPICKER
+#define CPKN_CUSTOMCHANGED  (CPKN_FIRST - 2)   // NMHDR; the user saved or cleared a custom color
 
 struct NMCOLORPICKER {
 	NMHDR    hdr;
@@ -74,6 +92,7 @@ struct NMCOLORPICKER {
 // ---- Control class --------------------------------------------------------------------------
 
 class CpGradientWindow;
+class CpMagnifier;
 
 class CColorPickerCtrl : public ATL::CWindowImpl<CColorPickerCtrl> {
 public:
@@ -84,6 +103,9 @@ public:
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
+	// posted to itself by the eyedropper's mouse hook; wParam: PickMove, PickCommit or PickCancel
+	enum : UINT { WM_CPK_PICK = WM_USER + 200 };
+	enum : WPARAM { PickMove, PickCommit, PickCancel };
 
 	BEGIN_MSG_MAP(CColorPickerCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -100,9 +122,15 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnRButtonDown)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
+		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_CPK_PICK, OnPick)
 		MESSAGE_HANDLER(WM_STYLECHANGED, OnStyleChanged)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
@@ -146,11 +174,36 @@ public:
 	// the text is a value; Up/Down step it (Shift: by ten), as do its spin buttons and the mouse wheel; Enter
 	// or leaving it puts the text right, Escape puts back the value it had.
 
-	UINT      HitTest(POINT pt) const;            // client coords; CPKHT_*
+	// client coords; CPKHT_*, with the swatch's index for CPKHT_PALETTE, CPKHT_CUSTOM and CPKHT_RECENT (else -1)
+	UINT      HitTest(POINT pt, int* pIndex = nullptr) const;
 	BOOL      GetPartRect(UINT part, RECT* prc) const;   // client coords; FALSE if not shown (or CPKHT_FIELD)
 	void      SetFocusPart(UINT part);            // CPKHT_SV, CPKHT_HUE or CPKHT_ALPHA
 	UINT      GetFocusPart() const;
 	HWND      GetGradientWindow() const;          // the child that shows the area and the bars
+
+	// ---- Swatches --------------------------------------------------------------------------
+	//
+	// Clicking a palette or recent color, or a custom slot holding one, picks it. Clicking an empty custom slot
+	// saves the color there, as Ctrl+click does on a full one; right-clicking a slot offers to save or clear
+	// it. Either sends CPKN_CUSTOMCHANGED, for the app to keep them. Recent colors are the app's to add
+	// (ColorPickerDialog adds the color picked).
+
+	void      SetPalette(const COLORREF* colors, int count);   // nullptr: the default one (24 colors)
+	int       GetPalette(COLORREF* colors, int max) const;     // the count; colors may be nullptr
+	void      SetCustomColors(const COLORREF* colors, int count);   // CLR_NONE: an empty slot
+	int       GetCustomColors(COLORREF* colors, int max) const;     // CPK_CUSTOMCOLORS slots
+	void      AddRecentColor(COLORREF color);     // to the front, once
+	void      SetRecentColors(const COLORREF* colors, int count);
+	int       GetRecentColors(COLORREF* colors, int max) const;
+
+	// ---- Eyedropper ------------------------------------------------------------------------
+	//
+	// Picks a color from anywhere on the screen: a magnifier follows the mouse and the color follows the pixel
+	// under it. A click keeps it; Escape, a right click or losing the mouse goes back to the color before.
+
+	void      StartEyedropper();
+	void      CancelEyedropper();
+	bool      IsEyedropperActive() const;
 
 	// ---- Appearance ------------------------------------------------------------------------
 	//
@@ -173,9 +226,15 @@ private:
 	LRESULT OnCtlColorEdit(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnRButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPick(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnStyleChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -229,6 +288,22 @@ private:
 	void    EndSpin();
 	void    InvalidateField(int field);
 	void    PaintPanel(HDC hdc, const RECT& rcPaint);
+
+	// swatches and the eyedropper (ColorPickerSwatches.cpp)
+	bool    HasGroups() const;
+	int     GroupCount(int group) const;          // the cells there are (custom: all slots)
+	COLORREF GroupColor(int group, int index) const;   // CLR_NONE for an empty custom slot
+	RECT    SwatchCellRect(int group, int index) const;
+	void    PickSwatch(UINT part, int index);
+	void    SaveCustom(int index, COLORREF color); // CLR_NONE clears it
+	void    CustomMenu(int index, POINT ptScreen);
+	void    SetHot(UINT part, int index);
+	void    UpdateToolTips();
+	void    PaintSwatches(HDC hdc, const CPKCOLORS& c);
+	void    PaintEyedropperButton(HDC hdc, const CPKCOLORS& c);
+	void    SampleScreen(POINT ptScreen);         // the eyedropper's color, and the magnifier
+	void    EndEyedropper(bool cancel);
+	static LRESULT CALLBACK PickHookProc(int code, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK EditSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 	// painting the gradients
@@ -272,6 +347,32 @@ private:
 	bool          m_OwnFont = true;
 	WTL::CBrush   m_FieldBrush;                   // WM_CTLCOLOREDIT
 	COLORREF      m_FieldBrushColor = CLR_INVALID;
+
+	// swatches
+	enum { GroupCountMax = 3 };                   // CpGroupCount
+	RECT          m_Eyedropper{};
+	RECT          m_Groups[GroupCountMax]{};
+	int           m_Cell = 0;
+	int           m_CellGap = 3;
+	std::vector<COLORREF> m_Palette;
+	std::vector<COLORREF> m_Custom;               // CPK_CUSTOMCOLORS slots, CLR_NONE when empty
+	std::vector<COLORREF> m_Recent;
+	UINT          m_HotPart = CPKHT_NOWHERE;      // the swatch (or button) under the mouse
+	int           m_HotIndex = -1;
+	bool          m_TrackingLeave = false;
+	HWND          m_hToolTip = nullptr;
+	std::vector<UINT_PTR> m_ToolIds;              // the tooltip's tools, to remove on a new layout
+	ATL::CString  m_TipText;
+
+	// the eyedropper
+	bool          m_Picking = false;
+	Hsv           m_PickStartHsv{};
+	BYTE          m_PickStartAlpha = 255;
+	POINT         m_PickPoint{};                  // the mouse, screen coords (the hook's)
+	bool          m_PickPressed = false;          // the button that started it is still down
+	bool          m_PickMovePosted = false;
+	UINT          m_PickSwallowUp = 0;            // the button-up to keep from other windows
+	std::unique_ptr<CpMagnifier> m_Magnifier;
 
 	// the gradients, drawn when they change (32-bit, top-down)
 	std::vector<uint32_t> m_SvBits, m_HueBits, m_AlphaBits;

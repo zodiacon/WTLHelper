@@ -16,6 +16,7 @@
 #include <WTLHelper.h>
 #endif
 
+#include <algorithm>
 #include <iterator>
 #include <random>
 
@@ -37,6 +38,9 @@ enum {
 	ID_VIEW_DARKMODE,
 	ID_VIEW_FIELDS,
 	ID_VIEW_SWATCH,
+	ID_VIEW_PALETTE,
+	ID_VIEW_EYEDROPPER,
+	ID_VIEW_GRAYS,
 
 	ID_COLOR_RED = 401,
 	ID_COLOR_BLACK,
@@ -46,6 +50,8 @@ enum {
 	ID_COLOR_HSV,
 	ID_COLOR_SETORIGINAL,
 	ID_COLOR_NOORIGINAL,
+	ID_COLOR_ADDRECENT,
+	ID_COLOR_PICK,
 };
 
 // ---- State --------------------------------------------------------------------
@@ -53,7 +59,8 @@ enum {
 static CColorPickerCtrl g_picker;
 static HWND g_reset;
 static bool g_darkColors;
-static int g_changing, g_changed;
+static int g_changing, g_changed, g_customChanged;
+static bool g_grays;
 static CString g_lastEvent = L"(none)";
 static HFONT g_font;
 
@@ -101,6 +108,9 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_ALPHA, (g_picker.GetStyle() & CPKS_NOALPHA) == 0);
 	check(ID_VIEW_FIELDS, (g_picker.GetStyle() & CPKS_NOFIELDS) == 0);
 	check(ID_VIEW_SWATCH, (g_picker.GetStyle() & CPKS_NOSWATCH) == 0);
+	check(ID_VIEW_PALETTE, (g_picker.GetStyle() & CPKS_NOPALETTE) == 0);
+	check(ID_VIEW_EYEDROPPER, (g_picker.GetStyle() & CPKS_NOEYEDROPPER) == 0);
+	check(ID_VIEW_GRAYS, g_grays);
 	check(ID_VIEW_DARK, g_darkColors);
 #ifdef DEMO_WTLHELPER
 	check(ID_VIEW_DARKMODE, WTLHelper::IsDarkMode());
@@ -123,12 +133,15 @@ static void PaintPanel(HWND hwnd, HDC hdc) {
 	CString origText = L"none";
 	if (orig != CLR_NONE)
 		origText.Format(L"#%02X%02X%02X, %d", GetRValue(orig), GetGValue(orig), GetBValue(orig), origAlpha);
+	COLORREF custom[CPK_CUSTOMCOLORS];
+	g_picker.GetCustomColors(custom, CPK_CUSTOMCOLORS);
+	int saved = (int)std::count_if(std::begin(custom), std::end(custom), [](COLORREF c) { return c != CLR_NONE; });
 
 	auto hsv = g_picker.GetHsv();
 	CString text;
-	text.Format(L"Hex:  #%02X%02X%02X\nRGB:  %d, %d, %d\nAlpha:  %d\nHSV:  %.2f\x00B0, %.1f%%, %.1f%%\nOriginal:  %s\n\nChanging: %d\nChanged: %d\nLast: %s",
+	text.Format(L"Hex:  #%02X%02X%02X\nRGB:  %d, %d, %d\nAlpha:  %d\nHSV:  %.2f\x00B0, %.1f%%, %.1f%%\nOriginal:  %s\nCustom:  %d saved, %d changes\nRecent:  %d\n\nChanging: %d\nChanged: %d\nLast: %s",
 		GetRValue(color), GetGValue(color), GetBValue(color), GetRValue(color), GetGValue(color), GetBValue(color), alpha,
-		hsv.h, hsv.s * 100, hsv.v * 100, (LPCWSTR)origText, g_changing, g_changed, (LPCWSTR)g_lastEvent);
+		hsv.h, hsv.s * 100, hsv.v * 100, (LPCWSTR)origText, saved, g_customChanged, g_picker.GetRecentColors(nullptr, 0), g_changing, g_changed, (LPCWSTR)g_lastEvent);
 	RECT tr{ panel.left + pad, panel.top + pad, panel.right - pad, panel.bottom - Scale(hwnd, 44) };
 	auto oldFont = ::SelectObject(hdc, g_font);
 	::SetTextColor(hdc, c.crText);
@@ -148,10 +161,22 @@ static void OnCommand(HWND hwnd, UINT id) {
 			else
 				g_picker.ModifyStyle(0, CPKS_NOALPHA);
 			break;
+		case ID_VIEW_GRAYS:
+		{
+			g_grays = !g_grays;
+			COLORREF grays[12];
+			for (int i = 0; i < 12; i++)
+				grays[i] = RGB(i * 255 / 11, i * 255 / 11, i * 255 / 11);
+			g_picker.SetPalette(g_grays ? grays : nullptr, 12);
+			break;
+		}
 		case ID_VIEW_FIELDS:
 		case ID_VIEW_SWATCH:
+		case ID_VIEW_PALETTE:
+		case ID_VIEW_EYEDROPPER:
 		{
-			DWORD style = id == ID_VIEW_FIELDS ? CPKS_NOFIELDS : CPKS_NOSWATCH;
+			DWORD style = id == ID_VIEW_FIELDS ? CPKS_NOFIELDS : id == ID_VIEW_SWATCH ? CPKS_NOSWATCH :
+				id == ID_VIEW_PALETTE ? CPKS_NOPALETTE : CPKS_NOEYEDROPPER;
 			if (g_picker.GetStyle() & style)
 				g_picker.ModifyStyle(style, 0);
 			else
@@ -193,6 +218,12 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case ID_COLOR_NOORIGINAL:
 			g_picker.SetOriginalColor(CLR_NONE);
+			break;
+		case ID_COLOR_ADDRECENT:
+			g_picker.AddRecentColor(g_picker.GetColor());
+			break;
+		case ID_COLOR_PICK:
+			g_picker.StartEyedropper();
 			break;
 		case IDC_RESET:
 			g_picker.SetHsv({ 0, 0, 1 });
@@ -253,8 +284,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_NOTIFY:
 		{
 			auto nm = (NMCOLORPICKER*)lParam;
-			if (nm->hdr.idFrom == IDC_PICKER) {
-				static const wchar_t* parts[] = { L"?", L"area", L"hue", L"alpha", L"field", L"new", L"original" };
+			if (nm->hdr.idFrom == IDC_PICKER && nm->hdr.code == CPKN_CUSTOMCHANGED) {
+				g_customChanged++;
+				auto panel = PanelRect(hwnd);
+				::InvalidateRect(hwnd, &panel, FALSE);
+			}
+			else if (nm->hdr.idFrom == IDC_PICKER) {
+				static const wchar_t* parts[] = { L"?", L"area", L"hue", L"alpha", L"field", L"new", L"original", L"eyedropper", L"palette", L"custom", L"recent" };
 				bool changed = nm->hdr.code == CPKN_COLORCHANGED;
 				(changed ? g_changed : g_changing)++;
 				g_lastEvent.Format(L"%s (%s)", changed ? L"changed" : L"changing", nm->part < std::size(parts) ? parts[nm->part] : L"?");
@@ -313,6 +349,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_ALPHA, L"&Alpha Bar");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_FIELDS, L"&Fields");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SWATCH, L"&Swatch");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_PALETTE, L"&Palette, Custom and Recent");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_EYEDROPPER, L"&Eyedropper Button");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_GRAYS, L"&Grays Palette (SetPalette)");
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARK, L"Dar&k Colors (SetColors)");
 #ifdef DEMO_WTLHELPER
@@ -329,6 +368,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hColor, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hColor, MF_STRING, ID_COLOR_SETORIGINAL, L"Make the Color the &Original");
 	::AppendMenuW(hColor, MF_STRING, ID_COLOR_NOORIGINAL, L"&No Original");
+	::AppendMenuW(hColor, MF_STRING, ID_COLOR_ADDRECENT, L"Add to Recen&t\tCtrl+R");
+	::AppendMenuW(hColor, MF_STRING, ID_COLOR_PICK, L"&Pick from the Screen\tCtrl+P");
 
 	HMENU hMenu = ::CreateMenu();
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
@@ -341,6 +382,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	ACCEL accels[] = {
 		{ FVIRTKEY, VK_F5, ID_COLOR_RANDOM },
+		{ FVIRTKEY | FCONTROL, 'R', ID_COLOR_ADDRECENT },
+		{ FVIRTKEY | FCONTROL, 'P', ID_COLOR_PICK },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTable(accels, (int)std::size(accels));
 
