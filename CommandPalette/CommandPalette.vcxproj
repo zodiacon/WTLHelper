@@ -95,9 +95,11 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\CommandPalette.h" />
     <ClInclude Include="src\CommandPaletteModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CommandPaletteCtrl.cpp" />
     <ClCompile Include="src\CommandPaletteModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

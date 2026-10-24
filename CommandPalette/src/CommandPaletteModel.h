@@ -46,6 +46,27 @@ private:
 // digit after a non-digit
 bool CmpIsWordStart(std::wstring_view label, size_t index);
 
+// ---- Commands --------------------------------------------------------------------------------
+
+struct CmpItem {
+	UINT   id = 0;
+	std::wstring name;
+	std::wstring category;
+	std::wstring shortcut;
+	std::wstring label;            // what's shown and matched: "Category: Name", or the name
+	int    image = -1;
+	UINT   state = 0;              // CMDPIS_*
+	LPARAM lParam = 0;
+	int    source = -1;            // the menu it was read from (an index), -1: added by itself
+
+	void UpdateLabel() {
+		label = category.empty() ? name : category + L": " + name;
+	}
+	size_t NameStart() const {     // where the name starts in the label
+		return label.size() - name.size();
+	}
+};
+
 // ---- Ranking ---------------------------------------------------------------------------------
 
 struct CmpResult {
