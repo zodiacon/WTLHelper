@@ -97,8 +97,10 @@
   <ItemGroup>
     <ClInclude Include="include\Accordion.h" />
     <ClInclude Include="src\AccordionModel.h" />
+    <ClInclude Include="src\AccordionNode.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\AccordionAccessible.cpp" />
     <ClCompile Include="src\AccordionCtrl.cpp" />
     <ClCompile Include="src\AccordionModel.cpp" />
   </ItemGroup>

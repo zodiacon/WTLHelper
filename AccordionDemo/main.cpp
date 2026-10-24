@@ -190,7 +190,7 @@ static void AddSections(HWND hwnd) {
 	s.minHeight = 80;
 	s.state = ACDSS_EXPANDED;
 	auto files = g_acc.InsertSection(&s);
-	ACDBUTTON buttons[] = { { BTN_ADDFILE, -1, L"+" }, { BTN_MORE, -1, L"..." } };
+	ACDBUTTON buttons[] = { { BTN_ADDFILE, -1, L"+", L"Add a file" }, { BTN_MORE, -1, L"...", L"More commands" } };
 	g_acc.SetSectionButtons(files, buttons, (int)std::size(buttons));
 
 	s = {};

@@ -67,7 +67,8 @@ struct ACDSECTION {
 struct ACDBUTTON {
 	UINT    id;          // the app's, in ACDN_BUTTONCLICK
 	int     iImage;      // in the image list; -1: the text instead
-	LPCWSTR pszText;     // shown without an image (a short "+" or "..."), and the tooltip either way
+	LPCWSTR pszText;     // shown without an image (a short "+" or "...")
+	LPCWSTR pszTip;      // the tooltip and the name screen readers say ("Add a file"); nullptr: pszText
 };
 
 // ---- Colors -----------------------------------------------------------------------
@@ -128,6 +129,7 @@ struct NMACDFITHEIGHT {
 
 class AcdFocusWindow;
 class AcdDragImage;
+class AcdAccessible;
 
 class CAccordionCtrl : public ATL::CWindowImpl<CAccordionCtrl> {
 public:
@@ -135,6 +137,7 @@ public:
 
 	CAccordionCtrl();
 	~CAccordionCtrl();
+	friend class AcdAccessible;
 
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
 
@@ -184,6 +187,7 @@ public:
 		MESSAGE_HANDLER(WM_CHAR, OnHeaderChar)
 		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
 		MESSAGE_HANDLER(WM_UPDATEUISTATE, OnHeaderUpdateUIState)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnHeaderGetObject)
 	END_MSG_MAP()
 
 	// ---- Sections ------------------------------------------------------------------
@@ -242,7 +246,8 @@ public:
 
 	HIMAGELIST  SetImageList(HIMAGELIST hImageList);   // the header icons; not destroyed by the control
 	HIMAGELIST  GetImageList() const;
-	void        SetColors(const ACDCOLORS* colors);   // nullptr: system colors (follows WTLHelper dark mode)
+	// nullptr: system colors (follows WTLHelper dark mode); high contrast uses the system's regardless
+	void        SetColors(const ACDCOLORS* colors);
 	ACDCOLORS   GetColors() const;                    // the colors in effect
 	int         GetHeaderHeight() const;              // pixels, from the font
 
@@ -272,6 +277,7 @@ private:
 	LRESULT OnHeaderKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnHeaderChar(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnHeaderUpdateUIState(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnHeaderGetObject(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnStyleChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -306,6 +312,10 @@ private:
 	void    MoveDragImage(POINT pt);
 	void    HideDragImage();
 	void    UpdateComposited();                         // WS_EX_COMPOSITED while bodies resize (a drag, an animation)
+	bool    MoveFocusedSection(bool up);                // Ctrl+Up/Down
+	long    HeaderChildId(int index) const;             // the header's accessible child id
+	void    NotifyAccessible(DWORD event, long child);  // only once a client has asked for the object
+	void    DisconnectAccessible();
 
 	// top to bottom: the sections' text and windows, and the model's side of them (AccordionModel.h), in the same order
 	std::vector<std::unique_ptr<AcdNode>> m_Nodes;
@@ -348,4 +358,5 @@ private:
 	bool        m_Animating = false;
 	bool        m_Composited = false;              // WS_EX_COMPOSITED is on for a resize or an animation
 	bool        m_AppComposited = false;           // the app had it on already
+	AcdAccessible* m_Acc = nullptr;                // made on the first WM_GETOBJECT; cut off in OnDestroy
 };
