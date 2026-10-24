@@ -107,6 +107,10 @@ public:
 	bool SaveToFile(PCWSTR path = nullptr) const;
 	bool Load(PCWSTR path);
 	bool Save() const;
+	// where Save writes: the registry key (under HKCU) or the INI file the settings were loaded from
+	std::wstring const& GetPath() const {
+		return m_path;
+	}
 
 	template<typename T>
 	void Set(const std::wstring& name, const T& value, SettingType type = SettingType::Binary) {
