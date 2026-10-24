@@ -101,11 +101,14 @@
     <ClInclude Include="src\ColorPickerModel.h" />
     <ClInclude Include="src\ColorPickerGradient.h" />
     <ClInclude Include="src\ColorPickerMagnifier.h" />
+    <ClInclude Include="src\ColorPickerDraw.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\ColorPickerCtrl.cpp" />
     <ClCompile Include="src\ColorPickerFields.cpp" />
     <ClCompile Include="src\ColorPickerSwatches.cpp" />
+    <ClCompile Include="src\ColorPickerDialog.cpp" />
+    <ClCompile Include="src\ColorButton.cpp" />
     <ClCompile Include="src\ColorPickerModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

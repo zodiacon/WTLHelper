@@ -80,6 +80,8 @@ struct CPKCOLORS {
 #define CPKN_COLORCHANGING  (CPKN_FIRST - 0)   // NMCOLORPICKER
 #define CPKN_COLORCHANGED   (CPKN_FIRST - 1)   // NMCOLORPICKER
 #define CPKN_CUSTOMCHANGED  (CPKN_FIRST - 2)   // NMHDR; the user saved or cleared a custom color
+#define CPKN_DROPDOWN       (CPKN_FIRST - 3)   // NMHDR; a color button is about to open its picker
+#define CPKN_CLOSEUP        (CPKN_FIRST - 4)   // NMHDR; a color button's picker closed
 
 struct NMCOLORPICKER {
 	NMHDR    hdr;
@@ -180,6 +182,8 @@ public:
 	void      SetFocusPart(UINT part);            // CPKHT_SV, CPKHT_HUE or CPKHT_ALPHA
 	UINT      GetFocusPart() const;
 	HWND      GetGradientWindow() const;          // the child that shows the area and the bars
+	// the size that shows everything with a square area as tall as the panel (at least 200 DIPs)
+	SIZE      GetIdealSize() const;
 
 	// ---- Swatches --------------------------------------------------------------------------
 	//
@@ -385,4 +389,130 @@ private:
 
 	bool          m_SystemColors = true;
 	CPKCOLORS     m_Colors{};
+};
+
+// ---- Dialog --------------------------------------------------------------------------------
+//
+// A modal dialog with a color picker, OK and Cancel; a replacement for ChooseColor that follows WTLHelper's dark
+// mode. Resizable, at the owner's DPI, centered over it. The starting color shows as the original.
+
+typedef void (CALLBACK* CPKPREVIEWPROC)(COLORREF color, BYTE alpha, LPARAM lParam);
+
+struct CPKDIALOG {
+	HWND            hwndOwner = nullptr;
+	LPCWSTR         pszTitle = nullptr;        // nullptr: "Color"
+	COLORREF        color = 0;                 // in: the starting color; out: the color picked
+	BYTE            alpha = 255;               // in and out
+	DWORD           pickerStyle = 0;           // CPKS_*: the parts shown
+	COLORREF*       customColors = nullptr;    // CPK_CUSTOMCOLORS (CLR_NONE: empty); in and out, also on Cancel
+	COLORREF*       recentColors = nullptr;    // room for CPK_MAXRECENT; in and out (OK adds the color picked)
+	int             recentCount = 0;           // in and out
+	const COLORREF* palette = nullptr;         // nullptr: the default one
+	int             paletteCount = 0;
+	const CPKCOLORS* colors = nullptr;         // nullptr: system colors
+	// called as the color changes, for a live preview; on Cancel once more with the starting color
+	CPKPREVIEWPROC  pfnPreview = nullptr;
+	LPARAM          lParam = 0;
+};
+
+BOOL ColorPickerDialog(CPKDIALOG* pDialog);    // TRUE on OK
+
+// ---- Color button ----------------------------------------------------------------------------
+//
+// A button showing a color (the left half opaque, the right half with its alpha) and a drop-down arrow. A click,
+// Space, F4 or Alt+Down opens a color picker below it; the color changes as the user picks (CPKN_COLORCHANGING
+// from the button), Enter or a click elsewhere keeps it (CPKN_COLORCHANGED, and it's added to the recent colors),
+// Escape goes back. CPKN_DROPDOWN and CPKN_CLOSEUP tell when the picker opens and closes.
+
+constexpr wchar_t WC_COLORBUTTON[] = L"WC_ColorButton";
+
+class CpColorPopup;
+
+class CColorButtonCtrl : public ATL::CWindowImpl<CColorButtonCtrl> {
+public:
+	DECLARE_WND_CLASS_EX(L"WC_ColorButton", CS_DBLCLKS, -1)
+
+	CColorButtonCtrl();
+	~CColorButtonCtrl();
+	friend class CpColorPopup;
+
+	enum : UINT { WM_CPB_CLOSE = WM_USER + 210 };   // posted to itself; wParam: TRUE to cancel
+
+	BEGIN_MSG_MAP(CColorButtonCtrl)
+		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_PRINTCLIENT, OnPaint)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_ENABLE, OnRepaint)
+		MESSAGE_HANDLER(WM_UPDATEUISTATE, OnUpdateUIState)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_CPB_CLOSE, OnClose)
+		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnRepaint)
+		MESSAGE_HANDLER(WM_THEMECHANGED, OnRepaint)
+		MESSAGE_HANDLER(CColorPickerCtrl::ThemeChangedMessage, OnRepaint)
+		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnRepaint)
+	END_MSG_MAP()
+
+	void      SetColor(COLORREF color);
+	COLORREF  GetColor() const;
+	void      SetAlpha(BYTE alpha);
+	BYTE      GetAlpha() const;
+	void      SetPickerStyle(DWORD style);        // CPKS_*: the parts the picker shows (default: all)
+	DWORD     GetPickerStyle() const;
+	void      SetPalette(const COLORREF* colors, int count);   // as CColorPickerCtrl's
+	void      SetCustomColors(const COLORREF* colors, int count);
+	int       GetCustomColors(COLORREF* colors, int max) const;
+	void      SetRecentColors(const COLORREF* colors, int count);
+	int       GetRecentColors(COLORREF* colors, int max) const;
+	void      SetColors(const CPKCOLORS* colors); // the button's and the picker's; nullptr: system colors
+	CPKCOLORS GetColors() const;
+
+	void      DropDown();
+	void      CloseUp(bool cancel);
+	bool      IsDroppedDown() const;
+
+private:
+	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnRepaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnUpdateUIState(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
+
+	void    Paint(HDC hdc);
+	void    Notify(UINT code, UINT part);
+	void    PickerChanged(const NMCOLORPICKER* nm);   // from the popup's picker
+
+	COLORREF      m_Color = RGB(0, 0, 0);
+	BYTE          m_Alpha = 255;
+	DWORD         m_PickerStyle = 0;
+	std::vector<COLORREF> m_Palette;              // empty: the picker's default
+	std::vector<COLORREF> m_Custom;
+	std::vector<COLORREF> m_Recent;
+	bool          m_SystemColors = true;
+	CPKCOLORS     m_Colors{};
+	bool          m_Hot = false;
+	bool          m_TrackingLeave = false;
+	bool          m_IgnoreClick = false;          // the click that closed the picker: not one that opens it
+	std::unique_ptr<CpColorPopup> m_Popup;
+	bool          m_Dropped = false;
+	COLORREF      m_StartColor = 0;               // when it opened, for Escape
+	BYTE          m_StartAlpha = 255;
+	bool          m_Changed = false;              // since it opened
 };

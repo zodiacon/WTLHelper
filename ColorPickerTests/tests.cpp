@@ -529,6 +529,37 @@ TEST(Pixels_Swatch) {
 	CHECK(CpColor(b.px.At(9, 3)) == RGB(255, 0, 0));
 }
 
+TEST(DropDown_And_Center) {
+	RECT work{ 0, 0, 1000, 800 };
+	RECT anchor{ 100, 100, 180, 124 };
+	auto pt = CpPlaceDropDown(anchor, { 300, 200 }, work);
+	CHECK(pt.x == 100 && pt.y == 124);
+	RECT low{ 100, 700, 180, 724 };   // no room below: above
+	pt = CpPlaceDropDown(low, { 300, 200 }, work);
+	CHECK(pt.y == 500);
+	RECT right{ 900, 100, 980, 124 };   // kept in from the right
+	pt = CpPlaceDropDown(right, { 300, 200 }, work);
+	CHECK(pt.x == 700 && pt.y == 124);
+	RECT mid{ 100, 350, 180, 374 };   // fits neither: below, pushed up into the work area
+	pt = CpPlaceDropDown(mid, { 300, 600 }, work);
+	CHECK(pt.y == 200);
+
+	pt = CpCenterOver({ 100, 100, 500, 400 }, { 200, 100 }, work);
+	CHECK(pt.x == 200 && pt.y == 200);
+	pt = CpCenterOver({ -300, -300, -100, -100 }, { 200, 100 }, work);   // owner off the work area
+	CHECK(pt.x == 0 && pt.y == 0);
+}
+
+TEST(Panel_Height) {
+	CpPanelMetrics m;
+	auto p = CpComputePanel(0, 10, m, { true, true, true, true, true, 24 });
+	CHECK(CpPanelHeight(p, 10) == p.group[CpRecent].bottom - 10);
+	auto s = CpComputePanel(0, 10, m, { true, false, false, true, false, 0 });
+	CHECK(CpPanelHeight(s, 10) == m.swatchHeight);
+	auto none = CpComputePanel(0, 10, m, { false, false, false, true, false, 0 });
+	CHECK(CpPanelHeight(none, 10) == 0);
+}
+
 int wmain() {
 	Run_HsvToRgb_Primaries();
 	Run_RgbToHsv_Values();
@@ -551,6 +582,8 @@ int wmain() {
 	Run_Panel_EyedropperAndGroups();
 	Run_Recent();
 	Run_Magnifier_Placement();
+	Run_DropDown_And_Center();
+	Run_Panel_Height();
 	Run_Fields_Text();
 	Run_Fields_Parse();
 	Run_Fields_Apply();

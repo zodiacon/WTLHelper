@@ -110,6 +110,12 @@ void     CpAddRecent(std::vector<COLORREF>& recent, COLORREF color, size_t max =
 
 // the eyedropper's magnifier: below and right of the cursor, flipped to stay in the work area
 POINT    CpPlaceMagnifier(POINT cursor, SIZE size, const RECT& work, int offset);
+// a drop-down under the anchor, left-aligned; above it if it doesn't fit below and does above; in the work area
+POINT    CpPlaceDropDown(const RECT& anchor, SIZE size, const RECT& work);
+// centered over a window, in the work area
+POINT    CpCenterOver(const RECT& owner, SIZE size, const RECT& work);
+// from the panel's top to the bottom of its lowest part (0 if nothing is shown)
+int      CpPanelHeight(const CpPanel& p, int top);
 bool     CpHasSpin(CpField field);         // all but Hex
 // the spin buttons inside a field's frame: the upper and lower halves
 void     CpSpinRects(const RECT& frame, int spinWidth, RECT* pUp, RECT* pDown);

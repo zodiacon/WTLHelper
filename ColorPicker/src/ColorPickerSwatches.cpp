@@ -1,4 +1,5 @@
 #include "ColorPicker.h"
+#include "ColorPickerDraw.h"
 #include "ColorPickerGradient.h"
 #include "ColorPickerMagnifier.h"
 #include "ColorPickerModel.h"
@@ -11,29 +12,10 @@
 // the eyedropper itself: a low-level mouse hook while it's on, since the mouse has to be followed over other
 // apps' windows, where capturing it doesn't reach without a button held down.
 
+using namespace CpDraw;
+
 namespace {
 	const UINT GroupParts[CpGroupCount] = { CPKHT_PALETTE, CPKHT_CUSTOM, CPKHT_RECENT };
-
-	bool IsEmpty(const RECT& rc) {
-		return rc.right <= rc.left || rc.bottom <= rc.top;
-	}
-
-	COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
-		auto mix = [=](int x, int y) { return (BYTE)((x * (100 - percentB) + y * percentB) / 100); };
-		return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
-	}
-
-	void FillSolid(HDC hdc, const RECT& rc, COLORREF color) {
-		::SetBkColor(hdc, color);
-		::ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
-	}
-
-	void Frame(HDC hdc, const RECT& rc, COLORREF color, int thickness = 1) {
-		FillSolid(hdc, { rc.left, rc.top, rc.right, rc.top + thickness }, color);
-		FillSolid(hdc, { rc.left, rc.bottom - thickness, rc.right, rc.bottom }, color);
-		FillSolid(hdc, { rc.left, rc.top, rc.left + thickness, rc.bottom }, color);
-		FillSolid(hdc, { rc.right - thickness, rc.top, rc.right, rc.bottom }, color);
-	}
 
 	int GroupOfPart(UINT part) {
 		for (int g = 0; g < CpGroupCount; g++) {

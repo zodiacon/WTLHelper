@@ -263,6 +263,37 @@ void CpAddRecent(std::vector<COLORREF>& recent, COLORREF color, size_t max) {
 		recent.resize(max);
 }
 
+POINT CpPlaceDropDown(const RECT& anchor, SIZE size, const RECT& work) {
+	POINT pt{ anchor.left, anchor.bottom };
+	if (pt.y + size.cy > work.bottom && anchor.top - size.cy >= work.top)
+		pt.y = anchor.top - size.cy;
+	pt.x = std::clamp(pt.x, work.left, std::max(work.left, work.right - size.cx));
+	pt.y = std::clamp(pt.y, work.top, std::max(work.top, work.bottom - size.cy));
+	return pt;
+}
+
+POINT CpCenterOver(const RECT& owner, SIZE size, const RECT& work) {
+	POINT pt{ (owner.left + owner.right - size.cx) / 2, (owner.top + owner.bottom - size.cy) / 2 };
+	pt.x = std::clamp(pt.x, work.left, std::max(work.left, work.right - size.cx));
+	pt.y = std::clamp(pt.y, work.top, std::max(work.top, work.bottom - size.cy));
+	return pt;
+}
+
+int CpPanelHeight(const CpPanel& p, int top) {
+	int bottom = top;
+	auto take = [&](const RECT& rc) {
+		if (rc.right > rc.left && rc.bottom > rc.top)
+			bottom = std::max(bottom, (int)rc.bottom);
+	};
+	take(p.swatch);
+	take(p.eyedropper);
+	for (auto& rc : p.frame)
+		take(rc);
+	for (auto& rc : p.group)
+		take(rc);
+	return bottom - top;
+}
+
 POINT CpPlaceMagnifier(POINT cursor, SIZE size, const RECT& work, int offset) {
 	POINT pt{ cursor.x + offset, cursor.y + offset };
 	if (pt.x + size.cx > work.right)

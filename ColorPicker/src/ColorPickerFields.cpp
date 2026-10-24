@@ -1,4 +1,5 @@
 #include "ColorPicker.h"
+#include "ColorPickerDraw.h"
 #include "ColorPickerGradient.h"
 #include "ColorPickerModel.h"
 
@@ -12,62 +13,75 @@
 // controls without borders; their frames, labels and spin buttons are drawn by the control, so they follow
 // its colors.
 
+using namespace CpDraw;
+
 namespace {
 	const wchar_t* const FieldNames[CpFieldCount] = { L"H", L"S", L"V", L"A", L"R", L"G", L"B", L"Hex" };
 	const UINT SpinTimer = 1;
 	const COLORREF BadColor = RGB(0xE0, 0x40, 0x40);
-
-	bool IsEmpty(const RECT& rc) {
-		return rc.right <= rc.left || rc.bottom <= rc.top;
-	}
-
-	COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
-		auto mix = [=](int x, int y) { return (BYTE)((x * (100 - percentB) + y * percentB) / 100); };
-		return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
-	}
-
-	void FillSolid(HDC hdc, const RECT& rc, COLORREF color) {
-		::SetBkColor(hdc, color);
-		::ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
-	}
-
-	void Frame(HDC hdc, const RECT& rc, COLORREF color) {
-		FillSolid(hdc, { rc.left, rc.top, rc.right, rc.top + 1 }, color);
-		FillSolid(hdc, { rc.left, rc.bottom - 1, rc.right, rc.bottom }, color);
-		FillSolid(hdc, { rc.left, rc.top, rc.left + 1, rc.bottom }, color);
-		FillSolid(hdc, { rc.right - 1, rc.top, rc.right, rc.bottom }, color);
-	}
-
-	// pixels drawn by the model, put on the DC at rc
-	void DrawPixels(HDC hdc, const RECT& rc, auto&& fill) {
-		int w = rc.right - rc.left, h = rc.bottom - rc.top;
-		if (w <= 0 || h <= 0)
-			return;
-		std::vector<uint32_t> bits((size_t)w * h);
-		fill(CpPixels{ bits.data(), w, h });
-		BITMAPINFO bmi{};
-		bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-		bmi.bmiHeader.biWidth = w;
-		bmi.bmiHeader.biHeight = -h;
-		bmi.bmiHeader.biPlanes = 1;
-		bmi.bmiHeader.biBitCount = 32;
-		bmi.bmiHeader.biCompression = BI_RGB;
-		::SetDIBitsToDevice(hdc, rc.left, rc.top, w, h, 0, 0, 0, h, bits.data(), &bmi, DIB_RGB_COLORS);
-	}
-
-	// a small arrow pointing up or down, centered in rc
-	void Arrow(HDC hdc, const RECT& rc, bool up, int width, COLORREF color) {
-		int height = std::max(2, width / 2 + 1);   // rows from the tip: one pixel, then two more each row
-		int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2;
-		int tip = up ? cy - height / 2 : cy + (height - 1) / 2;
-		for (int i = 0; i < height; i++) {
-			int y = up ? tip + i : tip - i;
-			FillSolid(hdc, { cx - i, y, cx + i + 1, y + 1 }, color);
-		}
-	}
 }
 
 // ---- Creating and placing ------------------------------------------------------------------
+
+// the panel's metrics: measured in the font, at the DPI
+static CpPanelMetrics MeasurePanel(HWND hWnd, HFONT font, UINT dpi, int* pTextHeight) {
+	auto scale = [=](int dips) { return ::MulDiv(dips, dpi, 96); };
+	WTL::CClientDC dc(hWnd);
+	auto old = dc.SelectFont(font);
+	TEXTMETRICW tm{};
+	dc.GetTextMetrics(&tm);
+	int labelWidth = 0;
+	for (auto name : FieldNames) {
+		SIZE size{};
+		dc.GetTextExtent(name, -1, &size);
+		labelWidth = std::max(labelWidth, (int)size.cx);
+	}
+	SIZE hex{}, number{};
+	dc.GetTextExtent(L"#DDDDDD", -1, &hex);
+	dc.GetTextExtent(L"0000", -1, &number);
+	dc.SelectFont(old);
+
+	*pTextHeight = tm.tmHeight;
+	int padX = scale(3);
+	CpPanelMetrics pm;
+	pm.spinWidth = scale(14);
+	pm.labelWidth = labelWidth + scale(8);
+	pm.fieldWidth = std::max({ scale(56), (int)hex.cx + 2 * padX + 4, (int)number.cx + 2 * padX + 4 + pm.spinWidth });
+	pm.fieldHeight = tm.tmHeight + scale(8);
+	pm.rowGap = scale(6);
+	pm.colGap = scale(10);
+	pm.swatchHeight = scale(56);
+	pm.swatchGap = scale(12);
+	pm.buttonGap = scale(6);
+	pm.cellGap = std::max(2, scale(3));
+	pm.groupGap = scale(8);
+	return pm;
+}
+
+static CpPanelOptions PanelOptions(DWORD style, int paletteCount) {
+	CpPanelOptions o;
+	o.swatch = (style & CPKS_NOSWATCH) == 0;
+	o.eyedropper = (style & CPKS_NOEYEDROPPER) == 0;
+	o.fields = (style & CPKS_NOFIELDS) == 0;
+	o.alpha = (style & CPKS_NOALPHA) == 0;
+	o.groups = (style & CPKS_NOPALETTE) == 0;
+	o.paletteCount = paletteCount;
+	return o;
+}
+
+SIZE CColorPickerCtrl::GetIdealSize() const {
+	// the area square and as tall as the panel (or a minimum), the bars and the panel beside it
+	int textHeight;
+	auto pm = MeasurePanel(m_hWnd, m_hFont, m_Dpi, &textHeight);
+	auto o = PanelOptions(GetStyle(), (int)m_Palette.size());
+	bool panel = o.swatch || o.fields || o.groups;
+	int panelHeight = panel ? CpPanelHeight(CpComputePanel(0, 0, pm, o), 0) : 0;
+	int side = std::max(panelHeight, Scale(200));
+	int width = m_Pad + side + m_Gap + m_BarWidth + (HasAlpha() ? m_Gap + m_BarWidth : 0) + m_Pad;
+	if (panel)
+		width += m_Gap - m_Pad + CpPanelWidth(pm) + m_Pad;
+	return { width, side + 2 * m_Pad };
+}
 
 void CColorPickerCtrl::CreateFields() {
 	for (int f = 0; f < CpFieldCount; f++) {
@@ -94,45 +108,11 @@ void CColorPickerCtrl::PositionFields() {
 	RECT client;
 	GetClientRect(&client);
 
-	// measured in the font
-	WTL::CClientDC dc(m_hWnd);
-	auto old = dc.SelectFont(m_hFont);
-	TEXTMETRICW tm{};
-	dc.GetTextMetrics(&tm);
-	int labelWidth = 0;
-	for (auto name : FieldNames) {
-		SIZE size{};
-		dc.GetTextExtent(name, -1, &size);
-		labelWidth = std::max(labelWidth, (int)size.cx);
-	}
-	SIZE hex{}, number{};
-	dc.GetTextExtent(L"#DDDDDD", -1, &hex);
-	dc.GetTextExtent(L"0000", -1, &number);
-	dc.SelectFont(old);
-
-	m_TextHeight = tm.tmHeight;
-	m_SpinWidth = Scale(14);
-	int padX = Scale(3);
-	CpPanelMetrics pm;
-	pm.labelWidth = labelWidth + Scale(8);
-	pm.fieldWidth = std::max({ Scale(56), (int)hex.cx + 2 * padX + 4, (int)number.cx + 2 * padX + 4 + m_SpinWidth });
-	pm.fieldHeight = m_TextHeight + Scale(8);
-	pm.rowGap = Scale(6);
-	pm.colGap = Scale(10);
-	pm.swatchHeight = Scale(56);
-	pm.swatchGap = Scale(12);
-	pm.spinWidth = m_SpinWidth;
-	pm.buttonGap = Scale(6);
-	pm.cellGap = m_CellGap = std::max(2, Scale(3));
-	pm.groupGap = Scale(8);
-
-	CpPanelOptions o;
-	o.swatch = HasSwatch();
-	o.eyedropper = (GetStyle() & CPKS_NOEYEDROPPER) == 0;
-	o.fields = HasFields();
-	o.alpha = HasAlpha();
-	o.groups = HasGroups();
-	o.paletteCount = (int)m_Palette.size();
+	auto pm = MeasurePanel(m_hWnd, m_hFont, m_Dpi, &m_TextHeight);
+	m_SpinWidth = pm.spinWidth;
+	m_CellGap = pm.cellGap;
+	int padX = ::MulDiv(3, m_Dpi, 96);
+	auto o = PanelOptions(GetStyle(), (int)m_Palette.size());
 	if (o.swatch || o.fields || o.groups) {
 		int left = std::max(m_Pad, (int)client.right - m_Pad - CpPanelWidth(pm));
 		auto p = CpComputePanel(left, m_Pad, pm, o);

@@ -1,4 +1,5 @@
 #include "ColorPicker.h"
+#include "ColorPickerDraw.h"
 #include "ColorPickerGradient.h"
 #include "ColorPickerMagnifier.h"
 #include "ColorPickerModel.h"
@@ -8,20 +9,7 @@
 #include <algorithm>
 #include <cmath>
 
-// ---- Helpers -----------------------------------------------------------------------
-
-static COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
-	auto mix = [=](int x, int y) { return (BYTE)((x * (100 - percentB) + y * percentB) / 100); };
-	return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
-}
-
-static bool IsDarkColor(COLORREF c) {
-	return GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114 < 128 * 1000;
-}
-
-static bool IsEmpty(const RECT& rc) {
-	return rc.right <= rc.left || rc.bottom <= rc.top;
-}
+using CpDraw::IsEmpty;
 
 // ---- Construction ------------------------------------------------------------------
 
@@ -600,18 +588,7 @@ void CColorPickerCtrl::SetColors(const CPKCOLORS* colors) {
 }
 
 CPKCOLORS CColorPickerCtrl::GetColors() const {
-	if (!m_SystemColors)
-		return m_Colors;
-	// read each time: WTLHelper's dark mode hooks GetSysColor (COLOR_WINDOW, COLOR_3DFACE and COLOR_WINDOWTEXT)
-	CPKCOLORS c;
-	c.crBack = ::GetSysColor(COLOR_3DFACE);
-	c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
-	c.crFieldBack = ::GetSysColor(COLOR_WINDOW);
-	bool dark = IsDarkColor(c.crBack);
-	c.crBorder = Blend(c.crBack, dark ? RGB(255, 255, 255) : RGB(0, 0, 0), dark ? 30 : 35);
-	c.crCheck1 = dark ? RGB(0x5A, 0x5A, 0x5A) : RGB(0xFF, 0xFF, 0xFF);
-	c.crCheck2 = dark ? RGB(0x3A, 0x3A, 0x3A) : RGB(0xCC, 0xCC, 0xCC);
-	return c;
+	return m_SystemColors ? CpDraw::SystemColors() : m_Colors;
 }
 
 // ---- Painting the gradients ------------------------------------------------------------------

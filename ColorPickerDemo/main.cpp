@@ -30,8 +30,10 @@ CAppModule _Module;
 enum {
 	IDC_PICKER = 101,
 	IDC_RESET = 102,
+	IDC_BUTTON = 103,
 
 	ID_FILE_EXIT = 201,
+	ID_FILE_DIALOG,
 
 	ID_VIEW_ALPHA = 301,
 	ID_VIEW_DARK,
@@ -57,7 +59,13 @@ enum {
 // ---- State --------------------------------------------------------------------
 
 static CColorPickerCtrl g_picker;
+static CColorButtonCtrl g_button;
 static HWND g_reset;
+// the dialog's, kept between uses
+static COLORREF g_dialogCustom[CPK_CUSTOMCOLORS] = { CLR_NONE, CLR_NONE, CLR_NONE, CLR_NONE, CLR_NONE, CLR_NONE,
+	CLR_NONE, CLR_NONE, CLR_NONE, CLR_NONE, CLR_NONE, CLR_NONE };
+static COLORREF g_dialogRecent[CPK_MAXRECENT];
+static int g_dialogRecentCount;
 static bool g_darkColors;
 static int g_changing, g_changed, g_customChanged;
 static bool g_grays;
@@ -99,6 +107,8 @@ static void Layout(HWND hwnd) {
 	auto panel = PanelRect(hwnd);
 	g_picker.SetWindowPos(nullptr, 0, 0, panel.left, rc.bottom, SWP_NOZORDER | SWP_NOACTIVATE);
 	::SetWindowPos(g_reset, nullptr, panel.left + Scale(hwnd, 10), rc.bottom - Scale(hwnd, 38), Scale(hwnd, 100), Scale(hwnd, 28),
+		SWP_NOZORDER | SWP_NOACTIVATE);
+	g_button.SetWindowPos(nullptr, panel.left + Scale(hwnd, 10), rc.bottom - Scale(hwnd, 76), Scale(hwnd, 100), Scale(hwnd, 28),
 		SWP_NOZORDER | SWP_NOACTIVATE);
 	::InvalidateRect(hwnd, &panel, TRUE);
 }
@@ -142,7 +152,7 @@ static void PaintPanel(HWND hwnd, HDC hdc) {
 	text.Format(L"Hex:  #%02X%02X%02X\nRGB:  %d, %d, %d\nAlpha:  %d\nHSV:  %.2f\x00B0, %.1f%%, %.1f%%\nOriginal:  %s\nCustom:  %d saved, %d changes\nRecent:  %d\n\nChanging: %d\nChanged: %d\nLast: %s",
 		GetRValue(color), GetGValue(color), GetBValue(color), GetRValue(color), GetGValue(color), GetBValue(color), alpha,
 		hsv.h, hsv.s * 100, hsv.v * 100, (LPCWSTR)origText, saved, g_customChanged, g_picker.GetRecentColors(nullptr, 0), g_changing, g_changed, (LPCWSTR)g_lastEvent);
-	RECT tr{ panel.left + pad, panel.top + pad, panel.right - pad, panel.bottom - Scale(hwnd, 44) };
+	RECT tr{ panel.left + pad, panel.top + pad, panel.right - pad, panel.bottom - Scale(hwnd, 82) };
 	auto oldFont = ::SelectObject(hdc, g_font);
 	::SetTextColor(hdc, c.crText);
 	::SetBkMode(hdc, TRANSPARENT);
@@ -150,11 +160,39 @@ static void PaintPanel(HWND hwnd, HDC hdc) {
 	::SelectObject(hdc, oldFont);
 }
 
+// the dialog's live preview: the color button shows it
+static void CALLBACK Preview(COLORREF color, BYTE alpha, LPARAM) {
+	g_button.SetColor(color);
+	g_button.SetAlpha(alpha);
+	g_button.UpdateWindow();
+}
+
 static void OnCommand(HWND hwnd, UINT id) {
 	switch (id) {
 		case ID_FILE_EXIT:
 			::DestroyWindow(hwnd);
 			return;
+		case ID_FILE_DIALOG:
+		{
+			CPKDIALOG dlg;
+			dlg.hwndOwner = hwnd;
+			dlg.pszTitle = L"Pick a Color";
+			dlg.color = g_button.GetColor();
+			dlg.alpha = g_button.GetAlpha();
+			dlg.customColors = g_dialogCustom;
+			dlg.recentColors = g_dialogRecent;
+			dlg.recentCount = g_dialogRecentCount;
+			dlg.colors = g_darkColors ? &g_dark : nullptr;
+			dlg.pfnPreview = Preview;
+			if (ColorPickerDialog(&dlg)) {
+				g_dialogRecentCount = dlg.recentCount;
+				g_lastEvent.Format(L"dialog OK #%02X%02X%02X", GetRValue(dlg.color), GetGValue(dlg.color), GetBValue(dlg.color));
+			}
+			else {
+				g_lastEvent = L"dialog canceled";
+			}
+			break;
+		}
 		case ID_VIEW_ALPHA:
 			if (g_picker.GetStyle() & CPKS_NOALPHA)
 				g_picker.ModifyStyle(CPKS_NOALPHA, 0);
@@ -186,6 +224,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_VIEW_DARK:
 			g_darkColors = !g_darkColors;
 			g_picker.SetColors(g_darkColors ? &g_dark : nullptr);
+			g_button.SetColors(g_darkColors ? &g_dark : nullptr);
 			break;
 #ifdef DEMO_WTLHELPER
 		case ID_VIEW_DARKMODE:
@@ -248,6 +287,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_reset = ::CreateWindowExW(0, WC_BUTTONW, L"&Reset", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_RESET, nullptr, nullptr);
 			::SendMessage(g_reset, WM_SETFONT, (WPARAM)g_font, FALSE);
+			g_button.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, IDC_BUTTON);
+			g_button.SetColor(RGB(0xE0, 0x60, 0x20));
 			g_picker.SetFocus();
 			return 0;
 
@@ -284,7 +325,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_NOTIFY:
 		{
 			auto nm = (NMCOLORPICKER*)lParam;
-			if (nm->hdr.idFrom == IDC_PICKER && nm->hdr.code == CPKN_CUSTOMCHANGED) {
+			if (nm->hdr.idFrom == IDC_BUTTON) {
+				static const wchar_t* codes[] = { L"changing", L"changed", L"custom changed", L"dropdown", L"closeup" };
+				UINT index = CPKN_FIRST - nm->hdr.code;
+				if (index < std::size(codes)) {
+					g_lastEvent.Format(L"button: %s #%02X%02X%02X", codes[index], GetRValue(nm->color), GetGValue(nm->color), GetBValue(nm->color));
+					auto panel = PanelRect(hwnd);
+					::InvalidateRect(hwnd, &panel, FALSE);
+				}
+			}
+			else if (nm->hdr.idFrom == IDC_PICKER && nm->hdr.code == CPKN_CUSTOMCHANGED) {
 				g_customChanged++;
 				auto panel = PanelRect(hwnd);
 				::InvalidateRect(hwnd, &panel, FALSE);
@@ -343,6 +393,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::RegisterClassExW(&wc);
 
 	HMENU hFile = ::CreatePopupMenu();
+	::AppendMenuW(hFile, MF_STRING, ID_FILE_DIALOG, L"&Choose Color (Dialog)...\tCtrl+D");
+	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_FILE_EXIT, L"E&xit");
 
 	HMENU hView = ::CreatePopupMenu();
@@ -384,6 +436,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY, VK_F5, ID_COLOR_RANDOM },
 		{ FVIRTKEY | FCONTROL, 'R', ID_COLOR_ADDRECENT },
 		{ FVIRTKEY | FCONTROL, 'P', ID_COLOR_PICK },
+		{ FVIRTKEY | FCONTROL, 'D', ID_FILE_DIALOG },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTable(accels, (int)std::size(accels));
 
