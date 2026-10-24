@@ -23,11 +23,11 @@ NuGet dependencies (`packages.config`): Detours (`ThemeHelper.cpp` includes `<de
 
 ## Tests
 
-The automated tests are in `GraphControlTests/tests.cpp`, `WTLDockTests/`, `PropertyGridTests/tests.cpp`, `LogViewTests/tests.cpp` and `ColorPickerTests/tests.cpp`. Each is a console exe with a hand-rolled harness and no framework. The process exit code is the number of failed checks.
+The automated tests are in `GraphControlTests/tests.cpp`, `WTLDockTests/`, `PropertyGridTests/tests.cpp`, `LogViewTests/tests.cpp`, `ColorPickerTests/tests.cpp` and `AccordionTests/tests.cpp`. Each is a console exe with a hand-rolled harness and no framework. The process exit code is the number of failed checks.
 
 - Add a test with `TEST(Name) { CHECK(...); }`, then add a `Run_Name();` call in `wmain`. Registration is manual, so a test you don't call never runs.
 - To run a single test, comment out the other `Run_*` calls in `wmain`. There is no filter argument.
-- The tests mostly cover pure data models (`GraphData` and the cell graphs, the dock layout, the property grid's item tree and formatters, the log view's line storage, the color picker's conversions and pixels); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `CellGraphsDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `LogViewDemo`, `ColorPickerDemo`, `HexTest`, `BasicDemo`).
+- The tests mostly cover pure data models (`GraphData` and the cell graphs, the dock layout, the property grid's item tree and formatters, the log view's line storage, the color picker's conversions and pixels, the accordion's layout and state); `WTLDockTests/ui_tests.cpp` also creates windows. Anything else that needs an HWND or a render target is checked by hand with the demo apps (`GraphDemo`, `CellGraphsDemo`, `NodeGraphDemo`, `TreeListViewDemo`, `PropertyGridDemo`, `LogViewDemo`, `ColorPickerDemo`, `HexTest`, `BasicDemo`).
 
 ## Architecture
 
