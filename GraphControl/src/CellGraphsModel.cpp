@@ -87,7 +87,7 @@ float MeterFraction(float value, float min, float max) {
     return std::clamp((value - min) / (max - min), 0.0f, 1.0f);
 }
 
-COLORREF ThresholdColor(float value, const Threshold* thresholds, size_t count, COLORREF fallback) {
+COLORREF ThresholdColor(float value, const CellThreshold* thresholds, size_t count, COLORREF fallback) {
     COLORREF color = fallback;
     if (IsMissing(value))
         return color;
@@ -145,6 +145,22 @@ void FillRect(const Pixels& px, const RectF& rc, COLORREF color, float alpha) {
             float c = cy * Overlap((float)x, (float)x + 1, rc.Left, rc.Right) * alpha;
             if (c > 0)
                 px.At(x, y) = Blend(px.At(x, y), color, c);
+        }
+    }
+}
+
+void TintRect(const Pixels& px, const RectF& rc, float strength) {
+    int x0 = std::max(0, (int)std::floor(rc.Left)), x1 = std::min(px.Width, (int)std::ceil(rc.Right));
+    int y0 = std::max(0, (int)std::floor(rc.Top)), y1 = std::min(px.Height, (int)std::ceil(rc.Bottom));
+    for (int y = y0; y < y1; y++) {
+        float cy = Overlap((float)y, (float)y + 1, rc.Top, rc.Bottom);
+        for (int x = x0; x < x1; x++) {
+            float c = cy * Overlap((float)x, (float)x + 1, rc.Left, rc.Right) * strength;
+            if (c <= 0)
+                continue;
+            uint32_t p = px.At(x, y);
+            int lum = (int)(((p >> 16) & 0xFF) * 299 + ((p >> 8) & 0xFF) * 587 + (p & 0xFF) * 114) / 1000;
+            px.At(x, y) = Blend(p, lum < 128 ? RGB(255, 255, 255) : RGB(0, 0, 0), c);
         }
     }
 }

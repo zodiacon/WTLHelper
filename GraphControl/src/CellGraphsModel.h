@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "CellGraphs.h"
 #include "GraphData.h"
 
 // The window-free parts of the cell graphs: where a series' samples go in a cell, the bars of a column graph,
@@ -58,14 +59,9 @@ std::vector<Bar> ColumnBars(const Series& series, size_t slots, ValueRange range
 
 // ---- Meter -------------------------------------------------------------------------
 
-struct Threshold {
-    float    From;    // the color from this value up
-    COLORREF Color;
-};
-
 float    MeterFraction(float value, float min, float max);   // 0..1; 0 for a missing value
 // the color of the last threshold at or below the value (in ascending order), else fallback
-COLORREF ThresholdColor(float value, const Threshold* thresholds, size_t count, COLORREF fallback);
+COLORREF ThresholdColor(float value, const CellThreshold* thresholds, size_t count, COLORREF fallback);
 
 // ---- Stacked bar ---------------------------------------------------------------------
 //
@@ -97,6 +93,9 @@ void FillRect(const Pixels& px, const RectF& rc, COLORREF color, float alpha = 1
 void FillArea(const Pixels& px, const std::vector<PointF>& run, float baseY, COLORREF color, float alpha = 1);
 // an anti-aliased line through the points, width wide; joints blend once (coverage is the max over the segments)
 void DrawPolyline(const Pixels& px, const std::vector<PointF>& points, float width, COLORREF color, float alpha = 1);
+// the pixels under the rectangle shifted toward black on a light background, white on a dark one (each pixel by
+// its own lightness, so it reads the same over a selection highlight): a track that suits any background
+void TintRect(const Pixels& px, const RectF& rc, float strength);
 // a dot (a run of one point)
 void FillDot(const Pixels& px, PointF center, float radius, COLORREF color, float alpha = 1);
 

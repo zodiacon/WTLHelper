@@ -694,7 +694,7 @@ TEST(Cells_MeterAndThresholds) {
     CHECK_NEAR(MeterFraction(-1, 0, 100), 0);
     CHECK_NEAR(MeterFraction(MissingSample, 0, 100), 0);
     CHECK_NEAR(MeterFraction(5, 10, 10), 0);
-    Threshold t[] = { { 0, RGB(0, 200, 0) }, { 70, RGB(240, 160, 0) }, { 90, RGB(220, 0, 0) } };
+    CellThreshold t[] = { { 0, RGB(0, 200, 0) }, { 70, RGB(240, 160, 0) }, { 90, RGB(220, 0, 0) } };
     CHECK(ThresholdColor(10, t, 3, 1) == RGB(0, 200, 0));
     CHECK(ThresholdColor(70, t, 3, 1) == RGB(240, 160, 0));
     CHECK(ThresholdColor(95, t, 3, 1) == RGB(220, 0, 0));
@@ -825,6 +825,120 @@ TEST(Cells_HistoryKeepsRowsSeen) {
     CHECK(named.Find(L"a") && !named.Find(L"b"));
 }
 
+TEST(Cells_Tint) {
+    Buffer light(4, 1, 0xFFFFFF), dark(4, 1, 0x101010);
+    TintRect(light.Px, { 0, 0, 2, 1 }, 0.5f);
+    TintRect(dark.Px, { 0, 0, 2, 1 }, 0.5f);
+    CHECK(light.Px.At(0, 0) == 0x808080 && light.Px.At(2, 0) == 0xFFFFFF);   // darker on light
+    CHECK(dark.Px.At(1, 0) == 0x888888 && dark.Px.At(3, 0) == 0x101010);     // lighter on dark
+}
+
+// a memory DC with a DIB section, for the drawing functions
+struct TestDc {
+    HDC       Dc = nullptr;
+    HBITMAP   Bitmap = nullptr;
+    HGDIOBJ   Old = nullptr;
+    uint32_t* Bits = nullptr;
+    int       W, H;
+
+    TestDc(int w, int h, uint32_t fill) : W(w), H(h) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        Bitmap = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        Bits = (uint32_t*)bits;
+        Dc = CreateCompatibleDC(nullptr);
+        Old = SelectObject(Dc, Bitmap);
+        std::fill_n(Bits, (size_t)w * h, fill);
+    }
+    ~TestDc() {
+        SelectObject(Dc, Old);
+        DeleteDC(Dc);
+        DeleteObject(Bitmap);
+    }
+    uint32_t At(int x, int y) const {
+        GdiFlush();
+        return Bits[(size_t)y * W + x];
+    }
+};
+
+TEST(Cells_DrawMeter) {
+    TestDc d(120, 20, 0xFFFFFF);
+    MeterStyle s;
+    s.Padding = 0;
+    s.BarColor = RGB(255, 0, 0);
+    DrawMeter(d.Dc, { 10, 0, 110, 20 }, 50, s);
+    CHECK(d.At(30, 10) == 0xFF0000);                   // the filled half
+    CHECK(d.At(59, 10) == 0xFF0000);
+    uint32_t track = d.At(80, 10);
+    CHECK(track != 0xFFFFFF && track != 0xFF0000);    // the tinted track
+    CHECK(d.At(5, 10) == 0xFFFFFF && d.At(115, 10) == 0xFFFFFF);   // outside the cell: untouched
+    // thresholds pick the color; a bar height is centered
+    CellThreshold t[] = { { 0, RGB(0, 255, 0) }, { 80, RGB(0, 0, 255) } };
+    s.Thresholds = t;
+    s.ThresholdCount = 2;
+    s.BarHeight = 6;
+    TestDc e(100, 20, 0xFFFFFF);
+    DrawMeter(e.Dc, { 0, 0, 100, 20 }, 90, s);
+    CHECK(e.At(50, 10) == 0x0000FF);
+    CHECK(e.At(50, 2) == 0xFFFFFF && e.At(50, 17) == 0xFFFFFF);   // above and below the bar
+    // the track on a dark background is lighter
+    TestDc dark(100, 20, 0x202020);
+    DrawMeter(dark.Dc, { 0, 0, 100, 20 }, 0, MeterStyle{});
+    CHECK(((dark.At(50, 10) >> 16) & 0xFF) > 0x20);
+}
+
+TEST(Cells_DrawSparklineAndColumns) {
+    TestDc d(60, 20, 0xFFFFFF);
+    SparklineStyle s;
+    s.Padding = 0;
+    s.LineWidth = 2;
+    s.LineColor = RGB(0, 0, 0);
+    s.FillColor = RGB(255, 0, 0);
+    s.FillOpacity = 1;
+    auto series = MakeSeries({ 50, 50, 50, 50 }, 4);
+    DrawSparkline(d.Dc, { 0, 0, 60, 20 }, series, s);
+    // a flat line at half height: dark on the line, the fill below it, white above
+    CHECK(d.At(30, 10) == 0x000000 || d.At(30, 9) == 0x000000);
+    CHECK(d.At(30, 16) == 0xFF0000);
+    CHECK(d.At(30, 3) == 0xFFFFFF);
+
+    TestDc c(40, 20, 0xFFFFFF);
+    ColumnStyle cs;
+    cs.Padding = 0;
+    cs.Gap = 0;
+    CellThreshold t[] = { { 0, RGB(0, 255, 0) }, { 75, RGB(255, 0, 0) } };
+    cs.Thresholds = t;
+    cs.ThresholdCount = 2;
+    DrawColumns(c.Dc, { 0, 0, 40, 20 }, MakeSeries({ 100, 50 }, 4), cs);   // 4 slots of 10 px
+    CHECK(c.At(35, 15) == 0x00FF00 && c.At(35, 5) == 0xFFFFFF);   // the newest, 50: half high, green
+    CHECK(c.At(25, 2) == 0xFF0000);                                // 100: full, red
+    CHECK(c.At(5, 15) == 0xFFFFFF);                                // no samples there yet
+}
+
+TEST(Cells_DrawStacked) {
+    TestDc d(100, 10, 0xFFFFFF);
+    StackedStyle s;
+    s.Padding = 0;
+    s.Total = 100;
+    COLORREF colors[] = { RGB(255, 0, 0), RGB(0, 0, 255) };
+    s.Colors = colors;
+    s.ColorCount = 2;
+    float values[] = { 25, 25 };
+    DrawStacked(d.Dc, { 0, 0, 100, 10 }, values, 2, s);
+    CHECK(d.At(10, 5) == 0xFF0000);
+    CHECK(d.At(40, 5) == 0x0000FF);
+    CHECK(d.At(80, 5) != 0xFFFFFF && d.At(80, 5) != 0x0000FF);   // the track
+    // an empty cell or no values: no harm
+    DrawStacked(d.Dc, { 0, 0, 0, 0 }, values, 2, s);
+    DrawStacked(d.Dc, { 0, 0, 100, 10 }, nullptr, 0, s);
+}
+
 int wmain() {
     wprintf(L"GraphControl data model tests\n\n");
 
@@ -873,6 +987,10 @@ int wmain() {
     Run_Cells_FillArea();
     Run_Cells_Polyline();
     Run_Cells_HistoryKeepsRowsSeen();
+    Run_Cells_Tint();
+    Run_Cells_DrawMeter();
+    Run_Cells_DrawSparklineAndColumns();
+    Run_Cells_DrawStacked();
 
     wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures;

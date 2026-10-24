@@ -103,6 +103,7 @@
     <ClInclude Include="src\CellGraphsModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CellGraphs.cpp" />
     <ClCompile Include="src\CellGraphsModel.cpp" />
     <ClCompile Include="src\CompositionBar.cpp" />
     <ClCompile Include="src\GraphControl.cpp" />
