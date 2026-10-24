@@ -94,7 +94,9 @@ struct NMCOLORPICKER {
 // ---- Control class --------------------------------------------------------------------------
 
 class CpGradientWindow;
+class CpSwatchWindow;
 class CpMagnifier;
+class CpAccessible;
 
 class CColorPickerCtrl : public ATL::CWindowImpl<CColorPickerCtrl> {
 public:
@@ -102,6 +104,8 @@ public:
 
 	CColorPickerCtrl();
 	~CColorPickerCtrl();
+	friend class CpGradAccessible;
+	friend class CpSwatchAccessible;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -153,6 +157,19 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnGradLButtonUp)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnGradCaptureChanged)
 		MESSAGE_HANDLER(WM_UPDATEUISTATE, OnGradUpdateUIState)
+		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnGradMouseWheel)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGradGetObject)
+	ALT_MSG_MAP(2)   // the swatches, a child window (for the focus and the keys; the mouse goes through it)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnSwPaint)
+		MESSAGE_HANDLER(WM_PRINTCLIENT, OnSwPaint)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnSwFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnSwFocus)
+		MESSAGE_HANDLER(WM_UPDATEUISTATE, OnSwUpdateUIState)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnSwGetDlgCode)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnSwKeyDown)
+		MESSAGE_HANDLER(WM_NCHITTEST, OnSwNcHitTest)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnSwGetObject)
 	END_MSG_MAP()
 
 	// ---- Color ---------------------------------------------------------------------------
@@ -253,6 +270,16 @@ private:
 	LRESULT OnGradLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGradCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGradUpdateUIState(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGradMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGradGetObject(UINT, WPARAM, LPARAM, BOOL&);
+
+	LRESULT OnSwPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwUpdateUIState(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwNcHitTest(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSwGetObject(UINT, WPARAM, LPARAM, BOOL&);
 
 	struct Hsv { double h, s, v; };               // CpHsv, which the header doesn't see
 	enum { FieldCount = 8 };                      // CpFieldCount
@@ -308,6 +335,20 @@ private:
 	void    SampleScreen(POINT ptScreen);         // the eyedropper's color, and the magnifier
 	void    EndEyedropper(bool cancel);
 	static LRESULT CALLBACK PickHookProc(int code, WPARAM wParam, LPARAM lParam);
+	// the swatch window: the cells' bounds; keys move a focused cell (group, index)
+	void    PositionSwatchWindow();
+	void    InvalidateSwatches(const RECT* prc = nullptr);   // control coords; nullptr: all
+	void    SwatchCounts(int* counts) const;      // [3]: the cells of each group that take the focus
+	bool    IsSwatchCell(int group, int index) const;
+	void    FocusSwatch(int group, int index, bool notify);
+	void    ActivateSwatch(int group, int index, bool save);   // Enter: pick it, or save the color into a slot
+	int     SwatchChild(int group, int index) const;   // the accessible child id (0 if none)
+	bool    SwatchOfChild(long child, int* pGroup, int* pIndex) const;
+
+	// accessibility (ColorPickerAccessible.cpp)
+	void    NotifyAccessible(DWORD event, HWND hWnd, long child);   // only when a client has asked
+	void    DisconnectAccessible();
+	static LRESULT EditGetObject(CColorPickerCtrl* self, int field, HWND hWnd, WPARAM wParam, LPARAM lParam);
 	static LRESULT CALLBACK EditSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
 	// painting the gradients
@@ -315,6 +356,14 @@ private:
 	bool    EnsureBuffer(int width, int height);
 
 	std::unique_ptr<CpGradientWindow> m_Grad;
+	std::unique_ptr<CpSwatchWindow> m_Swatches;
+	int           m_SwGroup = 0;                  // the focused swatch
+	int           m_SwIndex = 0;
+	RECT          m_SwRect{};                     // the swatch window's, control coords
+	int           m_GradWheel = 0;                // wheel remainder on the gradients
+	CpAccessible* m_GradAcc = nullptr;            // made on the first WM_GETOBJECT; cut off in OnDestroy
+	CpAccessible* m_SwAcc = nullptr;
+	CpAccessible* m_EditAcc[8]{};
 
 	Hsv           m_Hsv{ 0, 0, 1 };
 	BYTE          m_Alpha = 255;
@@ -435,8 +484,12 @@ public:
 	CColorButtonCtrl();
 	~CColorButtonCtrl();
 	friend class CpColorPopup;
+	friend class CpButtonAccessible;
 
-	enum : UINT { WM_CPB_CLOSE = WM_USER + 210 };   // posted to itself; wParam: TRUE to cancel
+	enum : UINT {
+		WM_CPB_CLOSE = WM_USER + 210,   // posted to itself; wParam: TRUE to cancel
+		WM_CPB_OPEN,                    // posted to itself (accessibility's default action)
+	};
 
 	BEGIN_MSG_MAP(CColorButtonCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -456,6 +509,9 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
 		MESSAGE_HANDLER(WM_CPB_CLOSE, OnClose)
+		MESSAGE_HANDLER(WM_CPB_OPEN, OnOpen)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnRepaint)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnRepaint)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnRepaint)
 		MESSAGE_HANDLER(CColorPickerCtrl::ThemeChangedMessage, OnRepaint)
@@ -494,8 +550,12 @@ private:
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnClose(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnOpen(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
 
 	void    Paint(HDC hdc);
+	void    NotifyAccessible(DWORD event);        // only when a client has asked (ColorPickerAccessible.cpp)
+	void    DisconnectAccessible();
 	void    Notify(UINT code, UINT part);
 	void    PickerChanged(const NMCOLORPICKER* nm);   // from the popup's picker
 
@@ -515,4 +575,5 @@ private:
 	COLORREF      m_StartColor = 0;               // when it opened, for Escape
 	BYTE          m_StartAlpha = 255;
 	bool          m_Changed = false;              // since it opened
+	CpAccessible* m_Acc = nullptr;                // made on the first WM_GETOBJECT; cut off in OnDestroy
 };

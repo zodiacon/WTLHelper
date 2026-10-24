@@ -85,8 +85,7 @@ int CColorPickerCtrl::GetPalette(COLORREF* colors, int max) const {
 void CColorPickerCtrl::SetCustomColors(const COLORREF* colors, int count) {
 	for (int i = 0; i < CPK_CUSTOMCOLORS; i++)
 		m_Custom[i] = colors && i < count && colors[i] != CLR_NONE ? colors[i] & 0xFFFFFF : CLR_NONE;
-	if (IsWindow())
-		InvalidateRect(&m_Groups[CpCustom], FALSE);
+	InvalidateSwatches();
 }
 
 int CColorPickerCtrl::GetCustomColors(COLORREF* colors, int max) const {
@@ -97,8 +96,7 @@ int CColorPickerCtrl::GetCustomColors(COLORREF* colors, int max) const {
 
 void CColorPickerCtrl::AddRecentColor(COLORREF color) {
 	CpAddRecent(m_Recent, color, CPK_MAXRECENT);
-	if (IsWindow())
-		InvalidateRect(&m_Groups[CpRecent], FALSE);
+	InvalidateSwatches();
 }
 
 void CColorPickerCtrl::SetRecentColors(const COLORREF* colors, int count) {
@@ -106,8 +104,7 @@ void CColorPickerCtrl::SetRecentColors(const COLORREF* colors, int count) {
 	// in order, the first the latest
 	for (int i = std::min(count, CPK_MAXRECENT) - 1; colors && i >= 0; i--)
 		CpAddRecent(m_Recent, colors[i], CPK_MAXRECENT);
-	if (IsWindow())
-		InvalidateRect(&m_Groups[CpRecent], FALSE);
+	InvalidateSwatches();
 }
 
 int CColorPickerCtrl::GetRecentColors(COLORREF* colors, int max) const {
@@ -134,8 +131,9 @@ void CColorPickerCtrl::SaveCustom(int index, COLORREF color) {
 		return;
 	m_Custom[index] = color;
 	auto rc = SwatchCellRect(CpCustom, index);
-	::InflateRect(&rc, 2, 2);
-	InvalidateRect(&rc, FALSE);
+	::InflateRect(&rc, 3, 3);
+	InvalidateSwatches(&rc);
+	NotifyAccessible(EVENT_OBJECT_NAMECHANGE, m_Swatches->m_hWnd, SwatchChild(CpCustom, index));
 	NMHDR nm{ m_hWnd, (UINT_PTR)GetDlgCtrlID(), CPKN_CUSTOMCHANGED };
 	::SendMessage(GetParent(), WM_NOTIFY, nm.idFrom, (LPARAM)&nm);
 }
@@ -153,19 +151,196 @@ void CColorPickerCtrl::CustomMenu(int index, POINT ptScreen) {
 		SaveCustom(index, CLR_NONE);
 }
 
+// ---- The swatch window: focus and keys ---------------------------------------------------------
+
+void CColorPickerCtrl::PositionSwatchWindow() {
+	RECT rc{};
+	for (auto& g : m_Groups) {
+		if (!IsEmpty(g))
+			::UnionRect(&rc, &rc, &g);
+	}
+	if (!IsEmpty(rc))
+		::InflateRect(&rc, 2, 2);   // the frames around a marked cell
+	m_SwRect = rc;
+	if (!m_Swatches || !m_Swatches->IsWindow())
+		return;
+	if (IsEmpty(rc)) {
+		if (::GetFocus() == m_Swatches->m_hWnd && m_Grad->IsWindow())
+			m_Grad->SetFocus();
+		m_Swatches->ShowWindow(SW_HIDE);
+		return;
+	}
+	m_Swatches->SetWindowPos(nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+		SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	m_Swatches->Invalidate();
+}
+
+void CColorPickerCtrl::InvalidateSwatches(const RECT* prc) {
+	if (!m_Swatches || !m_Swatches->IsWindow() || IsEmpty(m_SwRect))
+		return;
+	RECT rc = prc ? *prc : m_SwRect;
+	::OffsetRect(&rc, -m_SwRect.left, -m_SwRect.top);
+	m_Swatches->InvalidateRect(&rc, FALSE);
+}
+
+void CColorPickerCtrl::SwatchCounts(int* counts) const {
+	for (int g = 0; g < CpGroupCount; g++)
+		counts[g] = IsEmpty(m_Groups[g]) ? 0 : GroupCount(g);
+}
+
+bool CColorPickerCtrl::IsSwatchCell(int group, int index) const {
+	int counts[CpGroupCount];
+	SwatchCounts(counts);
+	return group >= 0 && group < CpGroupCount && index >= 0 && index < counts[group];
+}
+
+int CColorPickerCtrl::SwatchChild(int group, int index) const {
+	if (!IsSwatchCell(group, index))
+		return 0;
+	int counts[CpGroupCount];
+	SwatchCounts(counts);
+	int child = 1 + index;
+	for (int g = 0; g < group; g++)
+		child += counts[g];
+	return child;
+}
+
+bool CColorPickerCtrl::SwatchOfChild(long child, int* pGroup, int* pIndex) const {
+	int counts[CpGroupCount];
+	SwatchCounts(counts);
+	long i = child - 1;
+	for (int g = 0; g < CpGroupCount && i >= 0; g++) {
+		if (i < counts[g]) {
+			*pGroup = g;
+			*pIndex = (int)i;
+			return true;
+		}
+		i -= counts[g];
+	}
+	return false;
+}
+
+void CColorPickerCtrl::FocusSwatch(int group, int index, bool notify) {
+	if (!IsSwatchCell(group, index))
+		return;
+	auto invalidate = [&] {
+		RECT rc = SwatchCellRect(m_SwGroup, m_SwIndex);
+		::InflateRect(&rc, 3, 3);
+		InvalidateSwatches(&rc);
+	};
+	invalidate();
+	m_SwGroup = group;
+	m_SwIndex = index;
+	invalidate();
+	if (notify && m_Swatches->IsWindow() && ::GetFocus() == m_Swatches->m_hWnd)
+		NotifyAccessible(EVENT_OBJECT_FOCUS, m_Swatches->m_hWnd, SwatchChild(group, index));
+}
+
+void CColorPickerCtrl::ActivateSwatch(int group, int index, bool save) {
+	if (!IsSwatchCell(group, index))
+		return;
+	if (group == CpCustom && (save || m_Custom[index] == CLR_NONE))
+		SaveCustom(index, GetColor());
+	else
+		PickSwatch(GroupParts[group], index);
+}
+
+LRESULT CColorPickerCtrl::OnSwNcHitTest(UINT, WPARAM, LPARAM, BOOL&) {
+	return HTTRANSPARENT;   // the control takes the clicks (and the tooltips see the mouse)
+}
+
+LRESULT CColorPickerCtrl::OnSwGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
+	return DLGC_WANTARROWS;   // Space picks; Enter and Escape stay the dialog's
+}
+
+LRESULT CColorPickerCtrl::OnSwFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
+	if (uMsg == WM_SETFOCUS) {
+		int counts[CpGroupCount];
+		SwatchCounts(counts);
+		if (!IsSwatchCell(m_SwGroup, m_SwIndex))
+			CpSwatchMove(counts, m_SwGroup, m_SwIndex, CpNavFirst);
+		NotifyAccessible(EVENT_OBJECT_FOCUS, m_Swatches->m_hWnd, SwatchChild(m_SwGroup, m_SwIndex));
+	}
+	m_Swatches->Invalidate();
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnSwUpdateUIState(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	m_Swatches->Invalidate();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnSwKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
+	CpNav nav;
+	switch (wParam) {
+		case VK_LEFT:  nav = CpNavLeft; break;
+		case VK_RIGHT: nav = CpNavRight; break;
+		case VK_UP:    nav = CpNavUp; break;
+		case VK_DOWN:  nav = CpNavDown; break;
+		case VK_HOME:  nav = ctrl ? CpNavFirst : CpNavHome; break;
+		case VK_END:   nav = ctrl ? CpNavLast : CpNavEnd; break;
+		case VK_SPACE:
+			ActivateSwatch(m_SwGroup, m_SwIndex, ctrl);
+			return 0;
+		case VK_DELETE:
+			if (m_SwGroup == CpCustom && IsSwatchCell(m_SwGroup, m_SwIndex))
+				SaveCustom(m_SwIndex, CLR_NONE);
+			return 0;
+		default:
+			bHandled = FALSE;
+			return 0;
+	}
+	int counts[CpGroupCount], group = m_SwGroup, index = m_SwIndex;
+	SwatchCounts(counts);
+	if (CpSwatchMove(counts, group, index, nav) && (group != m_SwGroup || index != m_SwIndex))
+		FocusSwatch(group, index, true);
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnSwPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
+	auto paint = [&](HDC hdc) {
+		// in the control's coordinates
+		POINT old;
+		::OffsetViewportOrgEx(hdc, -m_SwRect.left, -m_SwRect.top, &old);
+		auto c = GetColors();
+		FillSolid(hdc, m_SwRect, c.crBack);
+		PaintSwatches(hdc, c);
+		bool cues = (m_Swatches->SendMessage(WM_QUERYUISTATE) & UISF_HIDEFOCUS) == 0;
+		if (::GetFocus() == m_Swatches->m_hWnd && cues && IsSwatchCell(m_SwGroup, m_SwIndex)) {
+			RECT rc = SwatchCellRect(m_SwGroup, m_SwIndex);
+			::InflateRect(&rc, 2, 2);
+			::SetTextColor(hdc, c.crText);
+			::SetBkColor(hdc, c.crBack);
+			::DrawFocusRect(hdc, &rc);
+		}
+		::SetViewportOrgEx(hdc, old.x, old.y, nullptr);
+	};
+	if (uMsg == WM_PRINTCLIENT) {
+		paint((HDC)wParam);
+		return 0;
+	}
+	WTL::CPaintDC dc(m_Swatches->m_hWnd);
+	WTL::CMemoryDC mdc(dc, dc.m_ps.rcPaint);
+	paint(mdc);
+	return 0;
+}
+
 // ---- Mouse -----------------------------------------------------------------------------------
 
 void CColorPickerCtrl::SetHot(UINT part, int index) {
 	if (part == m_HotPart && index == m_HotIndex)
 		return;
 	auto invalidate = [&](UINT p, int i) {
-		RECT rc{};
-		if (p == CPKHT_EYEDROPPER)
-			rc = m_Eyedropper;
-		else if (int g = GroupOfPart(p); g >= 0 && i >= 0)
-			rc = SwatchCellRect(g, i);
-		::InflateRect(&rc, 2, 2);
-		InvalidateRect(&rc, FALSE);
+		if (p == CPKHT_EYEDROPPER) {
+			InvalidateRect(&m_Eyedropper, FALSE);
+		}
+		else if (int g = GroupOfPart(p); g >= 0 && i >= 0) {
+			RECT rc = SwatchCellRect(g, i);
+			::InflateRect(&rc, 3, 3);
+			InvalidateSwatches(&rc);
+		}
 	};
 	invalidate(m_HotPart, m_HotIndex);
 	m_HotPart = part;
@@ -193,15 +368,16 @@ LRESULT CColorPickerCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	return 0;
 }
 
-LRESULT CColorPickerCtrl::OnContextMenu(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
-	// Shift+F10 or the menu key: the custom slot under the mouse, if any
+LRESULT CColorPickerCtrl::OnContextMenu(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	// Shift+F10 or the menu key on the swatches (passed up from their window): the focused custom slot
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	bHandled = FALSE;
-	if (pt.x == -1 && pt.y == -1 && m_HotPart == CPKHT_CUSTOM && m_HotIndex >= 0) {
-		auto rc = SwatchCellRect(CpCustom, m_HotIndex);
+	bool swatches = m_Swatches->IsWindow() && (HWND)wParam == m_Swatches->m_hWnd;
+	if (pt.x == -1 && pt.y == -1 && swatches && m_SwGroup == CpCustom && IsSwatchCell(m_SwGroup, m_SwIndex)) {
+		auto rc = SwatchCellRect(CpCustom, m_SwIndex);
 		pt = { rc.left, rc.bottom };
 		ClientToScreen(&pt);
-		CustomMenu(m_HotIndex, pt);
+		CustomMenu(m_SwIndex, pt);
 		bHandled = TRUE;
 	}
 	return 0;

@@ -67,6 +67,15 @@ namespace CpDraw {
 	// and COLOR_WINDOWTEXT; read each time)
 	inline CPKCOLORS SystemColors() {
 		CPKCOLORS c;
+		// high contrast: the theme's text on its window background everywhere, frames in full contrast
+		HIGHCONTRASTW hc{ sizeof(hc) };
+		if (::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON)) {
+			c.crBack = c.crFieldBack = ::GetSysColor(COLOR_WINDOW);
+			c.crText = c.crBorder = ::GetSysColor(COLOR_WINDOWTEXT);
+			c.crCheck1 = RGB(0xFF, 0xFF, 0xFF);
+			c.crCheck2 = RGB(0x80, 0x80, 0x80);
+			return c;
+		}
 		c.crBack = ::GetSysColor(COLOR_3DFACE);
 		c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
 		c.crFieldBack = ::GetSysColor(COLOR_WINDOW);

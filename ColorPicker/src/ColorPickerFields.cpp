@@ -124,6 +124,7 @@ void CColorPickerCtrl::PositionFields() {
 		m_Cell = p.cell;
 	}
 	UpdateToolTips();
+	PositionSwatchWindow();
 
 	HWND focus = ::GetFocus();
 	for (int f = 0; f < CpFieldCount; f++) {
@@ -305,6 +306,12 @@ LRESULT CALLBACK CColorPickerCtrl::EditSubclassProc(HWND hWnd, UINT msg, WPARAM 
 			::RemoveWindowSubclass(hWnd, EditSubclassProc, id);
 			break;
 
+		case WM_GETOBJECT:
+			// named for screen readers (their labels are drawn, not static controls)
+			if ((LONG)lParam == OBJID_CLIENT)
+				return EditGetObject(self, field, hWnd, wParam, lParam);
+			break;
+
 		case WM_GETDLGCODE:
 		{
 			// Enter and Escape are the field's while it's being edited; otherwise the dialog's (OK, Cancel)
@@ -412,16 +419,17 @@ LRESULT CColorPickerCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL
 			StartEyedropper();
 			break;
 		case CPKHT_PALETTE:
-		case CPKHT_RECENT:
-			PickSwatch(part, index);
-			break;
 		case CPKHT_CUSTOM:
-			// an empty slot (or Ctrl) saves the color; a full one is picked
-			if (m_Custom[index] == CLR_NONE || (wParam & MK_CONTROL))
-				SaveCustom(index, GetColor());
-			else
-				PickSwatch(part, index);
+		case CPKHT_RECENT:
+		{
+			// the swatches take the focus, on the cell clicked; an empty custom slot (or Ctrl) saves the color
+			int group = part - CPKHT_PALETTE;
+			if (m_Swatches->IsWindow())
+				m_Swatches->SetFocus();
+			FocusSwatch(group, index, true);
+			ActivateSwatch(group, index, (wParam & MK_CONTROL) != 0);
 			break;
+		}
 	}
 	return 0;
 }
@@ -534,8 +542,7 @@ void CColorPickerCtrl::PaintPanel(HDC hdc, const RECT& rcPaint) {
 			});
 	}
 
-	PaintEyedropperButton(hdc, c);
-	PaintSwatches(hdc, c);
+	PaintEyedropperButton(hdc, c);   // (the swatches are their window's)
 
 	// the fields: labels, frames, spin buttons (the edits paint the rest)
 	auto oldFont = ::SelectObject(hdc, m_hFont);

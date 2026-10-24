@@ -21,3 +21,23 @@ public:
 private:
 	CColorPickerCtrl* m_Owner;
 };
+
+// ---- The swatches -------------------------------------------------------------------------
+//
+// A child window over the swatch groups, after the fields in the tab order, for the keyboard focus and the keys;
+// the mouse goes through it (HTTRANSPARENT) to the control, which handles the clicks. It paints the swatches,
+// which the control lays out in its own coordinates. Its messages are handled in the control's ALT_MSG_MAP(2).
+
+class CpSwatchWindow : public ATL::CWindowImpl<CpSwatchWindow> {
+public:
+	DECLARE_WND_CLASS_EX(L"CpSwatchView", 0, -1)
+
+	explicit CpSwatchWindow(CColorPickerCtrl* owner) : m_Owner(owner) {}
+
+	BEGIN_MSG_MAP(CpSwatchWindow)
+		CHAIN_MSG_MAP_ALT_MEMBER((*m_Owner), 2)
+	END_MSG_MAP()
+
+private:
+	CColorPickerCtrl* m_Owner;
+};

@@ -255,6 +255,55 @@ const COLORREF* CpDefaultPalette(int* pCount) {
 	return palette;
 }
 
+bool CpSwatchMove(const int counts[CpGroupCount], int& group, int& index, CpNav nav) {
+	struct Row { int group, first, count; };
+	std::vector<Row> rows;
+	rows.reserve(CpMaxPalette / CpSwatchColumns + 2);
+	for (int g = 0; g < CpGroupCount; g++) {
+		for (int first = 0; first < counts[g]; first += CpSwatchColumns)
+			rows.push_back({ g, first, std::min(CpSwatchColumns, counts[g] - first) });
+	}
+	if (rows.empty())
+		return false;
+	auto set = [&](size_t r, int col) {
+		group = rows[r].group;
+		index = rows[r].first + std::clamp(col, 0, rows[r].count - 1);
+		return true;
+	};
+	size_t row = rows.size();
+	for (size_t r = 0; r < rows.size(); r++) {
+		if (rows[r].group == group && index >= rows[r].first && index < rows[r].first + rows[r].count)
+			row = r;
+	}
+	if (row == rows.size())
+		return set(0, 0);   // not a cell (gone, or never set)
+	int col = index - rows[row].first;
+	size_t last = rows.size() - 1;
+	switch (nav) {
+		case CpNavLeft:
+			if (col > 0)
+				return set(row, col - 1);
+			return row > 0 ? set(row - 1, rows[row - 1].count - 1) : true;
+		case CpNavRight:
+			if (col < rows[row].count - 1)
+				return set(row, col + 1);
+			return row < last ? set(row + 1, 0) : true;
+		case CpNavUp:
+			return row > 0 ? set(row - 1, col) : true;
+		case CpNavDown:
+			return row < last ? set(row + 1, col) : true;
+		case CpNavHome:
+			return set(row, 0);
+		case CpNavEnd:
+			return set(row, rows[row].count - 1);
+		case CpNavFirst:
+			return set(0, 0);
+		case CpNavLast:
+			return set(last, rows[last].count - 1);
+	}
+	return true;
+}
+
 void CpAddRecent(std::vector<COLORREF>& recent, COLORREF color, size_t max) {
 	color &= 0xFFFFFF;
 	std::erase(recent, color);

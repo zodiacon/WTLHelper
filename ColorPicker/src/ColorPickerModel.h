@@ -105,6 +105,12 @@ RECT     CpSwatchCell(const CpPanel& p, CpGroup group, int index, int cellGap);
 // the cell under pt (-1 if none); count: the cells there are
 int      CpSwatchAt(const CpPanel& p, CpGroup group, int count, int cellGap, POINT pt);
 const COLORREF* CpDefaultPalette(int* pCount);
+
+// Keyboard moves over the swatch groups as one grid of 12 columns (rows of the palette, then custom, then
+// recent). counts: the cells of each group that take the focus. A cell that isn't one moves to the first.
+// false if no group has cells.
+enum CpNav { CpNavLeft, CpNavRight, CpNavUp, CpNavDown, CpNavHome, CpNavEnd, CpNavFirst, CpNavLast };
+bool     CpSwatchMove(const int counts[CpGroupCount], int& group, int& index, CpNav nav);
 // color to the front, once; at most max
 void     CpAddRecent(std::vector<COLORREF>& recent, COLORREF color, size_t max = CpMaxRecent);
 

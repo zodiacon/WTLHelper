@@ -94,14 +94,17 @@ LRESULT CColorButtonCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CColorButtonCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	CloseUp(true);
+	DisconnectAccessible();
 	bHandled = FALSE;
 	return 0;
 }
 
 void CColorButtonCtrl::SetColor(COLORREF color) {
 	m_Color = color & 0xFFFFFF;
-	if (IsWindow())
+	if (IsWindow()) {
 		Invalidate();
+		NotifyAccessible(EVENT_OBJECT_VALUECHANGE);
+	}
 }
 
 COLORREF CColorButtonCtrl::GetColor() const {
@@ -110,8 +113,10 @@ COLORREF CColorButtonCtrl::GetColor() const {
 
 void CColorButtonCtrl::SetAlpha(BYTE alpha) {
 	m_Alpha = alpha;
-	if (IsWindow())
+	if (IsWindow()) {
 		Invalidate();
+		NotifyAccessible(EVENT_OBJECT_VALUECHANGE);
+	}
 }
 
 BYTE CColorButtonCtrl::GetAlpha() const {
@@ -223,6 +228,7 @@ void CColorButtonCtrl::DropDown() {
 	m_Changed = false;
 	m_Dropped = true;
 	Invalidate();
+	NotifyAccessible(EVENT_OBJECT_STATECHANGE);
 	m_Popup->SetWindowPos(HWND_TOP, at.x, at.y, size.cx, size.cy, SWP_SHOWWINDOW);
 	picker.SetFocus();
 
@@ -255,6 +261,7 @@ void CColorButtonCtrl::CloseUp(bool cancel) {
 	if (!IsWindow())
 		return;
 	Invalidate();
+	NotifyAccessible(EVENT_OBJECT_STATECHANGE);
 	Notify(CPKN_CLOSEUP, CPKHT_NOWHERE);
 
 	bool differs = m_Color != m_StartColor || m_Alpha != m_StartAlpha;
@@ -263,6 +270,7 @@ void CColorButtonCtrl::CloseUp(bool cancel) {
 			m_Color = m_StartColor;
 			m_Alpha = m_StartAlpha;
 			Invalidate();
+			NotifyAccessible(EVENT_OBJECT_VALUECHANGE);
 			Notify(CPKN_COLORCHANGING, CPKHT_NOWHERE);
 		}
 	}
@@ -286,6 +294,7 @@ void CColorButtonCtrl::PickerChanged(const NMCOLORPICKER* nm) {
 		m_Changed = true;
 		Invalidate();
 		UpdateWindow();
+		NotifyAccessible(EVENT_OBJECT_VALUECHANGE);
 		Notify(CPKN_COLORCHANGING, nm->part);
 	}
 	// a swatch picked: done, as a drop-down palette does
@@ -295,6 +304,11 @@ void CColorButtonCtrl::PickerChanged(const NMCOLORPICKER* nm) {
 
 LRESULT CColorButtonCtrl::OnClose(UINT, WPARAM wParam, LPARAM, BOOL&) {
 	CloseUp(wParam != FALSE);
+	return 0;
+}
+
+LRESULT CColorButtonCtrl::OnOpen(UINT, WPARAM, LPARAM, BOOL&) {
+	DropDown();
 	return 0;
 }
 

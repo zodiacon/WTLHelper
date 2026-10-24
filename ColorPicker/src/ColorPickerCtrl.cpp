@@ -13,7 +13,8 @@ using CpDraw::IsEmpty;
 
 // ---- Construction ------------------------------------------------------------------
 
-CColorPickerCtrl::CColorPickerCtrl() : m_Grad(std::make_unique<CpGradientWindow>(this)), m_Custom(CPK_CUSTOMCOLORS, CLR_NONE) {
+CColorPickerCtrl::CColorPickerCtrl() : m_Grad(std::make_unique<CpGradientWindow>(this)),
+	m_Swatches(std::make_unique<CpSwatchWindow>(this)), m_Custom(CPK_CUSTOMCOLORS, CLR_NONE) {
 	int count;
 	auto palette = CpDefaultPalette(&count);
 	m_Palette.assign(palette, palette + count);
@@ -32,6 +33,7 @@ LRESULT CColorPickerCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	UpdateFont();
 	m_Grad->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS);
 	CreateFields();
+	m_Swatches->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_TABSTOP | WS_CLIPSIBLINGS);   // after the fields: the tab order
 	m_hToolTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
 		0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
 	Layout();
@@ -41,6 +43,7 @@ LRESULT CColorPickerCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CColorPickerCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	EndEyedropper(true);
+	DisconnectAccessible();
 	// popups made with a child as their parent are owned by the top-level window: they'd outlive the control
 	if (m_hToolTip)
 		::DestroyWindow(m_hToolTip);
@@ -112,6 +115,7 @@ LRESULT CColorPickerCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) 
 	Invalidate();
 	if (m_Grad->IsWindow())
 		m_Grad->Invalidate();
+	InvalidateSwatches();
 	for (auto edit : m_Edits) {
 		if (edit)
 			::InvalidateRect(edit, nullptr, TRUE);
@@ -286,8 +290,11 @@ void CColorPickerCtrl::SetFocusPart(UINT part) {
 	if (part < CPKHT_SV || part > CPKHT_ALPHA || IsEmpty(PartRect(part)) || part == m_Focus)
 		return;
 	m_Focus = part;
-	if (m_Grad->IsWindow())
+	if (m_Grad->IsWindow()) {
 		m_Grad->Invalidate();
+		if (::GetFocus() == m_Grad->m_hWnd)
+			NotifyAccessible(EVENT_OBJECT_FOCUS, m_Grad->m_hWnd, (long)part);
+	}
 }
 
 UINT CColorPickerCtrl::GetFocusPart() const {
@@ -316,13 +323,10 @@ void CColorPickerCtrl::SetState(const Hsv& hsv, BYTE alpha, int skipField) {
 	m_Grad->Invalidate();
 	auto swatch = PartRect(CPKHT_NEWCOLOR);
 	InvalidateRect(&swatch);
-	for (auto& rc : m_Groups) {
-		// the cell marked as the color
-		RECT around = rc;
-		::InflateRect(&around, 2, 2);
-		InvalidateRect(&around, FALSE);
-	}
+	InvalidateSwatches();   // the cell marked as the color
 	UpdateFields(skipField);
+	NotifyAccessible(EVENT_OBJECT_VALUECHANGE, m_Grad->m_hWnd, CHILDID_SELF);
+	NotifyAccessible(EVENT_OBJECT_VALUECHANGE, m_Grad->m_hWnd, (long)m_Focus);
 }
 
 void CColorPickerCtrl::SetColor(COLORREF color) {
@@ -460,7 +464,32 @@ LRESULT CColorPickerCtrl::OnGradFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	// the eyedropper keeps the focus here for Escape; the focus going (another app) ends it
 	if (uMsg == WM_KILLFOCUS && m_Picking)
 		CancelEyedropper();
+	if (uMsg == WM_SETFOCUS)
+		NotifyAccessible(EVENT_OBJECT_FOCUS, m_Grad->m_hWnd, (long)m_Focus);
 	m_Grad->Invalidate();
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnGradMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
+	// the part under the mouse (else the focused one), a step a notch, as Up does; Shift: further
+	if (m_Drag != CPKHT_NOWHERE || m_Picking)
+		return 0;
+	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
+	m_Grad->ScreenToClient(&pt);
+	UINT part = HitTest(pt);
+	if (part < CPKHT_SV || part > CPKHT_ALPHA)
+		part = m_Focus;
+	m_GradWheel += GET_WHEEL_DELTA_WPARAM(wParam);
+	int steps = m_GradWheel / WHEEL_DELTA;
+	m_GradWheel -= steps * WHEEL_DELTA;
+	bool shift = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
+	UINT focus = m_Focus;
+	m_Focus = part;   // HandleKey works on the focused part
+	// wheel up is Up: the marker moves up (the hue toward 0, the value and the alpha higher)
+	WPARAM key = steps > 0 ? VK_UP : VK_DOWN;
+	for (int i = 0; i < std::abs(steps); i++)
+		HandleKey(key, shift);
+	m_Focus = focus;
 	return 0;
 }
 

@@ -560,6 +560,39 @@ TEST(Panel_Height) {
 	CHECK(CpPanelHeight(none, 10) == 0);
 }
 
+TEST(Swatch_Navigation) {
+	int counts[CpGroupCount] = { 24, 12, 3 };   // palette rows 0-1, custom row 2, recent row 3 (3 cells)
+	int g = CpPalette, i = 5;
+	CHECK(CpSwatchMove(counts, g, i, CpNavRight) && g == CpPalette && i == 6);
+	i = 11;   // the end of a row: on to the next one
+	CHECK(CpSwatchMove(counts, g, i, CpNavRight) && g == CpPalette && i == 12);
+	CHECK(CpSwatchMove(counts, g, i, CpNavLeft) && g == CpPalette && i == 11);
+	g = CpPalette; i = 0;   // the very first stays
+	CHECK(CpSwatchMove(counts, g, i, CpNavLeft) && g == CpPalette && i == 0);
+	CHECK(CpSwatchMove(counts, g, i, CpNavUp) && g == CpPalette && i == 0);
+	i = 17;   // down from the palette's second row into the custom row, same column
+	CHECK(CpSwatchMove(counts, g, i, CpNavDown) && g == CpCustom && i == 5);
+	// down into a short row: its last cell
+	CHECK(CpSwatchMove(counts, g, i, CpNavDown) && g == CpRecent && i == 2);
+	CHECK(CpSwatchMove(counts, g, i, CpNavDown) && g == CpRecent && i == 2);   // the last row stays
+	CHECK(CpSwatchMove(counts, g, i, CpNavRight) && g == CpRecent && i == 2);   // the very last stays
+	CHECK(CpSwatchMove(counts, g, i, CpNavUp) && g == CpCustom && i == 2);
+	CHECK(CpSwatchMove(counts, g, i, CpNavEnd) && g == CpCustom && i == 11);
+	CHECK(CpSwatchMove(counts, g, i, CpNavHome) && g == CpCustom && i == 0);
+	CHECK(CpSwatchMove(counts, g, i, CpNavLast) && g == CpRecent && i == 2);
+	CHECK(CpSwatchMove(counts, g, i, CpNavFirst) && g == CpPalette && i == 0);
+	// a cell that's gone (the recent colors shrank): to the first
+	g = CpRecent; i = 7;
+	CHECK(CpSwatchMove(counts, g, i, CpNavRight) && g == CpPalette && i == 0);
+	// no recent: the custom row is the last
+	int noRecent[CpGroupCount] = { 24, 12, 0 };
+	g = CpCustom; i = 4;
+	CHECK(CpSwatchMove(noRecent, g, i, CpNavDown) && g == CpCustom && i == 4);
+	// nothing at all
+	int none[CpGroupCount] = { 0, 0, 0 };
+	CHECK(!CpSwatchMove(none, g, i, CpNavRight));
+}
+
 int wmain() {
 	Run_HsvToRgb_Primaries();
 	Run_RgbToHsv_Values();
@@ -584,6 +617,7 @@ int wmain() {
 	Run_Magnifier_Placement();
 	Run_DropDown_And_Center();
 	Run_Panel_Height();
+	Run_Swatch_Navigation();
 	Run_Fields_Text();
 	Run_Fields_Parse();
 	Run_Fields_Apply();

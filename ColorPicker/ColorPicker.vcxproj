@@ -109,6 +109,7 @@
     <ClCompile Include="src\ColorPickerSwatches.cpp" />
     <ClCompile Include="src\ColorPickerDialog.cpp" />
     <ClCompile Include="src\ColorButton.cpp" />
+    <ClCompile Include="src\ColorPickerAccessible.cpp" />
     <ClCompile Include="src\ColorPickerModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
