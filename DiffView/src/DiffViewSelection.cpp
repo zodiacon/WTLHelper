@@ -324,6 +324,12 @@ LRESULT CDiffViewCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) 
 		ScrollToOverview(pt.y);
 		return 0;
 	}
+	int change;
+	bool toRight;
+	if (MergeHitTest(pt, change, toRight)) {
+		UserMerge(change, toRight);
+		return 0;
+	}
 	auto rc = GetRowsRect();
 	if (!::PtInRect(&rc, pt) || m_Doc->rows.empty())
 		return 0;
@@ -436,8 +442,10 @@ void CDiffViewCtrl::DragTo(POINT pt) {
 }
 
 LRESULT CDiffViewCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	if (m_Drag == Drag::None || ::GetCapture() != m_hWnd)
+	if (m_Drag == Drag::None || ::GetCapture() != m_hWnd) {
+		UpdateHotMerge({ (short)LOWORD(lParam), (short)HIWORD(lParam) });
 		return 0;
+	}
 	m_DragPoint = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	DragTo(m_DragPoint);
 	// past the edges: scroll on a timer
@@ -502,7 +510,7 @@ LRESULT CDiffViewCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHa
 	LPCWSTR cursor = IDC_ARROW;
 	if (hit.part == DFVHT_TEXT)
 		cursor = IDC_IBEAM;
-	else if (hit.part == DFVHT_FOLD)
+	else if (hit.part == DFVHT_FOLD || hit.part == DFVHT_MERGE)
 		cursor = IDC_HAND;
 	::SetCursor(::LoadCursor(nullptr, cursor));
 	return TRUE;
@@ -590,6 +598,14 @@ LRESULT CDiffViewCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 				break;
 			SelectAll();
 			FireSelChanged();
+			return 0;
+		case 'Z':
+			if (!ctrl)
+				break;
+			if (Undo()) {
+				NMHDR hdr{};
+				FireNotify(&hdr, DFVN_TEXTCHANGED);
+			}
 			return 0;
 		case 'C':
 		case VK_INSERT:

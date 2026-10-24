@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -33,6 +34,9 @@ public:
 	// false when the last line has no line break after it (an empty text: true)
 	bool EndsWithNewline() const {
 		return m_EndsWithNewline;
+	}
+	void SetEndsWithNewline(bool ends) {
+		m_EndsWithNewline = ends || empty();
 	}
 
 	// the lines with eol after each (but the last, if the text didn't end with a line break)
@@ -61,6 +65,8 @@ struct DfOptions {
 	bool ignoreCase = false;
 	bool intraLine = true;       // the changes within paired lines
 	int  costLimit = 0;          // the edit distance past which a range is split by a good guess; 0: by size
+	// set (from another thread) to stop early; the diff is then still consistent but not a good one
+	const std::atomic<bool>* cancel = nullptr;
 };
 
 // A run of lines: equal on both sides (the same count), or changed (deleted from the left, inserted on the right;
@@ -168,6 +174,21 @@ int DfRowOfLine(const std::vector<DfRow>& rows, bool right, size_t line);
 
 // Copies a changed block's lines to the other side: toRight replaces the block's right lines with its left ones.
 void DfMerge(DfLines& left, DfLines& right, const DfBlock& block, bool toRight);
+
+// What a merge replaced, to undo it.
+struct DfMergeUndo {
+	bool    right = false;       // the side that changed
+	size_t  first = 0;
+	size_t  count = 0;           // the lines there now
+	DfLines removed;             // the lines that were there
+	bool    endsWithNewline = true;   // the side's, before
+};
+DfMergeUndo DfMergeWithUndo(DfLines& left, DfLines& right, const DfBlock& block, bool toRight);
+void DfUndoMerge(DfLines& left, DfLines& right, const DfMergeUndo& undo);
+
+struct DfUndoStack {
+	std::vector<DfMergeUndo> items;
+};
 
 // The diff in the unified format ("@@ -1,3 +1,4 @@" hunks), with context lines around each change.
 std::wstring DfUnifiedText(const DfLines& left, const DfLines& right, const DfDiff& diff, int context = 3,

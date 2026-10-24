@@ -99,13 +99,24 @@ struct DFVPOS {
 #define DFVHT_FOLD      5   // pos: the first hidden line (of the left side, unified)
 #define DFVHT_OVERVIEW  6   // the strip beside the scroll bar; row: the row there
 #define DFVHT_BELOW     7   // under the last row
+#define DFVHT_MERGE     8   // a merge arrow between the panes; change, toRight
 
 struct DFVHITTEST {
 	POINT  pt;                 // in: client coords
 	UINT   part;               // out: DFVHT_*
 	size_t row;                // the row, if on one
 	DFVPOS pos;
+	int    change;             // DFVHT_MERGE: the change's index
+	BOOL   toRight;            // DFVHT_MERGE: the arrow copies the left lines to the right
 };
+
+// ---- Merging -----------------------------------------------------------------------
+//
+// Merging a change copies its lines from one side over the other's. EnableMerge shows arrows for it between the
+// panes (side by side) and turns on Alt+Right and Alt+Left for the caret's change (either layout).
+
+#define DFVMF_TORIGHT   0x0001   // the left lines over the right ones
+#define DFVMF_TOLEFT    0x0002
 
 // ---- Notifications -------------------------------------------------------------
 
@@ -113,6 +124,16 @@ struct DFVHITTEST {
 #define DFVN_SELCHANGED     (DFVN_FIRST - 0)   // NMHDR; the user moved the caret or changed the selection
 #define DFVN_CONTEXTMENU    (DFVN_FIRST - 1)   // NMDFVCONTEXTMENU
 #define DFVN_FOLDEXPANDED   (DFVN_FIRST - 2)   // NMHDR; the user opened a fold (a click, or Enter next to it)
+#define DFVN_MERGE          (DFVN_FIRST - 3)   // NMDFVMERGE; the user is merging a change; a non-zero return stops it
+#define DFVN_TEXTCHANGED    (DFVN_FIRST - 4)   // NMHDR; the user's merge or undo changed a text
+#define DFVN_DIFFDONE       (DFVN_FIRST - 5)   // NMHDR; a compare on the worker thread is done and shown
+
+struct NMDFVMERGE {
+	NMHDR     hdr;
+	size_t    change;
+	BOOL      toRight;
+	DFVCHANGE lines;
+};
 
 struct NMDFVCONTEXTMENU {
 	NMHDR  hdr;
@@ -125,6 +146,9 @@ struct NMDFVCONTEXTMENU {
 
 struct DfDocument;
 struct DfSpan;
+struct DfJob;
+class DfLines;
+struct DfUndoStack;
 
 class CDiffViewCtrl : public ATL::CWindowImpl<CDiffViewCtrl> {
 public:
@@ -135,9 +159,14 @@ public:
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
+	enum : UINT { WM_DFV_DIFFDONE = WM_USER + 100 };   // posted by the worker thread: wParam the compare's number
 
 	BEGIN_MSG_MAP(CDiffViewCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		MESSAGE_HANDLER(WM_DFV_DIFFDONE, OnDiffDone)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnSysKeyDown)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
@@ -242,6 +271,30 @@ public:
 	BOOL    GoToChange(size_t index);                 // the caret to the change's first line, scrolled into view
 	BOOL    NextChange(bool forward = true);          // from the caret, as F7 and Shift+F7; FALSE if there's none
 
+	// ---- Merging ------------------------------------------------------------------------
+	//
+	// The user's merge (an arrow, Alt+Right or Alt+Left) sends DFVN_MERGE, which may stop it, then DFVN_TEXTCHANGED;
+	// Ctrl+Z undoes merges, and DFVN_TEXTCHANGED follows. Setting a text forgets them. MergeChange and Undo send no
+	// notifications. While a compare runs on the worker thread, neither does anything.
+
+	void    EnableMerge(UINT flags);                  // DFVMF_*; 0: none (the default)
+	UINT    GetMergeFlags() const;
+	BOOL    MergeChange(size_t index, bool toRight);
+	bool    CanUndo() const;
+	BOOL    Undo();
+	bool    IsModified(bool right) const;             // a merge not undone changed the side
+
+	// ---- Comparing on a worker thread ---------------------------------------------------
+	//
+	// Texts with more lines than the threshold (both sides together) are compared on a worker thread, so the
+	// window stays responsive: until the diff is in, the view shows the last one (and says it's comparing), the
+	// diff's queries answer about it, and the text queries (GetText, GetLineCount, GetLineText) about the new texts.
+	// DFVN_DIFFDONE says when it's shown. Setting a text or the options again stops a compare still running.
+
+	void    SetBackgroundThreshold(size_t lines);     // default 100,000; SIZE_MAX: always on the calling thread
+	size_t  GetBackgroundThreshold() const;
+	bool    IsComparing() const;
+
 	// ---- Appearance -------------------------------------------------------------------
 	//
 	// The default font is Consolas, 10 points at the window's DPI; WM_SETFONT replaces it (the app then
@@ -252,6 +305,10 @@ public:
 
 private:
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDiffDone(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSysKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
@@ -336,6 +393,18 @@ private:
 	void    DragTo(POINT pt);
 	void    MoveByKey(UINT vk, bool shift, bool ctrl);
 
+	// merging and comparing (DiffViewMerge.cpp)
+	const DfDocument& Latest() const;                 // the document being compared, or else the one shown
+	void    Compare(DfLines&& left, DfLines&& right);
+	void    CancelCompare();
+	int     CenterWidth() const;
+	bool    GetMergeRect(size_t change, bool toRight, RECT* prc) const;
+	bool    MergeHitTest(POINT pt, int& change, bool& toRight) const;
+	void    PaintMerge(WTL::CDCHandle dc, const DFVCOLORS& c);
+	void    PaintComparing(WTL::CDCHandle dc, const DFVCOLORS& c);
+	void    UserMerge(size_t change, bool toRight);
+	void    UpdateHotMerge(POINT pt);
+
 	std::unique_ptr<DfDocument> m_Doc;
 	DFVLAYOUT m_Layout = DFVL_SIDEBYSIDE;
 	UINT    m_Options = 0;
@@ -378,4 +447,13 @@ private:
 	DFVPOS  m_DragEnd{};
 	POINT   m_DragPoint{};
 	int     m_SelRows[2] = { -1, -1 };                // unified, while painting: the selection's first and last rows
+
+	UINT    m_MergeFlags = 0;
+	int     m_HotMerge = -1;                          // the change whose arrow is under the mouse
+	bool    m_HotToRight = false;
+	bool    m_TrackingMouse = false;
+	std::unique_ptr<DfUndoStack> m_Undo;
+	std::shared_ptr<DfJob> m_Job;                     // the compare running on the worker thread
+	WPARAM  m_JobNumber = 0;
+	size_t  m_BackgroundThreshold = 100000;
 };

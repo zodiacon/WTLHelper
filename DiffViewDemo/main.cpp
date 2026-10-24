@@ -63,6 +63,11 @@ enum {
 
 	ID_DEMO_COPY = 601,
 	ID_DEMO_SELECTALL,
+
+	ID_MERGE_ENABLE = 701,
+	ID_MERGE_ASK,
+	ID_MERGE_UNDO,
+	ID_MERGE_BACKGROUND,
 };
 
 // ---- State --------------------------------------------------------------------
@@ -71,6 +76,8 @@ static CDiffViewCtrl g_diff;
 static HWND g_main;
 static CString g_paths[2];
 static bool g_customColors;
+static bool g_askMerge;
+static ULONGLONG g_compareStart;    // the tick a compare started (shown when it's done)
 
 static const DFVCOLORS g_colors = {
 	RGB(0xFB, 0xF8, 0xF1), RGB(0x30, 0x30, 0x40), RGB(0xEE, 0xE8, 0xDA), RGB(0x9A, 0x90, 0x80),
@@ -198,11 +205,20 @@ static bool ReadText(LPCWSTR path, std::wstring& text) {
 static void UpdateTitle() {
 	DFVINFO info{};
 	g_diff.GetInfo(&info);
-	CString title;
-	if (info.changes == 0)
-		title.Format(L"DiffView Demo - identical (%zu lines)", info.leftLines);
+	CString title = L"DiffView Demo - ";
+	bool left = g_diff.IsModified(false), right = g_diff.IsModified(true);
+	if (left || right)
+		title.AppendFormat(L"%s modified - ", left && right ? L"both sides" : left ? L"left" : L"right");
+	if (g_diff.IsComparing())
+		title += L"comparing...";
+	else if (info.changes == 0)
+		title.AppendFormat(L"identical (%zu lines)", info.leftLines);
 	else
-		title.Format(L"DiffView Demo - %zu changes, %zu lines deleted, %zu inserted", info.changes, info.deleted, info.inserted);
+		title.AppendFormat(L"%zu changes, %zu lines deleted, %zu inserted", info.changes, info.deleted, info.inserted);
+	if (g_compareStart && !g_diff.IsComparing()) {
+		title.AppendFormat(L" (%llu ms)", ::GetTickCount64() - g_compareStart);
+		g_compareStart = 0;
+	}
 	// where the caret is
 	auto caret = g_diff.GetCaret();
 	title.AppendFormat(L" - %s line %zu, column %zu", caret.right ? L"right" : L"left", caret.line + 1, caret.column + 1);
@@ -250,15 +266,9 @@ static void LoadLarge() {
 	}
 	g_paths[0] = g_paths[1] = L"";
 	g_diff.SetTitles(L"200,000 lines", L"edited");
-	auto start = ::GetTickCount64();
+	g_compareStart = ::GetTickCount64();
 	g_diff.SetTexts(left.c_str(), right.c_str(), (int)left.size(), (int)right.size());
-	auto ms = ::GetTickCount64() - start;
-	UpdateTitle();
-	CString title;
-	::GetWindowTextW(g_main, title.GetBuffer(256), 256);
-	title.ReleaseBuffer();
-	title.AppendFormat(L" (%llu ms)", ms);
-	::SetWindowTextW(g_main, title);
+	UpdateTitle();   // the time now, or when DFVN_DIFFDONE comes
 }
 
 static void LoadFile(int side, LPCWSTR path) {
@@ -312,6 +322,10 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_NUMBERS, g_diff.AreLineNumbersShown());
 	check(ID_VIEW_COLORS, g_customColors);
 	check(ID_VIEW_OVERVIEW, g_diff.IsOverviewShown());
+	check(ID_MERGE_ENABLE, g_diff.GetMergeFlags() != 0);
+	check(ID_MERGE_ASK, g_askMerge);
+	check(ID_MERGE_BACKGROUND, g_diff.GetBackgroundThreshold() != SIZE_MAX);
+	::EnableMenuItem(menu, ID_MERGE_UNDO, MF_BYCOMMAND | (g_diff.CanUndo() ? MF_ENABLED : MF_GRAYED));
 	UINT options = g_diff.GetOptions();
 	check(ID_COMPARE_IGNORECASE, (options & DFVF_IGNORECASE) != 0);
 	check(ID_COMPARE_IGNORESPACECHANGE, (options & DFVF_IGNORESPACECHANGE) != 0);
@@ -367,6 +381,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_VIEW_EXPANDALL: g_diff.ExpandAll(); break;
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
+		case ID_MERGE_ENABLE: g_diff.EnableMerge(g_diff.GetMergeFlags() ? 0 : DFVMF_TORIGHT | DFVMF_TOLEFT); break;
+		case ID_MERGE_ASK: g_askMerge = !g_askMerge; break;
+		case ID_MERGE_UNDO: g_diff.Undo(); UpdateTitle(); break;
+		case ID_MERGE_BACKGROUND: g_diff.SetBackgroundThreshold(g_diff.GetBackgroundThreshold() == SIZE_MAX ? 100000 : SIZE_MAX); break;
 	}
 	UpdateChecks(::GetMenu(hwnd));
 }
@@ -414,6 +432,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			if (hdr->idFrom != IDC_DIFF)
 				break;
 			switch (hdr->code) {
+				case DFVN_MERGE: {
+					// a non-zero return stops the merge
+					if (!g_askMerge)
+						return 0;
+					auto nm = (NMDFVMERGE*)lParam;
+					CString text;
+					text.Format(L"Copy change %zu's %zu line(s) over the %s side's %zu?", nm->change + 1,
+						nm->toRight ? nm->lines.leftCount : nm->lines.rightCount, nm->toRight ? L"right" : L"left",
+						nm->toRight ? nm->lines.rightCount : nm->lines.leftCount);
+					return ::MessageBoxW(hwnd, text, L"Merge", MB_YESNO | MB_ICONQUESTION) == IDYES ? 0 : 1;
+				}
+				case DFVN_TEXTCHANGED:
+				case DFVN_DIFFDONE:
+					UpdateTitle();
+					UpdateChecks(::GetMenu(hwnd));
+					break;
 				case DFVN_SELCHANGED:
 				case DFVN_FOLDEXPANDED:
 					UpdateTitle();
@@ -505,6 +539,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hCompare, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hCompare, MF_STRING, ID_COMPARE_INTRALINE, L"Mark Changed &Words");
 
+	HMENU hMerge = ::CreatePopupMenu();
+	::AppendMenuW(hMerge, MF_STRING, ID_MERGE_ENABLE, L"&Merge Arrows (Alt+Right, Alt+Left)");
+	::AppendMenuW(hMerge, MF_STRING, ID_MERGE_ASK, L"&Ask Before Merging");
+	::AppendMenuW(hMerge, MF_STRING, ID_MERGE_UNDO, L"&Undo\tCtrl+Z");
+	::AppendMenuW(hMerge, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hMerge, MF_STRING, ID_MERGE_BACKGROUND, L"Compare Large Texts in the &Background");
+
 	HMENU hGo = ::CreatePopupMenu();
 	::AppendMenuW(hGo, MF_STRING, ID_GO_NEXT, L"&Next Change\tF7");
 	::AppendMenuW(hGo, MF_STRING, ID_GO_PREV, L"&Previous Change\tShift+F7");
@@ -514,6 +555,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hCompare, L"&Compare");
+	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hMerge, L"&Merge");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hGo, L"&Go");
 
 	ACCEL accels[] = {

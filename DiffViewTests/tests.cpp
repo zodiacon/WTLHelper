@@ -8,8 +8,10 @@
 #include "DiffViewModel.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -717,6 +719,55 @@ TEST(Merge) {
 	CHECK_STR(r.Join(L""), L"ab");
 }
 
+TEST(Merge_Undo) {
+	// every change merged either way, then undone in reverse: the texts come back exactly
+	const wchar_t* lefts[] = { L"a\nb\nc\nd\n", L"a\nb\nc", L"", L"x\ny\n", L"a\nb\nc\nd\ne\n" };
+	const wchar_t* rights[] = { L"a\nX\nY\nd\nZ\n", L"a\nb", L"p\nq", L"", L"b\nc\nE\n" };
+	bool ok = true;
+	for (size_t t = 0; t < std::size(lefts); t++) {
+		for (int dir = 0; dir < 2; dir++) {
+			DfLines left(lefts[t]), right(rights[t]);
+			auto original = std::make_pair(left.Join(L"\n"), right.Join(L"\n"));
+			std::vector<DfMergeUndo> undos;
+			auto diff = DfCompute(left, right);
+			// back to front, so the earlier blocks' positions still hold
+			for (size_t k = diff.blocks.size(); k-- > 0;)
+				if (diff.blocks[k].changed)
+					undos.push_back(DfMergeWithUndo(left, right, diff.blocks[k], dir == 1));
+			ok = ok && DfCompute(left, right).Identical();
+			for (size_t u = undos.size(); u-- > 0;)
+				DfUndoMerge(left, right, undos[u]);
+			ok = ok && left.Join(L"\n") == original.first && right.Join(L"\n") == original.second;
+		}
+	}
+	CHECK(ok);
+
+	// a merge that adds lines after a last line with no line break, undone
+	DfLines l(L"a\nb\n"), r(L"a");
+	auto diff = DfCompute(l, r);
+	auto undo = DfMergeWithUndo(l, r, diff.blocks.back(), true);
+	CHECK_STR(r.Join(L"\n"), L"a\nb\n");
+	DfUndoMerge(l, r, undo);
+	CHECK_STR(r.Join(L"\n"), L"a");
+}
+
+TEST(Cancel) {
+	std::wstring ta, tb;
+	for (int i = 0; i < 5000; i++) {
+		ta += std::to_wstring(Random() % 100) + L"\n";
+		tb += std::to_wstring(Random() % 100) + L"\n";
+	}
+	DfLines a(ta), b(tb);
+	std::atomic<bool> cancel{ true };
+	DfOptions options;
+	options.cancel = &cancel;
+	auto diff = DfCompute(a, b, options);
+	CHECK(Consistent(diff, a, b));   // stopped right away: still a valid script
+	CHECK(diff.pairs.empty());
+	cancel = false;
+	CHECK(Common(DfCompute(a, b, options)) > Common(diff));
+}
+
 TEST(UnifiedText) {
 	auto a = Letters(L"abcdefghij"), b = Letters(L"abcDefghiJk");
 	auto diff = DfCompute(a, b);
@@ -774,6 +825,8 @@ int wmain() {
 	Run_Rows_Navigation();
 
 	Run_Merge();
+	Run_Merge_Undo();
+	Run_Cancel();
 	Run_UnifiedText();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);

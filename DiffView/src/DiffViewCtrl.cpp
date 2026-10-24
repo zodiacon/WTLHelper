@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <thread>
 
 #pragma comment(lib, "uxtheme.lib")
 
@@ -49,10 +50,11 @@ static std::wstring_view View(LPCWSTR text, int cch) {
 
 // ---- Construction ------------------------------------------------------------------
 
-CDiffViewCtrl::CDiffViewCtrl() : m_Doc(std::make_unique<DfDocument>()) {
+CDiffViewCtrl::CDiffViewCtrl() : m_Doc(std::make_unique<DfDocument>()), m_Undo(std::make_unique<DfUndoStack>()) {
 }
 
 CDiffViewCtrl::~CDiffViewCtrl() {
+	CancelCompare();
 	if (m_OwnFont && m_hFont)
 		::DeleteObject(m_hFont);
 }
@@ -64,6 +66,12 @@ LRESULT CDiffViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	UpdateMetrics();
 	UpdateScrollBarTheme();
 	UpdateScrollBars();
+	return 0;
+}
+
+LRESULT CDiffViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	CancelCompare();   // its result has no window to go to
+	bHandled = FALSE;
 	return 0;
 }
 
@@ -174,27 +182,30 @@ LRESULT CDiffViewCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bHandl
 // ---- Texts ---------------------------------------------------------------------------
 
 void CDiffViewCtrl::SetTexts(LPCWSTR left, LPCWSTR right, int cchLeft, int cchRight) {
-	m_Doc->left = DfLines(View(left, cchLeft));
-	m_Doc->right = DfLines(View(right, cchRight));
-	Recompute();
+	m_Undo->items.clear();
+	Compare(DfLines(View(left, cchLeft)), DfLines(View(right, cchRight)));
 }
 
 void CDiffViewCtrl::SetText(bool right, LPCWSTR text, int cch) {
-	(right ? m_Doc->right : m_Doc->left) = DfLines(View(text, cch));
-	Recompute();
+	m_Undo->items.clear();
+	DfLines lines(View(text, cch)), other = Latest().Lines(!right);
+	if (right)
+		Compare(std::move(other), std::move(lines));
+	else
+		Compare(std::move(lines), std::move(other));
 }
 
 ATL::CString CDiffViewCtrl::GetText(bool right) const {
-	auto text = (right ? m_Doc->right : m_Doc->left).Join(L"\r\n");
+	auto text = Latest().Lines(right).Join(L"\r\n");
 	return ATL::CString(text.c_str(), (int)std::min<size_t>(text.size(), INT_MAX));
 }
 
 size_t CDiffViewCtrl::GetLineCount(bool right) const {
-	return (right ? m_Doc->right : m_Doc->left).size();
+	return Latest().Lines(right).size();
 }
 
 ATL::CString CDiffViewCtrl::GetLineText(bool right, size_t line) const {
-	auto& lines = right ? m_Doc->right : m_Doc->left;
+	auto& lines = Latest().Lines(right);
 	if (line >= lines.size())
 		return {};
 	auto text = lines[line];
@@ -202,11 +213,10 @@ ATL::CString CDiffViewCtrl::GetLineText(bool right, size_t line) const {
 }
 
 void CDiffViewCtrl::Clear() {
-	m_Doc->left = DfLines();
-	m_Doc->right = DfLines();
+	m_Undo->items.clear();
 	m_TopRow = 0;
 	m_Left = 0;
-	Recompute();
+	Compare(DfLines(), DfLines());
 }
 
 void CDiffViewCtrl::SetTitles(LPCWSTR left, LPCWSTR right) {
@@ -215,6 +225,87 @@ void CDiffViewCtrl::SetTitles(LPCWSTR left, LPCWSTR right) {
 	UpdateScrollBars();
 	if (IsWindow())
 		Invalidate();
+}
+
+// ---- Comparing ---------------------------------------------------------------------------
+
+// A compare on the worker thread. The thread holds it too: a compare stopped or replaced runs on into nothing.
+struct DfJob {
+	std::unique_ptr<DfDocument> doc = std::make_unique<DfDocument>();
+	DfOptions options;
+	int tabSize = 4;
+	std::atomic<bool> cancel{ false };
+	HWND hwnd = nullptr;
+	WPARAM number = 0;
+};
+
+const DfDocument& CDiffViewCtrl::Latest() const {
+	return m_Job ? *m_Job->doc : *m_Doc;
+}
+
+void CDiffViewCtrl::CancelCompare() {
+	if (m_Job) {
+		m_Job->cancel = true;
+		m_Job.reset();
+	}
+}
+
+void CDiffViewCtrl::Compare(DfLines&& left, DfLines&& right) {
+	bool comparing = m_Job != nullptr;
+	CancelCompare();
+	if (IsWindow() && left.size() + right.size() > m_BackgroundThreshold) {
+		// the texts the thread compares are its own; the view keeps the last diff until it's done
+		auto job = std::make_shared<DfJob>();
+		job->doc->left = std::move(left);
+		job->doc->right = std::move(right);
+		job->options = MakeOptions(m_Options);
+		job->options.cancel = &job->cancel;
+		job->tabSize = m_TabSize;
+		job->hwnd = m_hWnd;
+		job->number = ++m_JobNumber;
+		m_Job = job;
+		std::thread([job] {
+			job->doc->Compute(job->options, job->tabSize);
+			if (!job->cancel)
+				::PostMessage(job->hwnd, WM_DFV_DIFFDONE, job->number, 0);
+		}).detach();
+		m_HotMerge = -1;
+		Invalidate();   // the note, and no arrows meanwhile
+		return;
+	}
+	m_Doc->left = std::move(left);
+	m_Doc->right = std::move(right);
+	Recompute();
+	if (comparing && IsWindow())
+		Invalidate();
+}
+
+LRESULT CDiffViewCtrl::OnDiffDone(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	if (!m_Job || wParam != m_Job->number)
+		return 0;   // stopped or replaced meanwhile
+	auto anchor = GetAnchor();
+	m_Doc = std::move(m_Job->doc);
+	m_Job.reset();
+	BuildRows();
+	SetAnchor(anchor);
+	ClampPositions();
+	UpdateScrollBars();
+	Invalidate();
+	NMHDR hdr{};
+	FireNotify(&hdr, DFVN_DIFFDONE);
+	return 0;
+}
+
+void CDiffViewCtrl::SetBackgroundThreshold(size_t lines) {
+	m_BackgroundThreshold = lines;
+}
+
+size_t CDiffViewCtrl::GetBackgroundThreshold() const {
+	return m_BackgroundThreshold;
+}
+
+bool CDiffViewCtrl::IsComparing() const {
+	return m_Job != nullptr;
 }
 
 // ---- The diff ------------------------------------------------------------------------
@@ -293,7 +384,8 @@ void CDiffViewCtrl::SetOptions(UINT flags) {
 	if (flags == m_Options)
 		return;
 	m_Options = flags;
-	Recompute();
+	auto& latest = Latest();
+	Compare(DfLines(latest.left), DfLines(latest.right));
 }
 
 UINT CDiffViewCtrl::GetOptions() const {
@@ -484,6 +576,8 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 	pHit->part = DFVHT_NOWHERE;
 	pHit->row = DFV_NOLINE;
 	pHit->pos = {};
+	pHit->change = -1;
+	pHit->toRight = FALSE;
 	POINT pt = pHit->pt;
 	RECT client{};
 	GetClientRect(&client);
@@ -500,6 +594,14 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 		int height = std::max(1, (int)(overview.bottom - overview.top));
 		if (!m_Doc->rows.empty())
 			pHit->row = std::min(m_Doc->rows.size() - 1, (size_t)((double)(pt.y - overview.top) / height * m_Doc->rows.size()));
+		return TRUE;
+	}
+	int change;
+	bool toRight;
+	if (MergeHitTest(pt, change, toRight)) {
+		pHit->part = DFVHT_MERGE;
+		pHit->change = change;
+		pHit->toRight = toRight;
 		return TRUE;
 	}
 	size_t row = m_TopRow + (pt.y - rc.top) / m_RowHeight;
@@ -528,7 +630,7 @@ CDiffViewCtrl::Pane CDiffViewCtrl::GetPane(int index) const {
 	int gutter = GutterWidth();
 	if (m_Layout == DFVL_UNIFIED)
 		return { 0, std::min(gutter, (int)rc.right), (int)rc.right };
-	int center = Scale(6);
+	int center = CenterWidth();
 	int half = std::max(0, ((int)rc.right - center) / 2);
 	if (index == 0)
 		return { 0, std::min(gutter, half), half };
@@ -772,6 +874,10 @@ void CDiffViewCtrl::Paint(WTL::CDCHandle dc, const RECT& rcPaint) {
 			FillSolid(dc, { pane.text, y, pane.right, (int)rcPaint.bottom }, c.crBack);
 		}
 	}
+	if (m_Layout == DFVL_SIDEBYSIDE && m_MergeFlags)
+		PaintMerge(dc, c);
+	if (m_Job)
+		PaintComparing(dc, c);
 	dc.SelectFont(oldFont);
 	if (m_ShowOverview && rcPaint.right > rc.right)
 		PaintOverview(dc, c);

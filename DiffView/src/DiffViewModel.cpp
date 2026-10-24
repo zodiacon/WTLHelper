@@ -75,8 +75,8 @@ namespace {
 	// either search reached, so very different inputs cost O(N * limit) rather than O(N * D), not quite minimal.
 	class DfMyers {
 	public:
-		DfMyers(const int* a, int n, const int* b, int m, uint8_t* marksA, uint8_t* marksB, int costLimit)
-			: m_A(a), m_B(b), m_MarksA(marksA), m_MarksB(marksB) {
+		DfMyers(const int* a, int n, const int* b, int m, uint8_t* marksA, uint8_t* marksB, int costLimit, const std::atomic<bool>* cancel = nullptr)
+			: m_A(a), m_B(b), m_MarksA(marksA), m_MarksB(marksB), m_Cancel(cancel) {
 			m_Diags.resize(size_t(n) + m + 3);
 			m_Fd = m_Diags.data() + m + 1;
 			m_BDiags.resize(size_t(n) + m + 3);
@@ -97,6 +97,12 @@ namespace {
 				while (xoff < xlim && yoff < ylim && m_A[xlim - 1] == m_B[ylim - 1])
 					xlim--, ylim--;
 				if (xoff == xlim) {
+					std::fill(m_MarksB + yoff, m_MarksB + ylim, uint8_t(1));
+					return;
+				}
+				if (m_Cancel && m_Cancel->load(std::memory_order_relaxed)) {
+					// stopped: the rest of the range changed
+					std::fill(m_MarksA + xoff, m_MarksA + xlim, uint8_t(1));
 					std::fill(m_MarksB + yoff, m_MarksB + ylim, uint8_t(1));
 					return;
 				}
@@ -216,6 +222,7 @@ namespace {
 		int* m_Fd;
 		int* m_Bd;
 		int m_Limit;
+		const std::atomic<bool>* m_Cancel;
 	};
 
 	void Diff(const std::vector<int>& a, const std::vector<int>& b, std::vector<uint8_t>& marksA, std::vector<uint8_t>& marksB, int costLimit = 0) {
@@ -617,7 +624,7 @@ DfDiff DfCompute(const DfLines& left, const DfLines& right, const DfOptions& opt
 	auto lis = Lis(candR);
 
 	std::vector<uint8_t> marksL(n), marksR(m);
-	DfMyers myers(idsL.data(), int(n), idsR.data(), int(m), marksL.data(), marksR.data(), options.costLimit);
+	DfMyers myers(idsL.data(), int(n), idsR.data(), int(m), marksL.data(), marksR.data(), options.costLimit, options.cancel);
 	int x = 0, y = 0;
 	for (auto k : lis) {
 		myers.Compare(x, candL[k], y, candR[k]);
@@ -654,13 +661,14 @@ DfDiff DfCompute(const DfLines& left, const DfLines& right, const DfOptions& opt
 	diff.leftPair.assign(n, -1);
 	diff.rightPair.assign(m, -1);
 	std::vector<std::pair<size_t, size_t>> pairs;
+	auto cancelled = [&] { return options.cancel && options.cancel->load(std::memory_order_relaxed); };
 	for (auto& block : diff.blocks) {
 		if (!block.changed)
 			continue;
 		diff.changes++;
 		diff.deleted += block.leftCount;
 		diff.inserted += block.rightCount;
-		if (block.leftCount > 0 && block.rightCount > 0)
+		if (block.leftCount > 0 && block.rightCount > 0 && !cancelled())
 			PairLines(left, right, block, options, pairs);
 	}
 	diff.pairs.reserve(pairs.size());
@@ -668,7 +676,7 @@ DfDiff DfCompute(const DfLines& left, const DfLines& right, const DfOptions& opt
 		DfLinePair pair;
 		pair.left = l;
 		pair.right = r;
-		if (options.intraLine)
+		if (options.intraLine && !cancelled())
 			DfIntraLine(left[l], right[r], options, pair.leftSpans, pair.rightSpans);
 		diff.leftPair[l] = diff.rightPair[r] = int(diff.pairs.size());
 		diff.pairs.push_back(std::move(pair));
@@ -807,6 +815,25 @@ void DfMerge(DfLines& left, DfLines& right, const DfBlock& block, bool toRight) 
 		right.Replace(block.right, block.rightCount, left, block.left, block.leftCount);
 	else
 		left.Replace(block.left, block.leftCount, right, block.right, block.rightCount);
+}
+
+DfMergeUndo DfMergeWithUndo(DfLines& left, DfLines& right, const DfBlock& block, bool toRight) {
+	DfMergeUndo undo;
+	undo.right = toRight;
+	auto& target = toRight ? right : left;
+	undo.first = toRight ? block.right : block.left;
+	size_t count = toRight ? block.rightCount : block.leftCount;
+	undo.removed.Replace(0, 0, target, undo.first, count);   // with the target's missing line break, if it's there
+	undo.count = toRight ? block.leftCount : block.rightCount;
+	undo.endsWithNewline = target.EndsWithNewline();
+	DfMerge(left, right, block, toRight);
+	return undo;
+}
+
+void DfUndoMerge(DfLines& left, DfLines& right, const DfMergeUndo& undo) {
+	auto& target = undo.right ? right : left;
+	target.Replace(undo.first, undo.count, undo.removed, 0, undo.removed.size());
+	target.SetEndsWithNewline(undo.endsWithNewline);
 }
 
 std::wstring DfUnifiedText(const DfLines& left, const DfLines& right, const DfDiff& diff, int context, std::wstring_view leftName, std::wstring_view rightName, std::wstring_view eol) {
