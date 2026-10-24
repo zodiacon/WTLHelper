@@ -173,6 +173,144 @@ CpLayout CpComputeLayout(int width, int height, const CpMetrics& m, bool alpha) 
 	return l;
 }
 
+int CpPanelWidth(const CpPanelMetrics& m) {
+	return 2 * (m.labelWidth + m.fieldWidth) + m.colGap;
+}
+
+CpPanel CpComputePanel(int left, int top, const CpPanelMetrics& m, bool swatch, bool fields, bool alpha) {
+	CpPanel p;
+	if (swatch) {
+		p.swatch = { left, top, left + CpPanelWidth(m), top + m.swatchHeight };
+		top += m.swatchHeight + m.swatchGap;
+	}
+	if (!fields)
+		return p;
+	for (int f = 0; f < CpFieldCount; f++) {
+		if (f == CpA && !alpha)
+			continue;
+		int col = f < CpR ? 0 : 1, row = f < CpR ? f : f - CpR;
+		int x = left + col * (m.labelWidth + m.fieldWidth + m.colGap);
+		int y = top + row * (m.fieldHeight + m.rowGap);
+		p.label[f] = { x, y, x + m.labelWidth, y + m.fieldHeight };
+		p.frame[f] = { x + m.labelWidth, y, x + m.labelWidth + m.fieldWidth, y + m.fieldHeight };
+	}
+	return p;
+}
+
+bool CpHasSpin(CpField field) {
+	return field != CpHex;
+}
+
+void CpSpinRects(const RECT& frame, int spinWidth, RECT* pUp, RECT* pDown) {
+	RECT rc{ std::max(frame.left + 1, frame.right - 1 - spinWidth), frame.top + 1, frame.right - 1, frame.bottom - 1 };
+	int mid = (rc.top + rc.bottom) / 2;
+	*pUp = { rc.left, rc.top, rc.right, mid };
+	*pDown = { rc.left, mid, rc.right, rc.bottom };
+}
+
+RECT CpEditRect(const RECT& frame, CpField field, int spinWidth, int textHeight, int padX) {
+	int right = frame.right - 1 - (CpHasSpin(field) ? spinWidth : 0) - 1;
+	int top = frame.top + (frame.bottom - frame.top - textHeight) / 2;
+	RECT rc{ frame.left + 1 + padX, top, right, top + textHeight };
+	rc.right = std::max(rc.left, rc.right);
+	return rc;
+}
+
+void CpSwatchRects(const RECT& swatch, bool hasOriginal, RECT* pNew, RECT* pOld) {
+	*pNew = swatch;
+	*pOld = {};
+	if (hasOriginal) {
+		pNew->bottom = (swatch.top + swatch.bottom) / 2;
+		*pOld = { swatch.left, pNew->bottom, swatch.right, swatch.bottom };
+	}
+}
+
+// ---- Fields --------------------------------------------------------------------------
+
+bool CpParseInt(std::wstring_view text, int* pValue) {
+	while (!text.empty() && iswspace(text.front()))
+		text.remove_prefix(1);
+	while (!text.empty() && iswspace(text.back()))
+		text.remove_suffix(1);
+	bool negative = !text.empty() && text.front() == L'-';
+	if (negative)
+		text.remove_prefix(1);
+	if (text.empty() || text.size() > 9)
+		return false;
+	int value = 0;
+	for (auto ch : text) {
+		if (ch < L'0' || ch > L'9')
+			return false;
+		value = value * 10 + (ch - L'0');
+	}
+	*pValue = negative ? -value : value;
+	return true;
+}
+
+static int ShownValue(CpField field, const CpHsv& hsv, BYTE alpha) {
+	auto rgb = CpHsvToRgb(hsv);
+	switch (field) {
+		case CpH: return (int)std::lround(hsv.h);
+		case CpS: return (int)std::lround(hsv.s * 100);
+		case CpV: return (int)std::lround(hsv.v * 100);
+		case CpA: return alpha;
+		case CpR: return GetRValue(rgb);
+		case CpG: return GetGValue(rgb);
+		case CpB: return GetBValue(rgb);
+	}
+	return 0;
+}
+
+// a whole value for a numeric field, clamped
+static void ApplyValue(CpField field, int value, CpHsv& hsv, BYTE& alpha) {
+	// the value shown already: nothing changes (the fraction behind it stays)
+	if (value == ShownValue(field, hsv, alpha))
+		return;
+	auto rgb = CpHsvToRgb(hsv);
+	BYTE r = GetRValue(rgb), g = GetGValue(rgb), b = GetBValue(rgb);
+	switch (field) {
+		case CpH: hsv.h = std::clamp(value, 0, 360); return;
+		case CpS: hsv.s = std::clamp(value, 0, 100) / 100.0; return;
+		case CpV: hsv.v = std::clamp(value, 0, 100) / 100.0; return;
+		case CpA: alpha = (BYTE)std::clamp(value, 0, 255); return;
+		case CpR: r = (BYTE)std::clamp(value, 0, 255); break;
+		case CpG: g = (BYTE)std::clamp(value, 0, 255); break;
+		case CpB: b = (BYTE)std::clamp(value, 0, 255); break;
+		default: return;
+	}
+	hsv = CpUpdateHsv(hsv, RGB(r, g, b));
+}
+
+std::wstring CpFieldText(CpField field, const CpHsv& hsv, BYTE alpha) {
+	if (field == CpHex)
+		return CpFormatHex(CpHsvToRgb(hsv));
+	return std::to_wstring(ShownValue(field, hsv, alpha));
+}
+
+bool CpApplyField(CpField field, std::wstring_view text, CpHsv& hsv, BYTE& alpha) {
+	if (field == CpHex) {
+		COLORREF color;
+		BYTE a = alpha;
+		if (!CpParseHex(text, &color, &a))
+			return false;
+		hsv = CpUpdateHsv(hsv, color);
+		alpha = a;
+		return true;
+	}
+	int value;
+	if (field < 0 || field >= CpFieldCount || !CpParseInt(text, &value))
+		return false;
+	ApplyValue(field, value, hsv, alpha);
+	return true;
+}
+
+bool CpStepField(CpField field, int delta, CpHsv& hsv, BYTE& alpha) {
+	if (field == CpHex || field < 0 || field >= CpFieldCount)
+		return false;
+	ApplyValue(field, ShownValue(field, hsv, alpha) + delta, hsv, alpha);
+	return true;
+}
+
 static double Fraction(int pos, int start, int size) {
 	return size <= 1 ? 0 : std::clamp((double)(pos - start) / (size - 1), 0.0, 1.0);
 }
@@ -247,6 +385,15 @@ void CpRenderAlpha(const CpPixels& px, COLORREF color, int cell, COLORREF check1
 		double a = 1 - Fraction(y, 0, px.height);
 		for (int x = 0; x < px.width; x++)
 			px.At(x, y) = CpBlend(CpChecker(x, y, cell, check1, check2), p, a);
+	}
+}
+
+void CpRenderSwatch(const CpPixels& px, COLORREF color, BYTE alpha, int cell, COLORREF check1, COLORREF check2) {
+	auto p = CpPixel(color);
+	int half = px.width / 2;
+	for (int y = 0; y < px.height; y++) {
+		for (int x = 0; x < px.width; x++)
+			px.At(x, y) = x < half ? p : CpBlend(CpChecker(x - half, y, cell, check1, check2), p, alpha / 255.0);
 	}
 }
 

@@ -35,6 +35,8 @@ enum {
 	ID_VIEW_ALPHA = 301,
 	ID_VIEW_DARK,
 	ID_VIEW_DARKMODE,
+	ID_VIEW_FIELDS,
+	ID_VIEW_SWATCH,
 
 	ID_COLOR_RED = 401,
 	ID_COLOR_BLACK,
@@ -42,6 +44,8 @@ enum {
 	ID_COLOR_HALF,
 	ID_COLOR_RANDOM,
 	ID_COLOR_HSV,
+	ID_COLOR_SETORIGINAL,
+	ID_COLOR_NOORIGINAL,
 };
 
 // ---- State --------------------------------------------------------------------
@@ -53,8 +57,8 @@ static int g_changing, g_changed;
 static CString g_lastEvent = L"(none)";
 static HFONT g_font;
 
-static const CPKCOLORS g_dark = { RGB(0x20, 0x20, 0x20), RGB(0xE0, 0xE0, 0xE0), RGB(0x60, 0x60, 0x60),
-	RGB(0x5A, 0x5A, 0x5A), RGB(0x3A, 0x3A, 0x3A) };
+static const CPKCOLORS g_dark = { RGB(0x20, 0x20, 0x20), RGB(0xE0, 0xE0, 0xE0), RGB(0x2C, 0x2C, 0x2C),
+	RGB(0x60, 0x60, 0x60), RGB(0x5A, 0x5A, 0x5A), RGB(0x3A, 0x3A, 0x3A) };
 
 static CPKCOLORS Colors() {
 	return g_picker.GetColors();
@@ -78,7 +82,7 @@ static void UpdateFont(HWND hwnd) {
 static RECT PanelRect(HWND hwnd) {
 	RECT rc;
 	::GetClientRect(hwnd, &rc);
-	rc.left = rc.right - Scale(hwnd, 230);
+	rc.left = rc.right - Scale(hwnd, 190);
 	return rc;
 }
 
@@ -95,6 +99,8 @@ static void Layout(HWND hwnd) {
 static void UpdateChecks(HMENU menu) {
 	auto check = [&](UINT id, bool on) { ::CheckMenuItem(menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED)); };
 	check(ID_VIEW_ALPHA, (g_picker.GetStyle() & CPKS_NOALPHA) == 0);
+	check(ID_VIEW_FIELDS, (g_picker.GetStyle() & CPKS_NOFIELDS) == 0);
+	check(ID_VIEW_SWATCH, (g_picker.GetStyle() & CPKS_NOSWATCH) == 0);
 	check(ID_VIEW_DARK, g_darkColors);
 #ifdef DEMO_WTLHELPER
 	check(ID_VIEW_DARKMODE, WTLHelper::IsDarkMode());
@@ -108,34 +114,22 @@ static void PaintPanel(HWND hwnd, HDC hdc) {
 	::FillRect(hdc, &panel, brush);
 	::DeleteObject(brush);
 
-	// the color over a checkerboard, the left half without its alpha
+	// what the app reads back, and the notifications
 	int pad = Scale(hwnd, 10);
-	RECT sw{ panel.left + pad, panel.top + Scale(hwnd, 9), panel.right - pad, panel.top + Scale(hwnd, 89) };
-	int cell = Scale(hwnd, 6);
 	COLORREF color = g_picker.GetColor();
 	BYTE alpha = g_picker.GetAlpha();
-	for (int y = sw.top; y < sw.bottom; y += cell) {
-		for (int x = sw.left; x < sw.right; x += cell) {
-			RECT r{ x, y, std::min(x + cell, (int)sw.right), std::min(y + cell, (int)sw.bottom) };
-			COLORREF check = (((x - sw.left) / cell + (y - sw.top) / cell) & 1) ? c.crCheck2 : c.crCheck1;
-			bool opaque = x < (sw.left + sw.right) / 2;
-			auto mix = [&](int a, int b) { return (BYTE)((a * (255 - alpha) + b * alpha + 127) / 255); };
-			COLORREF out = opaque ? color : RGB(mix(GetRValue(check), GetRValue(color)), mix(GetGValue(check), GetGValue(color)),
-				mix(GetBValue(check), GetBValue(color)));
-			::SetBkColor(hdc, out);
-			::ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &r, nullptr, 0, nullptr);
-		}
-	}
-	auto frame = ::CreateSolidBrush(c.crBorder);
-	::FrameRect(hdc, &sw, frame);
-	::DeleteObject(frame);
+	BYTE origAlpha;
+	COLORREF orig = g_picker.GetOriginalColor(&origAlpha);
+	CString origText = L"none";
+	if (orig != CLR_NONE)
+		origText.Format(L"#%02X%02X%02X, %d", GetRValue(orig), GetGValue(orig), GetBValue(orig), origAlpha);
 
 	auto hsv = g_picker.GetHsv();
 	CString text;
-	text.Format(L"Hex:  #%02X%02X%02X\nRGB:  %d, %d, %d\nAlpha:  %d\nHSV:  %.2f\x00B0, %.1f%%, %.1f%%\n\nChanging: %d\nChanged: %d\nLast: %s",
+	text.Format(L"Hex:  #%02X%02X%02X\nRGB:  %d, %d, %d\nAlpha:  %d\nHSV:  %.2f\x00B0, %.1f%%, %.1f%%\nOriginal:  %s\n\nChanging: %d\nChanged: %d\nLast: %s",
 		GetRValue(color), GetGValue(color), GetBValue(color), GetRValue(color), GetGValue(color), GetBValue(color), alpha,
-		hsv.h, hsv.s * 100, hsv.v * 100, g_changing, g_changed, (LPCWSTR)g_lastEvent);
-	RECT tr{ sw.left, sw.bottom + pad, sw.right, panel.bottom - Scale(hwnd, 44) };
+		hsv.h, hsv.s * 100, hsv.v * 100, (LPCWSTR)origText, g_changing, g_changed, (LPCWSTR)g_lastEvent);
+	RECT tr{ panel.left + pad, panel.top + pad, panel.right - pad, panel.bottom - Scale(hwnd, 44) };
 	auto oldFont = ::SelectObject(hdc, g_font);
 	::SetTextColor(hdc, c.crText);
 	::SetBkMode(hdc, TRANSPARENT);
@@ -154,6 +148,16 @@ static void OnCommand(HWND hwnd, UINT id) {
 			else
 				g_picker.ModifyStyle(0, CPKS_NOALPHA);
 			break;
+		case ID_VIEW_FIELDS:
+		case ID_VIEW_SWATCH:
+		{
+			DWORD style = id == ID_VIEW_FIELDS ? CPKS_NOFIELDS : CPKS_NOSWATCH;
+			if (g_picker.GetStyle() & style)
+				g_picker.ModifyStyle(style, 0);
+			else
+				g_picker.ModifyStyle(0, style);
+			break;
+		}
 		case ID_VIEW_DARK:
 			g_darkColors = !g_darkColors;
 			g_picker.SetColors(g_darkColors ? &g_dark : nullptr);
@@ -184,6 +188,12 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_COLOR_HSV:
 			g_picker.SetHsv({ 210, 0.6, 0.9 });
 			break;
+		case ID_COLOR_SETORIGINAL:
+			g_picker.SetOriginalColor(g_picker.GetColor(), g_picker.GetAlpha());
+			break;
+		case ID_COLOR_NOORIGINAL:
+			g_picker.SetOriginalColor(CLR_NONE);
+			break;
 		case IDC_RESET:
 			g_picker.SetHsv({ 0, 0, 1 });
 			g_picker.SetAlpha(255);
@@ -203,6 +213,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			UpdateFont(hwnd);
 			g_picker.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, IDC_PICKER);
 			g_picker.SetHsv({ 210, 0.6, 0.9 });
+			g_picker.SetOriginalColor(g_picker.GetColor());
 			g_reset = ::CreateWindowExW(0, WC_BUTTONW, L"&Reset", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_RESET, nullptr, nullptr);
 			::SendMessage(g_reset, WM_SETFONT, (WPARAM)g_font, FALSE);
@@ -243,7 +254,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		{
 			auto nm = (NMCOLORPICKER*)lParam;
 			if (nm->hdr.idFrom == IDC_PICKER) {
-				static const wchar_t* parts[] = { L"?", L"area", L"hue", L"alpha" };
+				static const wchar_t* parts[] = { L"?", L"area", L"hue", L"alpha", L"field", L"new", L"original" };
 				bool changed = nm->hdr.code == CPKN_COLORCHANGED;
 				(changed ? g_changed : g_changing)++;
 				g_lastEvent.Format(L"%s (%s)", changed ? L"changed" : L"changing", nm->part < std::size(parts) ? parts[nm->part] : L"?");
@@ -300,6 +311,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	HMENU hView = ::CreatePopupMenu();
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_ALPHA, L"&Alpha Bar");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_FIELDS, L"&Fields");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_SWATCH, L"&Swatch");
+	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARK, L"Dar&k Colors (SetColors)");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"WTLHelper Dark &Mode");
@@ -312,6 +326,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hColor, MF_STRING, ID_COLOR_HALF, L"&Half Transparent");
 	::AppendMenuW(hColor, MF_STRING, ID_COLOR_RANDOM, L"R&andom\tF5");
 	::AppendMenuW(hColor, MF_STRING, ID_COLOR_HSV, L"&HSV 210, 60%, 90%");
+	::AppendMenuW(hColor, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hColor, MF_STRING, ID_COLOR_SETORIGINAL, L"Make the Color the &Original");
+	::AppendMenuW(hColor, MF_STRING, ID_COLOR_NOORIGINAL, L"&No Original");
 
 	HMENU hMenu = ::CreateMenu();
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
@@ -319,7 +336,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hColor, L"&Color");
 
 	HWND hwnd = ::CreateWindowExW(0, L"ColorPickerDemoWnd", L"Color Picker Demo", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-		CW_USEDEFAULT, CW_USEDEFAULT, 760, 460, nullptr, hMenu, hInstance, nullptr);
+		CW_USEDEFAULT, CW_USEDEFAULT, 920, 480, nullptr, hMenu, hInstance, nullptr);
 	UpdateChecks(hMenu);
 
 	ACCEL accels[] = {

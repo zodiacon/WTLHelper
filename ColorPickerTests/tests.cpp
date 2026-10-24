@@ -345,6 +345,121 @@ TEST(Pixels_Ring) {
 	CHECK(CpBlend(0x000000, 0xFFFFFF, 0.5) == 0x808080);
 }
 
+TEST(Panel_Layout) {
+	CpPanelMetrics m;   // label 28, field 64, height 22, row gap 6, col gap 10, swatch 56 + 12
+	CHECK(CpPanelWidth(m) == 2 * (28 + 64) + 10);
+	auto p = CpComputePanel(100, 8, m, true, true, true);
+	CHECK(p.swatch.left == 100 && p.swatch.top == 8 && p.swatch.right == 100 + CpPanelWidth(m) && p.swatch.bottom == 64);
+	// the first column: H S V A; the second: R G B Hex
+	CHECK(p.label[CpH].left == 100 && p.label[CpH].top == 76 && p.frame[CpH].left == 128 && p.frame[CpH].right == 192);
+	CHECK(p.frame[CpS].top == 76 + 28 && p.frame[CpA].top == 76 + 3 * 28);
+	CHECK(p.label[CpR].left == 100 + 28 + 64 + 10 && p.frame[CpR].top == 76);
+	CHECK(p.frame[CpHex].top == p.frame[CpA].top && p.frame[CpHex].right == p.swatch.right);
+
+	// no alpha: no A field; no swatch: the fields start at the top
+	auto q = CpComputePanel(0, 0, m, false, true, false);
+	CHECK(::IsRectEmpty(&q.swatch) && ::IsRectEmpty(&q.frame[CpA]) && ::IsRectEmpty(&q.label[CpA]));
+	CHECK(q.frame[CpH].top == 0 && !::IsRectEmpty(&q.frame[CpHex]));
+	// no fields
+	auto s = CpComputePanel(0, 0, m, true, false, true);
+	CHECK(!::IsRectEmpty(&s.swatch));
+	for (int f = 0; f < CpFieldCount; f++)
+		CHECK(::IsRectEmpty(&s.frame[f]));
+}
+
+TEST(Panel_Pieces) {
+	RECT frame{ 10, 20, 74, 42 };
+	RECT up, down;
+	CpSpinRects(frame, 14, &up, &down);
+	CHECK(up.left == 59 && up.right == 73 && up.top == 21 && up.bottom == 31);
+	CHECK(down.top == 31 && down.bottom == 41 && down.left == 59);
+	auto e = CpEditRect(frame, CpR, 14, 16, 3);
+	CHECK(e.left == 14 && e.right == 58 && e.top == 23 && e.bottom == 39);
+	auto h = CpEditRect(frame, CpHex, 14, 16, 3);
+	CHECK(h.right == 72);
+	CHECK(CpHasSpin(CpH) && !CpHasSpin(CpHex));
+
+	RECT sw{ 0, 0, 100, 50 }, n, o;
+	CpSwatchRects(sw, true, &n, &o);
+	CHECK(n.top == 0 && n.bottom == 25 && o.top == 25 && o.bottom == 50 && o.right == 100);
+	CpSwatchRects(sw, false, &n, &o);
+	CHECK(n.bottom == 50 && ::IsRectEmpty(&o));
+}
+
+TEST(Fields_Text) {
+	CpHsv hsv{ 210.4, 0.604, 0.899 };
+	auto rgb = CpHsvToRgb(hsv);
+	CHECK_STR(CpFieldText(CpH, hsv, 77), L"210");
+	CHECK_STR(CpFieldText(CpS, hsv, 77), L"60");
+	CHECK_STR(CpFieldText(CpV, hsv, 77), L"90");
+	CHECK_STR(CpFieldText(CpA, hsv, 77), L"77");
+	CHECK_STR(CpFieldText(CpR, hsv, 77), std::to_wstring(GetRValue(rgb)));
+	CHECK_STR(CpFieldText(CpB, hsv, 77), std::to_wstring(GetBValue(rgb)));
+	CHECK_STR(CpFieldText(CpHex, hsv, 77), CpFormatHex(rgb));
+	CHECK_STR(CpFieldText(CpH, { 360, 1, 1 }, 255), L"360");
+}
+
+TEST(Fields_Parse) {
+	int v = 0;
+	CHECK(CpParseInt(L" 42 ", &v) && v == 42);
+	CHECK(CpParseInt(L"-5", &v) && v == -5);
+	CHECK(CpParseInt(L"007", &v) && v == 7);
+	CHECK(!CpParseInt(L"", &v) && !CpParseInt(L"-", &v) && !CpParseInt(L"4 2", &v) && !CpParseInt(L"1.5", &v));
+	CHECK(!CpParseInt(L"12a", &v) && !CpParseInt(L"1234567890", &v));
+}
+
+TEST(Fields_Apply) {
+	CpHsv hsv{ 200, 0.5, 0.5 };
+	BYTE alpha = 255;
+	CHECK(CpApplyField(CpH, L"120", hsv, alpha) && hsv.h == 120);
+	CHECK(CpApplyField(CpH, L"400", hsv, alpha) && hsv.h == 360);     // clamped
+	CHECK(CpApplyField(CpS, L"75", hsv, alpha) && Near(hsv.s, 0.75));
+	CHECK(CpApplyField(CpV, L"-3", hsv, alpha) && hsv.v == 0);
+	CHECK(CpApplyField(CpA, L"300", hsv, alpha) && alpha == 255);
+	CHECK(CpApplyField(CpA, L"128", hsv, alpha) && alpha == 128);
+	// bad text changes nothing
+	auto before = hsv;
+	CHECK(!CpApplyField(CpS, L"x", hsv, alpha) && hsv == before && alpha == 128);
+	CHECK(!CpApplyField(CpHex, L"#12", hsv, alpha) && hsv == before);
+
+	// RGB: the other channels stay
+	hsv = CpRgbToHsv(RGB(10, 20, 30));
+	CHECK(CpApplyField(CpG, L"200", hsv, alpha) && CpHsvToRgb(hsv) == RGB(10, 200, 30));
+	CHECK(CpApplyField(CpR, L"999", hsv, alpha) && CpHsvToRgb(hsv) == RGB(255, 200, 30));
+	// the value shown already keeps the fraction behind it
+	CpHsv exact{ 33.3, 0.333, 0.777 };
+	CHECK(CpApplyField(CpH, L"33", exact, alpha) && exact.h == 33.3);
+	CHECK(CpApplyField(CpS, L"33", exact, alpha) && exact.s == 0.333);
+	// RGB to gray keeps the hue
+	hsv = { 250, 0.5, 0.5 };
+	CHECK(CpApplyField(CpHex, L"#808080", hsv, alpha) && hsv.h == 250 && hsv.s == 0 && alpha == 128);
+	// hex with alpha
+	CHECK(CpApplyField(CpHex, L"#40FF0000", hsv, alpha) && CpHsvToRgb(hsv) == RGB(255, 0, 0) && alpha == 0x40);
+}
+
+TEST(Fields_Step) {
+	CpHsv hsv{ 359.6, 0.5, 0.5 };
+	BYTE alpha = 250;
+	CHECK(CpStepField(CpH, 1, hsv, alpha) && hsv.h == 360);   // shown as 360: stays
+	CHECK(CpStepField(CpH, -10, hsv, alpha) && hsv.h == 350);
+	CHECK(CpStepField(CpS, 1, hsv, alpha) && Near(hsv.s, 0.51));
+	CHECK(CpStepField(CpA, 10, hsv, alpha) && alpha == 255);
+	CHECK(CpStepField(CpA, -1, hsv, alpha) && alpha == 254);
+	hsv = CpRgbToHsv(RGB(0, 100, 255));
+	CHECK(CpStepField(CpB, 1, hsv, alpha) && CpHsvToRgb(hsv) == RGB(0, 100, 255));
+	CHECK(CpStepField(CpR, 5, hsv, alpha) && CpHsvToRgb(hsv) == RGB(5, 100, 255));
+	CHECK(!CpStepField(CpHex, 1, hsv, alpha));
+}
+
+TEST(Pixels_Swatch) {
+	Buffer b(10, 4);
+	CpRenderSwatch(b.px, RGB(255, 0, 0), 0, 2, RGB(255, 255, 255), RGB(0, 0, 0));
+	CHECK(CpColor(b.px.At(0, 0)) == RGB(255, 0, 0) && CpColor(b.px.At(4, 3)) == RGB(255, 0, 0));
+	CHECK(CpColor(b.px.At(5, 0)) == RGB(255, 255, 255) && CpColor(b.px.At(7, 0)) == RGB(0, 0, 0));
+	CpRenderSwatch(b.px, RGB(255, 0, 0), 255, 2, RGB(255, 255, 255), RGB(0, 0, 0));
+	CHECK(CpColor(b.px.At(9, 3)) == RGB(255, 0, 0));
+}
+
 int wmain() {
 	Run_HsvToRgb_Primaries();
 	Run_RgbToHsv_Values();
@@ -362,6 +477,13 @@ int wmain() {
 	Run_Pixels_HueAndAlpha();
 	Run_Pixels_FillFrameCopy();
 	Run_Pixels_Ring();
+	Run_Panel_Layout();
+	Run_Panel_Pieces();
+	Run_Fields_Text();
+	Run_Fields_Parse();
+	Run_Fields_Apply();
+	Run_Fields_Step();
+	Run_Pixels_Swatch();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

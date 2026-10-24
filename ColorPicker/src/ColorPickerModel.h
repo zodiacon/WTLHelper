@@ -51,6 +51,49 @@ struct CpLayout {          // the gradients; each has a 1px frame outside it
 // the SV area takes what the bars leave, the bars are on its right
 CpLayout CpComputeLayout(int width, int height, const CpMetrics& m, bool alpha);
 
+// The panel on the right: the new/old swatch above, the fields below in two columns: H S V A | R G B Hex.
+
+enum CpField { CpH, CpS, CpV, CpA, CpR, CpG, CpB, CpHex, CpFieldCount };   // also the tab order
+
+struct CpPanelMetrics {    // pixels at the window's DPI
+	int labelWidth = 28;
+	int fieldWidth = 64;   // the frame, spin buttons included
+	int fieldHeight = 22;
+	int rowGap = 6;
+	int colGap = 10;
+	int swatchHeight = 56;
+	int swatchGap = 12;    // between the swatch and the fields
+	int spinWidth = 14;
+};
+
+struct CpPanel {
+	RECT swatch{};                     // empty without it
+	RECT label[CpFieldCount]{};        // empty for a field not shown
+	RECT frame[CpFieldCount]{};
+};
+
+int      CpPanelWidth(const CpPanelMetrics& m);
+CpPanel  CpComputePanel(int left, int top, const CpPanelMetrics& m, bool swatch, bool fields, bool alpha);
+bool     CpHasSpin(CpField field);         // all but Hex
+// the spin buttons inside a field's frame: the upper and lower halves
+void     CpSpinRects(const RECT& frame, int spinWidth, RECT* pUp, RECT* pDown);
+// the edit inside a field's frame, textHeight high and centered
+RECT     CpEditRect(const RECT& frame, CpField field, int spinWidth, int textHeight, int padX);
+// the swatch's halves: the new color above the original, or all of it with no original
+void     CpSwatchRects(const RECT& swatch, bool hasOriginal, RECT* pNew, RECT* pOld);
+
+// ---- Fields --------------------------------------------------------------------------
+//
+// H in degrees 0..360, S and V in percent, R G B and A 0..255, Hex "#RRGGBB" (also takes "#AARRGGBB", which
+// sets the alpha). Numbers are whole; out of range ones are clamped.
+
+std::wstring CpFieldText(CpField field, const CpHsv& hsv, BYTE alpha);
+// false if the text isn't a value for the field (hsv and alpha untouched)
+bool     CpApplyField(CpField field, std::wstring_view text, CpHsv& hsv, BYTE& alpha);
+// up (delta > 0) or down from the field's shown value; false for Hex
+bool     CpStepField(CpField field, int delta, CpHsv& hsv, BYTE& alpha);
+bool     CpParseInt(std::wstring_view text, int* pValue);   // digits, an optional '-', spaces around
+
 // a point anywhere (clamped into the area) to saturation (left to right) and value (bottom to top)
 void     CpSvFromPoint(const RECT& rc, POINT pt, double* pS, double* pV);
 POINT    CpPointFromSv(const RECT& rc, double s, double v);
@@ -85,8 +128,10 @@ void     CpRenderSv(const CpPixels& px, double hue);
 void     CpRenderHue(const CpPixels& px);
 // all of px: the color from opaque at the top to transparent at the bottom, over a checkerboard of cell pixels
 void     CpRenderAlpha(const CpPixels& px, COLORREF color, int cell, COLORREF check1, COLORREF check2);
-// the checkerboard under a color with alpha (also for swatches); cells counted from (x0, y0)
+// the checkerboard under a color with alpha (also for swatches)
 uint32_t CpChecker(int x, int y, int cell, COLORREF check1, COLORREF check2);
+// all of px: the color opaque on the left half, with its alpha over the checkerboard on the right
+void     CpRenderSwatch(const CpPixels& px, COLORREF color, BYTE alpha, int cell, COLORREF check1, COLORREF check2);
 
 void     CpFillRect(const CpPixels& px, const RECT& rc, COLORREF color);   // clipped to px
 void     CpFrameRect(const CpPixels& px, const RECT& rc, COLORREF color, int thickness = 1);   // inside rc

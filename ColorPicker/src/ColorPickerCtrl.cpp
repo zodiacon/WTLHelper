@@ -1,4 +1,5 @@
 #include "ColorPicker.h"
+#include "ColorPickerGradient.h"
 #include "ColorPickerModel.h"
 
 #include <algorithm>
@@ -21,17 +22,46 @@ static bool IsEmpty(const RECT& rc) {
 
 // ---- Construction ------------------------------------------------------------------
 
-CColorPickerCtrl::CColorPickerCtrl() = default;
-CColorPickerCtrl::~CColorPickerCtrl() = default;
+CColorPickerCtrl::CColorPickerCtrl() : m_Grad(std::make_unique<CpGradientWindow>(this)) {
+}
+
+CColorPickerCtrl::~CColorPickerCtrl() {
+	if (m_OwnFont && m_hFont)
+		::DeleteObject(m_hFont);
+}
 
 LRESULT CColorPickerCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
+	// a container: Tab goes through the gradients and the fields
+	ModifyStyleEx(0, WS_EX_CONTROLPARENT);
+	ModifyStyle(0, WS_CLIPCHILDREN);
+	UpdateFont();
+	m_Grad->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS);
+	CreateFields();
 	Layout();
+	UpdateFields(-1);
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	for (auto& edit : m_Edits)
+		edit = nullptr;   // they go with the control
+	bHandled = FALSE;
+	return 0;
+}
+
+HWND CColorPickerCtrl::GetGradientWindow() const {
+	return m_Grad->m_hWnd;
+}
+
+LRESULT CColorPickerCtrl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_Grad->IsWindow())
+		m_Grad->SetFocus();
 	return 0;
 }
 
 LRESULT CColorPickerCtrl::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
-	return 1;   // painted through the back buffer
+	return 1;   // painted through back buffers
 }
 
 LRESULT CColorPickerCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
@@ -42,19 +72,33 @@ LRESULT CColorPickerCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CColorPickerCtrl::OnStyleChanged(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	if (wParam == GWL_STYLE) {
-		Layout();
 		if (m_Focus == CPKHT_ALPHA && !HasAlpha())
 			m_Focus = CPKHT_HUE;
+		Layout();
 		Invalidate();
+		if (m_Grad->IsWindow())
+			m_Grad->Invalidate();
 	}
 	bHandled = FALSE;
 	return 0;
 }
 
 LRESULT CColorPickerCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	// a font set with WM_SETFONT is the app's to replace for the new DPI
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
+	UpdateFont();
 	Layout();
 	Invalidate();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam == SPI_SETNONCLIENTMETRICS) {
+		UpdateFont();
+		Layout();
+		Invalidate();
+	}
 	bHandled = FALSE;
 	return 0;
 }
@@ -62,17 +106,23 @@ LRESULT CColorPickerCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 LRESULT CColorPickerCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	m_AlphaDirty = true;   // the checkerboard
 	Invalidate();
+	if (m_Grad->IsWindow())
+		m_Grad->Invalidate();
+	for (auto edit : m_Edits) {
+		if (edit)
+			::InvalidateRect(edit, nullptr, TRUE);
+	}
 	bHandled = FALSE;
 	return 0;
 }
 
-LRESULT CColorPickerCtrl::OnUpdateUIState(UINT, WPARAM, LPARAM, BOOL& bHandled) {
-	Invalidate();   // focus cues shown or hidden
+LRESULT CColorPickerCtrl::OnGradUpdateUIState(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	m_Grad->Invalidate();   // focus cues shown or hidden
 	bHandled = FALSE;
 	return 0;
 }
 
-// ---- Layout ----------------------------------------------------------------------------
+// ---- Fonts and layout ------------------------------------------------------------------
 
 int CColorPickerCtrl::Scale(int dips) const {
 	return ::MulDiv(dips, m_Dpi, 96);
@@ -80,6 +130,44 @@ int CColorPickerCtrl::Scale(int dips) const {
 
 bool CColorPickerCtrl::HasAlpha() const {
 	return (GetStyle() & CPKS_NOALPHA) == 0;
+}
+
+bool CColorPickerCtrl::HasFields() const {
+	return (GetStyle() & CPKS_NOFIELDS) == 0;
+}
+
+bool CColorPickerCtrl::HasSwatch() const {
+	return (GetStyle() & CPKS_NOSWATCH) == 0;
+}
+
+void CColorPickerCtrl::UpdateFont() {
+	if (m_OwnFont) {
+		if (m_hFont)
+			::DeleteObject(m_hFont);
+		NONCLIENTMETRICSW ncm{ sizeof(ncm) };
+		::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, m_Dpi);
+		m_hFont = ::CreateFontIndirectW(&ncm.lfMessageFont);
+	}
+	for (auto edit : m_Edits) {
+		if (edit)
+			::SendMessage(edit, WM_SETFONT, (WPARAM)m_hFont, FALSE);
+	}
+}
+
+LRESULT CColorPickerCtrl::OnSetFont(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
+	if (m_OwnFont && m_hFont)
+		::DeleteObject(m_hFont);
+	m_hFont = (HFONT)wParam;
+	m_OwnFont = m_hFont == nullptr;   // nullptr: back to the default font
+	UpdateFont();
+	Layout();
+	if (lParam)
+		Invalidate();
+	return 0;
+}
+
+LRESULT CColorPickerCtrl::OnGetFont(UINT, WPARAM, LPARAM, BOOL&) {
+	return (LRESULT)m_hFont;
 }
 
 void CColorPickerCtrl::Layout() {
@@ -90,7 +178,22 @@ void CColorPickerCtrl::Layout() {
 	m_Gap = Scale(12);
 	RECT rc;
 	GetClientRect(&rc);
-	auto l = CpComputeLayout(rc.right, rc.bottom, { m_Pad, m_BarWidth, m_Gap }, HasAlpha());
+
+	// the panel on the right, then the gradients take the rest
+	PositionFields();
+	int gradWidth = rc.right;
+	if (HasFields() || HasSwatch()) {
+		int left = rc.right;
+		for (auto& r : m_Labels)
+			if (!IsEmpty(r))
+				left = std::min(left, (int)r.left);
+		if (!IsEmpty(m_Swatch))
+			left = std::min(left, (int)m_Swatch.left);
+		gradWidth = std::max(0, left - m_Gap + m_Pad);
+	}
+	if (m_Grad->IsWindow())
+		m_Grad->SetWindowPos(nullptr, 0, 0, gradWidth, rc.bottom, SWP_NOZORDER | SWP_NOACTIVATE);
+	auto l = CpComputeLayout(gradWidth, rc.bottom, { m_Pad, m_BarWidth, m_Gap }, HasAlpha());
 	m_Sv = l.sv;
 	m_Hue = l.hue;
 	m_AlphaBar = l.alpha;
@@ -102,6 +205,14 @@ RECT CColorPickerCtrl::PartRect(UINT part) const {
 		case CPKHT_SV: return m_Sv;
 		case CPKHT_HUE: return m_Hue;
 		case CPKHT_ALPHA: return HasAlpha() ? m_AlphaBar : RECT{};
+		case CPKHT_NEWCOLOR:
+		case CPKHT_OLDCOLOR:
+		{
+			RECT inner = m_Swatch, n, o;
+			::InflateRect(&inner, -1, -1);
+			CpSwatchRects(inner, m_HasOriginal, &n, &o);
+			return IsEmpty(m_Swatch) ? RECT{} : part == CPKHT_NEWCOLOR ? n : o;
+		}
 	}
 	return {};
 }
@@ -114,15 +225,28 @@ BOOL CColorPickerCtrl::GetPartRect(UINT part, RECT* prc) const {
 }
 
 UINT CColorPickerCtrl::HitTest(POINT pt) const {
-	// a little around each part grabs it too: the markers stick out
+	// a little around each gradient grabs it too: the markers stick out
 	int slack = Scale(4);
+	RECT grad{};
+	if (m_Grad->IsWindow())
+		m_Grad->GetClientRect(&grad);
 	for (UINT part : { CPKHT_SV, CPKHT_HUE, CPKHT_ALPHA }) {
 		auto rc = PartRect(part);
 		if (IsEmpty(rc))
 			continue;
 		::InflateRect(&rc, slack, slack);
+		::IntersectRect(&rc, &rc, &grad);
 		if (::PtInRect(&rc, pt))
 			return part;
+	}
+	for (UINT part : { CPKHT_NEWCOLOR, CPKHT_OLDCOLOR }) {
+		auto rc = PartRect(part);
+		if (::PtInRect(&rc, pt))
+			return part;
+	}
+	for (auto& rc : m_Frames) {
+		if (::PtInRect(&rc, pt))
+			return CPKHT_FIELD;
 	}
 	return CPKHT_NOWHERE;
 }
@@ -135,10 +259,11 @@ UINT CColorPickerCtrl::NextPart(UINT part, bool forward) const {
 }
 
 void CColorPickerCtrl::SetFocusPart(UINT part) {
-	if (IsEmpty(PartRect(part)) || part == m_Focus)
+	if (part < CPKHT_SV || part > CPKHT_ALPHA || IsEmpty(PartRect(part)) || part == m_Focus)
 		return;
 	m_Focus = part;
-	Invalidate();
+	if (m_Grad->IsWindow())
+		m_Grad->Invalidate();
 }
 
 UINT CColorPickerCtrl::GetFocusPart() const {
@@ -147,19 +272,27 @@ UINT CColorPickerCtrl::GetFocusPart() const {
 
 // ---- Color ---------------------------------------------------------------------------
 
-void CColorPickerCtrl::SetState(const Hsv& hsv, BYTE alpha) {
+bool CColorPickerCtrl::SameState(const Hsv& hsv, BYTE alpha) const {
+	return hsv.h == m_Hsv.h && hsv.s == m_Hsv.s && hsv.v == m_Hsv.v && alpha == m_Alpha;
+}
+
+void CColorPickerCtrl::SetState(const Hsv& hsv, BYTE alpha, int skipField) {
 	auto c = CpNormalize({ hsv.h, hsv.s, hsv.v });
 	Hsv n{ c.h, c.s, c.v };
+	if (SameState(n, alpha))
+		return;
 	if (n.h != m_Hsv.h)
 		m_SvDirty = true;
 	if (CpHsvToRgb(c) != GetColor())
 		m_AlphaDirty = true;
-	if (n.h == m_Hsv.h && n.s == m_Hsv.s && n.v == m_Hsv.v && alpha == m_Alpha)
-		return;
 	m_Hsv = n;
 	m_Alpha = alpha;
-	if (IsWindow())
-		Invalidate();
+	if (!IsWindow())
+		return;
+	m_Grad->Invalidate();
+	auto swatch = PartRect(CPKHT_NEWCOLOR);
+	InvalidateRect(&swatch);
+	UpdateFields(skipField);
 }
 
 void CColorPickerCtrl::SetColor(COLORREF color) {
@@ -187,6 +320,20 @@ CPKHSV CColorPickerCtrl::GetHsv() const {
 	return { m_Hsv.h, m_Hsv.s, m_Hsv.v };
 }
 
+void CColorPickerCtrl::SetOriginalColor(COLORREF color, BYTE alpha) {
+	m_HasOriginal = color != CLR_NONE;
+	m_Original = color & 0xFFFFFF;
+	m_OriginalAlpha = alpha;
+	if (IsWindow())
+		InvalidateRect(&m_Swatch);
+}
+
+COLORREF CColorPickerCtrl::GetOriginalColor(BYTE* pAlpha) const {
+	if (pAlpha)
+		*pAlpha = m_OriginalAlpha;
+	return m_HasOriginal ? m_Original : CLR_NONE;
+}
+
 void CColorPickerCtrl::Notify(UINT code, UINT part) {
 	NMCOLORPICKER nm{};
 	nm.hdr.hwndFrom = m_hWnd;
@@ -199,7 +346,7 @@ void CColorPickerCtrl::Notify(UINT code, UINT part) {
 	::SendMessage(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
 }
 
-// ---- Mouse -------------------------------------------------------------------------------
+// ---- Mouse on the gradients ---------------------------------------------------------------
 
 void CColorPickerCtrl::ApplyPoint(POINT pt) {
 	Hsv hsv = m_Hsv;
@@ -217,43 +364,41 @@ void CColorPickerCtrl::ApplyPoint(POINT pt) {
 		default:
 			return;
 	}
-	auto before = m_Hsv;
-	auto beforeAlpha = m_Alpha;
+	if (SameState(hsv, alpha))
+		return;
 	SetState(hsv, alpha);
-	if (before.h != m_Hsv.h || before.s != m_Hsv.s || before.v != m_Hsv.v || beforeAlpha != m_Alpha) {
-		UpdateWindow();   // the marker follows the mouse even when the parent is slow to repaint
-		Notify(CPKN_COLORCHANGING, m_Drag);
-	}
+	m_Grad->UpdateWindow();   // the marker follows the mouse even when the parent is slow to repaint
+	Notify(CPKN_COLORCHANGING, m_Drag);
 }
 
-LRESULT CColorPickerCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	if (::GetFocus() != m_hWnd)
-		SetFocus();
+LRESULT CColorPickerCtrl::OnGradLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	if (::GetFocus() != m_Grad->m_hWnd)
+		m_Grad->SetFocus();   // a field typed in commits first
 	POINT pt{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
 	UINT part = HitTest(pt);
-	if (part == CPKHT_NOWHERE || m_Drag != CPKHT_NOWHERE)
+	if (part < CPKHT_SV || part > CPKHT_ALPHA || m_Drag != CPKHT_NOWHERE)
 		return 0;
 	SetFocusPart(part);
 	m_DragStartHsv = m_Hsv;
 	m_DragStartAlpha = m_Alpha;
 	m_Drag = part;
-	SetCapture();
+	m_Grad->SetCapture();
 	ApplyPoint(pt);
 	return 0;
 }
 
-LRESULT CColorPickerCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
+LRESULT CColorPickerCtrl::OnGradMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (m_Drag != CPKHT_NOWHERE)
 		ApplyPoint({ (short)LOWORD(lParam), (short)HIWORD(lParam) });
 	return 0;
 }
 
-LRESULT CColorPickerCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CColorPickerCtrl::OnGradLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
 	EndDrag(false);
 	return 0;
 }
 
-LRESULT CColorPickerCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CColorPickerCtrl::OnGradCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 	EndDrag(false);   // taken away (another window, a menu): what the drag did stays
 	return 0;
 }
@@ -262,12 +407,10 @@ void CColorPickerCtrl::EndDrag(bool cancel) {
 	UINT part = m_Drag;
 	if (part == CPKHT_NOWHERE)
 		return;
-	m_Drag = CPKHT_NOWHERE;   // first: releasing the capture comes back through OnCaptureChanged
-	if (::GetCapture() == m_hWnd)
+	m_Drag = CPKHT_NOWHERE;   // first: releasing the capture comes back through OnGradCaptureChanged
+	if (::GetCapture() == m_Grad->m_hWnd)
 		::ReleaseCapture();
-	bool changed = m_Hsv.h != m_DragStartHsv.h || m_Hsv.s != m_DragStartHsv.s || m_Hsv.v != m_DragStartHsv.v ||
-		m_Alpha != m_DragStartAlpha;
-	if (!changed)
+	if (SameState(m_DragStartHsv, m_DragStartAlpha))
 		return;
 	if (cancel) {
 		SetState(m_DragStartHsv, m_DragStartAlpha);
@@ -278,21 +421,21 @@ void CColorPickerCtrl::EndDrag(bool cancel) {
 	}
 }
 
-// ---- Keyboard --------------------------------------------------------------------------
+// ---- Keyboard on the gradients --------------------------------------------------------------
 
-LRESULT CColorPickerCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
+LRESULT CColorPickerCtrl::OnGradFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	// tabbing in starts at the first part, Shift+Tab at the last
 	if (uMsg == WM_SETFOCUS && ::GetKeyState(VK_TAB) < 0)
 		m_Focus = ::GetKeyState(VK_SHIFT) < 0 ? (HasAlpha() ? CPKHT_ALPHA : CPKHT_HUE) : CPKHT_SV;
-	Invalidate();
+	m_Grad->Invalidate();
 	return 0;
 }
 
-LRESULT CColorPickerCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
+LRESULT CColorPickerCtrl::OnGradGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (m_Drag != CPKHT_NOWHERE)
 		return DLGC_WANTALLKEYS;   // Escape cancels the drag
 	LRESULT code = DLGC_WANTARROWS;
-	// Tab moves between the parts, and leaves the control from the first or last one
+	// Tab moves between the parts, and leaves from the first or last one
 	auto msg = (const MSG*)lParam;
 	if (msg && msg->message == WM_KEYDOWN && msg->wParam == VK_TAB && ::GetKeyState(VK_CONTROL) >= 0 &&
 		NextPart(m_Focus, ::GetKeyState(VK_SHIFT) >= 0) != CPKHT_NOWHERE)
@@ -300,7 +443,7 @@ LRESULT CColorPickerCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	return code;
 }
 
-LRESULT CColorPickerCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+LRESULT CColorPickerCtrl::OnGradKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	bool shift = ::GetKeyState(VK_SHIFT) < 0;
 	if (wParam == VK_ESCAPE && m_Drag != CPKHT_NOWHERE) {
 		EndDrag(true);
@@ -383,10 +526,8 @@ bool CColorPickerCtrl::HandleKey(WPARAM key, bool shift) {
 		default:
 			return false;
 	}
-	auto before = m_Hsv;
-	auto beforeAlpha = m_Alpha;
-	SetState(hsv, (BYTE)alpha);
-	if (before.h != m_Hsv.h || before.s != m_Hsv.s || before.v != m_Hsv.v || beforeAlpha != m_Alpha) {
+	if (!SameState(hsv, (BYTE)alpha)) {
+		SetState(hsv, (BYTE)alpha);
 		Notify(CPKN_COLORCHANGING, m_Focus);
 		Notify(CPKN_COLORCHANGED, m_Focus);
 	}
@@ -399,18 +540,23 @@ void CColorPickerCtrl::SetColors(const CPKCOLORS* colors) {
 	m_SystemColors = colors == nullptr;
 	if (colors)
 		m_Colors = *colors;
-	m_AlphaDirty = true;
-	if (IsWindow())
-		Invalidate();
+	if (IsWindow()) {
+		BOOL handled;
+		OnColorsChanged(0, 0, 0, handled);
+	}
+	else {
+		m_AlphaDirty = true;
+	}
 }
 
 CPKCOLORS CColorPickerCtrl::GetColors() const {
 	if (!m_SystemColors)
 		return m_Colors;
-	// read each time: WTLHelper's dark mode hooks GetSysColor
+	// read each time: WTLHelper's dark mode hooks GetSysColor (COLOR_WINDOW, COLOR_3DFACE and COLOR_WINDOWTEXT)
 	CPKCOLORS c;
 	c.crBack = ::GetSysColor(COLOR_3DFACE);
-	c.crText = ::GetSysColor(COLOR_WINDOWTEXT);   // WTLHelper maps it, not COLOR_BTNTEXT
+	c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
+	c.crFieldBack = ::GetSysColor(COLOR_WINDOW);
 	bool dark = IsDarkColor(c.crBack);
 	c.crBorder = Blend(c.crBack, dark ? RGB(255, 255, 255) : RGB(0, 0, 0), dark ? 30 : 35);
 	c.crCheck1 = dark ? RGB(0x5A, 0x5A, 0x5A) : RGB(0xFF, 0xFF, 0xFF);
@@ -418,7 +564,7 @@ CPKCOLORS CColorPickerCtrl::GetColors() const {
 	return c;
 }
 
-// ---- Painting ---------------------------------------------------------------------------
+// ---- Painting the gradients ------------------------------------------------------------------
 
 bool CColorPickerCtrl::EnsureBuffer(int width, int height) {
 	if (!m_Buffer.IsNull() && m_BufferSize.cx == width && m_BufferSize.cy == height)
@@ -445,13 +591,13 @@ bool CColorPickerCtrl::EnsureBuffer(int width, int height) {
 	return true;
 }
 
-LRESULT CColorPickerCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
+LRESULT CColorPickerCtrl::OnGradPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 	if (uMsg == WM_PRINTCLIENT) {
-		Paint((HDC)wParam);
+		PaintGradients((HDC)wParam);
 		return 0;
 	}
-	WTL::CPaintDC dc(m_hWnd);
-	Paint(dc);
+	WTL::CPaintDC dc(m_Grad->m_hWnd);
+	PaintGradients(dc);
 	return 0;
 }
 
@@ -467,9 +613,9 @@ static void Render(std::vector<uint32_t>& bits, const RECT& rc, bool& dirty, aut
 	}
 }
 
-void CColorPickerCtrl::Paint(HDC hdc) {
+void CColorPickerCtrl::PaintGradients(HDC hdc) {
 	RECT client;
-	GetClientRect(&client);
+	m_Grad->GetClientRect(&client);
 	if (!EnsureBuffer(client.right, client.bottom))
 		return;
 	::GdiFlush();   // GDI's drawing on the buffer last time is done before writing its pixels
@@ -532,8 +678,8 @@ void CColorPickerCtrl::Paint(HDC hdc) {
 	auto old = mdc.SelectBitmap(m_Buffer);
 
 	// the focused part
-	bool cues = (SendMessage(WM_QUERYUISTATE) & UISF_HIDEFOCUS) == 0;
-	if (::GetFocus() == m_hWnd && cues) {
+	bool cues = (m_Grad->SendMessage(WM_QUERYUISTATE) & UISF_HIDEFOCUS) == 0;
+	if (::GetFocus() == m_Grad->m_hWnd && cues) {
 		RECT rc = PartRect(m_Focus);
 		if (!IsEmpty(rc)) {
 			::InflateRect(&rc, Scale(4), Scale(4));
