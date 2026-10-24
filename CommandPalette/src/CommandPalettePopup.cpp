@@ -153,7 +153,7 @@ LRESULT CCommandPalettePopup::OnNotify(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 		case CMDPN_CANCEL:
 			Close();
 			break;
-		case CMDPN_TEXTCHANGED: {
+		case CMDPN_RESULTSCHANGED: {
 			// as tall as the results need
 			auto rc = TargetRect();
 			SetWindowPos(nullptr, &rc, SWP_NOZORDER | SWP_NOACTIVATE);

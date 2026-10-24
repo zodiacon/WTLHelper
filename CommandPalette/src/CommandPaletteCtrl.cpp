@@ -54,7 +54,7 @@ namespace {
 
 // ---- Construction ------------------------------------------------------------------
 
-CCommandPaletteCtrl::CCommandPaletteCtrl() : m_Recent(std::make_unique<CmpRecent>()), m_Box(this, 1),
+CCommandPaletteCtrl::CCommandPaletteCtrl() : m_Recent(std::make_unique<CmpRecent>()), m_Search(std::make_unique<CmpSearch>()), m_Box(this, 1),
 	m_List(std::make_unique<CmpListWindow>(this)) {
 }
 
@@ -237,7 +237,7 @@ int CCommandPaletteCtrl::PageRows() const {
 void CCommandPaletteCtrl::UpdateScrollBar() {
 	if (!m_List->IsWindow())
 		return;
-	int count = (int)m_Results.size(), page = PageRows();
+	int count = (int)Results().size(), page = PageRows();
 	m_Top = std::clamp(m_Top, 0, std::max(0, count - page));
 	SCROLLINFO si{ sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL };
 	si.nMax = std::max(0, count - 1);
@@ -249,7 +249,7 @@ void CCommandPaletteCtrl::UpdateScrollBar() {
 }
 
 void CCommandPaletteCtrl::ScrollTo(int top) {
-	int count = (int)m_Results.size();
+	int count = (int)Results().size();
 	top = std::clamp(top, 0, std::max(0, count - PageRows()));
 	if (top == m_Top)
 		return;
@@ -276,7 +276,7 @@ LRESULT CCommandPaletteCtrl::OnListVScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		case SB_PAGEUP: top -= page; break;
 		case SB_PAGEDOWN: top += page; break;
 		case SB_TOP: top = 0; break;
-		case SB_BOTTOM: top = (int)m_Results.size(); break;
+		case SB_BOTTOM: top = (int)Results().size(); break;
 		case SB_THUMBTRACK:
 		case SB_THUMBPOSITION: {
 			SCROLLINFO si{ sizeof(si), SIF_TRACKPOS };
@@ -506,8 +506,8 @@ void CCommandPaletteCtrl::RefreshMenus(HWND initMenus) {
 		return item.source < 0 && std::binary_search(menuIds.begin(), menuIds.end(), item.id);
 	}), m_Items.end());
 	Filter();
-	for (int row = 0; row < (int)m_Results.size(); row++) {
-		if (m_Items[m_Results[row].index].id == selected) {
+	for (int row = 0; row < (int)Results().size(); row++) {
+		if (GetResultId(row) == selected) {
 			Select(row, false);
 			break;
 		}
@@ -524,46 +524,271 @@ HIMAGELIST CCommandPaletteCtrl::GetImageList() const {
 	return m_Images;
 }
 
-// ---- Search and selection --------------------------------------------------------------
+// ---- The active list ---------------------------------------------------------------------
+
+namespace {
+	enum : UINT_PTR { SearchTimer = 1 };
+	constexpr DWORD SearchSlice = 25;   // ms of matching at a time: typing and painting go on in between
+}
+
+std::vector<CmpResult>& CCommandPaletteCtrl::Results() const {
+	return m_Search->Results();
+}
+
+CmpProvider* CCommandPaletteCtrl::FindProvider(int id) const {
+	for (auto& p : m_Providers)
+		if (p->id == id)
+			return p.get();
+	return nullptr;
+}
+
+const CmpItem* CCommandPaletteCtrl::ItemOf(size_t index) {
+	if (m_Mode == 0)
+		return index < m_Items.size() ? &m_Items[index] : nullptr;
+	if (m_Mode < 0)
+		return index < m_Help.size() ? &m_Help[index] : nullptr;
+	auto p = FindProvider(m_Mode);
+	if (!p || index >= p->count)
+		return nullptr;
+	if (!p->fetched[index]) {
+		// asked for once, kept until the provider changes
+		NMCMDPGETITEM nm{};
+		nm.provider = p->id;
+		nm.index = index;
+		nm.iImage = -1;
+		if (p->getItem)
+			p->getItem(p->context, &nm);
+		else
+			FireNotify(&nm.hdr, CMDPN_GETITEM);
+		auto& item = p->items[index];
+		item.name = Text(nm.pszName);
+		item.category = Text(nm.pszCategory);
+		item.shortcut = Text(nm.pszShortcut);
+		item.image = nm.iImage;
+		item.lParam = nm.lParam;
+		item.UpdateLabel();
+		p->fetched[index] = 1;
+	}
+	return &p->items[index];
+}
+
+const CmpItem& CCommandPaletteCtrl::RowItem(int row) const {
+	size_t index = Results()[row].index;
+	if (m_Mode == 0)
+		return m_Items[index];
+	if (m_Mode < 0)
+		return m_Help[index];
+	return FindProvider(m_Mode)->items[index];   // asked for when it was matched
+}
+
+void CCommandPaletteCtrl::BuildHelp() {
+	m_Help.clear();
+	CmpItem commands;
+	commands.name = L"Commands";
+	commands.UpdateLabel();
+	m_Help.push_back(commands);
+	for (auto& p : m_Providers) {
+		CmpItem item;
+		item.name = p->name.empty() ? p->prefix : p->name;
+		item.shortcut = p->prefix;
+		item.lParam = p->id;
+		item.UpdateLabel();
+		m_Help.push_back(std::move(item));
+	}
+}
 
 void CCommandPaletteCtrl::Filter() {
 	ATL::CString text;
 	if (m_Box.IsWindow())
 		m_Box.GetWindowText(text);
-	CmpPattern pattern{ std::wstring_view(text, text.GetLength()) };
-	const bool hideDisabled = IsWindow() && (GetStyle() & CMDPS_HIDEDISABLED);
-	const bool useRecent = !IsWindow() || !(GetStyle() & CMDPS_NORECENT) || !pattern.Empty();
-
+	std::wstring_view all(text, text.GetLength());
+	// the old results go before the list changes: they index the old one (and CMDPN_QUERY may let the app paint)
 	UINT selected = GetSelectedId();
-	m_Results.clear();
-	std::vector<size_t> lengths;
-	if (!pattern.Empty()) {
-		lengths.reserve(m_Items.size());
-		for (auto& item : m_Items)
-			lengths.push_back(item.label.size());
-	}
-	for (size_t i = 0; i < m_Items.size(); i++) {
-		auto& item = m_Items[i];
-		if ((item.state & CMDPIS_HIDDEN) || (hideDisabled && (item.state & CMDPIS_DISABLED)))
-			continue;
-		CmpResult r;
-		r.index = i;
-		if (!pattern.Match(item.label, r.score, &r.positions))
-			continue;
-		r.recent = useRecent ? m_Recent->Rank(item.id) : -1;
-		m_Results.push_back(std::move(r));
-	}
-	CmpSort(m_Results, lengths);
+	m_Search->Start({}, 0);
+	m_Selected = -1;
 
-	// typing starts again at the best match
+	// the list the prefix picks
+	const DWORD style = IsWindow() ? GetStyle() : 0;
+	std::vector<std::wstring> prefixes;
+	for (auto& p : m_Providers)
+		prefixes.push_back(p->prefix);
+	const bool help = !(style & CMDPS_NOHELP) && !m_Providers.empty();
+	if (help)
+		prefixes.push_back(L"?");
+	std::wstring_view rest;
+	int picked = CmpPickProvider(prefixes, all, rest);
+	m_Mode = picked < 0 ? 0 : picked == (int)m_Providers.size() ? -1 : m_Providers[picked]->id;
+
+	size_t count = m_Items.size();
+	bool filter = true;
+	if (m_Mode < 0) {
+		BuildHelp();
+		count = m_Help.size();
+	}
+	else if (m_Mode > 0) {
+		auto p = FindProvider(m_Mode);
+		// the app hears the text (a provider that isn't matched sets its items for it now)
+		if (m_QueryProvider != m_Mode || m_QueryText != rest) {
+			m_QueryProvider = m_Mode;
+			m_QueryText = rest;
+			NMCMDPQUERY nm{};
+			nm.provider = m_Mode;
+			nm.pszText = m_QueryText.c_str();
+			m_InQuery = true;
+			FireNotify(&nm.hdr, CMDPN_QUERY);
+			m_InQuery = false;
+			p = FindProvider(m_Mode);
+		}
+		count = p ? p->count : 0;
+		filter = p && !(p->flags & CMDPPF_NOFILTER);
+	}
+	else {
+		m_QueryProvider = 0;
+	}
+
+	m_Search->Start(rest, count, filter);
 	m_Top = 0;
 	m_Hot = -1;
 	m_Selected = -1;
-	Select(m_Results.empty() ? -1 : 0, selected != GetResultId(0));
+	m_UserSelected = false;
+	Search(SearchSlice);
+	// typing starts again at the best match
+	if (m_Mode == 0 && selected != GetResultId(0) && m_Selected >= 0) {
+		NotifyItem(CMDPN_SELCHANGED, m_Selected);
+	}
+	if (IsWindow()) {
+		if (m_Search->Running())
+			SetTimer(SearchTimer, USER_TIMER_MINIMUM);
+		else
+			KillTimer(SearchTimer);
+	}
+}
+
+void CCommandPaletteCtrl::Search(DWORD ms) {
+	const DWORD style = IsWindow() ? GetStyle() : 0;
+	const bool hideDisabled = (style & CMDPS_HIDEDISABLED) != 0;
+	const bool useRecent = m_Mode == 0 && (!(style & CMDPS_NORECENT) || m_Search->Filtering());
+	auto label = [&](size_t i) -> std::wstring_view {
+		auto item = ItemOf(i);
+		if (!item || (item->state & CMDPIS_HIDDEN) || (hideDisabled && (item->state & CMDPIS_DISABLED)))
+			return {};
+		return item->label;
+	};
+	auto recent = [&](size_t i) { return useRecent ? m_Recent->Rank(m_Items[i].id) : -1; };
+
+	// the item the user went to stays selected as more results come in
+	bool keep = m_UserSelected && m_Selected >= 0;
+	size_t keepIndex = keep ? Results()[m_Selected].index : 0;
+
+	ULONGLONG start = ::GetTickCount64();
+	while (!m_Search->Step(256, label, recent) && ::GetTickCount64() - start < ms)
+		;
+	m_Search->Sort();
+
+	auto& results = Results();
+	int row = results.empty() ? -1 : 0;
+	if (keep) {
+		auto it = std::find_if(results.begin(), results.end(), [&](const CmpResult& r) { return r.index == keepIndex; });
+		if (it != results.end())
+			row = (int)(it - results.begin());
+	}
+	m_Selected = row;
+	EnsureVisible(row);
 	UpdateScrollBar();
 	if (m_List->IsWindow())
 		m_List->Invalidate();
+	if (IsWindow()) {
+		// the progress line under the box
+		auto box = GetBoxRect();
+		box.top = box.bottom - Scale(1);
+		box.bottom += Scale(3);
+		InvalidateRect(&box, FALSE);
+		NMHDR hdr{};
+		FireNotify(&hdr, CMDPN_RESULTSCHANGED);
+	}
 }
+
+LRESULT CCommandPaletteCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam != SearchTimer) {
+		bHandled = FALSE;
+		return 0;
+	}
+	Search(SearchSlice);
+	if (!m_Search->Running()) {
+		KillTimer(SearchTimer);
+		Invalidate(FALSE);   // the progress line goes
+	}
+	return 0;
+}
+
+bool CCommandPaletteCtrl::IsSearching() const {
+	return m_Search->Running();
+}
+
+int CCommandPaletteCtrl::GetActiveProvider() const {
+	return m_Mode;
+}
+
+// ---- Providers -----------------------------------------------------------------------------
+
+int CCommandPaletteCtrl::AddProvider(const CMDPPROVIDER* provider) {
+	if (!provider || !provider->pszPrefix || !*provider->pszPrefix)
+		return 0;
+	std::wstring prefix = provider->pszPrefix;
+	if (prefix == L"?" && !(IsWindow() && (GetStyle() & CMDPS_NOHELP)))
+		return 0;
+	for (auto& p : m_Providers)
+		if (p->prefix == prefix)
+			return 0;
+	auto p = std::make_unique<CmpProvider>();
+	p->id = m_NextProvider++;
+	p->prefix = std::move(prefix);
+	p->name = Text(provider->pszName);
+	p->placeholder = Text(provider->pszPlaceholder);
+	p->flags = provider->flags;
+	p->lParam = provider->lParam;
+	p->getItem = provider->pfnGetItem;
+	p->context = provider->pvContext;
+	int id = p->id;
+	m_Providers.push_back(std::move(p));
+	Filter();   // the text may pick it now
+	return id;
+}
+
+BOOL CCommandPaletteCtrl::RemoveProvider(int id) {
+	auto it = std::find_if(m_Providers.begin(), m_Providers.end(), [&](const std::unique_ptr<CmpProvider>& p) { return p->id == id; });
+	if (it == m_Providers.end())
+		return FALSE;
+	m_Providers.erase(it);
+	if (m_QueryProvider == id)
+		m_QueryProvider = 0;
+	Filter();
+	return TRUE;
+}
+
+BOOL CCommandPaletteCtrl::SetProviderItemCount(int id, size_t count) {
+	auto p = FindProvider(id);
+	if (!p)
+		return FALSE;
+	p->count = count;
+	p->items.assign(count, {});
+	p->fetched.assign(count, 0);
+	if (m_Mode == id && !m_InQuery)
+		Filter();
+	return TRUE;
+}
+
+BOOL CCommandPaletteCtrl::InvalidateProvider(int id) {
+	auto p = FindProvider(id);
+	if (!p)
+		return FALSE;
+	p->fetched.assign(p->count, 0);
+	if (m_Mode == id && !m_InQuery)
+		Filter();
+	return TRUE;
+}
+
+// ---- Search and selection --------------------------------------------------------------
 
 void CCommandPaletteCtrl::SetSearchText(LPCWSTR text) {
 	if (!m_Box.IsWindow())
@@ -588,11 +813,11 @@ void CCommandPaletteCtrl::SetPlaceholder(LPCWSTR text) {
 }
 
 int CCommandPaletteCtrl::GetResultCount() const {
-	return (int)m_Results.size();
+	return (int)Results().size();
 }
 
 UINT CCommandPaletteCtrl::GetResultId(int row) const {
-	return row >= 0 && row < (int)m_Results.size() ? m_Items[m_Results[row].index].id : 0;
+	return m_Mode == 0 && row >= 0 && row < (int)Results().size() ? m_Items[Results()[row].index].id : 0;
 }
 
 int CCommandPaletteCtrl::GetSelectedRow() const {
@@ -607,8 +832,20 @@ UINT CCommandPaletteCtrl::GetSelectedId() const {
 	return GetResultId(m_Selected);
 }
 
+LRESULT CCommandPaletteCtrl::NotifyItem(UINT code, int row) {
+	NMCMDPITEM nm{};
+	if (row >= 0 && row < (int)Results().size()) {
+		auto& item = RowItem(row);
+		nm.id = m_Mode == 0 ? item.id : 0;
+		nm.lParam = item.lParam;
+		nm.provider = m_Mode > 0 ? m_Mode : 0;
+		nm.index = Results()[row].index;
+	}
+	return FireNotify(&nm.hdr, code);
+}
+
 void CCommandPaletteCtrl::Select(int row, bool notify) {
-	if (row < -1 || row >= (int)m_Results.size())
+	if (row < -1 || row >= (int)Results().size())
 		row = -1;
 	if (row == m_Selected)
 		return;
@@ -617,35 +854,41 @@ void CCommandPaletteCtrl::Select(int row, bool notify) {
 	if (m_List->IsWindow())
 		m_List->Invalidate();
 	if (notify) {
-		NMCMDPITEM nm{};
-		nm.id = GetResultId(row);
-		nm.lParam = row >= 0 ? m_Items[m_Results[row].index].lParam : 0;
-		FireNotify(&nm.hdr, CMDPN_SELCHANGED);
+		m_UserSelected = true;
+		NotifyItem(CMDPN_SELCHANGED, row);
 	}
 }
 
 BOOL CCommandPaletteCtrl::ExecuteSelected() {
-	if (m_Selected < 0 || (m_Items[m_Results[m_Selected].index].state & CMDPIS_DISABLED))
+	if (m_Selected < 0 || (RowItem(m_Selected).state & CMDPIS_DISABLED))
 		return FALSE;
 	Execute(m_Selected);
 	return TRUE;
 }
 
 void CCommandPaletteCtrl::Execute(int row) {
-	if (row < 0 || row >= (int)m_Results.size())
+	if (row < 0 || row >= (int)Results().size())
 		return;
-	auto& item = m_Items[m_Results[row].index];
+	auto& item = RowItem(row);
 	if (item.state & CMDPIS_DISABLED) {
 		::MessageBeep(MB_OK);
 		return;
 	}
+	if (m_Mode < 0) {
+		// '?': the provider's prefix typed (the commands: nothing), as the user would
+		auto p = FindProvider((int)item.lParam);
+		ATL::CString text = p ? p->prefix.c_str() : L"";
+		m_Box.SetWindowText(text);
+		m_Box.SetSel(-1, -1);
+		return;
+	}
+	if (m_Mode > 0) {
+		NotifyItem(CMDPN_EXECUTE, row);   // a provider's item: the app's to run
+		return;
+	}
 	UINT id = item.id;
-	LPARAM lParam = item.lParam;
 	m_Recent->Use(id);
-	NMCMDPITEM nm{};
-	nm.id = id;
-	nm.lParam = lParam;
-	if (FireNotify(&nm.hdr, CMDPN_EXECUTE))
+	if (NotifyItem(CMDPN_EXECUTE, row))
 		return;   // the app ran it
 	// posted: the command may well close or change the palette
 	HWND owner = m_Owner ? m_Owner : GetParent().m_hWnd;
@@ -710,7 +953,7 @@ LRESULT CCommandPaletteCtrl::OnCtlColorEdit(UINT, WPARAM wParam, LPARAM lParam, 
 }
 
 LRESULT CCommandPaletteCtrl::OnBoxKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
-	int count = (int)m_Results.size();
+	int count = (int)Results().size();
 	bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
 	switch (wParam) {
 		case VK_UP:
@@ -777,7 +1020,7 @@ int CCommandPaletteCtrl::RowAt(POINT pt) const {
 	if (!::PtInRect(&rc, pt))
 		return -1;
 	int row = m_Top + pt.y / m_RowHeight;
-	return row < (int)m_Results.size() ? row : -1;
+	return row < (int)Results().size() ? row : -1;
 }
 
 LRESULT CCommandPaletteCtrl::OnListMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
@@ -895,6 +1138,13 @@ LRESULT CCommandPaletteCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 		dc.RoundRect(&box, { radius, radius });
 		dc.SelectPen(oldPen);
 		dc.SelectBrush(oldBrush);
+		// going through a long list: how far, a line under the box
+		if (m_Search->Running() && m_Search->Count() > 0) {
+			int width = box.right - box.left - radius;
+			RECT bar{ box.left + radius / 2, box.bottom + Scale(1), 0, box.bottom + Scale(3) };
+			bar.right = bar.left + (int)((double)m_Search->Done() / m_Search->Count() * width);
+			FillSolid(dc, bar, c.crBoxFocusBorder);
+		}
 	};
 	if (uMsg == WM_PRINTCLIENT) {
 		paint((HDC)wParam);
@@ -915,15 +1165,25 @@ LRESULT CCommandPaletteCtrl::OnListPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&
 		dc.SetBkMode(TRANSPARENT);
 		int row = m_Top + std::max(0, (int)rcPaint.top) / m_RowHeight;
 		int y = (row - m_Top) * m_RowHeight;
-		for (; y < rcPaint.bottom && row < (int)m_Results.size(); row++, y += m_RowHeight)
+		for (; y < rcPaint.bottom && row < (int)Results().size(); row++, y += m_RowHeight)
 			PaintRow(dc, row, { 0, y, rc.right, y + m_RowHeight }, c);
 		if (y < rcPaint.bottom)
 			FillSolid(dc, { 0, y, (int)rc.right, (int)rcPaint.bottom }, c.crBack);
-		if (m_Results.empty()) {
-			// say why the list is empty
+		if (Results().empty()) {
+			// say why the list is empty (or what to type)
+			LPCWSTR why = m_Items.empty() ? L"No commands" : L"No matching commands";
+			if (m_Mode > 0) {
+				auto p = FindProvider(m_Mode);
+				if (m_Search->Running())
+					why = L"Searching\x2026";
+				else if (p && m_QueryText.empty() && !p->placeholder.empty())
+					why = p->placeholder.c_str();
+				else
+					why = L"No matching items";
+			}
 			RECT text{ m_Pad * 2, 0, (int)rc.right - m_Pad * 2, m_RowHeight };
 			dc.SetTextColor(c.crDimText);
-			dc.DrawText(m_Items.empty() ? L"No commands" : L"No matching commands", -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+			dc.DrawText(why, -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 		}
 		dc.SelectFont(oldFont);
 	};
@@ -940,8 +1200,8 @@ LRESULT CCommandPaletteCtrl::OnListPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&
 }
 
 void CCommandPaletteCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, const CMDPCOLORS& c) {
-	auto& result = m_Results[row];
-	auto& item = m_Items[result.index];
+	auto& result = Results()[row];
+	auto& item = RowItem(row);
 	const bool selected = row == m_Selected, disabled = (item.state & CMDPIS_DISABLED) != 0;
 
 	// the row's back, inset and rounded when selected or under the mouse
@@ -991,9 +1251,9 @@ void CCommandPaletteCtrl::PaintRow(WTL::CDCHandle dc, int row, const RECT& rc, c
 		right -= 2 * m_Pad;
 	};
 	rightText(item.shortcut);
-	if (GetSearchText().IsEmpty()) {
+	if (m_Mode == 0 && GetSearchText().IsEmpty()) {
 		bool recent = result.recent >= 0;
-		bool first = row == 0 || (m_Results[row - 1].recent >= 0) != recent;
+		bool first = row == 0 || (Results()[row - 1].recent >= 0) != recent;
 		if (first && (recent || (row > 0 && m_Recent->Count() > 0)))
 			rightText(recent ? L"recently used" : L"other commands");
 	}

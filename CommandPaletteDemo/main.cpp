@@ -17,6 +17,8 @@
 #endif
 
 #include <iterator>
+#include <string>
+#include <vector>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -52,6 +54,68 @@ static CCommandPalettePopup g_popup;
 static HWND g_main, g_log;
 static HIMAGELIST g_images;
 static bool g_customColors;
+
+// ---- Providers -------------------------------------------------------------------
+//
+// '@' 200,000 made-up symbols (enough to be gone through in slices), ':' a line number (not matched: one item made
+// for the text), '#' a few recent files.
+
+enum { PROV_SYMBOLS = 1, PROV_LINE, PROV_FILES };   // the ids AddProvider gives, in this order
+static std::vector<std::wstring> g_symbols, g_classes;
+static std::vector<size_t> g_symbolClass;
+static const wchar_t* const g_kinds[] = { L"method", L"field", L"property", L"event" };
+static const wchar_t* const g_files[][2] = {
+	{ L"MainFrame.cpp", L"src\\ui" }, { L"MainFrame.h", L"src\\ui" }, { L"CommandPalette.cpp", L"src\\controls" },
+	{ L"Settings.json", L"config" }, { L"README.md", L"" }, { L"Build.ps1", L"scripts" }, { L"Theme.cpp", L"src\\ui" },
+	{ L"Tests.cpp", L"tests" },
+};
+static int g_line;                    // ':': the line typed, 0 if none
+static ULONGLONG g_searchStart;       // the tick the user's text changed, while a long search goes on
+
+static void BuildSymbols() {
+	static const wchar_t* const nouns[] = { L"Widget", L"Layout", L"Document", L"View", L"Frame", L"Command", L"Theme", L"Buffer",
+		L"Window", L"Session", L"Cache", L"Parser", L"Token", L"Node", L"Item", L"Panel" };
+	static const wchar_t* const verbs[] = { L"Update", L"Get", L"Set", L"Create", L"Destroy", L"Find", L"Load", L"Save", L"Draw",
+		L"Measure", L"Handle", L"Reset" };
+	for (auto a : nouns)
+		for (auto b : nouns)
+			g_classes.push_back(std::wstring(L"C") + a + b + L"Manager");
+	g_symbols.reserve(200000);
+	g_symbolClass.reserve(200000);
+	unsigned seed = 1;
+	auto random = [&]() { seed = seed * 1103515245 + 12345; return (seed >> 16) & 0x7fff; };
+	for (int i = 0; i < 200000; i++) {
+		g_symbols.push_back(std::wstring(verbs[random() % std::size(verbs)]) + nouns[random() % std::size(nouns)] + std::to_wstring(i % 100));
+		g_symbolClass.push_back(random() % g_classes.size());
+	}
+}
+
+// '@': the symbols through a callback (200,000 notifications would each pass WTLHelper's hooks, and the popup's)
+static void CALLBACK GetSymbol(void*, NMCMDPGETITEM* nm) {
+	nm->pszName = g_symbols[nm->index].c_str();
+	nm->pszCategory = g_classes[g_symbolClass[nm->index]].c_str();
+	nm->pszShortcut = g_kinds[nm->index % std::size(g_kinds)];
+}
+
+static void AddProviders(CCommandPaletteCtrl& palette) {
+	CMDPPROVIDER p;
+	p.pszPrefix = L"@";
+	p.pszName = L"Go to Symbol";
+	p.pszPlaceholder = L"Type a symbol's name";
+	p.pfnGetItem = GetSymbol;
+	palette.SetProviderItemCount(palette.AddProvider(&p), g_symbols.size());
+	p.pfnGetItem = nullptr;   // the others with CMDPN_GETITEM
+	p.pszPrefix = L":";
+	p.pszName = L"Go to Line";
+	p.pszPlaceholder = L"Type a line number, 1 to 5,000";
+	p.flags = CMDPPF_NOFILTER;
+	palette.AddProvider(&p);
+	p.pszPrefix = L"#";
+	p.pszName = L"Open Recent File";
+	p.pszPlaceholder = nullptr;
+	p.flags = 0;
+	palette.SetProviderItemCount(palette.AddProvider(&p), std::size(g_files));
+}
 
 static const CMDPCOLORS g_colors = {
 	RGB(0xFA, 0xF6, 0xEE), RGB(0x3A, 0x30, 0x28), RGB(0x9A, 0x8C, 0x7C), RGB(0xC0, 0x50, 0x10), RGB(0xF0, 0xDC, 0xC0),
@@ -225,7 +289,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_images = BuildImages(hwnd);
 			g_popup.Create(hwnd, IDC_POPUP);
 			// the same commands in both: the embedded palette and the popup's
+			BuildSymbols();
 			for (auto palette : { &g_palette, &g_popup.Palette() }) {
+				AddProviders(*palette);
 				palette->SetImageList(g_images);
 				palette->AddFromMenu(::GetMenu(hwnd));
 				palette->AddCommand(CMD_CMD_REFRESH, L"Refresh Everything", L"Developer", L"F5", 0);
@@ -276,10 +342,66 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 						Log(L"popup: CMDPN_CANCEL (Escape)");
 					}
 					break;
-				case CMDPN_EXECUTE:
-					line.Format(L"%s: CMDPN_EXECUTE %u", from, ((NMCMDPITEM*)lParam)->id);
+				case CMDPN_EXECUTE: {
+					auto nm = (NMCMDPITEM*)lParam;
+					switch (nm->provider) {
+						case PROV_SYMBOLS:
+							line.Format(L"%s: go to %s::%s", from, g_classes[g_symbolClass[nm->index]].c_str(), g_symbols[nm->index].c_str());
+							break;
+						case PROV_LINE:
+							line.Format(L"%s: go to line %d", from, g_line);
+							break;
+						case PROV_FILES:
+							line.Format(L"%s: open %s", from, g_files[nm->index][0]);
+							break;
+						default:
+							line.Format(L"%s: CMDPN_EXECUTE %u", from, nm->id);
+							break;
+					}
 					Log(line);
 					break;
+				}
+				case CMDPN_GETITEM: {
+					auto nm = (NMCMDPGETITEM*)lParam;
+					static wchar_t text[64];
+					switch (nm->provider) {
+						case PROV_LINE:
+							swprintf_s(text, L"Go to line %d", g_line);
+							nm->pszName = text;
+							break;
+						case PROV_FILES:
+							nm->pszName = g_files[nm->index][0];
+							nm->pszShortcut = g_files[nm->index][1];
+							nm->iImage = 3;
+							break;
+					}
+					return 0;
+				}
+				case CMDPN_QUERY: {
+					// ':' isn't matched: its item is made for the text
+					auto nm = (NMCMDPQUERY*)lParam;
+					if (nm->provider == PROV_LINE) {
+						g_line = _wtoi(nm->pszText);
+						auto palette = hdr->idFrom == IDC_POPUP ? &g_popup.Palette() : &g_palette;
+						palette->SetProviderItemCount(PROV_LINE, g_line >= 1 && g_line <= 5000 ? 1 : 0);
+					}
+					return 0;
+				}
+				case CMDPN_TEXTCHANGED:
+					g_searchStart = ::GetTickCount64();
+					break;
+				case CMDPN_RESULTSCHANGED: {
+					auto palette = hdr->idFrom == IDC_POPUP ? &g_popup.Palette() : &g_palette;
+					if (g_searchStart && !palette->IsSearching()) {
+						// a provider's list gone through: how long it took
+						if (palette->GetActiveProvider() == PROV_SYMBOLS) {
+							line.Format(L"%s: %d results in %llu ms", from, palette->GetResultCount(), ::GetTickCount64() - g_searchStart);
+							Log(line);
+						}
+						g_searchStart = 0;
+					}
+					break;
+				}
 				case CMDPN_CLOSED:
 					Log(L"popup: CMDPN_CLOSED");
 					break;

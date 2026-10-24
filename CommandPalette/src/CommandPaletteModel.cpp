@@ -146,20 +146,49 @@ bool CmpPattern::Match(std::wstring_view label, int& score, std::vector<uint16_t
 
 // ---- Ranking ---------------------------------------------------------------------------------
 
-void CmpSort(std::vector<CmpResult>& results, const std::vector<size_t>& lengths) {
-	auto length = [&](size_t index) { return index < lengths.size() ? lengths[index] : 0; };
-	std::sort(results.begin(), results.end(), [&](const CmpResult& a, const CmpResult& b) {
-		if (a.score != b.score)
-			return a.score > b.score;
-		if (a.recent != b.recent) {
-			if (a.recent < 0 || b.recent < 0)
-				return a.recent >= 0;
-			return a.recent < b.recent;
-		}
-		if (length(a.index) != length(b.index))
-			return length(a.index) < length(b.index);
-		return a.index < b.index;
-	});
+bool CmpLess(const CmpResult& a, const CmpResult& b, bool byLength) {
+	if (a.score != b.score)
+		return a.score > b.score;
+	if (a.recent != b.recent) {
+		if (a.recent < 0 || b.recent < 0)
+			return a.recent >= 0;
+		return a.recent < b.recent;
+	}
+	if (byLength && a.length != b.length)
+		return a.length < b.length;
+	return a.index < b.index;
+}
+
+void CmpSort(std::vector<CmpResult>& results, bool byLength) {
+	std::sort(results.begin(), results.end(), [&](const CmpResult& a, const CmpResult& b) { return CmpLess(a, b, byLength); });
+}
+
+void CmpSearch::Start(std::wstring_view pattern, size_t count, bool filter) {
+	m_Pattern = CmpPattern(pattern);
+	m_Count = count;
+	m_Next = 0;
+	m_Filter = filter;
+	m_AnyRecent = false;
+	m_Sorted = 0;
+	m_Results.clear();
+}
+
+void CmpSearch::Stop() {
+	m_Next = m_Count;
+}
+
+void CmpSearch::Sort() {
+	// in the list's order already: not filtered, or nothing typed and none recently used
+	if (!m_Filter || (m_Pattern.Empty() && !m_AnyRecent)) {
+		m_Sorted = m_Results.size();
+		return;
+	}
+	const bool byLength = !m_Pattern.Empty();
+	auto less = [&](const CmpResult& a, const CmpResult& b) { return CmpLess(a, b, byLength); };
+	auto mid = m_Results.begin() + m_Sorted;
+	std::sort(mid, m_Results.end(), less);
+	std::inplace_merge(m_Results.begin(), mid, m_Results.end(), less);
+	m_Sorted = m_Results.size();
 }
 
 // ---- Recently used --------------------------------------------------------------------------

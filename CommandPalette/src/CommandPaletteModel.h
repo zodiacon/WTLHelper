@@ -7,6 +7,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -67,19 +68,92 @@ struct CmpItem {
 	}
 };
 
+// An item provider: the app's list picked by a prefix, its items asked for as they're needed.
+struct CmpProvider {
+	int    id = 0;
+	std::wstring prefix;
+	std::wstring name;
+	std::wstring placeholder;
+	UINT   flags = 0;              // CMDPPF_*
+	LPARAM lParam = 0;
+	size_t count = 0;
+	void (CALLBACK* getItem)(void*, struct NMCMDPGETITEM*) = nullptr;   // the app's callback, else the notification
+	void*  context = nullptr;
+	std::vector<CmpItem> items;    // count of them, filled in as they're asked for
+	std::vector<uint8_t> fetched;
+};
+
 // ---- Ranking ---------------------------------------------------------------------------------
 
 struct CmpResult {
 	size_t index = 0;              // in the list ranked
 	int    score = 0;
 	int    recent = -1;            // its place among the recently used (0: the last used), -1 if not
+	uint32_t length = 0;           // its label's, for the order
 	std::vector<uint16_t> positions;
 };
 
-// Orders results: by score, then the recently used first (the latest first), then shorter labels (by lengths, the
-// labels' lengths by index; empty: not), then by index. With an empty pattern scores are equal: given no lengths, the
-// recently used come first, then the list in its order.
-void CmpSort(std::vector<CmpResult>& results, const std::vector<size_t>& lengths);
+// Orders results: by score, then the recently used first (the latest first), then shorter labels (byLength), then by
+// index. With an empty pattern scores are equal: without byLength the recently used come first, then the list in its
+// order.
+void CmpSort(std::vector<CmpResult>& results, bool byLength);
+bool CmpLess(const CmpResult& a, const CmpResult& b, bool byLength);   // CmpSort's order
+
+// A search through a list in steps, for lists too long to go through at once: each step matches the next items, the
+// results so far can be shown in between.
+class CmpSearch {
+public:
+	// filter: match the pattern; else every item is a result, in the list's order
+	void Start(std::wstring_view pattern, size_t count, bool filter = true);
+	void Stop();
+	bool Running() const {
+		return m_Next < m_Count;
+	}
+	size_t Done() const {          // the items gone through
+		return m_Next;
+	}
+	size_t Count() const {
+		return m_Count;
+	}
+	bool Filtering() const {
+		return m_Filter && !m_Pattern.Empty();
+	}
+	// Goes through up to budget more items: label(i) is item i's label (a std::wstring_view; empty: skip it), recent(i)
+	// its rank among the recently used (-1: none). True when the list is done.
+	template<typename Label, typename Recent>
+	bool Step(size_t budget, Label&& label, Recent&& recent) {
+		size_t end = m_Next + std::min(budget, m_Count - m_Next);
+		for (; m_Next < end; m_Next++) {
+			std::wstring_view text = label(m_Next);
+			if (text.empty())
+				continue;
+			CmpResult r;
+			r.index = m_Next;
+			r.length = (uint32_t)text.size();
+			if (m_Filter && !m_Pattern.Match(text, r.score, &r.positions))
+				continue;
+			r.recent = recent(m_Next);
+			m_AnyRecent = m_AnyRecent || r.recent >= 0;
+			m_Results.push_back(std::move(r));
+		}
+		return !Running();
+	}
+	// The results so far, ordered (a list not filtered keeps its order). Each time only the new ones are sorted, then
+	// merged with the others: a long search sorting after every step costs no more than once at the end.
+	void Sort();
+	std::vector<CmpResult>& Results() {
+		return m_Results;
+	}
+
+private:
+	CmpPattern m_Pattern;
+	size_t m_Count = 0;
+	size_t m_Next = 0;
+	bool   m_Filter = true;
+	bool   m_AnyRecent = false;
+	size_t m_Sorted = 0;           // the results in order, the rest come after
+	std::vector<CmpResult> m_Results;
+};
 
 // ---- Recently used --------------------------------------------------------------------------
 

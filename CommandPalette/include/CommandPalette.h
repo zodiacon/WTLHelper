@@ -25,6 +25,7 @@ constexpr wchar_t WC_COMMANDPALETTE[] = L"WC_CommandPalette";
 
 #define CMDPS_HIDEDISABLED   0x0001   // disabled commands aren't listed (else they are, dimmed, and don't run)
 #define CMDPS_NORECENT       0x0002   // no "recently used" first with nothing typed (the list keeps its order)
+#define CMDPS_NOHELP         0x0004   // '?' doesn't list the providers
 
 // ---- Commands -----------------------------------------------------------------
 
@@ -40,6 +41,35 @@ struct CMDPITEM {
 	int     iImage = -1;              // in the image list (SetImageList); -1: none
 	UINT    state = 0;                // CMDPIS_*
 	LPARAM  lParam = 0;
+};
+
+// ---- Providers ------------------------------------------------------------------
+//
+// Besides the commands the palette can list the app's items, picked by the text's prefix: '@' symbols, ':' a line
+// number, ... The app says how many items a provider has (SetProviderItemCount), and the control asks for each one
+// with CMDPN_GETITEM when it needs it, keeping what it gets (InvalidateProvider forgets it). The text after the prefix
+// is sent with CMDPN_QUERY when it changes, then matched like the commands; a long list is gone through in slices on a
+// timer, showing the results as they come. A provider with CMDPPF_NOFILTER isn't matched: it sets its items for the
+// text in CMDPN_QUERY (a line number: one item), and they're listed as they are. Picking an item sends CMDPN_EXECUTE
+// with the provider and the index (no WM_COMMAND). '?' lists the providers (and the commands); picking one types its
+// prefix.
+
+#define CMDPPF_NOFILTER      0x0001
+
+struct NMCMDPGETITEM;
+
+// Gives an item as CMDPN_GETITEM would (hdr isn't set), called directly: a long list's items come much faster than
+// through a notification each, which every hook on the thread (and a popup's forwarding) slows down.
+typedef void (CALLBACK* CMDPGETITEMPROC)(void* context, NMCMDPGETITEM* item);
+
+struct CMDPPROVIDER {
+	LPCWSTR pszPrefix = nullptr;      // not empty, not '?' (unless CMDPS_NOHELP)
+	LPCWSTR pszName = nullptr;        // in the '?' list
+	LPCWSTR pszPlaceholder = nullptr; // shown in the list while nothing follows the prefix and there are no items
+	UINT    flags = 0;                // CMDPPF_*
+	LPARAM  lParam = 0;
+	CMDPGETITEMPROC pfnGetItem = nullptr;   // nullptr: CMDPN_GETITEM
+	void*   pvContext = nullptr;      // for pfnGetItem
 };
 
 // ---- Colors ----------------------------------------------------------------------
@@ -66,18 +96,43 @@ struct CMDPCOLORS {
 #define CMDPN_CANCEL         (CMDPN_FIRST - 2)   // NMHDR; Escape in the box
 #define CMDPN_TEXTCHANGED    (CMDPN_FIRST - 3)   // NMHDR; the user changed the search text
 #define CMDPN_CLOSED         (CMDPN_FIRST - 4)   // NMHDR; the popup closed (from CCommandPalettePopup only)
+#define CMDPN_GETITEM        (CMDPN_FIRST - 5)   // NMCMDPGETITEM; a provider's item is needed
+#define CMDPN_QUERY          (CMDPN_FIRST - 6)   // NMCMDPQUERY; the text after a provider's prefix changed
+#define CMDPN_RESULTSCHANGED (CMDPN_FIRST - 7)   // NMHDR; the rows listed changed (filtered again, or more found)
 
 struct NMCMDPITEM {
 	NMHDR  hdr;
-	UINT   id;
+	UINT   id;                        // a command's; 0 for a provider's item
 	LPARAM lParam;
+	int    provider;                  // 0: a command
+	size_t index;                     // the provider's item
+};
+
+// The app points the strings at the item's (they're copied when it returns) and may set the image and lParam. Also
+// what a provider's pfnGetItem fills in.
+struct NMCMDPGETITEM {
+	NMHDR   hdr;
+	int     provider;
+	size_t  index;
+	LPCWSTR pszName;                  // nullptr or "": the item isn't listed
+	LPCWSTR pszCategory;              // shown dimmed before the name, and matched with it
+	LPCWSTR pszShortcut;              // shown at the right (a detail: a file's folder, a symbol's kind)
+	int     iImage;                   // -1 on entry
+	LPARAM  lParam;
+};
+
+struct NMCMDPQUERY {
+	NMHDR   hdr;
+	int     provider;
+	LPCWSTR pszText;                  // the text after the prefix
 };
 
 // ---- Control class --------------------------------------------------------------------------
 
 struct CmpItem;
-struct CmpResult;
+struct CmpProvider;
 class CmpRecent;
+class CmpSearch;
 class CmpListWindow;
 
 class CCommandPaletteCtrl : public ATL::CWindowImpl<CCommandPaletteCtrl> {
@@ -102,6 +157,7 @@ public:
 		MESSAGE_HANDLER(WM_GETFONT, OnGetFont)
 		MESSAGE_HANDLER(WM_COMMAND, OnCommand)
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
@@ -145,6 +201,15 @@ public:
 	// the menu opens), so an app that sets the items' states then (WTL's CUpdateUI) has them current.
 	void    RefreshMenus(HWND initMenus = nullptr);
 	void    SetImageList(HIMAGELIST images);          // small icons; the control doesn't destroy it
+
+	// ---- Providers -----------------------------------------------------------------------------
+
+	int     AddProvider(const CMDPPROVIDER* provider);   // its id (> 0); 0 if the prefix is empty or taken
+	BOOL    RemoveProvider(int id);
+	BOOL    SetProviderItemCount(int id, size_t count);  // its items are asked for again as they're needed
+	BOOL    InvalidateProvider(int id);               // the same items, asked for again
+	int     GetActiveProvider() const;                // the one the text picks: 0 for the commands, -1 for '?'
+	bool    IsSearching() const;                      // going through a long list
 	HIMAGELIST GetImageList() const;
 
 	// ---- Search and selection --------------------------------------------------------------
@@ -190,6 +255,7 @@ private:
 	LRESULT OnGetFont(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCommand(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCtlColorEdit(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -215,6 +281,13 @@ private:
 	void    Layout();
 	RECT    GetBoxRect() const;                       // the search box's frame, client coords
 	void    Filter();                                 // the results for the search text, the first selected
+	void    Search(DWORD ms);                         // goes on through the list for up to ms; then the order and the view
+	const CmpItem* ItemOf(size_t index);              // the active list's (a provider's is asked for if it's needed)
+	const CmpItem& RowItem(int row) const;            // the item a result row shows (asked for already)
+	std::vector<struct CmpResult>& Results() const;
+	CmpProvider* FindProvider(int id) const;
+	void    BuildHelp();                              // the '?' list
+	LRESULT NotifyItem(UINT code, int row);           // NMCMDPITEM for a row
 	void    UpdateScrollBar();
 	void    UpdateScrollBarTheme();
 	void    ScrollTo(int top);
@@ -235,7 +308,15 @@ private:
 	};
 
 	std::vector<CmpItem> m_Items;
-	std::vector<CmpResult> m_Results;
+	std::unique_ptr<CmpSearch> m_Search;              // through the active list: its results are the rows
+	std::vector<std::unique_ptr<CmpProvider>> m_Providers;
+	std::vector<CmpItem> m_Help;                      // the '?' list
+	int     m_Mode = 0;                               // the active list: 0 the commands, -1 '?', else a provider's id
+	int     m_NextProvider = 1;
+	int     m_QueryProvider = 0;                      // the last CMDPN_QUERY's
+	std::wstring m_QueryText;
+	bool    m_InQuery = false;                        // in CMDPN_QUERY: the app may set the count, which doesn't filter
+	bool    m_UserSelected = false;                   // the user moved the selection while the search goes on
 	std::unique_ptr<CmpRecent> m_Recent;
 	std::vector<MenuSource> m_Menus;
 	ATL::CContainedWindowT<WTL::CEdit> m_Box;

@@ -73,16 +73,15 @@ static std::wstring Marks(std::wstring_view pattern, std::wstring_view label) {
 static std::wstring Ranked(std::wstring_view pattern, const std::vector<std::wstring>& labels, const CmpRecent* recent = nullptr) {
 	CmpPattern p(pattern);
 	std::vector<CmpResult> results;
-	std::vector<size_t> lengths;
 	for (size_t i = 0; i < labels.size(); i++) {
-		lengths.push_back(labels[i].size());
 		CmpResult r;
 		r.index = i;
+		r.length = (uint32_t)labels[i].size();
 		r.recent = recent ? recent->Rank((UINT)i + 1) : -1;   // ids are 1-based indexes
 		if (p.Match(labels[i], r.score))
 			results.push_back(r);
 	}
-	CmpSort(results, p.Empty() ? std::vector<size_t>() : lengths);
+	CmpSort(results, !p.Empty());
 	std::wstring s;
 	for (auto& r : results) {
 		if (!s.empty())
@@ -179,6 +178,50 @@ TEST(Rank) {
 	CHECK_STR(Ranked(L"open", same), L"Open A|Open B");
 }
 
+TEST(Search_Steps) {
+	// in steps: the same results as all at once
+	std::vector<std::wstring> labels;
+	for (int i = 0; i < 1000; i++)
+		labels.push_back(L"Item " + std::to_wstring(i) + (i % 3 == 0 ? L" open" : L" close"));
+	auto label = [&](size_t i) { return std::wstring_view(labels[i]); };
+	auto none = [](size_t) { return -1; };
+	CmpSearch all, steps;
+	all.Start(L"opn", labels.size());
+	CHECK(all.Step(SIZE_MAX, label, none));
+	all.Sort();
+	steps.Start(L"opn", labels.size());
+	int count = 0;
+	while (!steps.Step(77, label, none)) {
+		count++;
+		steps.Sort();   // shown in between
+	}
+	steps.Sort();
+	CHECK(count == 12);
+	CHECK(!steps.Running() && steps.Done() == 1000);
+	CHECK(all.Results().size() == 334 && steps.Results().size() == 334);
+	bool same = true;
+	for (size_t i = 0; i < all.Results().size(); i++)
+		same = same && all.Results()[i].index == steps.Results()[i].index;
+	CHECK(same);
+
+	// not filtered: every item, in order, whatever the text
+	CmpSearch given;
+	given.Start(L"zzz", 5, false);
+	given.Step(SIZE_MAX, label, none);
+	given.Sort();
+	CHECK(given.Results().size() == 5 && given.Results()[4].index == 4);
+
+	// empty labels are skipped; stopping ends it
+	CmpSearch gaps;
+	gaps.Start(L"", 10);
+	gaps.Step(SIZE_MAX, [&](size_t i) { return i % 2 ? std::wstring_view(L"x") : std::wstring_view(); }, none);
+	CHECK(gaps.Results().size() == 5);
+	gaps.Start(L"x", 10);
+	gaps.Step(3, label, none);
+	gaps.Stop();
+	CHECK(!gaps.Running());
+}
+
 // ---- Recently used --------------------------------------------------------------------------
 
 TEST(Recent) {
@@ -256,6 +299,7 @@ int wmain() {
 	Run_Match_Speed();
 
 	Run_Rank();
+	Run_Search_Steps();
 	Run_Recent();
 	Run_MenuText();
 	Run_Providers();
