@@ -125,6 +125,12 @@ double DfSimilarity(std::wstring_view a, std::wstring_view b, const DfOptions& o
 // stayed. Whitespace changes the options ignore aren't included; a run of changes split only by a space is one span.
 void DfIntraLine(std::wstring_view a, std::wstring_view b, const DfOptions& options, std::vector<DfSpan>& spansA, std::vector<DfSpan>& spansB);
 
+// ---- Tabs ----------------------------------------------------------------------------------
+
+size_t DfColumns(std::wstring_view line, int tabSize);                        // the line's width in columns
+void   DfExpandTabs(std::wstring_view line, int tabSize, std::wstring& out);
+size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize);       // the column where a character starts
+
 // ---- Rows ----------------------------------------------------------------------------------
 
 enum class DfLayout {
@@ -166,3 +172,20 @@ void DfMerge(DfLines& left, DfLines& right, const DfBlock& block, bool toRight);
 // The diff in the unified format ("@@ -1,3 +1,4 @@" hunks), with context lines around each change.
 std::wstring DfUnifiedText(const DfLines& left, const DfLines& right, const DfDiff& diff, int context = 3,
 	std::wstring_view leftName = L"a", std::wstring_view rightName = L"b", std::wstring_view eol = L"\n");
+
+// ---- The control's document ------------------------------------------------------------------
+
+struct DfDocument {
+	DfLines left;
+	DfLines right;
+	DfDiff  diff;
+	std::vector<size_t> changeBlocks;   // the changed blocks' indexes, in order
+	std::vector<DfRow> rows;
+	std::vector<uint8_t> expanded;      // by block: folds the user opened
+	size_t  maxColumns = 0;             // the widest line of either side, tabs expanded
+
+	void Compute(const DfOptions& options, int tabSize);
+	void UpdateColumns(int tabSize);
+	// the index in changeBlocks of a block, or -1 if it isn't a change
+	int ChangeOfBlock(size_t block) const;
+};

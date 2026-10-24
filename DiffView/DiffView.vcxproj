@@ -95,9 +95,11 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\DiffView.h" />
     <ClInclude Include="src\DiffViewModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\DiffViewCtrl.cpp" />
     <ClCompile Include="src\DiffViewModel.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

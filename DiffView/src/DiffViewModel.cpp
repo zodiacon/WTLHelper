@@ -866,3 +866,51 @@ std::wstring DfUnifiedText(const DfLines& left, const DfLines& right, const DfDi
 	}
 	return text;
 }
+
+// ---- Tabs ----------------------------------------------------------------------------------
+
+size_t DfColumns(std::wstring_view line, int tabSize) {
+	size_t column = 0;
+	for (auto c : line)
+		column = c == L'\t' ? (column / tabSize + 1) * tabSize : column + 1;
+	return column;
+}
+
+void DfExpandTabs(std::wstring_view line, int tabSize, std::wstring& out) {
+	out.clear();
+	for (auto c : line) {
+		if (c == L'\t')
+			out.append(tabSize - out.size() % tabSize, L' ');
+		else
+			out += c;
+	}
+}
+
+size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize) {
+	return DfColumns(line.substr(0, std::min(index, line.size())), tabSize);
+}
+
+// ---- The control's document ------------------------------------------------------------------
+
+void DfDocument::Compute(const DfOptions& options, int tabSize) {
+	diff = DfCompute(left, right, options);
+	changeBlocks.clear();
+	changeBlocks.reserve(diff.changes);
+	for (size_t k = 0; k < diff.blocks.size(); k++)
+		if (diff.blocks[k].changed)
+			changeBlocks.push_back(k);
+	expanded.clear();
+	UpdateColumns(tabSize);
+}
+
+void DfDocument::UpdateColumns(int tabSize) {
+	maxColumns = 0;
+	for (auto* lines : { &left, &right })
+		for (size_t i = 0; i < lines->size(); i++)
+			maxColumns = std::max(maxColumns, DfColumns((*lines)[i], tabSize));
+}
+
+int DfDocument::ChangeOfBlock(size_t block) const {
+	auto it = std::lower_bound(changeBlocks.begin(), changeBlocks.end(), block);
+	return it != changeBlocks.end() && *it == block ? int(it - changeBlocks.begin()) : -1;
+}

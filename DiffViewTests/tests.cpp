@@ -492,6 +492,32 @@ TEST(Pairs) {
 	CHECK(noSpans.pairs.size() == 2 && noSpans.pairs[0].leftSpans.empty());
 }
 
+TEST(Tabs) {
+	CHECK(DfColumns(L"", 4) == 0);
+	CHECK(DfColumns(L"\tab", 4) == 6);
+	CHECK(DfColumns(L"ab\tc", 4) == 5);
+	CHECK(DfColumns(L"abcd\t", 4) == 8);
+	std::wstring out;
+	DfExpandTabs(L"a\tbc\td", 4, out);
+	CHECK_STR(out, L"a   bc  d");
+	CHECK(DfColumnOf(L"a\tbc\td", 2, 4) == 4);
+	CHECK(DfColumnOf(L"a\tbc\td", 5, 4) == 8);
+	CHECK(DfColumnOf(L"ab", 10, 4) == 2);
+}
+
+TEST(Document) {
+	DfDocument doc;
+	doc.left = DfLines(L"a\nb\nc\nd\n");
+	doc.right = DfLines(L"a\nX\nc\nd\n\tlong line\n");
+	doc.Compute({}, 4);
+	CHECK(doc.changeBlocks.size() == 2);
+	CHECK(doc.changeBlocks[0] == 1 && doc.changeBlocks[1] == 3);
+	CHECK(doc.ChangeOfBlock(1) == 0 && doc.ChangeOfBlock(3) == 1 && doc.ChangeOfBlock(2) == -1);
+	CHECK(doc.maxColumns == 13);
+	doc.UpdateColumns(8);
+	CHECK(doc.maxColumns == 17);
+}
+
 // ---- Rows ----------------------------------------------------------------------------------
 
 TEST(Rows_SideBySide) {
@@ -627,6 +653,9 @@ int wmain() {
 	Run_IntraLine_Words();
 	Run_IntraLine_Whitespace();
 	Run_Pairs();
+
+	Run_Tabs();
+	Run_Document();
 
 	Run_Rows_SideBySide();
 	Run_Rows_Folds();
