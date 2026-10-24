@@ -12,6 +12,10 @@
 #include <string>
 
 #include "GraphData.h"
+#include "CellGraphs.h"
+#include "CellGraphsModel.h"
+
+#include <vector>
 
 using namespace GraphCtrl;
 
@@ -587,6 +591,240 @@ TEST(TimeBase_ClearResetsIt) {
 
 // ---- Entry point -------------------------------------------------------------
 
+// ---- Cell graphs --------------------------------------------------------------
+
+using namespace GraphCtrl::Cells;
+
+static Series MakeSeries(std::initializer_list<float> values, size_t capacity = 10) {
+    Series s(0, L"s", {}, capacity);
+    for (float v : values)
+        s.Push(v);
+    return s;
+}
+
+struct Buffer {
+    std::vector<uint32_t> Bits;
+    Pixels Px;
+    Buffer(int w, int h, uint32_t fill = 0) : Bits((size_t)w * h, fill) { Px = { Bits.data(), w, h }; }
+};
+
+TEST(Cells_ScaleRangeFixedAndAuto) {
+    auto s = MakeSeries({ 10, 50, 30 });
+    auto fixed = ScaleRange(s, 10, 0, 100, false, 0);
+    CHECK_NEAR(fixed.Min, 0);
+    CHECK_NEAR(fixed.Max, 100);
+    // auto: from min (or lower) to the highest sample
+    auto r = ScaleRange(s, 10, 0, 100, true, 0);
+    CHECK_NEAR(r.Min, 0);
+    CHECK_NEAR(r.Max, 50);
+    // a minimum span keeps a small line from filling the cell
+    r = ScaleRange(MakeSeries({ 1, 2 }), 10, 0, 100, true, 10);
+    CHECK_NEAR(r.Max, 10);
+    // a sample below min lowers it
+    r = ScaleRange(MakeSeries({ -5, 3 }), 10, 0, 100, true, 0);
+    CHECK_NEAR(r.Min, -5);
+    CHECK_NEAR(r.Max, 3);
+    // only the slots shown count, and missing ones don't
+    r = ScaleRange(MakeSeries({ 90, 5, MissingSample, 7 }), 3, 0, 100, true, 0);
+    CHECK_NEAR(r.Max, 7);
+    // nothing: a span of one
+    r = ScaleRange(MakeSeries({}), 10, 0, 100, true, 0);
+    CHECK_NEAR(r.Min, 0);
+    CHECK_NEAR(r.Max, 1);
+}
+
+TEST(Cells_ValueToY) {
+    RectF area{ 0, 10, 100, 30 };
+    CHECK_NEAR(ValueToY(0, { 0, 100 }, area), 30);
+    CHECK_NEAR(ValueToY(100, { 0, 100 }, area), 10);
+    CHECK_NEAR(ValueToY(50, { 0, 100 }, area), 20);
+    CHECK_NEAR(ValueToY(150, { 0, 100 }, area), 10);    // clamped
+    CHECK_NEAR(ValueToY(-5, { 0, 100 }, area), 30);
+    CHECK_NEAR(ValueToY(5, { 3, 3 }, area), 30);        // no span
+}
+
+TEST(Cells_SparkRunsGrowFromTheRight) {
+    RectF area{ 0, 0, 90, 10 };
+    auto runs = SparkRuns(MakeSeries({ 0, 100 }), 10, { 0, 100 }, area);   // 10 slots: 10 px apart
+    CHECK(runs.size() == 1 && runs[0].size() == 2);
+    CHECK_NEAR(runs[0][0].X, 80);    // the older sample one slot left of the edge
+    CHECK_NEAR(runs[0][0].Y, 10);
+    CHECK_NEAR(runs[0][1].X, 90);    // the newest at the right edge
+    CHECK_NEAR(runs[0][1].Y, 0);
+    // more samples than slots: the oldest shown is at the left edge
+    auto full = SparkRuns(MakeSeries({ 1, 2, 3, 4, 5 }, 5), 3, { 0, 10 }, area);
+    CHECK(full.size() == 1 && full[0].size() == 3);
+    CHECK_NEAR(full[0][0].X, 0);
+    CHECK_NEAR(full[0][0].Y, ValueToY(3, { 0, 10 }, area));
+    // a missing sample splits the line; a lone sample is a run of one
+    auto gaps = SparkRuns(MakeSeries({ 1, MissingSample, 2, 3, MissingSample, 4 }), 6, { 0, 10 }, area);
+    CHECK(gaps.size() == 3);
+    CHECK(gaps[0].size() == 1 && gaps[1].size() == 2 && gaps[2].size() == 1);
+    CHECK_NEAR(gaps[2][0].X, 90);
+    // one slot: at the right edge
+    auto one = SparkRuns(MakeSeries({ 5 }), 1, { 0, 10 }, area);
+    CHECK(one.size() == 1 && one[0].size() == 1);
+    CHECK_NEAR(one[0][0].X, 90);
+    CHECK(SparkRuns(MakeSeries({ 5 }), 0, { 0, 10 }, area).empty());
+}
+
+TEST(Cells_ColumnBars) {
+    RectF area{ 0, 0, 40, 20 };
+    auto bars = ColumnBars(MakeSeries({ 50, 0, 100, MissingSample }), 4, { 0, 100 }, area, 2);
+    // 4 slots of 10 px; the newest (missing) and the zero get no bar
+    CHECK(bars.size() == 2);
+    CHECK(bars[0].Slot == 1);   // 100, the second newest
+    CHECK_NEAR(bars[0].Rect.Left, 21);
+    CHECK_NEAR(bars[0].Rect.Right, 29);
+    CHECK_NEAR(bars[0].Rect.Top, 0);
+    CHECK_NEAR(bars[0].Rect.Bottom, 20);
+    CHECK(bars[1].Slot == 3);   // 50, the oldest
+    CHECK_NEAR(bars[1].Rect.Left, 1);
+    CHECK_NEAR(bars[1].Rect.Top, 10);
+    // narrow slots: no gap
+    auto narrow = ColumnBars(MakeSeries({ 50 }), 10, { 0, 100 }, { 0, 0, 40, 20 }, 2);
+    CHECK(narrow.size() == 1);
+    CHECK_NEAR(narrow[0].Rect.Left, 36);
+    CHECK_NEAR(narrow[0].Rect.Right, 40);
+}
+
+TEST(Cells_MeterAndThresholds) {
+    CHECK_NEAR(MeterFraction(25, 0, 100), 0.25f);
+    CHECK_NEAR(MeterFraction(150, 0, 100), 1);
+    CHECK_NEAR(MeterFraction(-1, 0, 100), 0);
+    CHECK_NEAR(MeterFraction(MissingSample, 0, 100), 0);
+    CHECK_NEAR(MeterFraction(5, 10, 10), 0);
+    Threshold t[] = { { 0, RGB(0, 200, 0) }, { 70, RGB(240, 160, 0) }, { 90, RGB(220, 0, 0) } };
+    CHECK(ThresholdColor(10, t, 3, 1) == RGB(0, 200, 0));
+    CHECK(ThresholdColor(70, t, 3, 1) == RGB(240, 160, 0));
+    CHECK(ThresholdColor(95, t, 3, 1) == RGB(220, 0, 0));
+    CHECK(ThresholdColor(-5, t, 3, 1) == 1);            // below every threshold: the fallback
+    CHECK(ThresholdColor(MissingSample, t, 3, 1) == 1);
+    CHECK(ThresholdColor(50, nullptr, 0, 7) == 7);
+}
+
+TEST(Cells_StackSegments) {
+    RectF area{ 10, 0, 110, 8 };
+    float values[] = { 20, MissingSample, 30, -5 };
+    auto segs = StackSegments(values, 4, 100, area);
+    CHECK(segs.size() == 4);
+    CHECK_NEAR(segs[0].Left, 10);
+    CHECK_NEAR(segs[0].Right, 30);
+    CHECK_NEAR(segs[1].Width(), 0);                     // missing: no room
+    CHECK_NEAR(segs[2].Left, 30);
+    CHECK_NEAR(segs[2].Right, 60);
+    CHECK_NEAR(segs[3].Width(), 0);                     // negative: no room
+    // no total: their sum fills the area
+    auto whole = StackSegments(values, 4, 0, area);
+    CHECK_NEAR(whole[2].Right, 110);
+    CHECK_NEAR(whole[0].Right, 50);
+    // more than the total: clipped at the right
+    float big[] = { 80, 80 };
+    auto over = StackSegments(big, 2, 100, area);
+    CHECK_NEAR(over[1].Right, 110);
+    // nothing to show
+    float zeros[] = { 0, 0 };
+    auto none = StackSegments(zeros, 2, 0, area);
+    CHECK(none.size() == 2 && none[1].Width() == 0);
+}
+
+TEST(Cells_BlendAndFillRect) {
+    CHECK(Blend(0x000000, RGB(255, 255, 255), 0.5f) == 0x808080);
+    CHECK(Blend(0x102030, RGB(255, 0, 0), 0) == 0x102030);
+    CHECK(Blend(0x102030, RGB(255, 0, 0), 1) == 0xFF0000);
+    Buffer b(6, 4);
+    FillRect(b.Px, { 1, 1, 3.5f, 3 }, RGB(255, 255, 255));
+    CHECK(b.Px.At(1, 1) == 0xFFFFFF && b.Px.At(2, 2) == 0xFFFFFF);
+    CHECK(b.Px.At(3, 1) == 0x808080);                   // half covered
+    CHECK(b.Px.At(0, 0) == 0 && b.Px.At(4, 1) == 0 && b.Px.At(1, 3) == 0);
+    FillRect(b.Px, { -10, -10, 100, 100 }, RGB(1, 2, 3));   // clipped
+    CHECK(b.Px.At(5, 3) == 0x010203);
+}
+
+TEST(Cells_FillArea) {
+    Buffer b(10, 10);
+    // a flat line at y = 4 from x 2 to 8: columns 2..7 filled from 4 down to 10
+    std::vector<PointF> run = { { 2, 4 }, { 8, 4 } };
+    FillArea(b.Px, run, 10, RGB(255, 255, 255));
+    CHECK(b.Px.At(2, 4) == 0xFFFFFF && b.Px.At(7, 9) == 0xFFFFFF);
+    CHECK(b.Px.At(2, 3) == 0 && b.Px.At(1, 5) == 0 && b.Px.At(8, 5) == 0);
+    // a slope: higher on the right
+    Buffer s(10, 10);
+    std::vector<PointF> slope = { { 0, 10 }, { 10, 0 } };
+    FillArea(s.Px, slope, 10, RGB(255, 255, 255));
+    CHECK(s.Px.At(9, 1) == 0xFFFFFF && s.Px.At(9, 0) != 0);
+    CHECK(s.Px.At(0, 8) == 0 && s.Px.At(0, 9) != 0);
+    // one point: nothing
+    Buffer d(4, 4);
+    FillArea(d.Px, { { 2, 2 } }, 4, RGB(255, 255, 255));
+    CHECK(d.Px.At(2, 3) == 0);
+}
+
+TEST(Cells_Polyline) {
+    Buffer b(20, 10);
+    // horizontal, 1 px wide, through pixel centers on row 5
+    DrawPolyline(b.Px, { { 2, 5.5f }, { 17, 5.5f } }, 1, RGB(255, 255, 255));
+    CHECK(b.Px.At(8, 5) == 0xFFFFFF);
+    CHECK(b.Px.At(8, 4) == 0 && b.Px.At(8, 6) == 0);
+    // between rows: both half
+    Buffer h(20, 10);
+    DrawPolyline(h.Px, { { 2, 5 }, { 17, 5 } }, 1, RGB(255, 255, 255));
+    CHECK(h.Px.At(8, 4) == 0x808080 && h.Px.At(8, 5) == 0x808080);
+    // a joint isn't darker than the segments
+    Buffer j(20, 20);
+    DrawPolyline(j.Px, { { 2, 10.5f }, { 10.5f, 10.5f }, { 10.5f, 2 } }, 1, RGB(255, 255, 255));
+    CHECK(j.Px.At(10, 10) == 0xFFFFFF);
+    CHECK(j.Px.At(10, 5) == 0xFFFFFF && j.Px.At(5, 10) == 0xFFFFFF);
+    // alpha
+    Buffer a(10, 10);
+    DrawPolyline(a.Px, { { 0, 5.5f }, { 10, 5.5f } }, 1, RGB(255, 255, 255), 0.5f);
+    CHECK(a.Px.At(5, 5) == 0x808080);
+    // one point: a dot; none: nothing; off the buffer: clipped
+    Buffer d(10, 10);
+    DrawPolyline(d.Px, { { 5, 5 } }, 3, RGB(255, 255, 255));
+    CHECK(d.Px.At(4, 4) != 0 && d.Px.At(0, 0) == 0);
+    DrawPolyline(d.Px, {}, 3, RGB(255, 0, 0));
+    DrawPolyline(d.Px, { { -50, -50 }, { 50, -40 } }, 2, RGB(255, 0, 0));
+    CHECK(d.Px.At(9, 9) == 0);
+}
+
+TEST(Cells_HistoryKeepsRowsSeen) {
+    CellHistory<int> h(5);
+    h.BeginUpdate();
+    h.Push(1, 10);
+    h.Push(2, 20);
+    h.EndUpdate();
+    CHECK(h.Count() == 2);
+    CHECK(h.Find(1) && h.Find(1)->Count() == 1);
+    // row 2 not seen this time: dropped; row 3 new: starts empty then gets one
+    h.BeginUpdate();
+    h.Push(1, 11);
+    h.Push(3, 30);
+    h.EndUpdate();
+    CHECK(h.Count() == 2 && !h.Find(2));
+    CHECK(h.Find(1)->Count() == 2 && h.Find(1)->Last() == 11);
+    CHECK(h.Find(3)->Count() == 1);
+    // Keep: through a refresh without a sample
+    h.BeginUpdate();
+    h.Push(1, 12);
+    h.Keep(3);
+    h.EndUpdate();
+    CHECK(h.Find(3) && h.Find(3)->Count() == 1);
+    // capacity: the newest kept
+    for (int i = 0; i < 10; i++)
+        h.Push(1, (float)i);
+    CHECK(h.Find(1)->Count() == 5 && h.Find(1)->Last() == 9);
+    h.SetCapacity(3);
+    CHECK(h.Find(1)->Count() == 3 && h.Find(1)->AtFromEnd(2) == 7);
+    CHECK(h.Remove(1) && !h.Remove(1));
+    h.Clear();
+    CHECK(h.Count() == 0);
+    // keys of another type
+    CellHistory<std::wstring> named;
+    named.Push(L"a", 1);
+    CHECK(named.Find(L"a") && !named.Find(L"b"));
+}
+
 int wmain() {
     wprintf(L"GraphControl data model tests\n\n");
 
@@ -624,6 +862,17 @@ int wmain() {
     Run_TimeBase_WrapsWithTheSamples();
     Run_TimeBase_ShrinkKeepsStampsAlignedWithSamples();
     Run_TimeBase_ClearResetsIt();
+
+    Run_Cells_ScaleRangeFixedAndAuto();
+    Run_Cells_ValueToY();
+    Run_Cells_SparkRunsGrowFromTheRight();
+    Run_Cells_ColumnBars();
+    Run_Cells_MeterAndThresholds();
+    Run_Cells_StackSegments();
+    Run_Cells_BlendAndFillRect();
+    Run_Cells_FillArea();
+    Run_Cells_Polyline();
+    Run_Cells_HistoryKeepsRowsSeen();
 
     wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures;
