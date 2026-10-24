@@ -111,7 +111,9 @@ void TintRect(const Pixels& px, const RectF& rc, float strength);
 // (its selection and hot highlight too) and draws only the text. A list that fills each cell itself (a classic
 // selection highlight, a background color set for the cell) changes the pixel at (1, h / 2), which text doesn't
 // reach: then the cell becomes that fill, but for the border pixels it left alone (a grid line).
-void CellBackground(const uint32_t* before, uint32_t* after, int w, int h);
+// `after` rows are `stride` pixels apart (0: w). probeY is the probe's row when only part of the cell is on the
+// screen (a row cut off at the bottom of the list): one that is (-1: h / 2).
+void CellBackground(const uint32_t* before, uint32_t* after, int w, int h, int stride = 0, int probeY = -1);
 
 // the average color of the w x h pixels at the top left (of a sample of them)
 COLORREF AverageColor(const Pixels& px, int w, int h);
@@ -123,6 +125,12 @@ struct DefaultColors {
     COLORREF Fill;
 };
 DefaultColors DefaultsFor(COLORREF background);
+
+// a color moved halfway to black or white when it's too close to the background to see (a blue segment on a blue
+// selection highlight); else as is
+COLORREF Visible(COLORREF color, COLORREF background);
+// of the candidates, the one farthest from the background (high contrast: the system text color that reads on it)
+COLORREF Farthest(COLORREF background, const COLORREF* candidates, size_t count);
 
 // a horizontal dashed line from x0 to x1 centered on y, `dash` on and `gap` off, tinting what's under it (like
 // TintRect), so it reads on any background
@@ -136,5 +144,22 @@ void FillDot(const Pixels& px, PointF center, float radius, COLORREF color, floa
 // a cell's pixels, w x h top-down
 bool ReadCell(HDC hdc, const RECT& cell, std::vector<uint32_t>& pixels);
 void WriteCell(HDC hdc, const RECT& cell, const std::vector<uint32_t>& pixels);
+
+// While one is alive, the next drawing (DrawSparkline, ...) on this thread of a cell this size first takes the text
+// out of it (CellBackground with `before`), in the copy it draws in: what CellGraphs would otherwise do with two
+// more copies of the cell. Used() says whether a drawing did.
+class BackgroundScope {
+public:
+    BackgroundScope(const std::vector<uint32_t>& before, int w, int h, int probeY = -1);
+    ~BackgroundScope();
+    bool Used() const;
+    BackgroundScope(const BackgroundScope&) = delete;
+    BackgroundScope& operator=(const BackgroundScope&) = delete;
+};
+
+// High contrast (SPI_GETHIGHCONTRAST): every graph in the system text color that reads on the cell. For the tests,
+// this thread can say on (1) or off (0) instead of the system (-1).
+bool IsHighContrast();
+void ForceHighContrast(int mode);
 
 } // namespace GraphCtrl::Cells

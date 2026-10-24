@@ -124,10 +124,11 @@ std::vector<RectF> StackSegments(const float* values, size_t count, float total,
 // ---- Pixels ----------------------------------------------------------------------------
 
 uint32_t Blend(uint32_t pixel, COLORREF color, float alpha) {
-    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    // in fixed point (256 = opaque): this runs for every pixel drawn
+    int a = (int)(std::clamp(alpha, 0.0f, 1.0f) * 256 + 0.5f);
     auto mix = [&](int shift, int c) {
-        float x = (float)((pixel >> shift) & 0xFF);
-        return (uint32_t)std::lround(x + ((float)c - x) * alpha) << shift;
+        int x = (pixel >> shift) & 0xFF;
+        return (uint32_t)(x + (((c - x) * a + 128) >> 8)) << shift;
     };
     return mix(16, GetRValue(color)) | mix(8, GetGValue(color)) | mix(0, GetBValue(color));
 }
@@ -137,13 +138,16 @@ static float Overlap(float a0, float a1, float b0, float b1) {
 }
 
 void FillRect(const Pixels& px, const RectF& rc, COLORREF color, float alpha) {
+    uint32_t solid = ToPixel(color);
     int x0 = std::max(0, (int)std::floor(rc.Left)), x1 = std::min(px.Width, (int)std::ceil(rc.Right));
     int y0 = std::max(0, (int)std::floor(rc.Top)), y1 = std::min(px.Height, (int)std::ceil(rc.Bottom));
     for (int y = y0; y < y1; y++) {
         float cy = Overlap((float)y, (float)y + 1, rc.Top, rc.Bottom);
         for (int x = x0; x < x1; x++) {
             float c = cy * Overlap((float)x, (float)x + 1, rc.Left, rc.Right) * alpha;
-            if (c > 0)
+            if (c >= 1)
+                px.At(x, y) = solid;
+            else if (c > 0)
                 px.At(x, y) = Blend(px.At(x, y), color, c);
         }
     }
@@ -195,25 +199,50 @@ void DashedLine(const Pixels& px, float y, float x0, float x1, float width, floa
         TintRect(px, { x, y - width / 2, std::min(x + dash, x1), y + width / 2 }, strength);
 }
 
-void CellBackground(const uint32_t* before, uint32_t* after, int w, int h) {
+void CellBackground(const uint32_t* before, uint32_t* after, int w, int h, int stride, int probeY) {
     if (w <= 0 || h <= 0)
         return;
-    size_t probe = (size_t)(h / 2) * w + std::min(1, w - 1);
-    if (after[probe] == before[probe]) {
-        std::copy(before, before + (size_t)w * h, after);
+    if (stride <= 0)
+        stride = w;
+    int px = std::min(1, w - 1), py = probeY >= 0 && probeY < h ? probeY : h / 2;
+    if (after[(size_t)py * stride + px] == before[(size_t)py * w + px]) {
+        for (int y = 0; y < h; y++)
+            std::copy_n(before + (size_t)y * w, w, after + (size_t)y * stride);
         return;
     }
     // the cell's own pixels become the fill, the text too (white text can match what was there before); a grid
     // line on the border that the list didn't paint over stays
-    uint32_t fill = after[probe];
+    uint32_t fill = after[(size_t)py * stride + px];
     for (int y = 0; y < h; y++) {
         bool edgeRow = y == 0 || y == h - 1;
+        uint32_t* row = after + (size_t)y * stride;
+        const uint32_t* old = before + (size_t)y * w;
         for (int x = 0; x < w; x++) {
-            size_t i = (size_t)y * w + x;
-            if (!(edgeRow || x == 0 || x == w - 1) || after[i] != before[i])
-                after[i] = fill;
+            if (!(edgeRow || x == 0 || x == w - 1) || row[x] != old[x])
+                row[x] = fill;
         }
     }
+}
+
+static int Distance2(COLORREF a, COLORREF b) {
+    int dr = GetRValue(a) - GetRValue(b), dg = GetGValue(a) - GetGValue(b), db = GetBValue(a) - GetBValue(b);
+    return dr * dr + dg * dg + db * db;
+}
+
+COLORREF Visible(COLORREF color, COLORREF background) {
+    if (Distance2(color, background) >= 100 * 100)
+        return color;
+    bool dark = GetRValue(background) * 299 + GetGValue(background) * 587 + GetBValue(background) * 114 < 128 * 1000;
+    return ToColor(Blend(ToPixel(color), dark ? RGB(255, 255, 255) : RGB(0, 0, 0), 0.5f));
+}
+
+COLORREF Farthest(COLORREF background, const COLORREF* candidates, size_t count) {
+    COLORREF best = count ? candidates[0] : RGB(0, 0, 0);
+    for (size_t i = 1; i < count; i++) {
+        if (Distance2(candidates[i], background) > Distance2(best, background))
+            best = candidates[i];
+    }
+    return best;
 }
 
 COLORREF AverageColor(const Pixels& px, int w, int h) {

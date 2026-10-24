@@ -44,6 +44,8 @@ enum {
 	ID_VIEW_ALTROWS,
 	ID_VIEW_EXPLORER,
 	ID_VIEW_GRIDLINES,
+	ID_VIEW_MEASURE,
+	ID_VIEW_GRAPHS,
 
 	IDT_UPDATE = 1,
 };
@@ -99,7 +101,7 @@ static CellGraphs g_listCells, g_treeCells;
 static CListViewCtrl g_list;
 static CTreeListViewCtrl g_tree;
 static HTLITEM g_groupItems[std::size(g_groups)];
-static bool g_paused, g_explorer = true, g_gridLines;
+static bool g_paused, g_explorer = true, g_gridLines, g_graphs = true;
 
 static float Random(float lo, float hi) {
 	return std::uniform_real_distribution<float>(lo, hi)(g_rng);
@@ -366,6 +368,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_ALTROWS, g_tree.GetAlternateRowColor() != CLR_NONE);
 	check(ID_VIEW_EXPLORER, g_explorer);
 	check(ID_VIEW_GRIDLINES, g_gridLines);
+	check(ID_VIEW_GRAPHS, g_graphs);
 #ifdef DEMO_WTLHELPER
 	check(ID_VIEW_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -376,6 +379,27 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_FILE_EXIT:
 			::DestroyWindow(hwnd);
 			return;
+		case ID_VIEW_MEASURE:
+		{
+			// the list painted 100 times over, with its graphs: the time of one, in the title
+			LARGE_INTEGER freq, start, end;
+			::QueryPerformanceFrequency(&freq);
+			::QueryPerformanceCounter(&start);
+			constexpr int count = 100;
+			for (int i = 0; i < count; i++)
+				g_list.RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+			::QueryPerformanceCounter(&end);
+			CString title;
+			title.Format(L"Cell Graphs Demo - list painted in %.2f ms", (end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart / count);
+			::SetWindowText(hwnd, title);
+			return;
+		}
+		case ID_VIEW_GRAPHS:
+			// off: the cells' text, and what the list's painting costs without the graphs
+			g_graphs = !g_graphs;
+			g_list.Invalidate();
+			g_tree.Invalidate(TRUE);
+			break;
 		case ID_VIEW_PAUSE:
 			g_paused = !g_paused;
 			break;
@@ -451,10 +475,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			if (hdr->idFrom == IDC_LIST) {
 				if (hdr->code == LVN_GETDISPINFO)
 					GetListText((NMLVDISPINFO*)lParam);
-				else if (hdr->code == NM_CUSTOMDRAW)
+				else if (hdr->code == NM_CUSTOMDRAW && g_graphs)
 					return g_listCells.CustomDraw((NMLVCUSTOMDRAW*)lParam);
 			}
-			else if (hdr->idFrom == IDC_TREE && hdr->code == NM_CUSTOMDRAW) {
+			else if (hdr->idFrom == IDC_TREE && hdr->code == NM_CUSTOMDRAW && g_graphs) {
 				auto cd = (NMTLVCUSTOMDRAW*)lParam;
 				return g_treeCells.CustomDraw(&cd->nmcd, cd->iSubItem, (UINT_PTR)cd->hItem);
 			}
@@ -506,6 +530,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_PAUSE, L"&Pause");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_EXPLORER, L"List: &Explorer Theme");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_GRIDLINES, L"List: &Grid Lines");
+	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_GRAPHS, L"G&raphs");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_MEASURE, L"&Measure List Painting");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_ALTROWS, L"Tree: &Alternate Rows");
 
 	HMENU hMenu = ::CreateMenu();

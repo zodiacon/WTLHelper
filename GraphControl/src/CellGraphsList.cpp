@@ -102,12 +102,27 @@ LRESULT CellGraphs::CustomDraw(NMCUSTOMDRAW* cd, int subItem, UINT_PTR item, LRE
             if (GetKind(subItem) == CellKind::None)
                 return result;
             const RECT& rc = cd->rc;
-            if (!m_Before.empty() && ::EqualRect(&rc, &m_BeforeRect) && Cells::ReadCell(cd->hdc, rc, m_After)) {
-                Cells::CellBackground(m_Before.data(), m_After.data(), rc.right - rc.left, rc.bottom - rc.top);
-                Cells::WriteCell(cd->hdc, rc, m_After);
+            int w = rc.right - rc.left, h = rc.bottom - rc.top;
+            // the part of the cell being painted: a row at the bottom of the list can be cut off, and the pixels
+            // below it are nothing the list drew
+            RECT clip, visible;
+            if (::GetClipBox(cd->hdc, &clip) == ERROR || !::IntersectRect(&visible, &rc, &clip)) {
+                m_Before.clear();
+                return result;
+            }
+            int probeY = (visible.top + visible.bottom) / 2 - rc.top;
+            bool before = !m_Before.empty() && ::EqualRect(&rc, &m_BeforeRect);
+            {
+                // the drawing takes the text out in its own copy of the cell; with nothing drawn (no data), it's
+                // taken out here
+                Cells::BackgroundScope scope(before ? m_Before : std::vector<uint32_t>(), w, h, probeY);
+                Draw(m_Columns[subItem], { cd->hdr.hwndFrom, item, cd->lItemlParam, subItem }, cd->hdc, rc);
+                if (before && !scope.Used() && Cells::ReadCell(cd->hdc, rc, m_After)) {
+                    Cells::CellBackground(m_Before.data(), m_After.data(), w, h, 0, probeY);
+                    Cells::WriteCell(cd->hdc, rc, m_After);
+                }
             }
             m_Before.clear();
-            Draw(m_Columns[subItem], { cd->hdr.hwndFrom, item, cd->lItemlParam, subItem }, cd->hdc, rc);
             // a tooltip showing for this cell follows the new data
             if (m_Tip && subItem == m_TipColumn && item == m_TipItem && ::IsWindowVisible(m_Tip))
                 ::PostMessage(m_Tip, TTM_UPDATE, 0, 0);

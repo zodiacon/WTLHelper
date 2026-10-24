@@ -954,6 +954,37 @@ TEST(Cells_CellBackground) {
     CellBackground(grid, filled, 5, 3);
     uint32_t expect[] = { 5, 5, 5, 5, 7,  5, 5, 5, 5, 7,  5, 5, 5, 5, 7 };
     CHECK(std::equal(std::begin(filled), std::end(filled), std::begin(expect)));
+    // into a wider buffer (a canvas): the extra column (8) is left alone
+    uint32_t wide[] = { 1, 1, 1, 8,  1, 1, 9, 8,  1, 1, 1, 8 };
+    uint32_t small[] = { 1, 1, 1,  1, 1, 1,  1, 1, 1 };
+    CellBackground(small, wide, 3, 3, 4);
+    uint32_t wideExpect[] = { 1, 1, 1, 8,  1, 1, 1, 8,  1, 1, 1, 8 };
+    CHECK(std::equal(std::begin(wide), std::end(wide), std::begin(wideExpect)));
+}
+
+TEST(Cells_BackgroundScope) {
+    // a drawing in the scope takes the text (0) out of the cell first: what was there before (white) comes back
+    TestDc d(20, 10, 0xFFFFFF);
+    std::vector<uint32_t> before(20 * 10, 0xFFFFFF);
+    for (int x = 5; x < 15; x++)
+        d.Bits[5 * 20 + x] = 0;   // "text"
+    {
+        BackgroundScope scope(before, 20, 10);
+        MeterStyle s;
+        s.Padding = 0;
+        s.TrackColor = CLR_NONE;
+        DrawMeter(d.Dc, { 0, 0, 20, 10 }, 0, s);   // an empty meter with no track: draws nothing
+        CHECK(scope.Used());
+    }
+    CHECK(d.At(10, 5) == 0xFFFFFF);
+    // outside a scope (or for another size), nothing is taken out
+    d.Bits[5 * 20 + 10] = 0;
+    {
+        BackgroundScope scope(before, 30, 10);
+        DrawMeter(d.Dc, { 0, 0, 20, 10 }, 0, MeterStyle{ .TrackColor = CLR_NONE });
+        CHECK(!scope.Used());
+    }
+    CHECK(d.At(10, 5) == 0);
 }
 
 TEST(Cells_DefaultColors) {
@@ -1051,6 +1082,45 @@ TEST(Cells_MeterText) {
     CHECK(none.At(100, 10) == plain.At(100, 10));
 }
 
+TEST(Cells_VisibleColors) {
+    // apart from the background: as is
+    CHECK(Visible(RGB(17, 125, 187), RGB(255, 255, 255)) == RGB(17, 125, 187));
+    // a blue segment on a blue highlight is moved toward white
+    COLORREF moved = Visible(RGB(17, 125, 187), RGB(0, 120, 215));
+    CHECK(moved != RGB(17, 125, 187) && GetRValue(moved) > 100);
+    // near-white on white: toward black
+    CHECK(GetRValue(Visible(RGB(240, 240, 240), RGB(255, 255, 255))) < 140);
+    COLORREF texts[] = { RGB(255, 255, 255), RGB(255, 255, 0), RGB(0, 0, 0) };
+    CHECK(Farthest(RGB(0, 0, 0), texts, 3) == RGB(255, 255, 255));
+    CHECK(Farthest(RGB(255, 255, 255), texts, 3) == RGB(0, 0, 0));
+    CHECK(Farthest(RGB(0, 0, 255), texts, 2) == RGB(255, 255, 0));
+}
+
+TEST(Cells_HighContrast) {
+    // everything in the system text color that reads on the cell, the app's colors too
+    ForceHighContrast(1);
+    TestDc d(100, 10, 0xFFFFFF);
+    MeterStyle s;
+    s.Padding = 0;
+    s.BarColor = RGB(255, 0, 0);
+    DrawMeter(d.Dc, { 0, 0, 100, 10 }, 50, s);
+    COLORREF texts[] = { GetSysColor(COLOR_WINDOWTEXT), GetSysColor(COLOR_HIGHLIGHTTEXT), GetSysColor(COLOR_BTNTEXT) };
+    CHECK(d.At(20, 5) == ToPixel(Farthest(RGB(255, 255, 255), texts, 3)));
+    // stacked: every other segment in half of it
+    TestDc st(100, 10, 0xFFFFFF);
+    StackedStyle ss;
+    ss.Padding = 0;
+    ss.Total = 100;
+    float values[] = { 25, 25 };
+    DrawStacked(st.Dc, { 0, 0, 100, 10 }, values, 2, ss);
+    CHECK(st.At(10, 5) != st.At(40, 5));
+    ForceHighContrast(0);
+    TestDc n(100, 10, 0xFFFFFF);
+    DrawMeter(n.Dc, { 0, 0, 100, 10 }, 50, s);
+    CHECK(n.At(20, 5) == 0xFF0000);
+    ForceHighContrast(-1);
+}
+
 int wmain() {
     wprintf(L"GraphControl data model tests\n\n");
 
@@ -1104,11 +1174,14 @@ int wmain() {
     Run_Cells_DrawSparklineAndColumns();
     Run_Cells_DrawStacked();
     Run_Cells_CellBackground();
+    Run_Cells_BackgroundScope();
     Run_Cells_DefaultColors();
     Run_Cells_Stats();
     Run_Cells_DashedLine();
     Run_Cells_SparklineThresholdsAndReference();
     Run_Cells_MeterText();
+    Run_Cells_VisibleColors();
+    Run_Cells_HighContrast();
 
     wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures;
