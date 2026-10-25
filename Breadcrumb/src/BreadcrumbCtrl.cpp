@@ -58,6 +58,15 @@ LRESULT CBreadcrumbCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	// doesn't know), shown while editing
 	HWND edit = ::CreateWindowExW(0, WC_EDITW, nullptr, WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
 	m_Edit.SubclassWindow(edit);
+	// one tool, moved onto the hot part (UpdateTip)
+	m_hTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
+		m_hWnd, nullptr, nullptr, nullptr);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.uFlags = TTF_SUBCLASS;
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	::SendMessage(m_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 	UpdateFonts();
 	UpdateMetrics();
 	m_LastHeight = GetIdealHeight();
@@ -66,6 +75,11 @@ LRESULT CBreadcrumbCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CBreadcrumbCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
+	DisconnectAccessible();
+	if (m_hTip) {
+		::DestroyWindow(m_hTip);
+		m_hTip = nullptr;
+	}
 	if (d.list) {
 		d.list->Close();
 		if (d.list->IsWindow())
@@ -243,6 +257,15 @@ void CBreadcrumbCtrl::SetColors(const BRCCOLORS* colors) {
 }
 
 BRCCOLORS CBreadcrumbCtrl::GetColors() const {
+	if (IsHighContrast()) {
+		// the user's colors, over the app's too; hot and pressed parts are framed (PaintColors)
+		BRCCOLORS c;
+		c.crBack = c.crBox = c.crListBack = c.crHotBack = c.crPressedBack = ::GetSysColor(COLOR_WINDOW);
+		c.crText = c.crBorder = c.crHotBorder = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crDimText = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crListHotBack = c.crAccent = ::GetSysColor(COLOR_HIGHLIGHT);
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
@@ -283,6 +306,7 @@ BOOL CBreadcrumbCtrl::SetPath(const BRCITEM* items, int count, LPCWSTR location)
 	}
 	d.hot = d.pressed = {};
 	d.editText.clear();   // the app's text was for the path it replaces
+	NotifyAccessible(m_hWnd, EVENT_OBJECT_NAMECHANGE, CHILDID_SELF);
 	if (count > 0) {
 		BrcLocation loc{ location ? std::wstring(location) : PathTo(-1), d.segments.back().text, d.segments.back().image };
 		if (d.pendingOffset && d.backForward.Go(d.pendingOffset))
@@ -486,6 +510,7 @@ void CBreadcrumbCtrl::EnsureLayout() {
 	d.dirty = false;
 	if (d.editing)
 		PlaceEdit();
+	NotifyAccessible(m_hWnd, EVENT_OBJECT_REORDER, CHILDID_SELF);
 }
 
 // ---- Mouse ---------------------------------------------------------------------------------------
@@ -527,6 +552,7 @@ void CBreadcrumbCtrl::SetHot(const BrcHit& hit) {
 	if (!(hit == d.hot)) {
 		d.hot = hit;
 		Invalidate(FALSE);
+		UpdateTip();
 	}
 }
 
@@ -668,6 +694,8 @@ LRESULT CBreadcrumbCtrl::OnChar(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 
 LRESULT CBreadcrumbCtrl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	Invalidate(FALSE);   // the keys' part framed
+	if (!m_Data->editing)
+		NotifyAccessible(m_hWnd, EVENT_OBJECT_FOCUS, AccChildId(FocusPart()));
 	bHandled = FALSE;
 	return 0;
 }

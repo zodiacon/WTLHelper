@@ -103,6 +103,7 @@ void CBreadcrumbCtrl::OpenDropDown(const BrcHit& from, bool pressed, bool keyboa
 	d.list->Show(std::move(rows), under, pressed);
 	if (keyboard)
 		d.list->SelectFirst();
+	NotifyAccessible(m_hWnd, EVENT_OBJECT_STATECHANGE, AccChildId(from));
 }
 
 void CBreadcrumbCtrl::EnsureList() {
@@ -141,8 +142,11 @@ void CBreadcrumbCtrl::DropPicked(int tag) {
 void CBreadcrumbCtrl::DropClosed() {
 	auto& d = *m_Data;
 	auto kind = d.listKind;
+	auto opened = d.opened;
 	d.listKind = BrcList::None;
 	d.opened = {};
+	if (opened.part != BrcPart::None)
+		NotifyAccessible(m_hWnd, EVENT_OBJECT_STATECHANGE, AccChildId(opened));
 	d.openedIndex = -2;
 	if (!IsWindow())
 		return;
@@ -314,6 +318,11 @@ void BrcDropList::SetHot(int row, bool scroll) {
 	if (row != m_Hot) {
 		m_Hot = row;
 		Invalidate();
+		if (row >= 0) {
+			// the row selected, as an active descendant: the focus stays with the control
+			m_Owner->NotifyAccessible(m_hWnd, EVENT_OBJECT_FOCUS, row + 1);
+			m_Owner->NotifyAccessible(m_hWnd, EVENT_OBJECT_SELECTION, row + 1);
+		}
 	}
 	if (scroll && row >= 0) {
 		if (m_Y[row] < m_Scroll)
@@ -527,7 +536,7 @@ LRESULT BrcDropList::OnCancelMode(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT BrcDropList::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 	auto* o = m_Owner;
 	auto paint = [&](WTL::CDCHandle dc) {
-		auto c = o->GetColors();
+		auto c = o->PaintColors();
 		RECT rc;
 		GetClientRect(&rc);
 		FillSolid(dc, rc, c.crListBack);
@@ -558,6 +567,8 @@ LRESULT BrcDropList::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 			if (row.image >= 0 && o->m_Images)
 				::ImageList_Draw(o->m_Images, row.image, dc, r.left + m_ImageX, (r.top + r.bottom - icon) / 2, ILD_TRANSPARENT);
 			dc.SelectFont(row.bold ? o->m_hBold : o->m_hFont);
+			// high contrast: the selected row in the highlight colors, as the system's lists
+			dc.SetTextColor(HighContrast && i == m_Hot ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : c.crText);
 			RECT t{ r.left + m_TextX, r.top, r.right - Scale(10), r.bottom };
 			dc.DrawText(row.text.c_str(), (int)row.text.size(), &t, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 		}

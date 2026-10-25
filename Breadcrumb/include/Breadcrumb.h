@@ -8,8 +8,9 @@
 // The app owns the hierarchy: the control only says where the user wants to go (BRCN_NAVIGATE), and the app shows it
 // with SetPath. The control keeps the locations shown for its back and forward buttons and up goes to the parent. The
 // keys move a focus along the bar (Left, Right; Enter, Down). The location's icon is at the left, and the app's buttons
-// (Refresh) at the box's right. The API follows the common controls: C-style structures and WM_NOTIFY codes (BRCN_*)
-// sent to the parent. BreadcrumbShell.h has a helper that browses the shell's namespace with it.
+// (Refresh) at the box's right. Tooltips name where the buttons go; MSAA clients see a tool bar of the parts, and a
+// list in each drop-down. The API follows the common controls: C-style structures and WM_NOTIFY codes (BRCN_*) sent to
+// the parent. BreadcrumbShell.h has a helper that browses the shell's namespace with it.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -86,6 +87,24 @@ struct BRCCOLORS {
 	COLORREF crAccent;                // the box's frame while the path is edited
 };
 
+// ---- Strings ---------------------------------------------------------------------
+//
+// The control's own words, in tooltips and for accessibility clients (SetString replaces them: another language). %s
+// is a location's name.
+
+#define BRCSTR_ADDRESS       0        // "Address": the bar, as "Address: C:\Users"
+#define BRCSTR_BACK          1        // "Back"
+#define BRCSTR_BACKTO        2        // "Back to %s"
+#define BRCSTR_FORWARD       3        // "Forward"
+#define BRCSTR_FORWARDTO     4        // "Forward to %s"
+#define BRCSTR_UP            5        // "Up"
+#define BRCSTR_UPTO          6        // "Up to %s"
+#define BRCSTR_RECENT        7        // "Recent locations": the arrow beside forward
+#define BRCSTR_HISTORY       8        // "Previous locations": the history arrow
+#define BRCSTR_MORE          9        // "More": the root chevron
+#define BRCSTR_SUGGESTIONS   10       // "Suggestions": their list
+#define BRCSTR_COUNT         11
+
 // ---- Notifications -------------------------------------------------------------
 
 #define BRCN_FIRST           (0U - 3150U)   // outside the common controls ranges
@@ -153,6 +172,7 @@ public:
 	CBreadcrumbCtrl();
 	~CBreadcrumbCtrl();
 	friend class BrcDropList;
+	friend class BrcAccessible;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -187,6 +207,9 @@ public:
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_COMMAND, OnCommand)
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_BRC_ACCACTION, OnAccAction)
 	ALT_MSG_MAP(1)   // the edit box
 		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
 		MESSAGE_HANDLER(WM_CHAR, OnEditChar)
@@ -262,8 +285,14 @@ public:
 	BRCCOLORS GetColors() const;
 	int     GetIdealHeight() const;
 	void    SetOwner(HWND owner);                                 // gets WM_COMMAND; default (nullptr): the parent
+	void    SetString(UINT which, LPCWSTR text);                  // BRCSTR_*; nullptr: the default
+	// High contrast: the system's colors (over the app's too), the hot and pressed parts framed in the highlight color.
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
+	bool    IsHighContrast() const;
 
 private:
+	enum : UINT { WM_BRC_ACCACTION = WM_USER + 100 };
+
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
@@ -292,6 +321,9 @@ private:
 	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditKillFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -320,6 +352,7 @@ private:
 	std::vector<BrcHit> FocusOrder();                             // the parts the keys go along, left to right
 	bool    Enabled(const BrcHit& part);
 	void    SetKeyFocus(const BrcHit& part);
+	BrcHit  FocusPart();                                          // the keys' part (the last segment's text by default); none if none
 	bool    KeyDown(UINT vk);                                     // no list open, not editing
 	void    Activate(const BrcHit& part);                         // Enter on it
 	bool    DropAdjacent(int step);                               // in an open list: the next part with one opens its own
@@ -333,7 +366,18 @@ private:
 	void    DropClosed();
 	bool    DropMouse(POINT pt);                                  // the mouse over the bar while a list is open: TRUE if it opened another
 
+	// tooltips and accessibility (BreadcrumbAccessible.cpp)
+	std::wstring String(UINT which, const std::wstring& name = {}) const;   // %s: name
+	std::wstring PartName(const BrcHit& part) const;              // a tooltip's or a client's
+	RECT    PartRect(const BrcHit& part) const;
+	std::vector<BrcHit> AccParts();                               // the bar's children, in order
+	long    AccChildId(const BrcHit& part);                       // 1.., or CHILDID_SELF if it isn't one
+	void    UpdateTip();                                          // the hot part changed
+	void    NotifyAccessible(HWND hwnd, DWORD event, long child); // once a client has asked
+	void    DisconnectAccessible();
+
 	// painting (BreadcrumbPaint.cpp)
+	BRCCOLORS PaintColors() const;                                // GetColors, and high contrast for the painting
 	void    Paint(WTL::CDCHandle dc);
 	void    PaintNav(WTL::CDCHandle dc, const BRCCOLORS& c);
 	void    PaintSegments(WTL::CDCHandle dc, const BRCCOLORS& c);
@@ -349,6 +393,9 @@ private:
 
 	BRCCOLORS m_Colors{};
 	bool    m_SystemColors = true;
+	int     m_ForceHighContrast = -1;
+	HWND    m_hTip = nullptr;
+	std::wstring m_TipText;
 
 	HFONT   m_hFont = nullptr;
 	HFONT   m_hBold = nullptr;                                    // the lists' current child

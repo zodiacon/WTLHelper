@@ -101,6 +101,7 @@
     <ClInclude Include="src\BreadcrumbModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\BreadcrumbAccessible.cpp" />
     <ClCompile Include="src\BreadcrumbCtrl.cpp" />
     <ClCompile Include="src\BreadcrumbEdit.cpp" />
     <ClCompile Include="src\BreadcrumbKeys.cpp" />

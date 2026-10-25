@@ -9,12 +9,16 @@ using namespace BrcDraw;
 
 // ---- Drawing helpers ------------------------------------------------------------------------------
 
+bool BrcDraw::HighContrast = false;
+
 void BrcDraw::FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color) {
 	dc.SetBkColor(color);
 	dc.ExtTextOut(0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
 }
 
 void BrcDraw::RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius) {
+	if (HighContrast && border == fill && fill != ::GetSysColor(COLOR_HIGHLIGHT))
+		border = ::GetSysColor(COLOR_HIGHLIGHT);   // a hot or pressed part: framed, the fills all being the window's
 	WTL::CBrush brush;
 	brush.CreateSolidBrush(fill);
 	WTL::CPen pen;
@@ -108,6 +112,30 @@ void BrcDraw::Glyph(WTL::CDCHandle dc, UINT glyph, const RECT& rc, int size, COL
 	dc.SelectPen(oldPen);
 }
 
+// ---- High contrast ---------------------------------------------------------------------------
+
+void CBreadcrumbCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow())
+		Invalidate();
+	if (m_Edit.IsWindow())
+		m_Edit.Invalidate();
+	if (m_Data->list)
+		m_Data->list->Invalidate();
+}
+
+bool CBreadcrumbCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+BRCCOLORS CBreadcrumbCtrl::PaintColors() const {
+	HighContrast = IsHighContrast();
+	return GetColors();
+}
+
 // ---- Painting ---------------------------------------------------------------------------
 
 LRESULT CBreadcrumbCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
@@ -126,7 +154,7 @@ LRESULT CBreadcrumbCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 void CBreadcrumbCtrl::Paint(WTL::CDCHandle dc) {
 	auto& d = *m_Data;
 	auto& l = d.layout;
-	auto c = GetColors();
+	auto c = PaintColors();
 	RECT rc;
 	GetClientRect(&rc);
 	FillSolid(dc, rc, c.crBack);

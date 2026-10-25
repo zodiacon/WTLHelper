@@ -19,12 +19,16 @@ struct BrcRow {
 // doesn't take the activation: the control (or its edit box) keeps the focus and passes it the keys. A segment's list
 // takes the mouse capture as a menu does, so a click anywhere else closes it; the suggestions don't, as the user goes
 // on typing (the edit box losing the focus closes them). One window, shown again for each list.
+class BrcAccessible;
+
 class BrcDropList : public ATL::CWindowImpl<BrcDropList> {
 public:
 	DECLARE_WND_CLASS_EX(L"BrcDropList", CS_DROPSHADOW, -1)
 
 	explicit BrcDropList(CBreadcrumbCtrl* owner) : m_Owner(owner) {
 	}
+	friend class BrcAccessible;
+	friend class CBreadcrumbCtrl;
 
 	BEGIN_MSG_MAP(BrcDropList)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
@@ -40,7 +44,10 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_CANCELMODE, OnCancelMode)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 	END_MSG_MAP()
+
+	void Disconnect();                           // the accessible object, before the window goes
 
 	// under: the screen rect it drops from (below it, or above if there's no room); pressed: the mouse button is down
 	// (from the press that opened it: released on a row, that row is picked); capture: as a menu; width: 0 to fit
@@ -79,6 +86,7 @@ private:
 	}
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCancelMode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
 
 	int  Scale(int dips) const;
 	int  RowAt(POINT pt) const;                  // client coords; -1 none
@@ -107,6 +115,7 @@ private:
 	POINT m_Mouse{};                              // screen: a WM_MOUSEMOVE where the mouse already was isn't a move
 	std::wstring m_Typed;
 	ULONGLONG m_TypedTick = 0;
+	BrcAccessible* m_Acc = nullptr;              // once a client asked
 };
 
 // ---- The control's state -----------------------------------------------------------------------------
@@ -156,6 +165,9 @@ struct BrcData {
 	HWND focusBefore = nullptr;                   // given back when the list closes
 	bool switching = false;                       // one list closed for another to open: the focus stays
 	bool hotBox = false;                          // the mouse in the box: its frame drawn hot
+	RECT tipRect{};                               // the tooltip's tool, on the hot part
+	std::wstring strings[BRCSTR_COUNT];           // the app's (SetString); empty: the default
+	BrcAccessible* acc = nullptr;                 // the bar's, once a client asked
 	BrcList listKind = BrcList::None;             // what the open list shows
 
 	// editing
@@ -189,6 +201,9 @@ namespace BrcDraw {
 	inline bool IsDark(COLORREF color) {
 		return GetRValue(color) * 299 + GetGValue(color) * 587 + GetBValue(color) * 114 < 128 * 1000;
 	}
+
+	// high contrast while painting (PaintColors): RoundFill frames a fill of one color in the highlight color
+	extern bool HighContrast;
 
 	void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color);
 	void RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius);

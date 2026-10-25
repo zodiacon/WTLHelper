@@ -39,7 +39,7 @@ CAppModule _Module;
 enum : UINT {
 	IDC_CRUMB = 100, IDC_LIST, IDC_LOG,
 	CMD_EXIT = 1000, CMD_FILES, CMD_REGISTRY, CMD_NAV, CMD_UP, CMD_ICON, CMD_ROOTCHEVRON, CMD_HISTORY, CMD_BUTTONS,
-	CMD_DARKMODE, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_CLEARLOG, CMD_EDITING, CMD_SHELL,
+	CMD_DARKMODE, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_CLEARLOG, CMD_EDITING, CMD_SHELL, CMD_HIGHCONTRAST,
 	CMD_REFRESH = 2000, CMD_SEARCH,
 };
 
@@ -554,6 +554,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"&Dark Mode");
 #endif
 	::AppendMenuW(view, MF_STRING, CMD_CUSTOMCOLORS, L"&Custom Colors");
+	::AppendMenuW(view, MF_STRING, CMD_HIGHCONTRAST, L"&High Contrast");
 	::AppendMenuW(view, MF_STRING, CMD_LARGEFONT, L"&Larger Font");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(view, MF_STRING, CMD_CLEARLOG, L"Clear L&og");
@@ -629,6 +630,14 @@ static void OnCommand(UINT id) {
 			break;
 		}
 		case CMD_CLEARLOG: ::SendMessageW(g_log, LB_RESETCONTENT, 0, 0); break;
+		case CMD_HIGHCONTRAST: {
+			// as Windows' high contrast would show it (the rest of the window stays as it is)
+			bool on = !(::GetMenuState(g_menu, id, MF_BYCOMMAND) & MF_CHECKED);
+			::CheckMenuItem(g_menu, id, on ? MF_CHECKED : MF_UNCHECKED);
+			g_crumb.ForceHighContrast(on ? 1 : -1);
+			::InvalidateRect(g_main, nullptr, TRUE);
+			break;
+		}
 		case CMD_REFRESH:
 			Log(L"WM_COMMAND Refresh");
 			if (g_shell)

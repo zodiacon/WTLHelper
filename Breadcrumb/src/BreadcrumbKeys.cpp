@@ -5,7 +5,7 @@
 using namespace BrcDraw;
 
 namespace {
-	RECT PartRect(const BrcLayout& l, const BrcHit& part) {
+	RECT LayoutRect(const BrcLayout& l, const BrcHit& part) {
 		auto at = [](const std::vector<RECT>& v, int i) {
 			return i >= 0 && i < (int)v.size() ? v[i] : RECT{};
 		};
@@ -63,7 +63,7 @@ std::vector<BrcHit> CBreadcrumbCtrl::FocusOrder() {
 	auto& l = d.layout;
 	std::vector<BrcHit> order;
 	auto add = [&](BrcHit part) {
-		RECT rc = PartRect(l, part);
+		RECT rc = LayoutRect(l, part);
 		if (!::IsRectEmpty(&rc) && Enabled(part))
 			order.push_back(part);
 	};
@@ -84,9 +84,22 @@ std::vector<BrcHit> CBreadcrumbCtrl::FocusOrder() {
 	return order;
 }
 
+RECT CBreadcrumbCtrl::PartRect(const BrcHit& part) const {
+	return LayoutRect(m_Data->layout, part);
+}
+
 void CBreadcrumbCtrl::SetKeyFocus(const BrcHit& part) {
+	bool changed = !(m_Data->keyFocus == part);
 	m_Data->keyFocus = part;
 	Invalidate(FALSE);
+	if (changed && ::GetFocus() == m_hWnd)
+		NotifyAccessible(m_hWnd, EVENT_OBJECT_FOCUS, AccChildId(part));
+}
+
+BrcHit CBreadcrumbCtrl::FocusPart() {
+	auto order = FocusOrder();
+	int i = FocusIndex(order, m_Data->keyFocus);
+	return i < 0 ? BrcHit{} : order[i];
 }
 
 bool CBreadcrumbCtrl::KeyDown(UINT vk) {
@@ -172,11 +185,10 @@ void CBreadcrumbCtrl::PaintFocus(WTL::CDCHandle dc, const BRCCOLORS& c) {
 	auto& d = *m_Data;
 	if (::GetFocus() != m_hWnd || d.editing)
 		return;
-	auto order = FocusOrder();
-	int i = FocusIndex(order, d.keyFocus);
-	if (i < 0)
+	auto part = FocusPart();
+	if (part.part == BrcPart::None)
 		return;
-	RECT rc = PartRect(d.layout, order[i]);
+	RECT rc = PartRect(part);
 	::InflateRect(&rc, 0, -Scale(2));
 	WTL::CPen pen;
 	pen.CreatePen(PS_INSIDEFRAME, std::max(1, Scale(1)), c.crAccent);
