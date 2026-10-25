@@ -28,7 +28,7 @@ namespace {
 
 // ---- Construction ------------------------------------------------------------------
 
-CGanttCtrl::CGanttCtrl() : m_Data(std::make_unique<GntData>()) {
+CGanttCtrl::CGanttCtrl() : m_Data(std::make_unique<GntData>()), m_Edit(this, 1) {
 	auto& d = *m_Data;
 	d.columns = { { GNTCOL_NAME, 170 }, { GNTCOL_START, 80 }, { GNTCOL_FINISH, 80 }, { GNTCOL_DURATION, 60 } };
 	d.scale.minutesPerPixel = 45;
@@ -46,7 +46,33 @@ LRESULT CGanttCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
 	ModifyStyle(0, WS_VSCROLL | WS_HSCROLL);
 	SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+	// the name edited in place (F2), hidden until then
+	m_Edit.SubclassWindow(::CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr));
+	// one tool, moved onto the bar, link or marker under the mouse
+	m_hTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
+	if (m_hTip) {
+		TTTOOLINFOW ti{ sizeof(ti) };
+		ti.uFlags = TTF_SUBCLASS;
+		ti.hwnd = m_hWnd;
+		ti.uId = 1;
+		ti.lpszText = LPSTR_TEXTCALLBACKW;
+		::SendMessage(m_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+		::SendMessage(m_hTip, TTM_SETMAXTIPWIDTH, 0, Scale(400));
+	}
 	UpdateFonts();
+	return 0;
+}
+
+LRESULT CGanttCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	if (m_hTip)
+		::DestroyWindow(m_hTip);
+	m_hTip = nullptr;
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CGanttCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	Invalidate(FALSE);   // the selection's color
 	return 0;
 }
 
@@ -167,6 +193,12 @@ void CGanttCtrl::Changed() {
 	d.rows = d.project.Rows();
 	if (d.selected && !d.project.Find(d.selected))
 		d.selected = 0;
+	auto& links = d.project.Links();
+	if (d.selLinkFrom && std::none_of(links.begin(), links.end(), [&](auto& l) { return l.from == d.selLinkFrom && l.to == d.selLinkTo; }))
+		d.selLinkFrom = d.selLinkTo = 0;
+	d.hotLink = -1;
+	if (d.renaming && !d.project.Find(d.renaming))
+		EndRename(false);
 	UpdateLayout();
 }
 
@@ -219,6 +251,7 @@ void CGanttCtrl::ScrollTo(int y, LONGLONG origin) {
 	const GntTime span = (GntTime)((d.chart.right - d.chart.left) * d.scale.minutesPerPixel);
 	d.scale.origin = std::clamp<GntTime>(origin, d.rangeStart, std::max(d.rangeStart, d.rangeEnd - span));
 	UpdateScrollBars();
+	EndRename(true);   // its cell moved
 	Invalidate(FALSE);
 }
 
@@ -617,10 +650,13 @@ LRESULT CGanttCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		d.tracking = ::TrackMouseEvent(&tme) != FALSE;
 	}
 	auto hit = HitTest(pt);
-	if (hit.area != d.hot.area || hit.task != d.hot.task || hit.part != d.hot.part) {
+	const int link = hit.part == GntPart::None ? LinkAt(pt) : -1;
+	if (hit.area != d.hot.area || hit.task != d.hot.task || hit.part != d.hot.part || link != d.hotLink) {
 		d.hot = hit;
+		d.hotLink = link;
 		Invalidate(FALSE);
 	}
+	UpdateTip();
 	return 0;
 }
 
@@ -628,6 +664,7 @@ LRESULT CGanttCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
 	d.tracking = false;
 	d.hot = {};
+	d.hotLink = -1;
 	Invalidate(FALSE);
 	return 0;
 }
@@ -647,6 +684,10 @@ LRESULT CGanttCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandl
 		part = GntPart::Start;
 	else if (d.drag == GntDrag::Link)
 		part = GntPart::Link;
+	if (d.drag == GntDrag::None && d.hotLink >= 0) {
+		::SetCursor(::LoadCursor(nullptr, IDC_HAND));
+		return TRUE;
+	}
 	const bool editable = !(GetStyle() & GNTS_READONLY) && (d.drag != GntDrag::None || (d.hot.area == GntArea::Chart && d.hot.task >= 0
 		&& !d.project.Tasks()[d.hot.task].summary));
 	if (d.splitting || d.hot.area == GntArea::Splitter)
@@ -666,9 +707,13 @@ LRESULT CGanttCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandl
 	return TRUE;
 }
 
-LRESULT CGanttCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+LRESULT CGanttCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
-	const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
+	const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0, alt = ::GetKeyState(VK_MENU) < 0;
+	if (uMsg == WM_SYSKEYDOWN && !(alt && (wParam == VK_LEFT || wParam == VK_RIGHT))) {
+		bHandled = FALSE;   // Alt with anything else: the menu's
+		return 0;
+	}
 	if (wParam == VK_ESCAPE && d.drag != GntDrag::None) {
 		CancelDrag();
 		return 0;
@@ -683,6 +728,8 @@ LRESULT CGanttCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 			return 0;
 		}
 	}
+	if (d.drag == GntDrag::None && !ctrl && KeyDown((UINT)wParam, alt, shift))
+		return 0;
 	bHandled = FALSE;
 	return 0;
 }
@@ -704,6 +751,20 @@ LRESULT CGanttCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		return 0;
 	}
 	auto hit = HitTest(pt);
+	if (hit.part == GntPart::None) {
+		if (int link = LinkAt(pt); link >= 0) {
+			// a link: Delete removes it
+			auto& l = d.project.Links()[link];
+			d.selLinkFrom = l.from;
+			d.selLinkTo = l.to;
+			Invalidate(FALSE);
+			return 0;
+		}
+	}
+	if (d.selLinkFrom && (hit.area == GntArea::Grid || hit.area == GntArea::Chart)) {
+		d.selLinkFrom = d.selLinkTo = 0;
+		Invalidate(FALSE);
+	}
 	switch (hit.area) {
 		case GntArea::Splitter:
 			d.splitting = true;

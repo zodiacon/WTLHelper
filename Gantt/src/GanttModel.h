@@ -205,6 +205,8 @@ RECT GntLinkHandle(const GntBar& bar, const GntMetrics& m);
 
 // A link's line from a bar to another, as points; the last is where its arrow points.
 std::vector<POINT> GntRouteLink(const GntBar& from, const GntBar& to, GntLinkType type, const GntMetrics& m);
+// How far pt is from a route (its nearest segment), in pixels.
+double GntLinkDistance(const std::vector<POINT>& route, POINT pt);
 
 // ---- Dragging ----------------------------------------------------------------------------------------
 

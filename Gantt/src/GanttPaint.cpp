@@ -331,7 +331,11 @@ void CGanttCtrl::PaintChart(WTL::CDCHandle dc, const GNTCOLORS& c) {
 		pen.CreatePen(PS_SOLID, std::max(1, Scale(1)), c.crLink);
 		auto oldPen = dc.SelectPen(pen);
 		const int arrow = Scale(4);
-		for (auto& l : d.project.Links()) {
+		WTL::CPen hotPen, selPen;
+		hotPen.CreatePen(PS_SOLID, std::max(1, Scale(1)), c.crText);
+		selPen.CreatePen(PS_SOLID, std::max(2, Scale(2)), c.crBarDone);
+		for (int i = 0; i < (int)d.project.Links().size(); i++) {
+			auto& l = d.project.Links()[i];
 			const int a = d.project.Index(l.from), b = d.project.Index(l.to);
 			if (a < 0 || b < 0 || rowOf[a] < 0 || rowOf[b] < 0)
 				continue;
@@ -343,10 +347,16 @@ void CGanttCtrl::PaintChart(WTL::CDCHandle dc, const GNTCOLORS& c) {
 			POINT end = points.back(), before = points[points.size() - 2];
 			const int dx = end.x > before.x ? 1 : end.x < before.x ? -1 : 0, dy = end.y > before.y ? 1 : end.y < before.y ? -1 : 0;
 			points.back() = { end.x - dx * arrow, end.y - dy * arrow };
+			// the link clicked (Delete removes it) and the one under the mouse stand out
+			const bool selected = l.from == d.selLinkFrom && l.to == d.selLinkTo, hot = i == d.hotLink;
+			if (selected || hot)
+				dc.SelectPen(selected ? selPen : hotPen);
 			dc.Polyline(points.data(), (int)points.size());
+			if (selected || hot)
+				dc.SelectPen(pen);
 			POINT head[3] = { end, { end.x - dx * arrow - dy * arrow, end.y - dy * arrow - dx * arrow },
 				{ end.x - dx * arrow + dy * arrow, end.y - dy * arrow + dx * arrow } };
-			Polygon(dc, head, 3, c.crLink);
+			Polygon(dc, head, 3, selected ? c.crBarDone : hot ? c.crText : c.crLink);
 		}
 		dc.SelectPen(oldPen);
 	}

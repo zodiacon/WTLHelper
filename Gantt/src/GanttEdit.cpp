@@ -124,9 +124,16 @@ void CGanttCtrl::EndDrag(POINT pt) {
 	const auto& o = d.dragOriginal;
 	if (!t || (t->start == o.start && t->duration == o.duration && t->progress == o.progress))
 		return;   // where it was
-	const UINT change = kind == GntDrag::Move ? GNTC_MOVE : kind == GntDrag::Start ? GNTC_START : kind == GntDrag::Finish ? GNTC_FINISH : GNTC_PROGRESS;
+	Apply(d.dragId, kind == GntDrag::Move ? GNTC_MOVE : kind == GntDrag::Start ? GNTC_START : kind == GntDrag::Finish ? GNTC_FINISH : GNTC_PROGRESS);
+}
+
+bool CGanttCtrl::Apply(UINT id, UINT change) {
+	auto& d = *m_Data;
+	auto t = d.project.Find(id);
+	if (!t)
+		return false;
 	NMGANTTCHANGE nm{};
-	nm.id = d.dragId;
+	nm.id = id;
 	nm.change = change;
 	nm.start = GntToSystemTime(t->start);
 	nm.duration = t->duration;
@@ -135,17 +142,18 @@ void CGanttCtrl::EndDrag(POINT pt) {
 	if (FireNotify(&nm.hdr, GNTN_TASKCHANGING)) {
 		d.project.Restore(d.before);   // vetoed
 		Changed();
-		return;
+		return false;
 	}
 	// as the app left the values
-	t = d.project.Find(d.dragId);
+	t = d.project.Find(id);
 	if (!t)
-		return;
+		return false;
 	t->start = GntFromSystemTime(nm.start);
 	t->duration = std::max<LONGLONG>(0, nm.duration);
 	t->progress = std::clamp(nm.progress, 0, 100);
 	d.project.Recompute();
-	Commit(d.dragId, change);
+	Commit(id, change);
+	return true;
 }
 
 void CGanttCtrl::CancelDrag() {

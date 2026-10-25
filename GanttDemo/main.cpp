@@ -1,8 +1,9 @@
 // GanttDemo: a website relaunch planned this week on. The grid at the left shows the task tree, the chart its bars and
 // links on a calendar; Ctrl+wheel zooms, Shift+wheel pans. The menus zoom to presets, change the calendar (Saturdays,
 // a holiday), add and delete tasks, and switch dark mode; Edit has undo and makes the chart read-only or refuses moves
-// before today. Drag a bar, its ends or its progress, or from its link handle to another bar. The log at the bottom
-// shows the notifications.
+// before today. Drag a bar, its ends or its progress, or from its link handle to another bar; click a link and press
+// Delete to remove it. The keys: arrows, Alt+arrows to move a task (Shift: its finish), F2 to rename (an empty name is
+// refused). The log at the bottom shows the notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -350,6 +351,18 @@ static LRESULT OnNotify(NMHDR* hdr) {
 			break;
 		}
 		case GNTN_RESTORED: Log(L"GNTN_RESTORED"); break;
+		case GNTN_RENAMING: {
+			auto r = (NMGANTTRENAME*)hdr;
+			Log(L"GNTN_RENAMING %u \"%s\"", r->id, r->pszName);
+			if (!*r->pszName) {
+				Log(L"  refused: empty");
+				return 1;
+			}
+			break;
+		}
+		case GNTN_RENAMED: Log(L"GNTN_RENAMED %u \"%s\"", ((NMGANTTRENAME*)hdr)->id, ((NMGANTTRENAME*)hdr)->pszName); break;
+		case GNTN_LINKREMOVING: Log(L"GNTN_LINKREMOVING %u -> %u", ((NMGANTTLINK*)hdr)->from, ((NMGANTTLINK*)hdr)->to); break;
+		case GNTN_LINKREMOVED: Log(L"GNTN_LINKREMOVED %u -> %u", ((NMGANTTLINK*)hdr)->from, ((NMGANTTLINK*)hdr)->to); break;
 	}
 	return 0;
 }

@@ -61,6 +61,12 @@ struct GntData {
 	UINT    linkTarget = 0;        // a link drag over a task it can link to
 	GntHistory history;
 	std::vector<GntMarker> markers;
+
+	UINT    selLinkFrom = 0, selLinkTo = 0;   // the link clicked (Delete removes it)
+	int     hotLink = -1;                     // the link under the mouse
+	UINT    renaming = 0;                     // the task whose name is being edited
+	std::wstring tipText;                     // the tooltip's, on tipRect
+	RECT    tipRect{};
 };
 
 namespace GntDraw {

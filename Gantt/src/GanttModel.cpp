@@ -598,6 +598,19 @@ std::vector<POINT> GntRouteLink(const GntBar& from, const GntBar& to, GntLinkTyp
 	}
 }
 
+double GntLinkDistance(const std::vector<POINT>& route, POINT pt) {
+	double best = 1e18;
+	for (size_t i = 0; i + 1 < route.size(); i++) {
+		const double ax = route[i].x, ay = route[i].y, bx = route[i + 1].x, by = route[i + 1].y;
+		const double dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+		double t = len > 0 ? ((pt.x - ax) * dx + (pt.y - ay) * dy) / len : 0;
+		t = std::clamp(t, 0.0, 1.0);
+		const double x = ax + t * dx - pt.x, y = ay + t * dy - pt.y;
+		best = std::min(best, x * x + y * y);
+	}
+	return route.size() < 2 ? 1e9 : std::sqrt(best);
+}
+
 // ---- Dragging ----------------------------------------------------------------------------------------
 
 namespace {

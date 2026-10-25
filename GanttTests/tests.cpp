@@ -330,6 +330,12 @@ TEST(Routes) {
 		{ { 41, 60 }, { 49, 60 }, { 49, 72 }, { 12, 72 }, { 12, 84 }, { 20, 84 } }));
 	CHECK(SamePoints(GntRouteLink(a, c, GntLinkType::StartStart, m), { { 8, 60 }, { 0, 60 }, { 0, 84 }, { 20, 84 } }));
 	CHECK(SamePoints(GntRouteLink(a, c, GntLinkType::FinishFinish, m), { { 41, 60 }, { 58, 60 }, { 58, 84 }, { 50, 84 } }));
+	auto route = GntRouteLink(a, b, GntLinkType::FinishStart, m);
+	CHECK(GntLinkDistance(route, { 45, 60 }) == 0.0);    // on the first step
+	CHECK(GntLinkDistance(route, { 52, 70 }) == 3.0);    // beside the drop
+	CHECK(GntLinkDistance(route, { 41, 64 }) == 4.0);    // under its start
+	CHECK(GntLinkDistance({ { 0, 0 } }, { 1, 1 }) > 1000);
+
 	// upwards: the turn is under the target's row
 	CHECK(SamePoints(GntRouteLink(c, a, GntLinkType::FinishStart, m),
 		{ { 50, 84 }, { 58, 84 }, { 58, 72 }, { 0, 72 }, { 0, 60 }, { 8, 60 } }));

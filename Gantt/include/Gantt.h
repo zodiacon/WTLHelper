@@ -5,7 +5,9 @@
 // dependencies between tasks as arrows, non-working time shaded and today marked. Durations are working time on the
 // control's calendar (working days and hours, holidays). The header's time units follow the zoom (Ctrl+wheel). The user
 // drags a bar to move it, its ends to change its dates, its progress handle, and from its link handle to another bar
-// to link them; each change is the app's to allow, and Ctrl+Z undoes it. Markers are labeled lines at times. The API
+// to link them; each change is the app's to allow, and Ctrl+Z undoes it. The keys: Up and Down select, Left and
+// Right collapse and expand, Alt+Left and Alt+Right move the task (with Shift: its finish), F2 renames it, Delete
+// removes the link clicked. Tooltips tell a bar's dates. Markers are labeled lines at times. The API
 // follows the common controls: C-style structures and WM_NOTIFY codes (GNTN_*) sent to the parent. Times are local
 // SYSTEMTIMEs; durations are working minutes (GetMinutesPerDay: a working day's).
 
@@ -103,6 +105,10 @@ struct GNTCOLORS {
 #define GNTN_LINKADDED       (GNTN_FIRST - 6)   // NMGANTTLINK
 #define GNTN_MARKERCLICK     (GNTN_FIRST - 7)   // NMGANTTMARKER
 #define GNTN_RESTORED        (GNTN_FIRST - 8)   // NMHDR; undo or redo changed the project: read it again
+#define GNTN_RENAMING        (GNTN_FIRST - 9)   // NMGANTTRENAME; the user renamed a task (F2): non-zero vetoes
+#define GNTN_RENAMED         (GNTN_FIRST - 10)  // NMGANTTRENAME
+#define GNTN_LINKREMOVING    (GNTN_FIRST - 11)  // NMGANTTLINK; the user deletes a link: non-zero vetoes
+#define GNTN_LINKREMOVED     (GNTN_FIRST - 12)  // NMGANTTLINK
 
 struct NMGANTTTASK {
 	NMHDR   hdr;
@@ -131,6 +137,13 @@ struct NMGANTTLINK {
 	UINT    from, to;
 	UINT    type;                     // GNTL_*
 	LONGLONG lag;
+};
+
+struct NMGANTTRENAME {
+	NMHDR   hdr;
+	UINT    id;
+	LPCWSTR pszName;                  // the new name
+	LPARAM  lParam;
 };
 
 struct NMGANTTMARKER {
@@ -174,13 +187,23 @@ public:
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_BEFOREPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+	ALT_MSG_MAP(1)   // the name being edited (F2)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnEditChar)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnEditGetDlgCode)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnEditKillFocus)
 	END_MSG_MAP()
 
 	// ---- Tasks -----------------------------------------------------------------------------------------
@@ -198,6 +221,8 @@ public:
 	// Moves each task that starts before its links allow, later (never earlier): the tasks after them by links follow.
 	void    Reschedule();
 
+	BOOL    EditName(UINT id);                                    // renames it in place, as F2 does
+	BOOL    GetSelectedLink(UINT* from, UINT* to) const;          // FALSE if none is
 	BOOL    Select(UINT id);                                      // no notification; 0: none
 	UINT    GetSelected() const;
 	void    EnsureVisible(UINT id);                               // its row and its bar scrolled into view
@@ -257,6 +282,13 @@ private:
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditKillFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -279,6 +311,16 @@ private:
 	void    EndDrag(POINT pt);
 	void    CancelDrag();
 	void    Commit(UINT id, UINT change);                         // a drag done: pushed, undoable, notified
+	bool    Apply(UINT id, UINT change);                          // the task changed (before kept): the app may veto, else Commit
+	// the keys (GanttKeys.cpp)
+	bool    KeyDown(UINT vk, bool alt, bool shift);
+	void    SelectRow(int row);                                   // notified, scrolled into view
+	void    Nudge(bool finish, int direction);                    // Alt+Left/Right: a unit later or earlier
+	void    RemoveSelectedLink();
+	void    EndRename(bool commit);
+	int     LinkAt(POINT pt);                                     // the link's index under pt; -1 if none
+	std::vector<POINT> LinkRoute(int link, bool* shown);          // client coords
+	void    UpdateTip();
 	void    LinkTo(UINT from, UINT to);
 	int     MarkerAt(POINT pt) const;                             // the marker's index; -1 if none
 	void    PaintEditing(WTL::CDCHandle dc, const GNTCOLORS& c);  // the drag's line, label and target
@@ -293,6 +335,8 @@ private:
 	std::wstring UnitLabel(int unit, LONGLONG start, int width) const;
 
 	std::unique_ptr<GntData> m_Data;
+	ATL::CContainedWindowT<WTL::CEdit> m_Edit;
+	HWND    m_hTip = nullptr;
 	GNTCOLORS m_Colors{};
 	bool    m_SystemColors = true;
 	HFONT   m_hFont = nullptr;
