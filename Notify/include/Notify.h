@@ -89,7 +89,8 @@ struct NTFCOLORS {
 #define NTFSTR_MORE          2        // "%d more": the info bar's rows past its maximum
 #define NTFSTR_FEWER         3        // "Show fewer"
 #define NTFSTR_CLOSE         4        // "Close": the close button's tooltip and name
-#define NTFSTR_COUNT         5
+#define NTFSTR_NOTIFICATIONS 5        // "Notifications": the info bar, to accessibility clients
+#define NTFSTR_COUNT         6
 
 // ---- Notifications -------------------------------------------------------------
 
@@ -135,6 +136,7 @@ struct NMNTFCLOSED {
 
 struct NtfBarData;
 struct NtfHit;
+struct NtfAccSource;
 
 class CInfoBarCtrl : public ATL::CWindowImpl<CInfoBarCtrl> {
 public:
@@ -142,6 +144,7 @@ public:
 
 	CInfoBarCtrl();
 	~CInfoBarCtrl();
+	friend class NtfBarAcc;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -167,6 +170,9 @@ public:
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_USER + 120, OnAccAction)   // an accessibility client's default action, posted
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
@@ -202,6 +208,9 @@ public:
 	void    SetColors(const NTFCOLORS* colors);                   // nullptr: from the system colors (follows WTLHelper dark mode)
 	NTFCOLORS GetColors() const;
 	void    SetString(UINT which, LPCWSTR text);                  // NTFSTR_*; nullptr: the default
+	// High contrast: the system's colors (over the app's too), the hot parts framed in the highlight color.
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
+	bool    IsHighContrast() const;
 
 private:
 	enum : UINT_PTR { AnimationTimer = 1 };
@@ -223,6 +232,11 @@ private:
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
+	void    NotifyAccessible(DWORD event, const NtfHit& part);   // part: a child, or none (item -1) for the bar
+	void    UpdateTip();
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -247,9 +261,11 @@ private:
 	std::wstring String(UINT which, int number = 0) const;
 
 	std::unique_ptr<NtfBarData> m_Data;
+	std::unique_ptr<NtfAccSource> m_AccSource;
 	HIMAGELIST m_Images = nullptr;
 	NTFCOLORS m_Colors{};
 	bool    m_SystemColors = true;
+	int     m_ForceHighContrast = -1;
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;
 	UINT    m_Dpi = 96;
@@ -304,6 +320,7 @@ public:
 	void    SetColors(const NTFCOLORS* colors);                   // nullptr: from the system colors
 	NTFCOLORS GetColors() const;
 	void    SetString(UINT which, LPCWSTR text);                  // NTFSTR_*
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
 
 private:
 	friend class NtfToastWnd;

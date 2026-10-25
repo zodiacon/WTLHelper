@@ -31,7 +31,7 @@ enum : UINT {
 	CMD_EXIT = 1000, CMD_INFO, CMD_SUCCESS, CMD_WARNING, CMD_ERROR, CMD_UPDATE, CMD_PROGRESS, CMD_INDETERMINATE, CMD_DETAILS,
 	CMD_TIP, CMD_LONG, CMD_REMOVEALL, CMD_ROWS1, CMD_ROWS3, CMD_ROWSALL, CMD_DARKMODE, CMD_LARGEFONT, CMD_NOANIMATION, CMD_CLEARLOG, CMD_LOGHEIGHT, CMD_ALWAYSANIMATE,
 	CMD_T_INFO, CMD_T_SUCCESS, CMD_T_WARNING, CMD_T_ERROR, CMD_T_UPDATE, CMD_T_PROGRESS, CMD_T_BURST, CMD_T_CLOSEALL,
-	CMD_T_TOPLEFT, CMD_T_TOPRIGHT, CMD_T_BOTTOMLEFT, CMD_T_BOTTOMRIGHT, CMD_T_MAX1, CMD_T_MAX3, CMD_T_MAXALL, CMD_T_STAY,
+	CMD_T_TOPLEFT, CMD_T_TOPRIGHT, CMD_T_BOTTOMLEFT, CMD_T_BOTTOMRIGHT, CMD_T_MAX1, CMD_T_MAX3, CMD_T_MAXALL, CMD_T_STAY, CMD_HIGHCONTRAST,
 	// the messages' buttons
 	BTN_RESTART = 2000, BTN_LATER, BTN_CANCEL, BTN_RETRY, BTN_REPORT, BTN_OK,
 	ID_PROGRESS = 50, ID_UPDATE, ID_TIP, ID_TPROGRESS,
@@ -301,6 +301,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"&Dark Mode");
 #endif
 	::AppendMenuW(view, MF_STRING, CMD_LARGEFONT, L"&Larger Font");
+	::AppendMenuW(view, MF_STRING, CMD_HIGHCONTRAST, L"&High Contrast");
 	::AppendMenuW(view, MF_STRING, CMD_NOANIMATION, L"&No Animation");
 	::AppendMenuW(view, MF_STRING, CMD_ALWAYSANIMATE, L"&Always Animate (even with Windows' animations off)");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
@@ -363,6 +364,13 @@ static void OnCommand(UINT id) {
 			break;
 		case CMD_CLEARLOG: ::SendMessageW(g_log, LB_RESETCONTENT, 0, 0); break;
 		case CMD_LOGHEIGHT: Toggle(id); break;
+		case CMD_HIGHCONTRAST: {
+			// as Windows' high contrast would show them (the rest of the window stays as it is)
+			int on = Toggle(id) ? 1 : -1;
+			g_bar.ForceHighContrast(on);
+			g_toasts.ForceHighContrast(on);
+			break;
+		}
 		case CMD_ALWAYSANIMATE:
 			if (Toggle(id)) {
 				g_bar.ModifyStyle(0, NTFS_ALWAYSANIMATE);

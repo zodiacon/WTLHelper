@@ -16,7 +16,6 @@ namespace {
 		return { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
 	}
 
-	const wchar_t* const DefaultStrings[NTFSTR_COUNT] = { L"Show details", L"Hide details", L"%d more", L"Show fewer", L"Close" };
 }
 
 // ---- Construction ------------------------------------------------------------------
@@ -32,11 +31,27 @@ CInfoBarCtrl::~CInfoBarCtrl() {
 
 LRESULT CInfoBarCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
+	// one tool, moved onto the hot part (UpdateTip)
+	auto& d = *m_Data;
+	d.tip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
+		m_hWnd, nullptr, nullptr, nullptr);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.uFlags = TTF_SUBCLASS;
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	::SendMessage(d.tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 	UpdateFonts();
 	return 0;
 }
 
 LRESULT CInfoBarCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	auto& d = *m_Data;
+	NtfAccDisconnect(d.acc);
+	if (d.tip) {
+		::DestroyWindow(d.tip);
+		d.tip = nullptr;
+	}
 	KillTimer(AnimationTimer);
 	bHandled = FALSE;
 	return 0;
@@ -140,7 +155,19 @@ void CInfoBarCtrl::SetColors(const NTFCOLORS* colors) {
 }
 
 NTFCOLORS CInfoBarCtrl::GetColors() const {
+	if (IsHighContrast())
+		return SystemColors(true);   // the user's colors, over the app's too
 	return m_SystemColors ? SystemColors() : m_Colors;
+}
+
+void CInfoBarCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow())
+		Invalidate();
+}
+
+bool CInfoBarCtrl::IsHighContrast() const {
+	return NtfDraw::IsHighContrast(m_ForceHighContrast);
 }
 
 void CInfoBarCtrl::SetString(UINT which, LPCWSTR text) {
@@ -153,7 +180,7 @@ void CInfoBarCtrl::SetString(UINT which, LPCWSTR text) {
 std::wstring CInfoBarCtrl::String(UINT which, int number) const {
 	if (which >= NTFSTR_COUNT)
 		return {};
-	std::wstring s = m_Data->strings[which].empty() ? DefaultStrings[which] : m_Data->strings[which];
+	std::wstring s = m_Data->strings[which].empty() ? DefaultString(which) : m_Data->strings[which];
 	if (auto i = s.find(L"%d"); i != std::wstring::npos)
 		s.replace(i, 2, std::to_wstring(number));
 	return s;
@@ -194,6 +221,10 @@ UINT CInfoBarCtrl::AddMessage(const NTFMESSAGE* message) {
 			item.animStart = ::GetTickCount64();
 		}
 		d.items.insert(d.items.begin(), std::move(item));
+		d.hot = d.pressed = {};
+		Changed();
+		NotifyAccessible(EVENT_SYSTEM_ALERT, { 0, NtfPart::None });   // a screen reader says it
+		return id;
 	}
 	d.hot = d.pressed = {};
 	Changed();
@@ -432,6 +463,7 @@ LRESULT CInfoBarCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 	auto& d = *m_Data;
 	auto paint = [&](WTL::CDCHandle dc) {
 		EnsureLayout();
+		HighContrast = IsHighContrast();
 		auto c = GetColors();
 		RECT rc;
 		GetClientRect(&rc);
@@ -519,7 +551,54 @@ void CInfoBarCtrl::SetHot(const NtfHit& hit) {
 	if (!(hit == d.hot)) {
 		d.hot = hit;
 		Invalidate(FALSE);
+		UpdateTip();
 	}
+}
+
+void CInfoBarCtrl::UpdateTip() {
+	auto& d = *m_Data;
+	if (!d.tip)
+		return;
+	std::wstring text;
+	RECT rc{};
+	if (d.hot.item >= 0 && d.pressed.part == NtfPart::None) {
+		auto& item = d.items[d.hot.item];
+		text = TipText(item, d.hot, String(NTFSTR_CLOSE));
+		for (size_t r = 0; r < d.rowItems.size() && !text.empty(); r++)
+			if (d.rowItems[r] == d.hot.item) {
+				for (auto& one : PartRects(item, d.hot, d.m))
+					::UnionRect(&rc, &rc, &one);
+				::OffsetRect(&rc, 0, d.rowTops[r] + d.rowHeights[r] - item.layout.height);
+			}
+	}
+	if (text == d.tipText && ::EqualRect(&rc, &d.tipRect))
+		return;
+	d.tipText = text;
+	d.tipRect = rc;
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	ti.rect = rc;
+	::SendMessage(d.tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+	::SendMessage(d.tip, TTM_POP, 0, 0);
+	if (!text.empty()) {
+		// the mouse move that made it hot reached the tooltip before the tool moved there
+		POINT pt;
+		::GetCursorPos(&pt);
+		ScreenToClient(&pt);
+		MSG msg{ m_hWnd, WM_MOUSEMOVE, 0, MAKELPARAM(pt.x, pt.y) };
+		::SendMessage(d.tip, TTM_RELAYEVENT, 0, (LPARAM)&msg);
+	}
+}
+
+LRESULT CInfoBarCtrl::OnNotify(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
+	auto hdr = (NMHDR*)lParam;
+	if (hdr->hwndFrom == m_Data->tip && hdr->code == TTN_GETDISPINFOW) {
+		((NMTTDISPINFOW*)hdr)->lpszText = m_Data->tipText.data();
+		return 0;
+	}
+	bHandled = FALSE;
+	return 0;
 }
 
 LRESULT CInfoBarCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
@@ -696,6 +775,7 @@ LRESULT CInfoBarCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto focus = [&](int k) {
 		d.focus = order[std::clamp(k, 0, (int)order.size() - 1)];
 		Invalidate(FALSE);
+		NotifyAccessible(EVENT_OBJECT_FOCUS, d.focus);
 	};
 	switch (wParam) {
 		case VK_TAB: {
@@ -754,8 +834,13 @@ LRESULT CInfoBarCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	return code;
 }
 
-LRESULT CInfoBarCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+LRESULT CInfoBarCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL& bHandled) {
 	Invalidate(FALSE);   // the keys' part framed, or not
+	if (uMsg == WM_SETFOCUS) {
+		auto order = FocusOrder();
+		int i = FocusIndex(order);
+		NotifyAccessible(EVENT_OBJECT_FOCUS, i >= 0 ? order[i] : NtfHit{});
+	}
 	bHandled = FALSE;
 	return 0;
 }

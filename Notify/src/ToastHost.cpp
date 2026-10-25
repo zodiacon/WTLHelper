@@ -23,7 +23,6 @@ namespace {
 		return { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
 	}
 
-	const wchar_t* const DefaultStrings[NTFSTR_COUNT] = { L"Show details", L"Hide details", L"%d more", L"Show fewer", L"Close" };
 }
 
 class NtfToastWnd;
@@ -57,6 +56,7 @@ struct NtfToastData {
 	HWINEVENTHOOK hook = nullptr;
 
 	UINT corner = NTFC_BOTTOMRIGHT;
+	int  forceHighContrast = -1;
 	int  maxShown = 0;
 	int  widthDips = 360;
 	int  animation = -1;
@@ -80,10 +80,12 @@ struct NtfToastData {
 		return ::MulDiv(dips, dpi ? dpi : 96, 96);
 	}
 	NTFCOLORS Colors() const {
+		if (NtfDraw::IsHighContrast(forceHighContrast))
+			return SystemColors(true);   // the user's colors, over the app's too
 		return systemColors ? SystemColors() : colors;
 	}
 	std::wstring String(UINT which) const {
-		return which < NTFSTR_COUNT ? (strings[which].empty() ? DefaultStrings[which] : strings[which]) : std::wstring();
+		return which < NTFSTR_COUNT ? (strings[which].empty() ? DefaultString(which) : strings[which]) : std::wstring();
 	}
 	bool AnimationsOn() const {
 		if (animation >= 0)
@@ -120,7 +122,7 @@ std::vector<NtfToastData*> NtfToastData::s_Hosts;
 
 // ---- A toast's window ---------------------------------------------------------------------------------
 
-class NtfToastWnd : public ATL::CWindowImpl<NtfToastWnd> {
+class NtfToastWnd : public ATL::CWindowImpl<NtfToastWnd>, public NtfAccSource {
 public:
 	DECLARE_WND_CLASS_EX(L"NtfToast", CS_DROPSHADOW, -1)
 	explicit NtfToastWnd(NtfToastData* host) : m_Host(host) {
@@ -142,6 +144,10 @@ public:
 		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_NTF_ACCACTION, OnAccAction)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 	END_MSG_MAP()
 
 	NtfItem item;
@@ -158,6 +164,72 @@ public:
 	NtfHit hot, pressed;
 	NtfHit focus;                                 // the keys' part (in FocusParts; none: the toast itself)
 	bool tracking = false;
+	NtfAccessible* acc = nullptr;                 // once a client asked
+	HWND tip = nullptr;
+	std::wstring tipText;
+	RECT tipRect{};
+
+	// ---- NtfAccSource: the toast is an alert, its parts its children
+	int  AccCount() override {
+		return (int)FocusParts(item).size();
+	}
+	std::wstring AccName(int child) override {
+		return NtfAcc::Name(item, Child(child), m_Host->String(NTFSTR_CLOSE));
+	}
+	std::wstring AccDescription(int child) override {
+		return NtfAcc::Description(item, Child(child));
+	}
+	long AccRole(int child) override {
+		return NtfAcc::Role(Child(child));
+	}
+	long AccState(int child) override {
+		auto part = Child(child);
+		const bool keys = ::GetFocus() == m_hWnd;
+		if (child == 0)
+			return STATE_SYSTEM_READONLY | STATE_SYSTEM_FOCUSABLE | (keys && FocusPart().part == NtfPart::None ? STATE_SYSTEM_FOCUSED : 0);
+		long s = NtfAcc::State(item, part);
+		if (hot.part == part.part && hot.index == part.index)
+			s |= STATE_SYSTEM_HOTTRACKED;
+		auto f = FocusPart();
+		if (keys && f.part == part.part && f.index == part.index)
+			s |= STATE_SYSTEM_FOCUSED;
+		return s;
+	}
+	std::wstring AccAction(int child) override {
+		return child == 0 ? std::wstring(L"Press") : NtfAcc::Action(item, Child(child));   // the toast: its body
+	}
+	void AccDoAction(int child) override {
+		auto part = Child(child);
+		PostMessage(WM_NTF_ACCACTION, item.m.id, MAKELPARAM((WORD)part.part, (WORD)(part.index + 1)));
+	}
+	RECT AccRect(int child) override {
+		RECT rc{};
+		for (auto& one : PartRects(item, Child(child), m_Host->m))
+			::UnionRect(&rc, &rc, &one);
+		::OffsetRect(&rc, border, border);
+		return rc;
+	}
+	int  AccFocus() override {
+		if (::GetFocus() != m_hWnd)
+			return -1;
+		return AccId(FocusPart());
+	}
+	int  AccHitTest(POINT pt) override {
+		return AccId(HitTest(pt));
+	}
+	int  AccId(const NtfHit& part) const {
+		auto parts = FocusParts(item);
+		for (int k = 0; k < (int)parts.size(); k++)
+			if (parts[k].part == part.part && parts[k].index == part.index)
+				return k + 1;
+		return 0;
+	}
+	void NotifyAccessible(DWORD event, long child) {
+		// an alert goes out always (screen readers listen for them); the rest once a client asked
+		if (IsWindow() && (event == EVENT_SYSTEM_ALERT || acc))
+			::NotifyWinEvent(event, m_hWnd, OBJID_CLIENT, child);
+	}
+	void UpdateTip();
 
 	void Created() {
 		// Windows 11 rounds the corners and draws the border; else the toast draws it
@@ -169,6 +241,15 @@ public:
 				border = 0;
 		}
 		SetAlpha(0);
+		// one tool, moved onto the hot part (UpdateTip)
+		tip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
+			m_hWnd, nullptr, nullptr, nullptr);
+		TTTOOLINFOW ti{ sizeof(ti) };
+		ti.uFlags = TTF_SUBCLASS;
+		ti.hwnd = m_hWnd;
+		ti.uId = 1;
+		ti.lpszText = LPSTR_TEXTCALLBACKW;
+		::SendMessage(tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 	}
 	void SetAlpha(int alpha) {
 		::SetLayeredWindowAttributes(m_hWnd, 0, (BYTE)std::clamp(alpha, 0, 255), LWA_ALPHA);
@@ -197,6 +278,32 @@ private:
 	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKillFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnActivate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+		return NtfAccObject(acc, this, m_hWnd, wParam, lParam, bHandled);
+	}
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM lParam, BOOL&) {
+		if (!going) {
+			NtfHit hit{ 0, (NtfPart)LOWORD(lParam), (int)HIWORD(lParam) - 1 };
+			if (hit.part != NtfPart::None)
+				focus = hit;   // as the keys would have
+			Click(hit);
+		}
+		return 0;
+	}
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+		NtfAccDisconnect(acc);
+		if (tip) {
+			::DestroyWindow(tip);
+			tip = nullptr;
+		}
+		bHandled = FALSE;
+		return 0;
+	}
+	NtfHit  Child(int child) const {               // 0: none (the toast)
+		auto parts = FocusParts(item);
+		return child >= 1 && child <= (int)parts.size() ? parts[child - 1] : NtfHit{};
+	}
 	NtfHit  HitTest(POINT pt) const;
 	NtfHit  FocusPart() const;                    // the keys' part, the first if it's gone; none if the toast has no parts
 	void    Click(const NtfHit& hit);
@@ -207,6 +314,7 @@ private:
 LRESULT NtfToastWnd::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 	auto& h = *m_Host;
 	auto paint = [&](WTL::CDCHandle dc) {
+		HighContrast = NtfDraw::IsHighContrast(h.forceHighContrast);
 		auto c = h.Colors();
 		RECT rc;
 		GetClientRect(&rc);
@@ -265,7 +373,48 @@ LRESULT NtfToastWnd::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (!(hit == hot)) {
 		hot = hit;
 		Invalidate(FALSE);
+		UpdateTip();
 	}
+	return 0;
+}
+
+void NtfToastWnd::UpdateTip() {
+	if (!tip)
+		return;
+	std::wstring text = pressed.item < 0 ? TipText(item, hot, m_Host->String(NTFSTR_CLOSE)) : std::wstring();
+	RECT rc{};
+	if (!text.empty()) {
+		for (auto& one : PartRects(item, hot, m_Host->m))
+			::UnionRect(&rc, &rc, &one);
+		::OffsetRect(&rc, border, border);
+	}
+	if (text == tipText && ::EqualRect(&rc, &tipRect))
+		return;
+	tipText = text;
+	tipRect = rc;
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	ti.rect = rc;
+	::SendMessage(tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+	::SendMessage(tip, TTM_POP, 0, 0);
+	if (!text.empty()) {
+		// the mouse move that made it hot reached the tooltip before the tool moved there
+		POINT pt;
+		::GetCursorPos(&pt);
+		ScreenToClient(&pt);
+		MSG msg{ m_hWnd, WM_MOUSEMOVE, 0, MAKELPARAM(pt.x, pt.y) };
+		::SendMessage(tip, TTM_RELAYEVENT, 0, (LPARAM)&msg);
+	}
+}
+
+LRESULT NtfToastWnd::OnNotify(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
+	auto hdr = (NMHDR*)lParam;
+	if (hdr->hwndFrom == tip && hdr->code == TTN_GETDISPINFOW) {
+		((NMTTDISPINFOW*)hdr)->lpszText = tipText.data();
+		return 0;
+	}
+	bHandled = FALSE;
 	return 0;
 }
 
@@ -394,6 +543,7 @@ LRESULT NtfToastWnd::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 		if (!parts.empty()) {
 			focus = parts[(i + by + (int)parts.size()) % (int)parts.size()];
 			Invalidate(FALSE);
+			NotifyAccessible(EVENT_OBJECT_FOCUS, AccId(focus));
 		}
 	};
 	switch (wParam) {
@@ -432,6 +582,7 @@ LRESULT NtfToastWnd::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Host->focused = true;
 	m_Host->UpdateClocks();
 	Invalidate(FALSE);
+	NotifyAccessible(EVENT_OBJECT_FOCUS, AccId(FocusPart()));
 	return 0;
 }
 
@@ -553,6 +704,8 @@ void NtfToastData::Place(bool animate) {
 			t.ShowWindow(SW_SHOWNOACTIVATE);
 			t.UpdateWindow();   // painted before anything moves it (a layered window keeps what it painted)
 			t.shown = true;
+			if (!t.started)
+				t.NotifyAccessible(EVENT_SYSTEM_ALERT, CHILDID_SELF);   // a screen reader says it
 			if (!t.started) {
 				t.timer.Start(now, t.item.m.timeout);
 				t.started = true;
@@ -977,6 +1130,14 @@ void CToastHost::SetColors(const NTFCOLORS* colors) {
 
 NTFCOLORS CToastHost::GetColors() const {
 	return m_Data->Colors();
+}
+
+void CToastHost::ForceHighContrast(int on) {
+	auto& d = *m_Data;
+	d.forceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	for (auto& t : d.toasts)
+		if (t->IsWindow())
+			t->Invalidate(FALSE);
 }
 
 void CToastHost::SetString(UINT which, LPCWSTR text) {

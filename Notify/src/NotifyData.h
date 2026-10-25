@@ -54,6 +54,11 @@ struct NtfFonts {
 NtfMessage NtfFromApi(const NTFMESSAGE& message);
 
 namespace NtfDraw {
+	// high contrast while painting: RoundFill frames a fill of one color in the highlight color, and hot buttons too
+	extern bool HighContrast;
+
+	const wchar_t* DefaultString(UINT which);   // NTFSTR_*'s
+
 	inline COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
 		auto mix = [=](int x, int y) { return (BYTE)((x * (100 - percentB) + y * percentB) / 100); };
 		return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
@@ -66,8 +71,13 @@ namespace NtfDraw {
 	void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color);
 	void RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius);
 
-	// the system's colors (WTLHelper's dark mode hooks GetSysColor), as WinUI's InfoBar has them
-	NTFCOLORS SystemColors();
+	// the system's colors (WTLHelper's dark mode hooks GetSysColor), as WinUI's InfoBar has them; high contrast: the
+	// user's
+	NTFCOLORS SystemColors(bool highContrast = false);
+	bool IsHighContrast(int forced);                   // forced: 1, 0, or -1 as Windows says
+
+	// a part's tooltip: the close button's name, a link's address when it's one; empty: none
+	std::wstring TipText(const NtfItem& item, const NtfHit& part, const std::wstring& close);
 
 	// a text's width in the fonts (bold or not; a link's is the normal one's)
 	NtfMeasure Measurer(HDC dc, const NtfFonts& fonts);
@@ -90,6 +100,41 @@ namespace NtfDraw {
 	std::wstring CopyText(const NtfItem& item);
 	bool ToClipboard(HWND hwnd, const std::wstring& text);
 }
+
+// ---- Accessibility (NotifyAccessible.cpp) ------------------------------------------------------------
+
+// what an accessibility object asks its window: children 1..AccCount, 0 the window itself
+struct NtfAccSource {
+	virtual ~NtfAccSource() = default;
+	virtual int  AccCount() = 0;
+	virtual std::wstring AccName(int child) = 0;
+	virtual std::wstring AccDescription(int child) = 0;
+	virtual long AccRole(int child) = 0;
+	virtual long AccState(int child) = 0;
+	virtual std::wstring AccAction(int child) = 0;
+	virtual void AccDoAction(int child) = 0;        // posted: the app's code mustn't run inside the client's call
+	virtual RECT AccRect(int child) = 0;            // client coords
+	virtual int  AccFocus() = 0;                    // a child, 0 the window, -1 none
+	virtual int  AccHitTest(POINT pt) = 0;          // client coords: a child, or 0
+};
+
+class NtfAccessible;
+
+// WM_GETOBJECT for the window (the object made the first time), and letting it go when the window does
+LRESULT NtfAccObject(NtfAccessible*& slot, NtfAccSource* source, HWND hwnd, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+void NtfAccDisconnect(NtfAccessible*& slot);
+
+// a message's part to accessibility clients, the same in the bar and the toasts (part None: the message itself, an
+// alert named by its title and described by its text)
+namespace NtfAcc {
+	std::wstring Name(const NtfItem& item, const NtfHit& part, const std::wstring& close);
+	std::wstring Description(const NtfItem& item, const NtfHit& part);
+	long Role(const NtfHit& part);
+	long State(const NtfItem& item, const NtfHit& part);   // what the part itself says (checked, linked...)
+	std::wstring Action(const NtfItem& item, const NtfHit& part);
+}
+
+constexpr UINT WM_NTF_ACCACTION = WM_USER + 120;   // wParam: the message's id; lParam: MAKELPARAM(part, index + 1)
 
 // ---- The info bar's state --------------------------------------------------------------------------
 
@@ -114,6 +159,10 @@ struct NtfBarData {
 	bool tracking = false;
 	UINT nextId = 0x8000;
 	std::wstring strings[NTFSTR_COUNT];
+	NtfAccessible* acc = nullptr;                 // once a client asked
+	HWND tip = nullptr;                           // one tool, on the hot part
+	std::wstring tipText;
+	RECT tipRect{};
 };
 
 constexpr UINT NtfSlideDuration = 180;   // ms

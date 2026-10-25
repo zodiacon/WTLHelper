@@ -101,6 +101,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\InfoBarCtrl.cpp" />
+    <ClCompile Include="src\NotifyAccessible.cpp" />
     <ClCompile Include="src\NotifyModel.cpp" />
     <ClCompile Include="src\NotifyPaint.cpp" />
     <ClCompile Include="src\ToastHost.cpp" />

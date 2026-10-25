@@ -6,6 +6,14 @@
 
 using namespace NtfDraw;
 
+bool NtfDraw::HighContrast = false;
+
+const wchar_t* NtfDraw::DefaultString(UINT which) {
+	static const wchar_t* const Strings[NTFSTR_COUNT] = { L"Show details", L"Hide details", L"%d more", L"Show fewer", L"Close",
+		L"Notifications" };
+	return which < NTFSTR_COUNT ? Strings[which] : L"";
+}
+
 namespace {
 	// the severities' glyphs in Segoe Fluent Icons (and Segoe MDL2 Assets): Info, Completed, Warning, ErrorBadge
 	const wchar_t* const SeverityGlyphs[4] = { L"\xE946", L"\xE930", L"\xE7BA", L"\xEA39" };
@@ -105,6 +113,8 @@ void NtfDraw::FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color) {
 }
 
 void NtfDraw::RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius) {
+	if (HighContrast && border == fill && fill != ::GetSysColor(COLOR_HIGHLIGHT))
+		border = ::GetSysColor(COLOR_HIGHLIGHT);   // a hot or pressed part: framed, the fills all being the window's
 	WTL::CBrush brush;
 	brush.CreateSolidBrush(fill);
 	WTL::CPen pen;
@@ -116,9 +126,29 @@ void NtfDraw::RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORR
 	dc.SelectPen(oldPen);
 }
 
-NTFCOLORS NtfDraw::SystemColors() {
+bool NtfDraw::IsHighContrast(int forced) {
+	if (forced >= 0)
+		return forced != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+NTFCOLORS NtfDraw::SystemColors(bool highContrast) {
 	NTFCOLORS c;
 	COLORREF window = ::GetSysColor(COLOR_WINDOW), text = ::GetSysColor(COLOR_WINDOWTEXT);
+	if (highContrast) {
+		// the user's colors only: the severities by their icons' shapes
+		for (int i = 0; i < 4; i++) {
+			c.crBack[i] = window;
+			c.crIcon[i] = text;
+		}
+		c.crText = c.crBorder = c.crButtonBorder = text;
+		c.crDimText = text;
+		c.crLink = ::GetSysColor(COLOR_HOTLIGHT);
+		c.crButton = c.crButtonHot = c.crButtonPressed = window;
+		c.crAccent = ::GetSysColor(COLOR_HIGHLIGHT);
+		return c;
+	}
 	if (IsDark(window)) {
 		const COLORREF back[4] = { Blend(window, text, 7), RGB(0x39, 0x3D, 0x1B), RGB(0x43, 0x35, 0x19), RGB(0x44, 0x27, 0x26) };
 		const COLORREF icon[4] = { RGB(0x60, 0xCD, 0xFF), RGB(0x6C, 0xCB, 0x5F), RGB(0xFC, 0xE1, 0x00), RGB(0xFF, 0x99, 0xA4) };
@@ -254,7 +284,8 @@ void NtfDraw::PaintMessage(WTL::CDCHandle dc, const NtfItem& item, int index, in
 	for (int i = 0; i < (int)l.buttons.size() && i < (int)msg.buttons.size(); i++) {
 		RECT r = at(l.buttons[i]);
 		COLORREF fill = isPressed(NtfPart::Button, i) ? c.crButtonPressed : isHot(NtfPart::Button, i) ? c.crButtonHot : c.crButton;
-		RoundFill(dc, r, fill, c.crButtonBorder, scale(8));
+		COLORREF frame = HighContrast && isHot(NtfPart::Button, i) ? ::GetSysColor(COLOR_HIGHLIGHT) : c.crButtonBorder;
+		RoundFill(dc, r, fill, frame, scale(8));
 		dc.SetTextColor(c.crText);
 		dc.DrawText(msg.buttons[i].text.c_str(), (int)msg.buttons[i].text.size(), &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 	}
@@ -384,4 +415,15 @@ bool NtfDraw::ToClipboard(HWND hwnd, const std::wstring& text) {
 	}
 	::CloseClipboard();
 	return done;
+}
+
+std::wstring NtfDraw::TipText(const NtfItem& item, const NtfHit& part, const std::wstring& close) {
+	if (part.part == NtfPart::Close)
+		return close;
+	if (part.part == NtfPart::Link && part.index >= 0 && part.index < (int)item.layout.textRuns.size()) {
+		auto& link = item.layout.textRuns[part.index].link;
+		if (link.find(L"://") != std::wstring::npos)
+			return link;
+	}
+	return {};
 }
