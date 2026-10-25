@@ -66,6 +66,7 @@ struct RibItem {
 	RibSize minSize = RibSize::Icon;    // the smallest
 	int    rows = 1;           // a window's height in rows (1 to 3)
 	int    windowWidth = 0;    // a window's width
+	int    windowDips = 0;     // the app's, in DIPs: the control scales it into windowWidth
 	HWND   window = nullptr;
 	HMENU  menu = nullptr;     // a drop-down's or split button's
 	LPARAM lParam = 0;
@@ -102,6 +103,7 @@ struct RibGroup {
 	int    image = -1;         // the collapsed button's, in the large image list
 	UINT   flags = 0;          // RibGroup*
 	int    priority = 0;       // lower shrinks first: all the way, before any group of a higher one starts
+	UINT   launcherId = 0;     // the launcher's command
 	bool   hidden = false;
 	std::vector<RibItem> items;
 
@@ -168,7 +170,8 @@ struct RibGroupPlace {
 std::vector<RibItemPlace> RibPlaceItems(const RibGroup& group, const std::vector<RibSize>& sizes, const RibMetrics& m, int* width = nullptr);
 
 // Each visible group's step for a tab to fit in width: groups of the lowest priority shrink first, a step at a time
-// from the right, round after round; then the next priority. total: the tab's width then (more than the width if
+// from the right, round after round, then collapse from the right (none collapses while another of its priority can
+// still shrink); then the next priority. total: the tab's width then (more than the width if
 // even the smallest steps don't fit). Hidden groups get -1.
 std::vector<int> RibFitTab(const std::vector<RibGroup>& groups, int width, const RibMetrics& m, int* total = nullptr);
 

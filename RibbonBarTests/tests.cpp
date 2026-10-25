@@ -257,6 +257,22 @@ TEST(FitTab) {
 	CHECK(RibFitTab(groups, 200, M, &total) == std::vector<int>({ 4, 1 }));
 	CHECK_INT(total, 151);
 
+	// a group with fewer steps doesn't collapse while the other can still shrink
+	groups[1].priority = 0;
+	groups[0].flags = 0;
+	for (auto& item : groups[0].items)
+		item.size = RibSize::Icon;
+	RibGroupSteps(groups[0], M);
+	CHECK(Widths(groups[0]) == std::vector<int>({ 54, 46 }));    // all icons, collapsed
+	CHECK(RibFitTab(groups, 120, M, &total) == std::vector<int>({ 0, 3 }));
+	CHECK_INT(total, 54 + 1 + 54);
+	CHECK(RibFitTab(groups, 105, M, &total) == std::vector<int>({ 0, 4 }));     // the right one collapses first
+	CHECK_INT(total, 54 + 1 + 46);
+	CHECK(RibFitTab(groups, 95, M, &total) == std::vector<int>({ 1, 4 }));
+	CHECK_INT(total, 93);
+	groups[0] = FileGroup(1);
+	groups[1].priority = 1;
+
 	groups[0].hidden = true;
 	CHECK(RibFitTab(groups, 200, M, &total) == std::vector<int>({ -1, 0 }));
 	CHECK_INT(total, 166);

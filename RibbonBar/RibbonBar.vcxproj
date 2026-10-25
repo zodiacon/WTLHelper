@@ -95,10 +95,14 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\RibbonBar.h" />
+    <ClInclude Include="src\RibbonBarData.h" />
     <ClInclude Include="src\RibbonBarModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\RibbonBarCtrl.cpp" />
     <ClCompile Include="src\RibbonBarModel.cpp" />
+    <ClCompile Include="src\RibbonBarPaint.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

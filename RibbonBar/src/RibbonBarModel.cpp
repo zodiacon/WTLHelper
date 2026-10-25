@@ -219,21 +219,31 @@ std::vector<int> RibFitTab(const std::vector<RibGroup>& groups, int width, const
 	std::sort(priorities.begin(), priorities.end());
 	priorities.erase(std::unique(priorities.begin(), priorities.end()), priorities.end());
 
+	auto go = [&](int g, int step) {
+		sum += groups[g].steps[step].width - groups[g].steps[steps[g]].width;
+		steps[g] = step;
+	};
+	// a group's steps before it collapses
+	auto open = [&](int g) {
+		auto& s = groups[g].steps;
+		return s.back().collapsed ? s.size() - 1 : s.size();
+	};
 	for (int p : priorities) {
 		if (sum <= width)
 			break;
+		// rounds of a step each, from the right; then the groups collapse, from the right: none collapses while
+		// another of its priority can still shrink
 		size_t rounds = 0;
 		for (int g = 0; g < n; g++)
 			if (steps[g] >= 0 && groups[g].priority == p)
-				rounds = std::max(rounds, groups[g].steps.size());
-		for (size_t round = 1; round < rounds && sum > width; round++) {
-			for (int g = n - 1; g >= 0 && sum > width; g--) {
-				if (steps[g] < 0 || groups[g].priority != p || groups[g].steps.size() <= round)
-					continue;
-				sum += groups[g].steps[round].width - groups[g].steps[steps[g]].width;
-				steps[g] = (int)round;
-			}
-		}
+				rounds = std::max(rounds, open(g));
+		for (size_t round = 1; round < rounds && sum > width; round++)
+			for (int g = n - 1; g >= 0 && sum > width; g--)
+				if (steps[g] >= 0 && groups[g].priority == p && open(g) > round)
+					go(g, (int)round);
+		for (int g = n - 1; g >= 0 && sum > width; g--)
+			if (steps[g] >= 0 && groups[g].priority == p && groups[g].steps.back().collapsed)
+				go(g, (int)groups[g].steps.size() - 1);
 	}
 	if (total)
 		*total = sum;
