@@ -1,5 +1,6 @@
-// NotifyDemo: an info bar over a text area. The Info Bar menu adds messages of each kind (severities, buttons and links,
-// progress, details, "don't show again", long text); the log at the bottom shows the notifications.
+// NotifyDemo: an info bar over a text area, and toasts in a corner of the window. The Info Bar menu adds messages of
+// each kind (severities, buttons and links, progress, details, "don't show again", long text), the Toasts menu shows
+// toasts (and where); the log at the bottom shows the notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -25,16 +26,20 @@
 CAppModule _Module;
 
 enum : UINT {
-	IDC_BAR = 100, IDC_EDIT, IDC_LOG,
+	IDC_BAR = 100, IDC_EDIT, IDC_LOG, IDC_TOASTS,
 	CMD_EXIT = 1000, CMD_INFO, CMD_SUCCESS, CMD_WARNING, CMD_ERROR, CMD_UPDATE, CMD_PROGRESS, CMD_INDETERMINATE, CMD_DETAILS,
 	CMD_TIP, CMD_LONG, CMD_REMOVEALL, CMD_ROWS1, CMD_ROWS3, CMD_ROWSALL, CMD_DARKMODE, CMD_LARGEFONT, CMD_NOANIMATION, CMD_CLEARLOG, CMD_LOGHEIGHT, CMD_ALWAYSANIMATE,
+	CMD_T_INFO, CMD_T_SUCCESS, CMD_T_WARNING, CMD_T_ERROR, CMD_T_UPDATE, CMD_T_PROGRESS, CMD_T_BURST, CMD_T_CLOSEALL,
+	CMD_T_TOPLEFT, CMD_T_TOPRIGHT, CMD_T_BOTTOMLEFT, CMD_T_BOTTOMRIGHT, CMD_T_MAX1, CMD_T_MAX3, CMD_T_MAXALL, CMD_T_STAY,
 	// the messages' buttons
 	BTN_RESTART = 2000, BTN_LATER, BTN_CANCEL, BTN_RETRY, BTN_REPORT, BTN_OK,
-	ID_PROGRESS = 50, ID_UPDATE, ID_TIP,
-	TIMER_PROGRESS = 1,
+	ID_PROGRESS = 50, ID_UPDATE, ID_TIP, ID_TPROGRESS,
+	TIMER_PROGRESS = 1, TIMER_TPROGRESS,
 };
 
 static CInfoBarCtrl g_bar;
+static CToastHost g_toasts;
+static int g_toastProgress;
 static HWND g_main, g_edit, g_log;
 static HMENU g_menu;
 static HFONT g_font, g_largeFont;
@@ -180,6 +185,69 @@ static void AddLong() {
 		L"the current format to edit all of it, or keep it as it is to share it with people on the older version.");
 }
 
+// ---- Toasts -----------------------------------------------------------------------------------------------
+
+static void ToastSimple(UINT severity) {
+	static const wchar_t* const Titles[] = { L"Synced", L"Saved", L"Low disk space", L"Upload failed" };
+	static const wchar_t* const Texts[] = {
+		L"Your settings were synced with your other devices.",
+		L"report.docx was saved to OneDrive.",
+		L"Drive C: has less than 2 GB free. <a id=\"clean\">Free up space</a>",
+		L"photos.zip couldn't be uploaded: the connection was reset.",
+	};
+	g_toasts.Show(severity, Titles[severity], Texts[severity], 5000);
+}
+
+static void ToastUpdate() {
+	NTFBUTTON buttons[] = { { BTN_RESTART, L"Restart" }, { BTN_LATER, L"Later" } };
+	NTFMESSAGE m;
+	m.pszTitle = L"Update ready";
+	m.pszText = L"Restart to finish installing version 2.4.";
+	m.pButtons = buttons;
+	m.cButtons = _countof(buttons);
+	m.timeout = 8000;
+	g_toasts.Show(&m);
+}
+
+static void ToastProgress() {
+	NTFBUTTON cancel[] = { { BTN_CANCEL, L"Cancel" } };
+	NTFMESSAGE m;
+	m.id = ID_TPROGRESS;
+	m.pszTitle = L"Exporting";
+	m.pszText = L"video.mp4";
+	m.pButtons = cancel;
+	m.cButtons = 1;
+	m.progress = NTFP_VALUE;
+	m.flags = NTFF_NOCLOSE;
+	g_toasts.Show(&m);
+	g_toastProgress = 0;
+	::SetTimer(g_main, TIMER_TPROGRESS, 100, nullptr);
+}
+
+static void OnToastProgressTimer() {
+	if (!g_toasts.IsShown(ID_TPROGRESS)) {
+		::KillTimer(g_main, TIMER_TPROGRESS);
+		return;
+	}
+	g_toastProgress += 3;
+	if (g_toastProgress < 100) {
+		g_toasts.SetProgress(ID_TPROGRESS, NTFP_VALUE, g_toastProgress);
+		return;
+	}
+	::KillTimer(g_main, TIMER_TPROGRESS);
+	g_toasts.Show(NTFSEV_SUCCESS, L"Exported", L"video.mp4 is ready. <a id=\"open\">Open folder</a>", 5000, ID_TPROGRESS);
+}
+
+static void ToastStay() {
+	NTFMESSAGE m;
+	m.severity = NTFSEV_ERROR;
+	m.pszTitle = L"Sync stopped";
+	m.pszText = L"The server rejected the credentials.";
+	m.pszDetails = L"HTTP 401 Unauthorized from sync.example.com at 10:42.";
+	m.pszCheck = L"Don't show again";
+	g_toasts.Show(&m);   // no timeout: it stays
+}
+
 // ---- The window ---------------------------------------------------------------------------------------
 
 static HMENU BuildMenu() {
@@ -204,6 +272,29 @@ static HMENU BuildMenu() {
 	::AppendMenuW(rows, MF_STRING, CMD_ROWS3, L"&3");
 	::AppendMenuW(rows, MF_STRING, CMD_ROWSALL, L"&All");
 	::AppendMenuW(bar, MF_POPUP, (UINT_PTR)rows, L"&Maximum Rows");
+	HMENU toasts = ::CreatePopupMenu();
+	::AppendMenuW(toasts, MF_STRING, CMD_T_INFO, L"&Information");
+	::AppendMenuW(toasts, MF_STRING, CMD_T_SUCCESS, L"&Success");
+	::AppendMenuW(toasts, MF_STRING, CMD_T_WARNING, L"&Warning (a link)");
+	::AppendMenuW(toasts, MF_STRING, CMD_T_ERROR, L"&Error");
+	::AppendMenuW(toasts, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(toasts, MF_STRING, CMD_T_UPDATE, L"&Update (buttons)");
+	::AppendMenuW(toasts, MF_STRING, CMD_T_PROGRESS, L"&Progress");
+	::AppendMenuW(toasts, MF_STRING, CMD_T_STAY, L"S&taying (details, don't show again)");
+	::AppendMenuW(toasts, MF_STRING, CMD_T_BURST, L"&Burst of Six");
+	::AppendMenuW(toasts, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(toasts, MF_STRING, CMD_T_CLOSEALL, L"&Close All");
+	HMENU corner = ::CreatePopupMenu();
+	::AppendMenuW(corner, MF_STRING, CMD_T_TOPLEFT, L"Top &Left");
+	::AppendMenuW(corner, MF_STRING, CMD_T_TOPRIGHT, L"Top &Right");
+	::AppendMenuW(corner, MF_STRING, CMD_T_BOTTOMLEFT, L"Bottom L&eft");
+	::AppendMenuW(corner, MF_STRING, CMD_T_BOTTOMRIGHT, L"Bottom Ri&ght");
+	::AppendMenuW(toasts, MF_POPUP, (UINT_PTR)corner, L"C&orner");
+	HMENU most = ::CreatePopupMenu();
+	::AppendMenuW(most, MF_STRING, CMD_T_MAX1, L"&1");
+	::AppendMenuW(most, MF_STRING, CMD_T_MAX3, L"&3");
+	::AppendMenuW(most, MF_STRING, CMD_T_MAXALL, L"&As Many as Fit");
+	::AppendMenuW(toasts, MF_POPUP, (UINT_PTR)most, L"&Most Shown");
 	HMENU view = ::CreatePopupMenu();
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"&Dark Mode");
@@ -217,6 +308,7 @@ static HMENU BuildMenu() {
 	HMENU menu = ::CreateMenu();
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)file, L"&File");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)bar, L"&Info Bar");
+	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)toasts, L"&Toasts");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)view, L"&View");
 	return menu;
 }
@@ -271,21 +363,45 @@ static void OnCommand(UINT id) {
 		case CMD_CLEARLOG: ::SendMessageW(g_log, LB_RESETCONTENT, 0, 0); break;
 		case CMD_LOGHEIGHT: Toggle(id); break;
 		case CMD_ALWAYSANIMATE:
-			if (Toggle(id))
+			if (Toggle(id)) {
 				g_bar.ModifyStyle(0, NTFS_ALWAYSANIMATE);
-			else
+				g_toasts.SetAnimation(1);
+			}
+			else {
 				g_bar.ModifyStyle(NTFS_ALWAYSANIMATE, 0);
+				g_toasts.SetAnimation(-1);
+			}
+			break;
+		case CMD_T_INFO: case CMD_T_SUCCESS: case CMD_T_WARNING: case CMD_T_ERROR: ToastSimple(id - CMD_T_INFO); break;
+		case CMD_T_UPDATE: ToastUpdate(); break;
+		case CMD_T_PROGRESS: ToastProgress(); break;
+		case CMD_T_STAY: ToastStay(); break;
+		case CMD_T_BURST:
+			for (UINT k = 0; k < 6; k++)
+				ToastSimple(k % 4);
+			break;
+		case CMD_T_CLOSEALL: g_toasts.CloseAll(); break;
+		case CMD_T_TOPLEFT: case CMD_T_TOPRIGHT: case CMD_T_BOTTOMLEFT: case CMD_T_BOTTOMRIGHT:
+			g_toasts.SetCorner(id - CMD_T_TOPLEFT);
+			::CheckMenuRadioItem(g_menu, CMD_T_TOPLEFT, CMD_T_BOTTOMRIGHT, id, MF_BYCOMMAND);
+			break;
+		case CMD_T_MAX1: case CMD_T_MAX3: case CMD_T_MAXALL:
+			g_toasts.SetMaxShown(id == CMD_T_MAX1 ? 1 : id == CMD_T_MAX3 ? 3 : 0);
+			::CheckMenuRadioItem(g_menu, CMD_T_MAX1, CMD_T_MAXALL, id, MF_BYCOMMAND);
 			break;
 	}
 }
 
 static LRESULT OnNotify(NMHDR* hdr) {
-	if (hdr->hwndFrom != g_bar.m_hWnd)
+	// the bar's, or a toast's (idFrom: the host's)
+	const bool toast = hdr->idFrom == IDC_TOASTS && hdr->hwndFrom != g_bar.m_hWnd;
+	if (hdr->hwndFrom != g_bar.m_hWnd && !toast)
 		return 0;
+	const wchar_t* from = toast ? L"toast " : L"";
 	switch (hdr->code) {
 		case NTFN_BUTTONCLICK: {
 			auto nm = (NMNTFBUTTON*)hdr;
-			Log(L"NTFN_BUTTONCLICK message %u button %u checked %d", nm->id, nm->button, nm->checked);
+			Log(L"%sNTFN_BUTTONCLICK message %u button %u checked %d", from, nm->id, nm->button, nm->checked);
 			if (nm->button == BTN_RETRY) {
 				Log(L"  (kept: retrying)");
 				return 1;   // the message stays
@@ -294,13 +410,13 @@ static LRESULT OnNotify(NMHDR* hdr) {
 		}
 		case NTFN_LINKCLICK: {
 			auto nm = (NMNTFLINK*)hdr;
-			Log(L"NTFN_LINKCLICK message %u link \"%s\"", nm->id, nm->pszLink);
+			Log(L"%sNTFN_LINKCLICK message %u link \"%s\"", from, nm->id, nm->pszLink);
 			return 0;
 		}
 		case NTFN_CLOSED: {
 			auto nm = (NMNTFCLOSED*)hdr;
 			static const wchar_t* const Reasons[] = { L"close button", L"button", L"timeout" };
-			Log(L"NTFN_CLOSED message %u (%s) checked %d", nm->id, Reasons[std::min(nm->reason, 2u)], nm->checked);
+			Log(L"%sNTFN_CLOSED message %u (%s) checked %d", from, nm->id, Reasons[std::min(nm->reason, 2u)], nm->checked);
 			return 0;
 		}
 		case NTFN_HEIGHTCHANGED:
@@ -325,6 +441,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_edit = ::CreateWindowExW(0, WC_EDITW, L"The document's text.", WS_CHILD | WS_VISIBLE | ES_MULTILINE | WS_VSCROLL,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_EDIT, nullptr, nullptr);
 			g_bar.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, IDC_BAR);
+			g_toasts.Attach(hwnd, IDC_TOASTS);
+			::CheckMenuRadioItem(g_menu, CMD_T_TOPLEFT, CMD_T_BOTTOMRIGHT, CMD_T_BOTTOMRIGHT, MF_BYCOMMAND);
+			::CheckMenuRadioItem(g_menu, CMD_T_MAX1, CMD_T_MAXALL, CMD_T_MAXALL, MF_BYCOMMAND);
 			UpdateFonts();
 			auto cs = (CREATESTRUCTW*)lParam;
 			auto args = (const wchar_t*)cs->lpCreateParams;
@@ -346,6 +465,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_TIMER:
 			if (wParam == TIMER_PROGRESS)
 				OnProgressTimer();
+			else if (wParam == TIMER_TPROGRESS)
+				OnToastProgressTimer();
 			return 0;
 		case WM_DPICHANGED: {
 			auto rc = (RECT*)lParam;
@@ -355,6 +476,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			return 0;
 		}
 		case WM_DESTROY:
+			g_toasts.Detach();   // the host isn't a window: before this one goes
 			::PostQuitMessage(0);
 			return 0;
 	}

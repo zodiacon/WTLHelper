@@ -103,6 +103,7 @@
     <ClCompile Include="src\InfoBarCtrl.cpp" />
     <ClCompile Include="src\NotifyModel.cpp" />
     <ClCompile Include="src\NotifyPaint.cpp" />
+    <ClCompile Include="src\ToastHost.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

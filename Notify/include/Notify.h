@@ -242,3 +242,55 @@ private:
 	UINT    m_Dpi = 96;
 	int     m_LastHeight = 0;                                     // told (NTFN_HEIGHTCHANGED)
 };
+
+// ---- Toasts ---------------------------------------------------------------------------------------
+//
+// Popups in a corner of a window's client area: the newest in the corner, the older ones stacked away from it, those
+// that don't fit waiting their turn. They fade in and out, follow the window when it moves or is resized, and go away
+// when their time (NTFMESSAGE::timeout) runs out; the mouse over any of them stops the clocks. They don't take the
+// activation. The notifications are the info bar's, sent to the window (hwndFrom: the toast's popup, idFrom: the id
+// given to Attach); a click on a toast's body is NTFN_BUTTONCLICK with the button 0 (it closes, unless non-zero). The
+// host isn't a window: call Detach before the window is destroyed (its WM_DESTROY).
+
+#define NTFC_TOPLEFT         0
+#define NTFC_TOPRIGHT        1
+#define NTFC_BOTTOMLEFT      2
+#define NTFC_BOTTOMRIGHT     3        // the default
+
+struct NtfToastData;
+
+class CToastHost {
+public:
+	CToastHost();
+	~CToastHost();
+	CToastHost(const CToastHost&) = delete;
+	CToastHost& operator=(const CToastHost&) = delete;
+
+	BOOL    Attach(HWND window, UINT id = 0);                     // the window the toasts are shown in, and tell
+	void    Detach();                                             // the toasts close at once (no notification)
+	HWND    GetWindow() const;
+
+	UINT    Show(const NTFMESSAGE* message);                      // its id; a toast with the id is replaced; 0 if it can't
+	UINT    Show(UINT severity, LPCWSTR title, LPCWSTR text, UINT timeout = 5000, UINT id = 0);
+	BOOL    Close(UINT id);                                       // fades out; no NTFN_CLOSED
+	void    CloseAll();
+	bool    IsShown(UINT id) const;                               // shown or waiting (one going isn't)
+	int     GetCount() const;
+	BOOL    SetMessageText(UINT id, LPCWSTR text);
+	BOOL    SetProgress(UINT id, UINT kind, int value = 0);       // NTFP_*
+	bool    GetChecked(UINT id) const;
+
+	void    SetCorner(UINT corner);                               // NTFC_*
+	void    SetMaxShown(int count);                               // 0 (the default): as many as fit
+	void    SetWidth(int dips);                                   // default 360
+	void    SetAnimation(int on);                                 // 1 on, 0 off, -1 (the default) as Windows says
+	void    SetImageList(HIMAGELIST images);
+	void    SetColors(const NTFCOLORS* colors);                   // nullptr: from the system colors
+	NTFCOLORS GetColors() const;
+	void    SetString(UINT which, LPCWSTR text);                  // NTFSTR_*
+
+private:
+	friend class NtfToastWnd;
+	friend struct NtfToastData;
+	std::unique_ptr<NtfToastData> m_Data;
+};
