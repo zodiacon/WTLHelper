@@ -101,6 +101,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\GanttCtrl.cpp" />
+    <ClCompile Include="src\GanttEdit.cpp" />
     <ClCompile Include="src\GanttModel.cpp" />
     <ClCompile Include="src\GanttPaint.cpp" />
   </ItemGroup>

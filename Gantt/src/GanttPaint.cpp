@@ -383,9 +383,18 @@ void CGanttCtrl::PaintChart(WTL::CDCHandle dc, const GNTCOLORS& c) {
 			}
 		}
 		RECT label{ b.rc.right + Scale(6), b.rc.top - rh, ch.right + Scale(400), b.rc.bottom + rh };
+		// the link handle on the bar under the mouse: drag from it to another bar
+		if (d.hot.area == GntArea::Chart && d.hot.task == d.rows[r] && !b.summary && !(GetStyle() & GNTS_READONLY)
+			&& d.drag == GntDrag::None) {
+			RECT handle = GntLinkHandle(b, d.m);
+			RoundFill(dc, handle, d.hot.part == GntPart::Link ? c.crBarDone : c.crBack, c.crBarBorder, (int)(handle.right - handle.left));
+			label.left = handle.right + Scale(4);
+		}
 		dc.SelectFont(t.summary ? m_hBold : m_hFont);
 		dc.DrawText(t.name.c_str(), (int)t.name.size(), &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 	}
 	dc.SelectFont(m_hFont);
+	PaintMarkers(dc, c);
+	PaintEditing(dc, c);
 	dc.RestoreDC(saved);
 }

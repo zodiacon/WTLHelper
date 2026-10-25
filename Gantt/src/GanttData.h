@@ -14,6 +14,15 @@ struct GntHitInfo {
 	GntPart part = GntPart::None;  // the bar's part (Chart)
 };
 
+enum class GntDrag : uint8_t { None, Pending, Move, Start, Finish, Progress, Link };   // Pending: pressed, not moved yet
+
+struct GntMarker {
+	UINT    id = 0;
+	GntTime time = 0;
+	std::wstring label;
+	COLORREF color = CLR_INVALID;
+};
+
 struct GntColumn {
 	UINT id = GNTCOL_NAME;
 	int  dips = 100;
@@ -41,6 +50,17 @@ struct GntData {
 	bool splitting = false;
 	int  splitGrab = 0;
 	std::wstring nameBuffer;       // GetTask's
+
+	// a drag: the task changes as it goes (summaries and columns follow), the project as it was kept to go back to
+	GntDrag drag = GntDrag::None;
+	GntPart dragPart = GntPart::None;
+	UINT    dragId = 0;
+	POINT   dragDown{}, dragMouse{};
+	GntTask dragOriginal;
+	GntProject::State before;
+	UINT    linkTarget = 0;        // a link drag over a task it can link to
+	GntHistory history;
+	std::vector<GntMarker> markers;
 };
 
 namespace GntDraw {

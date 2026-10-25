@@ -320,6 +320,8 @@ void CGanttCtrl::SetGridWidth(int dips) {
 // ---- Tasks -----------------------------------------------------------------------------------------
 
 BOOL CGanttCtrl::AddTask(const GNTTASK* task, UINT after) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!task)
 		return FALSE;
 	GntTask t;
@@ -349,6 +351,8 @@ BOOL CGanttCtrl::AddTask(UINT id, LPCWSTR name, const SYSTEMTIME& start, LONGLON
 }
 
 BOOL CGanttCtrl::SetTask(const GNTTASK* task) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	auto& d = *m_Data;
 	auto t = task ? d.project.Find(task->id) : nullptr;
 	if (!t)
@@ -391,6 +395,8 @@ BOOL CGanttCtrl::GetTask(UINT id, GNTTASK* task) const {
 }
 
 BOOL CGanttCtrl::RemoveTask(UINT id) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!m_Data->project.Remove(id))
 		return FALSE;
 	Changed();
@@ -398,6 +404,8 @@ BOOL CGanttCtrl::RemoveTask(UINT id) {
 }
 
 void CGanttCtrl::RemoveAll() {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	m_Data->project.Restore({});
 	m_Data->selected = 0;
 	Changed();
@@ -417,6 +425,8 @@ BOOL CGanttCtrl::Expand(UINT id, bool expand) {
 }
 
 BOOL CGanttCtrl::AddLink(UINT from, UINT to, UINT type, LONGLONG lag) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!m_Data->project.AddLink({ from, to, (GntLinkType)std::min(type, (UINT)GNTL_STARTFINISH), lag }))
 		return FALSE;
 	Invalidate(FALSE);
@@ -424,6 +434,8 @@ BOOL CGanttCtrl::AddLink(UINT from, UINT to, UINT type, LONGLONG lag) {
 }
 
 BOOL CGanttCtrl::RemoveLink(UINT from, UINT to) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!m_Data->project.RemoveLink(from, to))
 		return FALSE;
 	Invalidate(FALSE);
@@ -431,6 +443,8 @@ BOOL CGanttCtrl::RemoveLink(UINT from, UINT to) {
 }
 
 void CGanttCtrl::Reschedule() {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	m_Data->project.Schedule();
 	Changed();
 }
@@ -438,12 +452,16 @@ void CGanttCtrl::Reschedule() {
 // ---- The calendar ----------------------------------------------------------------------------------
 
 void CGanttCtrl::SetWorkDays(BYTE days) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	m_Data->project.calendar.workDays = days;
 	m_Data->project.Recompute();
 	Changed();
 }
 
 void CGanttCtrl::SetWorkHours(int startMinute, int endMinute) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	auto& c = m_Data->project.calendar;
 	c.dayStart = std::clamp(startMinute, 0, 1439);
 	c.dayEnd = std::clamp(endMinute, c.dayStart + 1, 1440);
@@ -452,6 +470,8 @@ void CGanttCtrl::SetWorkHours(int startMinute, int endMinute) {
 }
 
 BOOL CGanttCtrl::AddHoliday(const SYSTEMTIME& day) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!m_Data->project.calendar.AddHoliday(GntDayOf(GntFromSystemTime(day))))
 		return FALSE;
 	m_Data->project.Recompute();
@@ -460,6 +480,8 @@ BOOL CGanttCtrl::AddHoliday(const SYSTEMTIME& day) {
 }
 
 BOOL CGanttCtrl::RemoveHoliday(const SYSTEMTIME& day) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!m_Data->project.calendar.RemoveHoliday(GntDayOf(GntFromSystemTime(day))))
 		return FALSE;
 	m_Data->project.Recompute();
@@ -578,6 +600,10 @@ GntHitInfo CGanttCtrl::HitTest(POINT pt) {
 LRESULT CGanttCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
+	if (d.drag != GntDrag::None) {
+		DragTo(pt);
+		return 0;
+	}
 	if (d.splitting) {
 		RECT rc;
 		GetClientRect(&rc);
@@ -608,17 +634,75 @@ LRESULT CGanttCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CGanttCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
 	auto& d = *m_Data;
-	if ((HWND)wParam == m_hWnd && LOWORD(lParam) == HTCLIENT && (d.splitting || d.hot.area == GntArea::Splitter)) {
-		::SetCursor(::LoadCursor(nullptr, IDC_SIZEWE));
-		return TRUE;
+	if ((HWND)wParam != m_hWnd || LOWORD(lParam) != HTCLIENT) {
+		bHandled = FALSE;
+		return 0;
+	}
+	// what a press there would do
+	LPCWSTR cursor = nullptr;
+	GntPart part = d.drag == GntDrag::None || d.drag == GntDrag::Pending ? d.hot.part : GntPart::None;
+	if (d.drag == GntDrag::Move)
+		part = GntPart::Bar;
+	else if (d.drag == GntDrag::Start || d.drag == GntDrag::Finish || d.drag == GntDrag::Progress)
+		part = GntPart::Start;
+	else if (d.drag == GntDrag::Link)
+		part = GntPart::Link;
+	const bool editable = !(GetStyle() & GNTS_READONLY) && (d.drag != GntDrag::None || (d.hot.area == GntArea::Chart && d.hot.task >= 0
+		&& !d.project.Tasks()[d.hot.task].summary));
+	if (d.splitting || d.hot.area == GntArea::Splitter)
+		cursor = IDC_SIZEWE;
+	else if (editable)
+		switch (part) {
+			case GntPart::Bar: cursor = IDC_SIZEALL; break;
+			case GntPart::Start: case GntPart::Finish: case GntPart::Progress: cursor = IDC_SIZEWE; break;
+			case GntPart::Link: cursor = IDC_CROSS; break;
+			default: break;
+		}
+	if (!cursor) {
+		bHandled = FALSE;
+		return 0;
+	}
+	::SetCursor(::LoadCursor(nullptr, cursor));
+	return TRUE;
+}
+
+LRESULT CGanttCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	auto& d = *m_Data;
+	const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
+	if (wParam == VK_ESCAPE && d.drag != GntDrag::None) {
+		CancelDrag();
+		return 0;
+	}
+	if (ctrl && !(GetStyle() & GNTS_READONLY)) {
+		if (wParam == 'Z' && !shift) {
+			Undo();
+			return 0;
+		}
+		if (wParam == 'Y' || (wParam == 'Z' && shift)) {
+			Redo();
+			return 0;
+		}
 	}
 	bHandled = FALSE;
 	return 0;
 }
 
+LRESULT CGanttCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
+	return DLGC_WANTARROWS | (m_Data->drag != GntDrag::None ? DLGC_WANTALLKEYS : 0);
+}
+
 LRESULT CGanttCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
+	if (::GetFocus() != m_hWnd)
+		SetFocus();   // the keys: Escape, Ctrl+Z
+	if (int m = MarkerAt(pt); m >= 0) {
+		NMGANTTMARKER nm{};
+		nm.id = d.markers[m].id;
+		nm.time = GntToSystemTime(d.markers[m].time);
+		FireNotify(&nm.hdr, GNTN_MARKERCLICK);
+		return 0;
+	}
 	auto hit = HitTest(pt);
 	switch (hit.area) {
 		case GntArea::Splitter:
@@ -635,8 +719,11 @@ LRESULT CGanttCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 			break;
 		}
 		case GntArea::Grid:
+			SetSelected(d.project.Tasks()[hit.task].id, true);
+			break;
 		case GntArea::Chart:
 			SetSelected(d.project.Tasks()[hit.task].id, true);
+			BeginDrag(hit, pt);   // a drag may follow
 			break;
 		default:
 			break;
@@ -654,8 +741,12 @@ LRESULT CGanttCtrl::OnLButtonDblClk(UINT uMsg, WPARAM wParam, LPARAM lParam, BOO
 	return 0;
 }
 
-LRESULT CGanttCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CGanttCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
+	if (d.drag != GntDrag::None) {
+		EndDrag(PointOf(lParam));
+		return 0;
+	}
 	if (d.splitting) {
 		d.splitting = false;
 		if (GetCapture() == m_hWnd)
@@ -666,5 +757,7 @@ LRESULT CGanttCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CGanttCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Data->splitting = false;
+	if (m_Data->drag != GntDrag::None)
+		CancelDrag();   // the capture taken from us
 	return 0;
 }

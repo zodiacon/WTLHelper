@@ -1,6 +1,8 @@
 // GanttDemo: a website relaunch planned this week on. The grid at the left shows the task tree, the chart its bars and
 // links on a calendar; Ctrl+wheel zooms, Shift+wheel pans. The menus zoom to presets, change the calendar (Saturdays,
-// a holiday), add and delete tasks, and switch dark mode; the log at the bottom shows the notifications.
+// a holiday), add and delete tasks, and switch dark mode; Edit has undo and makes the chart read-only or refuses moves
+// before today. Drag a bar, its ends or its progress, or from its link handle to another bar. The log at the bottom
+// shows the notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -29,7 +31,7 @@ enum : UINT {
 	IDC_GANTT = 100, IDC_LOG,
 	CMD_EXIT = 1000, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_HOURS, CMD_DAYS, CMD_WEEKS, CMD_MONTHS, CMD_TODAY, CMD_EXPANDALL,
 	CMD_COLLAPSEALL, CMD_ADDTASK, CMD_DELETE, CMD_SATURDAY, CMD_HOLIDAY, CMD_PROGRESSCOL, CMD_DARKMODE, CMD_LARGEFONT,
-	CMD_CLEARLOG,
+	CMD_CLEARLOG, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_VETO, CMD_NOAUTO,
 };
 
 static CGanttCtrl g_gantt;
@@ -117,6 +119,8 @@ static void Build() {
 	g_gantt.AddLink(31, 32);
 	g_gantt.AddLink(32, 33);
 	g_gantt.Reschedule();
+	g_gantt.AddMarker(1, Day(17), L"Design freeze");
+	g_gantt.AddMarker(2, Day(46), L"Launch target", RGB(0xC2, 0x3B, 0x22));
 }
 
 // ---- The window ---------------------------------------------------------------------------------------
@@ -175,8 +179,16 @@ static HMENU BuildMenu() {
 	::AppendMenuW(tasks, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(tasks, MF_STRING, CMD_SATURDAY, L"&Saturdays Are Working Days");
 	::AppendMenuW(tasks, MF_STRING, CMD_HOLIDAY, L"&Holiday Next Friday");
+	HMENU edit = ::CreatePopupMenu();
+	::AppendMenuW(edit, MF_STRING, CMD_UNDO, L"&Undo	Ctrl+Z");
+	::AppendMenuW(edit, MF_STRING, CMD_REDO, L"&Redo	Ctrl+Y");
+	::AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(edit, MF_STRING, CMD_READONLY, L"Read &Only");
+	::AppendMenuW(edit, MF_STRING, CMD_VETO, L"Refuse &Moves Before Today");
+	::AppendMenuW(edit, MF_STRING, CMD_NOAUTO, L"&Don't Push Linked Tasks");
 	HMENU menu = ::CreateMenu();
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)file, L"&File");
+	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)edit, L"&Edit");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)view, L"&View");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)tasks, L"&Tasks");
 	return menu;
@@ -270,6 +282,21 @@ static void OnCommand(UINT id) {
 			}
 			break;
 		case CMD_CLEARLOG: ::SendMessageW(g_log, LB_RESETCONTENT, 0, 0); break;
+		case CMD_UNDO: Log(g_gantt.Undo() ? L"undone" : L"nothing to undo"); break;
+		case CMD_REDO: Log(g_gantt.Redo() ? L"redone" : L"nothing to redo"); break;
+		case CMD_READONLY:
+			if (Toggle(id))
+				g_gantt.ModifyStyle(0, GNTS_READONLY);
+			else
+				g_gantt.ModifyStyle(GNTS_READONLY, 0);
+			break;
+		case CMD_VETO: Toggle(id); break;
+		case CMD_NOAUTO:
+			if (Toggle(id))
+				g_gantt.ModifyStyle(0, GNTS_NOAUTOSCHEDULE);
+			else
+				g_gantt.ModifyStyle(GNTS_NOAUTOSCHEDULE, 0);
+			break;
 	}
 }
 
@@ -277,10 +304,52 @@ static LRESULT OnNotify(NMHDR* hdr) {
 	if (hdr->hwndFrom != g_gantt.m_hWnd)
 		return 0;
 	auto nm = (NMGANTTTASK*)hdr;
+	static const wchar_t* const Changes[] = { L"move", L"start", L"finish", L"progress" };
 	switch (hdr->code) {
 		case GNTN_SELCHANGED: Log(L"GNTN_SELCHANGED %u", nm->id); break;
 		case GNTN_DBLCLK: Log(L"GNTN_DBLCLK %u", nm->id); break;
 		case GNTN_EXPANDED: Log(L"GNTN_EXPANDED %u", nm->id); break;
+		case GNTN_TASKCHANGING: {
+			auto c = (NMGANTTCHANGE*)hdr;
+			Log(L"GNTN_TASKCHANGING %u %s: %u/%u %02u:%02u, %lld min, %d%%", c->id, Changes[std::min(c->change, 3u)], c->start.wMonth,
+				c->start.wDay, c->start.wHour, c->start.wMinute, c->duration, c->progress);
+			if (::GetMenuState(g_menu, CMD_VETO, MF_BYCOMMAND) & MF_CHECKED) {
+				// not before today
+				SYSTEMTIME today;
+				::GetLocalTime(&today);
+				FILETIME a, b;
+				today.wHour = today.wMinute = today.wSecond = today.wMilliseconds = 0;
+				::SystemTimeToFileTime(&c->start, &a);
+				::SystemTimeToFileTime(&today, &b);
+				if (::CompareFileTime(&a, &b) < 0) {
+					Log(L"  refused: before today");
+					return 1;
+				}
+			}
+			return 0;
+		}
+		case GNTN_TASKCHANGED: {
+			auto c = (NMGANTTCHANGE*)hdr;
+			Log(L"GNTN_TASKCHANGED %u %s: %u/%u, %lld min, %d%%", c->id, Changes[std::min(c->change, 3u)], c->start.wMonth, c->start.wDay,
+				c->duration, c->progress);
+			break;
+		}
+		case GNTN_LINKADDING: {
+			auto l = (NMGANTTLINK*)hdr;
+			Log(L"GNTN_LINKADDING %u -> %u", l->from, l->to);
+			break;
+		}
+		case GNTN_LINKADDED: {
+			auto l = (NMGANTTLINK*)hdr;
+			Log(L"GNTN_LINKADDED %u -> %u", l->from, l->to);
+			break;
+		}
+		case GNTN_MARKERCLICK: {
+			auto m = (NMGANTTMARKER*)hdr;
+			Log(L"GNTN_MARKERCLICK %u (%u/%u)", m->id, m->time.wMonth, m->time.wDay);
+			break;
+		}
+		case GNTN_RESTORED: Log(L"GNTN_RESTORED"); break;
 	}
 	return 0;
 }

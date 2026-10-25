@@ -3,7 +3,9 @@
 // Gantt chart: a project's tasks as a tree with columns (name, start, finish, duration, % complete) at the left, and as
 // bars on a calendar at the right: summary tasks over their children, milestones as diamonds, the part done, the
 // dependencies between tasks as arrows, non-working time shaded and today marked. Durations are working time on the
-// control's calendar (working days and hours, holidays). The header's time units follow the zoom (Ctrl+wheel). The API
+// control's calendar (working days and hours, holidays). The header's time units follow the zoom (Ctrl+wheel). The user
+// drags a bar to move it, its ends to change its dates, its progress handle, and from its link handle to another bar
+// to link them; each change is the app's to allow, and Ctrl+Z undoes it. Markers are labeled lines at times. The API
 // follows the common controls: C-style structures and WM_NOTIFY codes (GNTN_*) sent to the parent. Times are local
 // SYSTEMTIMEs; durations are working minutes (GetMinutesPerDay: a working day's).
 
@@ -25,6 +27,8 @@ constexpr wchar_t WC_GANTT[] = L"WC_Gantt";
 // ---- Styles --------------------------------------------------------------------
 
 #define GNTS_NOTODAY         0x0001   // no line at today
+#define GNTS_READONLY        0x0002   // no dragging, no linking, no undo
+#define GNTS_NOAUTOSCHEDULE  0x0004   // a task the user moves later doesn't push those linked after it
 
 // ---- Tasks ----------------------------------------------------------------------
 
@@ -93,11 +97,46 @@ struct GNTCOLORS {
 #define GNTN_SELCHANGED      (GNTN_FIRST - 0)   // NMGANTTTASK; the user selected a task (id 0: none)
 #define GNTN_DBLCLK          (GNTN_FIRST - 1)   // NMGANTTTASK; a task's row or bar double-clicked
 #define GNTN_EXPANDED        (GNTN_FIRST - 2)   // NMGANTTTASK; the user expanded or collapsed a summary task
+#define GNTN_TASKCHANGING    (GNTN_FIRST - 3)   // NMGANTTCHANGE; a drag ends: non-zero vetoes (the app may change the values)
+#define GNTN_TASKCHANGED     (GNTN_FIRST - 4)   // NMGANTTCHANGE; the task changed (and pushed those after it)
+#define GNTN_LINKADDING      (GNTN_FIRST - 5)   // NMGANTTLINK; the user linked two tasks: non-zero vetoes
+#define GNTN_LINKADDED       (GNTN_FIRST - 6)   // NMGANTTLINK
+#define GNTN_MARKERCLICK     (GNTN_FIRST - 7)   // NMGANTTMARKER
+#define GNTN_RESTORED        (GNTN_FIRST - 8)   // NMHDR; undo or redo changed the project: read it again
 
 struct NMGANTTTASK {
 	NMHDR   hdr;
 	UINT    id;
 	LPARAM  lParam;
+};
+
+// what a drag changed
+#define GNTC_MOVE            0        // the start (the finish follows)
+#define GNTC_START           1        // the start, the finish staying
+#define GNTC_FINISH          2        // the duration
+#define GNTC_PROGRESS        3
+
+struct NMGANTTCHANGE {
+	NMHDR   hdr;
+	UINT    id;
+	UINT    change;                   // GNTC_*
+	SYSTEMTIME start;                 // the new values
+	LONGLONG duration;
+	int     progress;
+	LPARAM  lParam;
+};
+
+struct NMGANTTLINK {
+	NMHDR   hdr;
+	UINT    from, to;
+	UINT    type;                     // GNTL_*
+	LONGLONG lag;
+};
+
+struct NMGANTTMARKER {
+	NMHDR   hdr;
+	UINT    id;
+	SYSTEMTIME time;
 };
 
 // ---- Control class --------------------------------------------------------------------------
@@ -134,6 +173,8 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
@@ -160,6 +201,22 @@ public:
 	BOOL    Select(UINT id);                                      // no notification; 0: none
 	UINT    GetSelected() const;
 	void    EnsureVisible(UINT id);                               // its row and its bar scrolled into view
+
+	// ---- Undo -----------------------------------------------------------------------------------------
+	//
+	// The user's changes (drags, links) go back and forth (Ctrl+Z, Ctrl+Y). Undo goes back to the project as it was, so
+	// the API's changes to the tasks, the links and the calendar clear what there is to undo.
+
+	BOOL    Undo();                                               // GNTN_RESTORED follows
+	BOOL    Redo();
+	bool    CanUndo() const;
+	bool    CanRedo() const;
+	void    ClearUndo();
+
+	// ---- Markers ---------------------------------------------------------------------------------------
+
+	BOOL    AddMarker(UINT id, const SYSTEMTIME& time, LPCWSTR label, COLORREF color = CLR_INVALID);   // replaces one with the id
+	BOOL    RemoveMarker(UINT id);
 
 	// ---- The calendar ----------------------------------------------------------------------------------
 	//
@@ -198,6 +255,8 @@ private:
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -213,6 +272,17 @@ private:
 	void    SetSelected(UINT id, bool notify);
 	LRESULT FireNotify(NMHDR* pnm, UINT code) const;
 	LRESULT NotifyTask(UINT code, UINT id) const;
+
+	// editing (GanttEdit.cpp)
+	bool    BeginDrag(const GntHitInfo& hit, POINT pt);           // the button pressed: a drag may follow
+	void    DragTo(POINT pt);
+	void    EndDrag(POINT pt);
+	void    CancelDrag();
+	void    Commit(UINT id, UINT change);                         // a drag done: pushed, undoable, notified
+	void    LinkTo(UINT from, UINT to);
+	int     MarkerAt(POINT pt) const;                             // the marker's index; -1 if none
+	void    PaintEditing(WTL::CDCHandle dc, const GNTCOLORS& c);  // the drag's line, label and target
+	void    PaintMarkers(WTL::CDCHandle dc, const GNTCOLORS& c);
 
 	// painting (GanttPaint.cpp)
 	void    Paint(WTL::CDCHandle dc);
