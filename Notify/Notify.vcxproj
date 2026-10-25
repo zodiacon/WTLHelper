@@ -95,10 +95,14 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\Notify.h" />
+    <ClInclude Include="src\NotifyData.h" />
     <ClInclude Include="src\NotifyModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\InfoBarCtrl.cpp" />
     <ClCompile Include="src\NotifyModel.cpp" />
+    <ClCompile Include="src\NotifyPaint.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
