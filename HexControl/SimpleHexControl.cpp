@@ -98,7 +98,7 @@ void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 				dc.SetTextColor(hl->TextColor);
 				dc.SetBkColor(hl->BkColor);
 			}
-			else if ((int64_t)m_Modified.size() > offset + j && m_Modified[offset + j]) {
+			else if ((int64_t)m_Modified.size() > offset + j && m_Modified[(size_t)(offset + j)]) {
 				dc.SetTextColor(m_Colors.Modified);
 				dc.SetBkColor(m_Colors.Background);
 			}
@@ -168,7 +168,7 @@ void CHexControl::DoPaint(CDCHandle dc, RECT& rect) {
 				dc.SetTextColor(hl->TextColor);
 				dc.SetBkColor(hl->BkColor);
 			}
-			else if ((int64_t)m_Modified.size() > offset + j && m_Modified[offset + j]) {
+			else if ((int64_t)m_Modified.size() > offset + j && m_Modified[(size_t)(offset + j)]) {
 				dc.SetTextColor(m_Colors.Modified);
 				dc.SetBkColor(m_Colors.Background);
 			}
@@ -857,7 +857,7 @@ void CHexControl::CommitValue(int64_t offset, uint64_t value) {
 	if (m_InsertMode) {
 		rec.Op = UndoRecord::Type::Insert;
 		m_Buffer->Insert(offset, (uint8_t*)&value, m_DataSize);
-		m_Modified.insert(m_Modified.begin() + offset, m_DataSize, true);
+		m_Modified.insert(m_Modified.begin() + (ptrdiff_t)offset, m_DataSize, true);
 	}
 	else {
 		rec.Op = UndoRecord::Type::Overwrite;
@@ -865,25 +865,25 @@ void CHexControl::CommitValue(int64_t offset, uint64_t value) {
 		if ((int64_t)m_Modified.size() < m_Buffer->GetSize())
 			m_Modified.resize((size_t)m_Buffer->GetSize(), false);
 		for (uint32_t i = 0; i < m_DataSize; i++)
-			m_Modified[offset + i] = true;
+			m_Modified[(size_t)(offset + i)] = true;
 	}
 	PushUndo(std::move(rec));
 	ResetInput();
 }
 
 std::vector<uint8_t> CHexControl::ReadBytes(int64_t offset, int64_t count) const {
-	std::vector<uint8_t> buf(count);
+	std::vector<uint8_t> buf((size_t)count);
 	if (count > 0 && m_Buffer)
 		m_Buffer->GetData(offset, buf.data(), (uint32_t)count);
 	return buf;
 }
 
 std::vector<bool> CHexControl::ReadModified(int64_t offset, int64_t count) const {
-	std::vector<bool> bits(count, false);
+	std::vector<bool> bits((size_t)count, false);
 	for (int64_t i = 0; i < count; i++) {
 		auto idx = offset + i;
 		if (idx < (int64_t)m_Modified.size())
-			bits[i] = m_Modified[idx];
+			bits[(size_t)i] = m_Modified[(size_t)idx];
 	}
 	return bits;
 }
@@ -903,17 +903,17 @@ void CHexControl::ApplyUndo(const UndoRecord& rec) {
 			m_Buffer->SetData(rec.Offset, rec.OldData.data(), (uint32_t)rec.OldData.size());
 			for (size_t i = 0; i < rec.OldModified.size(); i++)
 				if (rec.Offset + (int64_t)i < (int64_t)m_Modified.size())
-					m_Modified[rec.Offset + i] = rec.OldModified[i];
+					m_Modified[(size_t)(rec.Offset + i)] = rec.OldModified[i];
 			break;
 		case UndoRecord::Type::Insert:
 			m_Buffer->Delete(rec.Offset, rec.NewData.size());
-			m_Modified.erase(m_Modified.begin() + rec.Offset,
-				m_Modified.begin() + rec.Offset + rec.NewData.size());
+			m_Modified.erase(m_Modified.begin() + (ptrdiff_t)rec.Offset,
+				m_Modified.begin() + (ptrdiff_t)(rec.Offset + rec.NewData.size()));
 			RecalcLayout();
 			break;
 		case UndoRecord::Type::Delete:
 			m_Buffer->Insert(rec.Offset, rec.OldData.data(), (uint32_t)rec.OldData.size());
-			m_Modified.insert(m_Modified.begin() + rec.Offset, rec.OldModified.begin(), rec.OldModified.end());
+			m_Modified.insert(m_Modified.begin() + (ptrdiff_t)rec.Offset, rec.OldModified.begin(), rec.OldModified.end());
 			RecalcLayout();
 			break;
 		case UndoRecord::Type::Compound:
@@ -930,17 +930,17 @@ void CHexControl::ApplyRedo(const UndoRecord& rec) {
 			if ((int64_t)m_Modified.size() < rec.Offset + (int64_t)rec.NewData.size())
 				m_Modified.resize((size_t)(rec.Offset + rec.NewData.size()), false);
 			for (size_t i = 0; i < rec.NewData.size(); i++)
-				m_Modified[rec.Offset + i] = true;
+				m_Modified[(size_t)(rec.Offset + i)] = true;
 			break;
 		case UndoRecord::Type::Insert:
 			m_Buffer->Insert(rec.Offset, rec.NewData.data(), (uint32_t)rec.NewData.size());
-			m_Modified.insert(m_Modified.begin() + rec.Offset, rec.NewData.size(), true);
+			m_Modified.insert(m_Modified.begin() + (ptrdiff_t)rec.Offset, rec.NewData.size(), true);
 			RecalcLayout();
 			break;
 		case UndoRecord::Type::Delete:
 			m_Buffer->Delete(rec.Offset, rec.OldData.size());
-			m_Modified.erase(m_Modified.begin() + rec.Offset,
-				m_Modified.begin() + rec.Offset + rec.OldData.size());
+			m_Modified.erase(m_Modified.begin() + (ptrdiff_t)rec.Offset,
+				m_Modified.begin() + (ptrdiff_t)(rec.Offset + rec.OldData.size()));
 			RecalcLayout();
 			break;
 		case UndoRecord::Type::Compound:
@@ -1398,7 +1398,7 @@ bool CHexControl::Paste(int64_t offset) {
 					rec.Op = UndoRecord::Type::Insert;
 					rec.NewData = bytes;
 					m_Buffer->Insert(offset, bytes.data(), (uint32_t)bytes.size());
-					m_Modified.insert(m_Modified.begin() + offset, bytes.size(), true);
+					m_Modified.insert(m_Modified.begin() + (ptrdiff_t)offset, bytes.size(), true);
 					RecalcLayout();
 				}
 				else {
@@ -1411,7 +1411,7 @@ bool CHexControl::Paste(int64_t offset) {
 					if ((int64_t)m_Modified.size() < bufSize)
 						m_Modified.resize((size_t)bufSize, false);
 					for (uint32_t i = 0; i < count; i++)
-						m_Modified[offset + i] = true;
+						m_Modified[(size_t)(offset + i)] = true;
 				}
 				PushUndo(std::move(rec));
 				RedrawWindow();
@@ -1461,8 +1461,8 @@ bool CHexControl::Delete() {
 				rowRec.OldData = ReadBytes(rowOffset, width);
 				rowRec.OldModified = ReadModified(rowOffset, width);
 				m_Buffer->Delete(rowOffset, width);
-				m_Modified.erase(m_Modified.begin() + rowOffset,
-					m_Modified.begin() + rowOffset + width);
+				m_Modified.erase(m_Modified.begin() + (ptrdiff_t)rowOffset,
+					m_Modified.begin() + (ptrdiff_t)(rowOffset + width));
 				compound.Children.insert(compound.Children.begin(), std::move(rowRec));
 			}
 			PushUndo(std::move(compound));
@@ -1486,8 +1486,8 @@ bool CHexControl::Delete() {
 			rec.OldData = ReadBytes(selOffset, selLength);
 			rec.OldModified = ReadModified(selOffset, selLength);
 			m_Buffer->Delete(selOffset, (size_t)selLength);
-			m_Modified.erase(m_Modified.begin() + selOffset,
-				m_Modified.begin() + selOffset + selLength);
+			m_Modified.erase(m_Modified.begin() + (ptrdiff_t)selOffset,
+				m_Modified.begin() + (ptrdiff_t)(selOffset + selLength));
 			PushUndo(std::move(rec));
 			m_CaretOffset = std::min(m_CaretOffset, m_Buffer->GetSize() - m_DataSize);
 			RecalcLayout();
@@ -1578,7 +1578,7 @@ uint32_t CHexControl::FillSelection(const uint8_t* pattern, uint32_t patternSize
 			if ((int64_t)m_Modified.size() < rowOffset + width)
 				m_Modified.resize((size_t)(rowOffset + width), false);
 			for (int col = 0; col < width; col++)
-				m_Modified[rowOffset + col] = true;
+				m_Modified[(size_t)(rowOffset + col)] = true;
 			compound.Children.push_back(std::move(rowRec));
 			total += width;
 		}
@@ -1611,7 +1611,7 @@ uint32_t CHexControl::Fill(int64_t offset, const uint8_t* pattern, uint32_t patt
 	if ((int64_t)m_Modified.size() < bufSize)
 		m_Modified.resize((size_t)bufSize, false);
 	for (uint32_t i = 0; i < count; i++)
-		m_Modified[offset + i] = true;
+		m_Modified[(size_t)(offset + i)] = true;
 
 	PushUndo(std::move(rec));
 	RedrawWindow();
@@ -1784,7 +1784,7 @@ void CHexControl::Refresh() {
 }
 
 bool CHexControl::IsModified(int64_t offset) const {
-	return offset >= 0 && offset < (int64_t)m_Modified.size() && m_Modified[offset];
+	return offset >= 0 && offset < (int64_t)m_Modified.size() && m_Modified[(size_t)offset];
 }
 
 bool CHexControl::IsModified() const {
@@ -1794,7 +1794,7 @@ bool CHexControl::IsModified() const {
 bool CHexControl::DeleteState(int64_t offset) {
 	if (offset < 0 || offset >= (int64_t)m_Modified.size())
 		return false;
-	return m_Modified[offset] = false;
+	return m_Modified[(size_t)offset] = false;
 }
 
 void CHexControl::SetOptions(HexControlOptions options) {
@@ -1987,7 +1987,7 @@ std::vector<std::pair<int64_t, int64_t>> CHexControl::GetModifiedRanges() const 
 	std::vector<std::pair<int64_t, int64_t>> ranges;
 	int64_t start = -1;
 	for (int64_t i = 0; i < (int64_t)m_Modified.size(); ++i) {
-		if (m_Modified[i]) {
+		if (m_Modified[(size_t)i]) {
 			if (start < 0)
 				start = i;
 		}

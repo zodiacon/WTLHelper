@@ -132,8 +132,7 @@ public:
 		return bRet;
 	}
 	BOOL SetSubItem(HTREEITEM hItem, const LPTLVITEM pItem) {
-		auto p = static_cast<T*>(this);
-		ATLASSERT(::IsWindow(p->m_hWnd));
+		ATLASSERT(::IsWindow(static_cast<T*>(this)->m_hWnd));
 		ATLASSERT(hItem);
 		ATLASSERT(!::IsBadReadPtr(pItem, sizeof(TLVITEM)));
 		if (pItem->iSubItem < 0 || pItem->iSubItem >= m_ctrlHeader.GetItemCount()) return FALSE;
@@ -577,7 +576,7 @@ public:
 		bHandled = FALSE;
 		return 0;
 	}
-	LRESULT OnTreeFixButtonHit(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	LRESULT OnTreeFixButtonHit(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled) {
 		// If a click is to the right of the label then we're still clicking on the item...
 		// NOTE: Handling TVM_HITTEST would be a lot nicer, but the TreeView control doesn't 
 		//       actually use it internally.
@@ -928,7 +927,6 @@ public:
 				rc.left += DpiHelper::Scale(2, m_ctrlTree);
 
 				COLORREF clrText = lptvcd->clrText == CLR_INVALID ? ::GetSysColor(COLOR_WINDOWTEXT) : lptvcd->clrText;
-				COLORREF clrBack = lptvcd->clrTextBk == CLR_INVALID ? ::GetSysColor(COLOR_WINDOW) : lptvcd->clrTextBk;
 
 				if (pItem->mask & TLVIF_COLOR) {
 					if (bSelected) {

@@ -21,7 +21,7 @@ public:
 			::DestroyIcon(m_hIcon);
 	}
 
-	LRESULT OnPaint(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	LRESULT OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		DefWindowProc();
 		if (GetWindowTextLength() == 0 && !m_Watermark.IsEmpty() && ::GetFocus() != m_hWnd) {
 			CClientDC dc(m_hWnd);
@@ -66,17 +66,17 @@ public:
 		Invalidate();
 	}
 
-	LRESULT OnGetDlgCode(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	LRESULT OnGetDlgCode(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		return wParam == VK_TAB ? 0 : DLGC_WANTALLKEYS;
 	}
 
-	LRESULT OnHotKey(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	LRESULT OnHotKey(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		if (wParam == 1)
 			SetFocus();
 		return 0;
 	}
 
-	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/) {
 		if (wParam == 1) {
 			KillTimer(1);
 			GetParent().SendMessage(WM_COMMAND, MAKEWPARAM(GetWindowLongPtr(GWL_ID), EN_DELAYCHANGE), reinterpret_cast<LPARAM>(m_hWnd));
@@ -84,13 +84,13 @@ public:
 		return 0;
 	}
 
-	LRESULT OnSetFocus(UINT msg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	LRESULT OnSetFocus(UINT /*msg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled) {
 		SetSelAll();
 		bHandled = FALSE;
 		return 0;
 	}
 
-	LRESULT OnKillFocus(UINT msg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	LRESULT OnKillFocus(UINT /*msg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled) {
 		Invalidate();
 	
 		bHandled = FALSE;
