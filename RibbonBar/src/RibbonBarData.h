@@ -5,11 +5,81 @@
 #include "RibbonBar.h"
 #include "RibbonBarModel.h"
 
+#include <memory>
 #include <vector>
 
 inline bool Same(const RibHit& a, const RibHit& b) {
 	return a.part == b.part && a.group == b.group && a.item == b.item;
 }
+
+// Where a tab's groups are drawn and clicked: the ribbon's strip under the tabs, or a popup (a folded group opened,
+// or a tab opened while the ribbon is minimized).
+struct RibSurface {
+	HWND   hwnd = nullptr;
+	int    tab = -1;                  // the tab shown (an index)
+	int    group = -1;                // a folded group's popup: that group alone, at its widest
+	std::vector<RibGroupPlace> places;    // by the tab's groups; width 0: not on this surface
+	RECT   panel{};                   // the groups' strip, client coords
+	int    originX = 0;               // the groups' x = 0, from the panel's left
+	int    total = 0;                 // the groups' width
+	int    scroll = 0;                // when they don't fit
+	RibHit hot;
+	RibHit pressed;
+	int    opened = -1;               // the folded group whose popup is open
+	bool   tracking = false;          // TrackMouseEvent
+	bool   menu = false;              // an item's menu is open: it stays pressed and hot
+
+	int Avail() const {
+		return std::max(0, (int)(panel.right - panel.left) - 2 * originX);
+	}
+	int MaxScroll() const {
+		return std::max(0, total - Avail());
+	}
+	int GroupX(int g) const {         // client coords
+		return panel.left + originX + places[g].x - scroll;
+	}
+};
+
+// A popup showing a surface. It takes the activation (a hosted window in it can have the focus) and closes when the
+// activation goes anywhere but another of the ribbon's popups, on Escape, or when an item runs.
+class RibPopup : public ATL::CWindowImpl<RibPopup, ATL::CWindow, ATL::CWinTraits<WS_POPUP | WS_CLIPCHILDREN, WS_EX_TOOLWINDOW>> {
+public:
+	DECLARE_WND_CLASS_EX(L"RibPopup", CS_DROPSHADOW | CS_DBLCLKS, -1)
+
+	explicit RibPopup(CRibbonBarCtrl* ribbon) : m_Ribbon(ribbon) {}
+
+	BEGIN_MSG_MAP(RibPopup)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_RANGE_HANDLER(WM_MOUSEMOVE, WM_LBUTTONDBLCLK, OnMouse)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouse)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnMouse)
+		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_COMMAND, OnForward)
+		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnForward)
+		MESSAGE_HANDLER(WM_MEASUREITEM, OnForward)
+		MESSAGE_HANDLER(WM_COMPAREITEM, OnForward)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnForward)
+	END_MSG_MAP()
+
+	RibSurface surface;
+	HWND   opener = nullptr;          // the surface's window it opened from
+	bool   hidden = false;            // closed: destroyed on the ribbon's WM_RIB_CLOSEPOPUPS
+
+private:
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
+		return 1;
+	}
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouse(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnActivate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
+
+	CRibbonBarCtrl* m_Ribbon;
+};
 
 struct RibData {
 	std::vector<RibTab> tabs;
@@ -23,15 +93,19 @@ struct RibData {
 	std::vector<int> tabWidths;       // by tab
 	std::vector<int> visible;         // the tabs shown, in order
 	std::vector<RECT> tabRects;       // by visible
-	std::vector<RibGroupPlace> places;    // the selected tab's groups
-	int  total = 0;                   // their width
-	RECT panel{};                     // the groups' strip, client coords
-	int  originX = 0;                 // the groups' x = 0
+	RECT minimizeButton{};            // empty with RIBS_NOMINIMIZE
+	RibSurface main;                  // the ribbon's own (no groups while minimized)
+	std::vector<std::unique_ptr<RibPopup>> popups;    // open, the last on top
 
-	// the mouse
-	int    hotTab = -1;               // in visible
-	RibHit hot;
-	RibHit pressed;
+	int  hotTab = -1;                 // in visible, or MinimizeButton
+
+	// the popup that closed last, as a click deactivated it: that click doesn't open it again
+	HWND closedFrom = nullptr;
+	int  closedTab = -1;
+	int  closedGroup = -1;
+	ULONGLONG closedTick = 0;
+
+	static constexpr int MinimizeButton = -2;
 
 	RibTab* Selected() {
 		return selected >= 0 && selected < (int)tabs.size() ? &tabs[selected] : nullptr;
@@ -52,6 +126,12 @@ struct RibData {
 				}
 		return nullptr;
 	}
+	const RibContext* FindContext(int id) const {
+		for (auto& c : contexts)
+			if (c.id == id)
+				return &c;
+		return nullptr;
+	}
 	// f(tab, group, item index, item) for every item with the id
 	template<typename F>
 	void ForEachItem(UINT id, F&& f) {
@@ -62,6 +142,14 @@ struct RibData {
 					if (items[i].id == id && items[i].kind != RibKind::Separator)
 						f(t, g, i, items[i]);
 			}
+	}
+	// every surface, the ribbon's first
+	template<typename F>
+	void ForEachSurface(F&& f) {
+		f(main);
+		for (auto& p : popups)
+			if (!p->hidden)
+				f(p->surface);
 	}
 };
 

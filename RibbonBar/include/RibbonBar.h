@@ -1,11 +1,13 @@
 #pragma once
 
 // Ribbon bar: a row of tabs, each a strip of labeled groups of commands: large buttons (an image over a label), small
-// ones (an image beside it) and icons, toggles, radio items, drop-down and split buttons. As the window narrows the
-// groups shrink, the rightmost first: large items become small, small ones icons, and at last a group folds into one
-// button. A click posts WM_COMMAND with the item's id to the owner, as a menu does; the app sets the items' states
-// through the API, or when RIBN_UPDATEUI asks before they're painted. The API follows the common controls: C-style
-// structures and WM_NOTIFY codes (RIBN_*) sent to the parent.
+// ones (an image beside it) and icons, toggles, radio items, drop-down and split buttons, and the app's own windows (a
+// combo box). As the window narrows the groups shrink, the rightmost first: large items become small, small ones
+// icons, and at last a group folds into one button that opens it in a popup. A click posts WM_COMMAND with the item's
+// id to the owner, as a menu does; the app sets the items' states through the API, or when RIBN_UPDATEUI asks before
+// they're painted. The ribbon can be minimized to its tabs (a tab then opens as a popup), and contextual tabs show only
+// while the app says. The API follows the common controls: C-style structures and WM_NOTIFY codes (RIBN_*) sent to
+// the parent.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -19,6 +21,10 @@
 // ---- Window class name -------------------------------------------------------
 
 constexpr wchar_t WC_RIBBONBAR[] = L"WC_RibbonBar";
+
+// ---- Styles --------------------------------------------------------------------
+
+#define RIBS_NOMINIMIZE      0x0001   // no minimize button; double-clicking a tab doesn't minimize
 
 // ---- Items --------------------------------------------------------------------
 
@@ -54,9 +60,12 @@ struct RIBITEM {
 	UINT    size = RIBSZ_LARGE;       // the largest it's shown at
 	UINT    minSize = RIBSZ_ICON;     // the smallest it goes down to (an item without an image stops at small)
 	HMENU   hMenu = nullptr;          // RIBIK_DROPDOWN, RIBIK_SPLIT: its commands; the app keeps it
-	HWND    hwnd = nullptr;           // RIBIK_WINDOW: made a child of the ribbon
-	int     cxWindow = 0;             // RIBIK_WINDOW: its width, in DIPs (the label, pszText, goes before it)
-	int     cRows = 1;                // RIBIK_WINDOW: its height in rows (1 to 3)
+	// RIBIK_WINDOW: a child window, made the ribbon's (or a popup's while one shows its group), shown and hidden with
+	// its group and disabled with the item; its notifications go on to the ribbon's parent. pszText is a label before
+	// it, dropped when the group shrinks.
+	HWND    hwnd = nullptr;
+	int     cxWindow = 0;             // its width, in DIPs
+	int     cRows = 1;                // its height in rows (1 to 3); a combo box is centered in its rows
 	LPARAM  lParam = 0;
 };
 
@@ -79,6 +88,7 @@ struct RIBTAB {
 	UINT    id = 0;                   // unique among the tabs
 	LPCWSTR pszText = nullptr;
 	LPCWSTR pszKeyTip = nullptr;
+	int     context = 0;              // 0: always shown; else its contextual set's id (AddContext)
 };
 
 // ---- Colors ----------------------------------------------------------------------
@@ -103,7 +113,8 @@ struct RIBCOLORS {
 #define RIBN_EXECUTE         (RIBN_FIRST - 0)   // NMRIBITEM; an item clicked (a toggle already flipped): non-zero = done, no WM_COMMAND
 #define RIBN_TABCHANGED      (RIBN_FIRST - 1)   // NMRIBTAB; the user selected a tab
 #define RIBN_UPDATEUI        (RIBN_FIRST - 2)   // NMRIBTAB; the tab's items are about to be painted: set their states now
-#define RIBN_HEIGHTCHANGED   (RIBN_FIRST - 3)   // NMHDR; GetIdealHeight changed (DPI, font): lay the window out again
+#define RIBN_HEIGHTCHANGED   (RIBN_FIRST - 3)   // NMHDR; GetIdealHeight changed (DPI, font, minimized): lay the window out again
+#define RIBN_DROPDOWN        (RIBN_FIRST - 4)   // NMRIBDROPDOWN; a drop-down or a split button's arrow pressed
 
 struct NMRIBITEM {
 	NMHDR  hdr;
@@ -118,9 +129,23 @@ struct NMRIBTAB {
 	UINT   id;
 };
 
+// Before the item's menu opens: the app may fill it, or set another (it's the app's). A non-zero return: the app
+// showed its own UI (at rcItem), no menu. A command picked from the menu is posted as WM_COMMAND to the owner; the
+// owner gets the menu's messages (WM_INITMENUPOPUP, WM_MENUSELECT) while it's open.
+struct NMRIBDROPDOWN {
+	NMHDR  hdr;
+	UINT   id;
+	HMENU  hMenu;
+	RECT   rcItem;                    // screen coords
+	LPARAM lParam;
+};
+
 // ---- Control class --------------------------------------------------------------------------
 
 struct RibData;
+struct RibSurface;
+struct RibHit;
+class RibPopup;
 
 class CRibbonBarCtrl : public ATL::CWindowImpl<CRibbonBarCtrl> {
 public:
@@ -128,12 +153,14 @@ public:
 
 	CRibbonBarCtrl();
 	~CRibbonBarCtrl();
+	friend class RibPopup;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
 
 	BEGIN_MSG_MAP(CRibbonBarCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
@@ -143,7 +170,7 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
-		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
@@ -153,16 +180,24 @@ public:
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_BEFOREPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		MESSAGE_HANDLER(WM_RIB_CLOSEPOPUPS, OnClosePopups)
+		// the hosted windows' messages, for the parent
+		MESSAGE_HANDLER(WM_COMMAND, OnForward)
+		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnForward)
+		MESSAGE_HANDLER(WM_MEASUREITEM, OnForward)
+		MESSAGE_HANDLER(WM_COMPAREITEM, OnForward)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnForward)
 	END_MSG_MAP()
 
 	// ---- Tabs, groups, items -------------------------------------------------------------------
 
 	BOOL    AddTab(const RIBTAB* tab, int insertAt = -1);         // FALSE if the id is taken
-	BOOL    AddTab(UINT id, LPCWSTR text);
+	BOOL    AddTab(UINT id, LPCWSTR text, int context = 0);
 	BOOL    RemoveTab(UINT id);                                   // its groups and items too
 	int     GetTabCount() const;
 	UINT    GetTabId(int index) const;                            // 0 if out of range
-	BOOL    SelectTab(UINT id);                                   // no notification
+	BOOL    SelectTab(UINT id);                                   // no notification; FALSE if it isn't shown
 	UINT    GetSelectedTab() const;                               // 0 if none
 
 	BOOL    AddGroup(UINT tabId, const RIBGROUP* group);          // at the tab's end; FALSE if the id is taken
@@ -172,16 +207,35 @@ public:
 	BOOL    AddItem(UINT groupId, const RIBITEM* item);           // at the group's end
 	BOOL    AddButton(UINT groupId, UINT id, LPCWSTR text, int image, UINT size = RIBSZ_LARGE, UINT kind = RIBIK_BUTTON);
 	BOOL    AddSeparator(UINT groupId);
-	BOOL    RemoveItem(UINT id);                                  // every item with the id
+	BOOL    RemoveItem(UINT id);                                  // every item with the id (a window is hidden, not destroyed)
 
 	BOOL    SetItemState(UINT id, UINT state, UINT mask = (UINT)-1);    // RIBIS_*; every item with the id
 	UINT    GetItemState(UINT id) const;                          // (UINT)-1 if there's no such item
 	BOOL    EnableItem(UINT id, bool enable = true);
 	BOOL    CheckItem(UINT id, bool check = true);                // a radio item: its group's others unchecked
 	BOOL    SetItemText(UINT id, LPCWSTR text);
+	BOOL    SetItemMenu(UINT id, HMENU menu);
 	// Sends RIBN_UPDATEUI for the selected tab now (it's also sent before the items are painted): an app's idle
 	// handler can call it, so states that follow the app's (a selection, the clipboard) show without a repaint first.
 	void    UpdateUI();
+
+	// ---- Contextual tabs ------------------------------------------------------------------------------
+	//
+	// A set of tabs (RIBTAB::context) shown while the app says, after the others, marked in the set's color: "Picture
+	// Tools" while a picture is selected. The selected tab hidden with its set: the first tab is selected.
+
+	BOOL    AddContext(int id, LPCWSTR name, COLORREF color);     // id > 0
+	BOOL    ShowContext(int id, bool show, bool select = false);  // select: its first tab
+	bool    IsContextShown(int id) const;
+
+	// ---- Minimized ----------------------------------------------------------------------------------------
+	//
+	// Only the tab row shows; clicking a tab opens its groups in a popup over the window. The user minimizes with the
+	// button at the right of the tabs or by double-clicking a tab (unless RIBS_NOMINIMIZE).
+
+	void    SetMinimized(bool minimized);                         // RIBN_HEIGHTCHANGED follows
+	bool    IsMinimized() const;
+	void    ClosePopups();                                        // a folded group's, a minimized tab's
 
 	// ---- Appearance and size -------------------------------------------------------------------------
 	//
@@ -191,11 +245,14 @@ public:
 	void    SetImageLists(HIMAGELIST large, HIMAGELIST smallImages);   // the control doesn't destroy them
 	void    SetColors(const RIBCOLORS* colors);                   // nullptr: from the system colors (follows WTLHelper dark mode)
 	RIBCOLORS GetColors() const;
-	int     GetIdealHeight() const;                               // the tab row and the groups
+	int     GetIdealHeight() const;                               // the tab row and the groups (minimized: the tabs)
 	void    SetOwner(HWND owner);                                 // gets WM_COMMAND; default (nullptr): the parent
 
 private:
+	enum : UINT { WM_RIB_CLOSEPOPUPS = WM_USER + 100 };
+
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
@@ -204,36 +261,58 @@ private:
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnClosePopups(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
 	void    UpdateMetrics();
 	void    Changed(bool measure);                                // the layout (and the sizes) to be found again
 	void    EnsureLayout();
+	void    LayoutSurface(RibSurface& s);                         // its groups' places, for its width
+	void    PlaceWindows();                                       // the hosted windows, where their groups show
 	void    NotifyHeight();
 	LRESULT FireNotify(NMHDR* pnm, UINT code) const;
+	HWND    Owner() const;
 	void    SendUpdateUI(bool painting);                          // painting: what the app changes isn't repainted again
-	void    Execute(int group, int item);
-	void    SetHot(int tab, int group, int item, int part);
+	void    Execute(int tab, int group, int item);
+	int     TabAt(POINT pt) const;                                // by its place in the row; -1 none, MinimizeButton
+	void    SetHotTab(int tab);
 	void    UserSelectTab(int visible);                           // a tab in the row, by its place: notified
+	void    TabClicked(int visible);
+	bool    JustClosed(HWND from, int tab, int group) const;      // that popup closed by this very click
+
+	// a surface: the ribbon's groups, or a popup's
+	LRESULT SurfaceMouse(RibSurface& s, UINT msg, WPARAM wParam, LPARAM lParam);
+	RibHit  HitSurface(const RibSurface& s, POINT pt) const;
+	RECT    ItemRect(const RibSurface& s, int group, int item) const;   // client coords of s
+	void    DropDown(RibSurface& s, int group, int item);
+	void    OpenGroupPopup(RibSurface& from, int group);
+	void    OpenTabPopup();
+	RibPopup* ShowPopup(std::unique_ptr<RibPopup> popup, HWND owner, RECT rc);   // rc: screen, kept on the monitor
+	void    HidePopups(size_t from);                                // hidden now, destroyed on WM_RIB_CLOSEPOPUPS
+	void    DestroyHidden();
 
 	// painting (RibbonBarPaint.cpp)
 	void    Paint(WTL::CDCHandle dc, const RECT& rcPaint);
 	void    PaintTabs(WTL::CDCHandle dc, const RIBCOLORS& c);
-	void    PaintGroup(WTL::CDCHandle dc, int group, int x, const RIBCOLORS& c);
-	void    PaintItem(WTL::CDCHandle dc, int group, int item, const RECT& rc, const RIBCOLORS& c);
+	void    PaintSurface(WTL::CDCHandle dc, RibSurface& s, const RIBCOLORS& c);
+	void    PaintGroup(WTL::CDCHandle dc, RibSurface& s, int group, int x, const RIBCOLORS& c);
+	void    PaintItem(WTL::CDCHandle dc, RibSurface& s, int group, int item, const RECT& rc, const RIBCOLORS& c);
 	void    PaintImage(WTL::CDCHandle dc, int image, bool large, int x, int y, bool disabled);
 
 	std::unique_ptr<RibData> m_Data;
 	HIMAGELIST m_Large = nullptr;
 	HIMAGELIST m_Small = nullptr;
 	HWND    m_Owner = nullptr;
+	bool    m_Minimized = false;
 
 	RIBCOLORS m_Colors{};
 	bool    m_SystemColors = true;
@@ -246,5 +325,4 @@ private:
 	int     m_LastHeight = 0;                                     // the height last told (RIBN_HEIGHTCHANGED)
 	bool    m_InUpdate = false;                                   // in RIBN_UPDATEUI
 	bool    m_NoInvalidate = false;                               // in RIBN_UPDATEUI sent while painting
-	bool    m_TrackingMouse = false;
 };

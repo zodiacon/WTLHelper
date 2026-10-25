@@ -42,6 +42,23 @@ namespace {
 		dc.SelectPen(oldPen);
 	}
 
+	// a chevron centered on (cx, cy), pointing the way of an arrow key
+	void Chevron(WTL::CDCHandle dc, int cx, int cy, int size, UINT vk, COLORREF color, int width) {
+		int h = size / 2, q = size / 4;
+		POINT pts[3];
+		switch (vk) {
+			case VK_UP: pts[0] = { cx - h, cy + q }; pts[1] = { cx, cy - q }; pts[2] = { cx + h, cy + q }; break;
+			case VK_DOWN: pts[0] = { cx - h, cy - q }; pts[1] = { cx, cy + q }; pts[2] = { cx + h, cy - q }; break;
+			case VK_LEFT: pts[0] = { cx + q, cy - h }; pts[1] = { cx - q, cy }; pts[2] = { cx + q, cy + h }; break;
+			default: pts[0] = { cx - q, cy - h }; pts[1] = { cx + q, cy }; pts[2] = { cx - q, cy + h }; break;
+		}
+		WTL::CPen pen;
+		pen.CreatePen(PS_SOLID, width, color);
+		auto old = dc.SelectPen(pen);
+		dc.Polyline(pts, 3);
+		dc.SelectPen(old);
+	}
+
 	// a large item's label: two lines centered from y, an arrow after the second (or alone on it)
 	void LargeLabel(WTL::CDCHandle dc, const RECT& rc, int y, int lineHeight, const std::wstring& line1, const std::wstring& line2,
 		bool arrow, const RibMetrics& m, COLORREF color) {
@@ -125,37 +142,18 @@ LRESULT CRibbonBarCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 	return 0;
 }
 
-void CRibbonBarCtrl::Paint(WTL::CDCHandle dc, const RECT& rcPaint) {
+void CRibbonBarCtrl::Paint(WTL::CDCHandle dc, const RECT&) {
 	auto& d = *m_Data;
 	auto c = GetColors();
 	RECT rc;
 	GetClientRect(&rc);
 	FillSolid(dc, rc, c.crBack);
-	FillSolid(dc, d.panel, c.crPanel);
-	FillSolid(dc, { 0, d.panel.bottom, rc.right, d.panel.bottom + 1 }, c.crLine);
 	auto oldFont = dc.SelectFont(m_hFont);
 	dc.SetBkMode(TRANSPARENT);
 	PaintTabs(dc, c);
-	if (auto sel = d.Selected()) {
-		int last = -1;
-		for (int g = 0; g < (int)d.places.size(); g++)
-			if (d.places[g].width > 0)
-				last = g;
-		int saved = dc.SaveDC();
-		dc.IntersectClipRect(&d.panel);
-		for (int g = 0; g <= last; g++) {
-			auto& place = d.places[g];
-			if (place.width <= 0)
-				continue;
-			int x = d.originX + place.x;
-			if (x < rcPaint.right && x + place.width + 1 > rcPaint.left)
-				PaintGroup(dc, g, x, c);
-			if (g != last)
-				FillSolid(dc, { x + place.width, d.panel.top + d.m.groupPad, x + place.width + 1, d.panel.bottom - d.m.groupPad }, c.crLine);
-		}
-		dc.RestoreDC(saved);
-		(void)sel;
-	}
+	if (!m_Minimized)
+		PaintSurface(dc, d.main, c);
+	FillSolid(dc, { 0, d.main.panel.bottom, rc.right, d.main.panel.bottom + 1 }, c.crLine);
 	dc.SelectFont(oldFont);
 }
 
@@ -166,37 +164,96 @@ void CRibbonBarCtrl::PaintTabs(WTL::CDCHandle dc, const RIBCOLORS& c) {
 		auto& tab = d.tabs[t];
 		RECT rc = d.tabRects[v];
 		bool selected = t == d.selected;
+		COLORREF accent = c.crAccent, text = c.crTabText;
+		if (auto context = tab.context ? d.FindContext(tab.context) : nullptr) {
+			// a contextual tab: tinted, a band of its set's color on top
+			FillSolid(dc, rc, Blend(c.crBack, context->color, 14));
+			FillSolid(dc, { rc.left, rc.top, rc.right, rc.top + Scale(3) }, context->color);
+			accent = context->color;
+		}
 		if (v == d.hotTab && !selected) {
 			RECT hot = rc;
-			::InflateRect(&hot, -Scale(2), -Scale(3));
+			::InflateRect(&hot, -Scale(2), -Scale(4));
 			COLORREF back = Blend(c.crBack, c.crTabText, 10);
 			RoundFill(dc, hot, back, back, Scale(4));
 		}
-		dc.SetTextColor(selected ? c.crAccent : c.crTabText);
+		dc.SetTextColor(selected ? accent : text);
 		dc.DrawText(tab.text.c_str(), (int)tab.text.size(), &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-		if (selected) {
-			// the mark under the selected tab's text
+		if (selected && !(m_Minimized && d.popups.empty())) {
+			// the mark under the selected tab's text (minimized: while it's open)
 			int w = t < (int)d.tabWidths.size() ? d.tabWidths[t] : 0;
 			int x = (rc.left + rc.right - w) / 2;
 			RECT bar{ x, rc.bottom - Scale(3), x + w, rc.bottom };
-			RoundFill(dc, bar, c.crAccent, c.crAccent, Scale(2));
+			RoundFill(dc, bar, accent, accent, Scale(2));
 		}
+	}
+	// the minimize button: a chevron up (minimize), down while minimized (show the groups again)
+	if (auto& b = d.minimizeButton; b.right > b.left) {
+		if (d.hotTab == RibData::MinimizeButton) {
+			RECT hot = b;
+			::InflateRect(&hot, -Scale(3), -Scale(3));
+			COLORREF back = Blend(c.crBack, c.crTabText, 10);
+			RoundFill(dc, hot, back, back, Scale(4));
+		}
+		Chevron(dc, (b.left + b.right) / 2, (b.top + b.bottom) / 2, Scale(10), m_Minimized ? VK_DOWN : VK_UP, c.crTabText,
+			std::max(1, Scale(1)));
 	}
 }
 
-void CRibbonBarCtrl::PaintGroup(WTL::CDCHandle dc, int g, int x, const RIBCOLORS& c) {
+void CRibbonBarCtrl::PaintSurface(WTL::CDCHandle dc, RibSurface& s, const RIBCOLORS& c) {
 	auto& d = *m_Data;
-	auto& group = d.Selected()->groups[g];
-	auto& place = d.places[g];
+	FillSolid(dc, s.panel, c.crPanel);
+	if (s.tab < 0 || s.tab >= (int)d.tabs.size())
+		return;
+	if (auto context = d.tabs[s.tab].context ? d.FindContext(d.tabs[s.tab].context) : nullptr)
+		FillSolid(dc, { s.panel.left, s.panel.top, s.panel.right, s.panel.top + std::max(1, Scale(2)) }, context->color);
+	int last = -1;
+	for (int g = 0; g < (int)s.places.size(); g++)
+		if (s.places[g].width > 0)
+			last = g;
+	int saved = dc.SaveDC();
+	dc.IntersectClipRect(&s.panel);
+	RECT clip;
+	dc.GetClipBox(&clip);
+	for (int g = 0; g <= last; g++) {
+		auto& place = s.places[g];
+		if (place.width <= 0)
+			continue;
+		int x = s.GroupX(g);
+		if (x < clip.right && x + place.width + 1 > clip.left)
+			PaintGroup(dc, s, g, x, c);
+		if (g != last)
+			FillSolid(dc, { x + place.width, s.panel.top + d.m.groupPad, x + place.width + 1, s.panel.bottom - d.m.groupPad }, c.crLine);
+	}
+	// the scroll buttons, when the groups don't fit
+	int button = Scale(14);
+	auto scrollButton = [&](RECT r, UINT vk, RibPart part) {
+		bool hot = s.hot.part == part;
+		FillSolid(dc, r, hot ? c.crPressedBack : c.crHotBack);
+		Chevron(dc, (r.left + r.right) / 2, (r.top + r.bottom) / 2, Scale(10), vk, c.crText, std::max(1, Scale(1)));
+	};
+	if (s.scroll > 0)
+		scrollButton({ s.panel.left, s.panel.top, s.panel.left + button, s.panel.bottom }, VK_LEFT, RibPart::ScrollLeft);
+	if (s.scroll < s.MaxScroll())
+		scrollButton({ s.panel.right - button, s.panel.top, s.panel.right, s.panel.bottom }, VK_RIGHT, RibPart::ScrollRight);
+	dc.RestoreDC(saved);
+}
+
+void CRibbonBarCtrl::PaintGroup(WTL::CDCHandle dc, RibSurface& s, int g, int x, const RIBCOLORS& c) {
+	auto& d = *m_Data;
+	auto& group = d.tabs[s.tab].groups[g];
+	auto& place = s.places[g];
 	auto& m = d.m;
-	int top = d.panel.top;
+	int top = s.panel.top;
 	if (place.collapsed) {
-		// one button: the group's image and its label, with an arrow
+		// one button: the group's image and its label, with an arrow; pressed while its popup is open
 		RECT rc = RibCollapsedRect(place.width, m);
 		::OffsetRect(&rc, x, top);
-		bool hot = d.hot.group == g && d.hot.part == RibPart::Group;
-		if (hot)
-			RoundFill(dc, rc, Same(d.pressed, d.hot) ? c.crPressedBack : c.crHotBack, c.crLine, Scale(4));
+		bool hot = s.hot.group == g && s.hot.part == RibPart::Group;
+		if (s.opened == g)
+			RoundFill(dc, rc, c.crPressedBack, c.crLine, Scale(4));
+		else if (hot)
+			RoundFill(dc, rc, c.crHotBack, c.crLine, Scale(4));
 		int image = group.image;
 		for (size_t i = 0; i < group.items.size() && image < 0; i++)
 			if (!group.items[i].Hidden())
@@ -210,7 +267,7 @@ void CRibbonBarCtrl::PaintGroup(WTL::CDCHandle dc, int g, int x, const RIBCOLORS
 			continue;
 		RECT rc = place.items[i].rc;
 		::OffsetRect(&rc, x, top);
-		PaintItem(dc, g, i, rc, c);
+		PaintItem(dc, s, g, i, rc, c);
 	}
 	RECT label = place.label;
 	::OffsetRect(&label, x, top);
@@ -219,21 +276,21 @@ void CRibbonBarCtrl::PaintGroup(WTL::CDCHandle dc, int g, int x, const RIBCOLORS
 	if (place.launcher.right > place.launcher.left) {
 		RECT r = place.launcher;
 		::OffsetRect(&r, x, top);
-		bool hot = d.hot.group == g && d.hot.part == RibPart::Launcher;
+		bool hot = s.hot.group == g && s.hot.part == RibPart::Launcher;
 		if (hot) {
 			RECT back = r;
 			::InflateRect(&back, Scale(2), Scale(2));
-			RoundFill(dc, back, Same(d.pressed, d.hot) ? c.crPressedBack : c.crHotBack, c.crHotBack, Scale(3));
+			RoundFill(dc, back, Same(s.pressed, s.hot) ? c.crPressedBack : c.crHotBack, c.crHotBack, Scale(3));
 		}
 		Launcher(dc, r, hot ? c.crText : c.crDimText);
 	}
 }
 
-void CRibbonBarCtrl::PaintItem(WTL::CDCHandle dc, int g, int i, const RECT& rc, const RIBCOLORS& c) {
+void CRibbonBarCtrl::PaintItem(WTL::CDCHandle dc, RibSurface& s, int g, int i, const RECT& rc, const RIBCOLORS& c) {
 	auto& d = *m_Data;
 	auto& m = d.m;
-	auto& item = d.Selected()->groups[g].items[i];
-	auto size = d.places[g].items[i].size;
+	auto& item = d.tabs[s.tab].groups[g].items[i];
+	auto size = s.places[g].items[i].size;
 	int radius = Scale(4);
 	if (item.kind == RibKind::Separator) {
 		int mid = (rc.left + rc.right) / 2;
@@ -251,8 +308,8 @@ void CRibbonBarCtrl::PaintItem(WTL::CDCHandle dc, int g, int i, const RECT& rc, 
 		}
 		return;
 	}
-	bool hot = !disabled && d.hot.group == g && d.hot.item == i && (d.hot.part == RibPart::Item || d.hot.part == RibPart::Arrow);
-	bool pressed = hot && Same(d.pressed, d.hot);
+	bool hot = !disabled && s.hot.group == g && s.hot.item == i && (s.hot.part == RibPart::Item || s.hot.part == RibPart::Arrow);
+	bool pressed = hot && Same(s.pressed, s.hot);
 	if (item.state & RibStateChecked)
 		RoundFill(dc, rc, hot ? Blend(c.crCheckedBack, c.crText, 6) : c.crCheckedBack, c.crCheckedBorder, radius);
 	else if (hot && item.kind == RibKind::Split) {
@@ -260,7 +317,7 @@ void CRibbonBarCtrl::PaintItem(WTL::CDCHandle dc, int g, int i, const RECT& rc, 
 		RECT main, arrow;
 		RibSplitRects(rc, size, m, main, arrow);
 		RoundFill(dc, rc, c.crHotBack, c.crHotBack, radius);
-		RoundFill(dc, d.hot.part == RibPart::Arrow ? arrow : main, pressed ? c.crPressedBack : Blend(c.crHotBack, c.crPressedBack, 50),
+		RoundFill(dc, s.hot.part == RibPart::Arrow ? arrow : main, pressed ? c.crPressedBack : Blend(c.crHotBack, c.crPressedBack, 50),
 			c.crHotBack, radius);
 		if (size == RibSize::Large)
 			FillSolid(dc, { rc.left + Scale(2), arrow.top, rc.right - Scale(2), arrow.top + 1 }, c.crLine);

@@ -180,7 +180,8 @@ std::vector<RibGroupPlace> RibLayoutTab(const std::vector<RibGroup>& groups, int
 
 // ---- Hit testing ----------------------------------------------------------------------------------
 
-enum class RibPart : uint8_t { None, Item, Arrow, Group, Launcher };     // Arrow: a split button's; Group: collapsed
+// Arrow: a split button's; Group: collapsed; the scroll buttons are the control's (when the groups don't fit)
+enum class RibPart : uint8_t { None, Item, Arrow, Group, Launcher, ScrollLeft, ScrollRight };
 
 struct RibHit {
 	RibPart part = RibPart::None;

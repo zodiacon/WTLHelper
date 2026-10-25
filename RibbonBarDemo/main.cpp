@@ -30,11 +30,16 @@ enum {
 	IDC_RIBBON = 101,
 	IDC_EDIT,
 	IDC_LOG,
+	IDC_FONTNAME,
+	IDC_FONTSIZE,
+	IDC_SEARCH,
 
-	TAB_HOME = 1, TAB_INSERT, TAB_VIEW, TAB_RIBBON,
+	TAB_HOME = 1, TAB_INSERT, TAB_VIEW, TAB_RIBBON, TAB_PICTURE, TAB_TABLEDESIGN, TAB_TABLELAYOUT,
+	CTX_PICTURE = 1, CTX_TABLE,
 
 	GRP_UNDO = 11, GRP_CLIPBOARD, GRP_FONT, GRP_PARAGRAPH, GRP_EDITING, GRP_PAGES, GRP_TABLES, GRP_ILLUSTRATIONS, GRP_LINKS,
-	GRP_TEXT, GRP_VIEWS, GRP_SHOW, GRP_ZOOM, GRP_WINDOW, GRP_APPEARANCE, GRP_STATES,
+	GRP_TEXT, GRP_VIEWS, GRP_SHOW, GRP_ZOOM, GRP_WINDOW, GRP_APPEARANCE, GRP_STATES, GRP_CONTEXTS, GRP_ADJUST, GRP_ARRANGE,
+	GRP_TABLESTYLES, GRP_ROWS,
 
 	CMD_UNDO = 1001, CMD_REDO, CMD_PASTE, CMD_CUT, CMD_COPY, CMD_FORMATPAINTER, CMD_CLIPBOARD_DIALOG,
 	CMD_BOLD, CMD_ITALIC, CMD_UNDERLINE, CMD_GROW, CMD_SHRINK, CMD_FONTCOLOR, CMD_FONT_DIALOG,
@@ -44,7 +49,15 @@ enum {
 	CMD_LINK, CMD_BOOKMARK, CMD_COMMENT, CMD_TEXTBOX, CMD_DATETIME, CMD_SYMBOL,
 	CMD_READMODE = 1201, CMD_PRINTLAYOUT, CMD_WEBLAYOUT, CMD_RULER, CMD_GRIDLINES, CMD_NAVPANE,
 	CMD_ZOOM, CMD_ZOOM100, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_NEWWINDOW, CMD_ARRANGE, CMD_SPLIT,
-	CMD_DARKMODE = 1301, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_HIDEEDITING, CMD_DISABLECLIPBOARD,
+	CMD_DARKMODE = 1301, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_HIDEEDITING, CMD_DISABLECLIPBOARD, CMD_PICTURESEL, CMD_TABLESEL,
+	CMD_MINIMIZE,
+	CMD_BRIGHTNESS = 1401, CMD_RECOLOR, CMD_FORWARD, CMD_BACKWARD, CMD_TABLESTYLE, CMD_SHADING, CMD_INSERTABOVE, CMD_INSERTBELOW,
+	CMD_DELETEROWS,
+	// the menus' commands
+	CMD_PASTESPECIAL = 1501, CMD_PASTETEXT, CMD_BULLET_DOT, CMD_BULLET_CIRCLE, CMD_BULLET_SQUARE, CMD_COLOR_RED, CMD_COLOR_BLUE,
+	CMD_COLOR_GREEN, CMD_SHAPE_LINE, CMD_SHAPE_RECT, CMD_SHAPE_OVAL, CMD_SCREEN_WINDOW, CMD_SCREEN_CLIP, CMD_TEXTBOX_SIMPLE,
+	CMD_TEXTBOX_QUOTE, CMD_SYMBOL_PI, CMD_SYMBOL_OMEGA, CMD_TABLE_2X2, CMD_TABLE_3X3,
+	CMD_COVER_FIRST = 1601,     // Cover Page's menu, made as it opens (RIBN_DROPDOWN)
 };
 
 // ---- Images ----------------------------------------------------------------------
@@ -160,6 +173,9 @@ static HIMAGELIST g_large, g_small;
 static HFONT g_largeFont;
 static std::map<UINT, std::wstring> g_names;   // for the log
 static bool g_disableClipboard;
+static HWND g_fontName, g_fontSize, g_search;
+static HMENU g_pasteMenu, g_menus[8];
+static int g_covers;               // Cover Page's menu grows each time it opens
 
 static const RIBCOLORS g_colors = {
 	RGB(0x1E, 0x3A, 0x5F), RGB(0xE8, 0xEE, 0xF5), RGB(0xF4, 0xF1, 0xEA), RGB(0x20, 0x20, 0x20), RGB(0x6E, 0x6A, 0x60), RGB(0xD6, 0xD0, 0xC2),
@@ -188,8 +204,33 @@ static void UpdateImages() {
 
 // ---- The ribbon ------------------------------------------------------------------
 
+static HMENU Menu(std::initializer_list<std::pair<UINT, const wchar_t*>> items) {
+	HMENU menu = ::CreatePopupMenu();
+	for (auto& [id, text] : items) {
+		::AppendMenuW(menu, id ? MF_STRING : MF_SEPARATOR, id, text);
+		if (id)
+			g_names[id] = text;
+	}
+	for (auto& m : g_menus)
+		if (!m) {
+			m = menu;    // destroyed at the end
+			break;
+		}
+	return menu;
+}
+
+static void Window(UINT group, UINT id, HWND hwnd, const wchar_t* label, int dips) {
+	RIBITEM item;
+	item.id = id;
+	item.kind = RIBIK_WINDOW;
+	item.hwnd = hwnd;
+	item.pszText = label;
+	item.cxWindow = dips;
+	g_ribbon.AddItem(group, &item);
+}
+
 static void Add(UINT group, UINT id, const wchar_t* text, int image, UINT size = RIBSZ_LARGE, UINT kind = RIBIK_BUTTON, int radio = 0,
-	UINT state = 0) {
+	UINT state = 0, HMENU menu = nullptr) {
 	RIBITEM item;
 	item.id = id;
 	item.kind = kind;
@@ -198,6 +239,7 @@ static void Add(UINT group, UINT id, const wchar_t* text, int image, UINT size =
 	item.size = size;
 	item.radio = radio;
 	item.state = state;
+	item.hMenu = menu;
 	g_ribbon.AddItem(group, &item);
 	g_names[id] = text;
 }
@@ -221,54 +263,70 @@ static void BuildRibbon() {
 	r.AddTab(TAB_INSERT, L"Insert");
 	r.AddTab(TAB_VIEW, L"View");
 	r.AddTab(TAB_RIBBON, L"Ribbon");
+	// contextual: shown from the Ribbon tab, as if a picture or a table were selected
+	r.AddContext(CTX_PICTURE, L"Picture Tools", RGB(0x88, 0x5C, 0xD6));
+	r.AddContext(CTX_TABLE, L"Table Tools", RGB(0x10, 0x89, 0x3E));
+	r.AddTab(TAB_PICTURE, L"Picture Format", CTX_PICTURE);
+	r.AddTab(TAB_TABLEDESIGN, L"Table Design", CTX_TABLE);
+	r.AddTab(TAB_TABLELAYOUT, L"Layout", CTX_TABLE);
 
 	// Home: Undo stays large longest, Editing shrinks first
 	Group(TAB_HOME, GRP_UNDO, L"Undo", 2);
 	Add(GRP_UNDO, CMD_UNDO, L"Undo", IMG_UNDO, RIBSZ_SMALL);
 	Add(GRP_UNDO, CMD_REDO, L"Redo", IMG_REDO, RIBSZ_SMALL, RIBIK_BUTTON, 0, RIBIS_DISABLED);
 	Group(TAB_HOME, GRP_CLIPBOARD, L"Clipboard", 1, CMD_CLIPBOARD_DIALOG);
-	Add(GRP_CLIPBOARD, CMD_PASTE, L"Paste", IMG_PASTE, RIBSZ_LARGE, RIBIK_SPLIT);
+	g_pasteMenu = Menu({ { CMD_PASTE, L"&Paste" }, { CMD_PASTESPECIAL, L"Paste &Special..." }, { CMD_PASTETEXT, L"Paste as Plain &Text" } });
+	Add(GRP_CLIPBOARD, CMD_PASTE, L"Paste", IMG_PASTE, RIBSZ_LARGE, RIBIK_SPLIT, 0, 0, g_pasteMenu);
 	Add(GRP_CLIPBOARD, CMD_CUT, L"Cut", IMG_CUT, RIBSZ_SMALL);
 	Add(GRP_CLIPBOARD, CMD_COPY, L"Copy", IMG_COPY, RIBSZ_SMALL);
 	Add(GRP_CLIPBOARD, CMD_FORMATPAINTER, L"Format Painter", IMG_PAINTER, RIBSZ_SMALL, RIBIK_TOGGLE);
 	Group(TAB_HOME, GRP_FONT, L"Font", 0, CMD_FONT_DIALOG);
+	Window(GRP_FONT, IDC_FONTNAME, g_fontName, nullptr, 130);
+	Window(GRP_FONT, IDC_FONTSIZE, g_fontSize, nullptr, 50);
+	Add(GRP_FONT, CMD_FONTCOLOR, L"Font Color", IMG_FONTCOLOR, RIBSZ_SMALL, RIBIK_SPLIT, 0, 0,
+		Menu({ { CMD_COLOR_RED, L"Red" }, { CMD_COLOR_BLUE, L"Blue" }, { CMD_COLOR_GREEN, L"Green" } }));
 	Add(GRP_FONT, CMD_BOLD, L"Bold", IMG_BOLD, RIBSZ_ICON, RIBIK_TOGGLE);
 	Add(GRP_FONT, CMD_ITALIC, L"Italic", IMG_ITALIC, RIBSZ_ICON, RIBIK_TOGGLE);
 	Add(GRP_FONT, CMD_UNDERLINE, L"Underline", IMG_UNDERLINE, RIBSZ_ICON, RIBIK_TOGGLE);
 	Add(GRP_FONT, CMD_GROW, L"Grow Font", IMG_GROW, RIBSZ_ICON);
 	Add(GRP_FONT, CMD_SHRINK, L"Shrink Font", IMG_SHRINK, RIBSZ_ICON);
-	Add(GRP_FONT, CMD_FONTCOLOR, L"Font Color", IMG_FONTCOLOR, RIBSZ_ICON, RIBIK_SPLIT);
 	Group(TAB_HOME, GRP_PARAGRAPH, L"Paragraph", 0, CMD_PARAGRAPH_DIALOG);
 	Add(GRP_PARAGRAPH, CMD_ALIGNLEFT, L"Align Left", IMG_ALIGNLEFT, RIBSZ_SMALL, RIBIK_RADIO, 1, RIBIS_CHECKED);
 	Add(GRP_PARAGRAPH, CMD_ALIGNCENTER, L"Center", IMG_ALIGNCENTER, RIBSZ_SMALL, RIBIK_RADIO, 1);
 	Add(GRP_PARAGRAPH, CMD_ALIGNRIGHT, L"Align Right", IMG_ALIGNRIGHT, RIBSZ_SMALL, RIBIK_RADIO, 1);
 	r.AddSeparator(GRP_PARAGRAPH);
-	Add(GRP_PARAGRAPH, CMD_BULLETS, L"Bullets", IMG_BULLETS, RIBSZ_SMALL, RIBIK_DROPDOWN);
+	Add(GRP_PARAGRAPH, CMD_BULLETS, L"Bullets", IMG_BULLETS, RIBSZ_SMALL, RIBIK_DROPDOWN, 0, 0,
+		Menu({ { CMD_BULLET_DOT, L"Dot" }, { CMD_BULLET_CIRCLE, L"Circle" }, { CMD_BULLET_SQUARE, L"Square" } }));
 	Group(TAB_HOME, GRP_EDITING, L"Editing", -1);
 	Add(GRP_EDITING, CMD_FIND, L"Find", IMG_FIND);
 	Add(GRP_EDITING, CMD_REPLACE, L"Replace", IMG_REPLACE, RIBSZ_SMALL);
 	Add(GRP_EDITING, CMD_SELECTALL, L"Select All", IMG_SELECTALL, RIBSZ_SMALL);
 	Add(GRP_EDITING, CMD_GOTO, L"Go To", IMG_GOTO, RIBSZ_SMALL);
+	Window(GRP_EDITING, IDC_SEARCH, g_search, L"Search", 110);
 
 	Group(TAB_INSERT, GRP_PAGES, L"Pages");
-	Add(GRP_PAGES, CMD_COVER, L"Cover Page", IMG_DOCUMENT, RIBSZ_LARGE, RIBIK_DROPDOWN);
+	Add(GRP_PAGES, CMD_COVER, L"Cover Page", IMG_DOCUMENT, RIBSZ_LARGE, RIBIK_DROPDOWN, 0, 0, Menu({}));
 	Add(GRP_PAGES, CMD_BLANKPAGE, L"Blank Page", IMG_PAGE, RIBSZ_SMALL);
 	Add(GRP_PAGES, CMD_PAGEBREAK, L"Page Break", IMG_PAGE, RIBSZ_SMALL);
 	Group(TAB_INSERT, GRP_TABLES, L"Tables", 1);
 	Add(GRP_TABLES, CMD_TABLE, L"Table", IMG_TABLE, RIBSZ_LARGE, RIBIK_DROPDOWN);
 	Group(TAB_INSERT, GRP_ILLUSTRATIONS, L"Illustrations");
 	Add(GRP_ILLUSTRATIONS, CMD_PICTURE, L"Pictures", IMG_PICTURE);
-	Add(GRP_ILLUSTRATIONS, CMD_SHAPES, L"Shapes", IMG_SHAPES, RIBSZ_LARGE, RIBIK_DROPDOWN);
+	Add(GRP_ILLUSTRATIONS, CMD_SHAPES, L"Shapes", IMG_SHAPES, RIBSZ_LARGE, RIBIK_DROPDOWN, 0, 0,
+		Menu({ { CMD_SHAPE_LINE, L"Line" }, { CMD_SHAPE_RECT, L"Rectangle" }, { CMD_SHAPE_OVAL, L"Oval" } }));
 	Add(GRP_ILLUSTRATIONS, CMD_CHART, L"Chart", IMG_CHART);
-	Add(GRP_ILLUSTRATIONS, CMD_SCREENSHOT, L"Screenshot", IMG_SCREENSHOT, RIBSZ_LARGE, RIBIK_DROPDOWN);
+	Add(GRP_ILLUSTRATIONS, CMD_SCREENSHOT, L"Screenshot", IMG_SCREENSHOT, RIBSZ_LARGE, RIBIK_DROPDOWN, 0, 0,
+		Menu({ { CMD_SCREEN_WINDOW, L"Window" }, { 0, nullptr }, { CMD_SCREEN_CLIP, L"Screen Clipping" } }));
 	Group(TAB_INSERT, GRP_LINKS, L"Links");
 	Add(GRP_LINKS, CMD_LINK, L"Link", IMG_LINK);
 	Add(GRP_LINKS, CMD_BOOKMARK, L"Bookmark", IMG_BOOKMARK, RIBSZ_SMALL);
 	Add(GRP_LINKS, CMD_COMMENT, L"Comment", IMG_COMMENT, RIBSZ_SMALL);
 	Group(TAB_INSERT, GRP_TEXT, L"Text");
-	Add(GRP_TEXT, CMD_TEXTBOX, L"Text Box", IMG_FONT, RIBSZ_LARGE, RIBIK_DROPDOWN);
+	Add(GRP_TEXT, CMD_TEXTBOX, L"Text Box", IMG_FONT, RIBSZ_LARGE, RIBIK_DROPDOWN, 0, 0,
+		Menu({ { CMD_TEXTBOX_SIMPLE, L"Simple Text Box" }, { CMD_TEXTBOX_QUOTE, L"Quote" } }));
 	Add(GRP_TEXT, CMD_DATETIME, L"Date & Time", IMG_CALENDAR, RIBSZ_SMALL);
-	Add(GRP_TEXT, CMD_SYMBOL, L"Symbol", IMG_SYMBOL, RIBSZ_SMALL, RIBIK_DROPDOWN);
+	Add(GRP_TEXT, CMD_SYMBOL, L"Symbol", IMG_SYMBOL, RIBSZ_SMALL, RIBIK_DROPDOWN, 0, 0,
+		Menu({ { CMD_SYMBOL_PI, L"Pi" }, { CMD_SYMBOL_OMEGA, L"Omega" } }));
 
 	Group(TAB_VIEW, GRP_VIEWS, L"Views");
 	Add(GRP_VIEWS, CMD_READMODE, L"Read Mode", IMG_READ, RIBSZ_LARGE, RIBIK_RADIO, 2);
@@ -299,6 +357,24 @@ static void BuildRibbon() {
 	Group(TAB_RIBBON, GRP_STATES, L"States");
 	Add(GRP_STATES, CMD_HIDEEDITING, L"Hide Editing", IMG_HIDE, RIBSZ_LARGE, RIBIK_TOGGLE);
 	Add(GRP_STATES, CMD_DISABLECLIPBOARD, L"Disable Clipboard", IMG_LOCK, RIBSZ_LARGE, RIBIK_TOGGLE);
+	Add(GRP_STATES, CMD_MINIMIZE, L"Minimize Ribbon", IMG_HIDE, RIBSZ_LARGE, RIBIK_TOGGLE);
+	Group(TAB_RIBBON, GRP_CONTEXTS, L"Contextual Tabs");
+	Add(GRP_CONTEXTS, CMD_PICTURESEL, L"Picture Selected", IMG_PICTURE, RIBSZ_LARGE, RIBIK_TOGGLE);
+	Add(GRP_CONTEXTS, CMD_TABLESEL, L"Table Selected", IMG_TABLE, RIBSZ_LARGE, RIBIK_TOGGLE);
+
+	Group(TAB_PICTURE, GRP_ADJUST, L"Adjust");
+	Add(GRP_ADJUST, CMD_BRIGHTNESS, L"Brightness", IMG_DARK);
+	Add(GRP_ADJUST, CMD_RECOLOR, L"Color", IMG_COLORS);
+	Group(TAB_PICTURE, GRP_ARRANGE, L"Arrange");
+	Add(GRP_ARRANGE, CMD_FORWARD, L"Bring Forward", IMG_PAGE, RIBSZ_SMALL);
+	Add(GRP_ARRANGE, CMD_BACKWARD, L"Send Backward", IMG_DOCUMENT, RIBSZ_SMALL);
+	Group(TAB_TABLEDESIGN, GRP_TABLESTYLES, L"Table Styles");
+	Add(GRP_TABLESTYLES, CMD_TABLESTYLE, L"Styles", IMG_TABLE);
+	Add(GRP_TABLESTYLES, CMD_SHADING, L"Shading", IMG_COLORS);
+	Group(TAB_TABLELAYOUT, GRP_ROWS, L"Rows & Columns");
+	Add(GRP_ROWS, CMD_INSERTABOVE, L"Insert Above", IMG_TABLE);
+	Add(GRP_ROWS, CMD_INSERTBELOW, L"Insert Below", IMG_TABLE);
+	Add(GRP_ROWS, CMD_DELETEROWS, L"Delete", IMG_HIDE, RIBSZ_SMALL);
 }
 
 // ---- Window -----------------------------------------------------------------------
@@ -323,6 +399,8 @@ static void UpdateFonts(HWND hwnd) {
 	font = ::CreateFontIndirectW(&ncm.lfMessageFont);
 	::SendMessageW(g_edit, WM_SETFONT, (WPARAM)font, TRUE);
 	::SendMessageW(g_log, WM_SETFONT, (WPARAM)font, TRUE);
+	for (HWND w : { g_fontName, g_fontSize, g_search })
+		::SendMessageW(w, WM_SETFONT, (WPARAM)font, TRUE);
 	if (g_largeFont) {
 		// Ribbon > Larger Font: a font of the app's, made again for the DPI
 		::DeleteObject(g_largeFont);
@@ -367,13 +445,22 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case CMD_HIDEEDITING: {
 			bool hide = (g_ribbon.GetItemState(CMD_HIDEEDITING) & RIBIS_CHECKED) != 0;
-			for (UINT item : { CMD_FIND, CMD_REPLACE, CMD_SELECTALL, CMD_GOTO })
+			for (UINT item : { (UINT)CMD_FIND, (UINT)CMD_REPLACE, (UINT)CMD_SELECTALL, (UINT)CMD_GOTO, (UINT)IDC_SEARCH })
 				g_ribbon.SetItemState(item, hide ? RIBIS_HIDDEN : 0, RIBIS_HIDDEN);
 			break;
 		}
 		case CMD_DISABLECLIPBOARD:
 			g_disableClipboard = (g_ribbon.GetItemState(CMD_DISABLECLIPBOARD) & RIBIS_CHECKED) != 0;
 			break;
+		case CMD_MINIMIZE:
+			g_ribbon.SetMinimized((g_ribbon.GetItemState(CMD_MINIMIZE) & RIBIS_CHECKED) != 0);
+			break;
+		case CMD_PICTURESEL:
+		case CMD_TABLESEL: {
+			bool on = (g_ribbon.GetItemState(id) & RIBIS_CHECKED) != 0;
+			g_ribbon.ShowContext(id == CMD_PICTURESEL ? CTX_PICTURE : CTX_TABLE, on, on);   // shown: its tab selected
+			break;
+		}
 	}
 	auto it = g_names.find(id);
 	CString line;
@@ -393,6 +480,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_NOHIDESEL, 0, 0, 0, 0, hwnd, (HMENU)IDC_EDIT, nullptr, nullptr);
 			g_log = ::CreateWindowExW(0, WC_LISTBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | WS_BORDER,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_LOG, nullptr, nullptr);
+			// the windows the ribbon hosts (made its children when added)
+			g_fontName = ::CreateWindowExW(0, WC_COMBOBOXW, nullptr, WS_CHILD | WS_VSCROLL | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+				0, 0, 0, 0, hwnd, (HMENU)IDC_FONTNAME, nullptr, nullptr);
+			for (auto name : { L"Segoe UI", L"Calibri", L"Cambria", L"Consolas", L"Georgia", L"Times New Roman" })
+				::SendMessageW(g_fontName, CB_ADDSTRING, 0, (LPARAM)name);
+			::SendMessageW(g_fontName, CB_SETCURSEL, 0, 0);
+			g_fontSize = ::CreateWindowExW(0, WC_COMBOBOXW, nullptr, WS_CHILD | WS_VSCROLL | WS_TABSTOP | CBS_DROPDOWN | CBS_HASSTRINGS,
+				0, 0, 0, 0, hwnd, (HMENU)IDC_FONTSIZE, nullptr, nullptr);
+			for (auto size : { L"8", L"9", L"10", L"11", L"12", L"14", L"16", L"20", L"28" })
+				::SendMessageW(g_fontSize, CB_ADDSTRING, 0, (LPARAM)size);
+			::SendMessageW(g_fontSize, CB_SETCURSEL, 3, 0);
+			g_search = ::CreateWindowExW(0, WC_EDITW, nullptr, WS_CHILD | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+				0, 0, 0, 0, hwnd, (HMENU)IDC_SEARCH, nullptr, nullptr);
+			::SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Find in text");
 			UpdateFonts(hwnd);
 			BuildRibbon();
 			UpdateImages();
@@ -416,6 +517,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_COMMAND:
 			if (lParam == 0)    // the ribbon's, as a menu's
 				OnCommand(hwnd, LOWORD(wParam));
+			else if (HIWORD(wParam) == CBN_SELCHANGE || (HIWORD(wParam) == EN_CHANGE && LOWORD(wParam) == IDC_SEARCH)) {
+				// the hosted windows' notifications, passed on by the ribbon
+				wchar_t text[64] = L"";
+				HWND w = (HWND)lParam;
+				if (HIWORD(wParam) == CBN_SELCHANGE)
+					::SendMessageW(w, CB_GETLBTEXT, ::SendMessageW(w, CB_GETCURSEL, 0, 0), (LPARAM)text);
+				else
+					::GetWindowTextW(w, text, 64);
+				CString line;
+				line.Format(L"%s from %s: %s", HIWORD(wParam) == CBN_SELCHANGE ? L"CBN_SELCHANGE" : L"EN_CHANGE",
+					LOWORD(wParam) == IDC_FONTNAME ? L"font" : LOWORD(wParam) == IDC_FONTSIZE ? L"size" : L"search", text);
+				Log(line);
+			}
+			return 0;
+
+		case WM_INITMENUPOPUP:
+			// a ribbon menu's messages come to the owner: Paste's items follow the clipboard
+			if ((HMENU)wParam == g_pasteMenu) {
+				UINT state = ::IsClipboardFormatAvailable(CF_UNICODETEXT) ? MF_ENABLED : MF_GRAYED;
+				for (UINT item : { CMD_PASTE, CMD_PASTESPECIAL, CMD_PASTETEXT })
+					::EnableMenuItem(g_pasteMenu, item, MF_BYCOMMAND | state);
+			}
 			return 0;
 
 		case WM_NOTIFY: {
@@ -433,12 +556,43 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 					g_ribbon.EnableItem(CMD_COPY, selection && !g_disableClipboard);
 					g_ribbon.EnableItem(CMD_PASTE, ::IsClipboardFormatAvailable(CF_UNICODETEXT) && !g_disableClipboard);
 					g_ribbon.EnableItem(CMD_UNDO, ::SendMessageW(g_edit, EM_CANUNDO, 0, 0) != 0);
+					g_ribbon.CheckItem(CMD_MINIMIZE, g_ribbon.IsMinimized());     // the user may have used the button
 					return 0;
 				}
 				case RIBN_TABCHANGED:
 					line.Format(L"RIBN_TABCHANGED: tab %u", ((NMRIBTAB*)lParam)->id);
 					Log(line);
 					return 0;
+				case RIBN_DROPDOWN: {
+					auto nm = (NMRIBDROPDOWN*)lParam;
+					auto it = g_names.find(nm->id);
+					line.Format(L"RIBN_DROPDOWN: %s", it != g_names.end() ? it->second.c_str() : L"?");
+					Log(line);
+					if (nm->id == CMD_COVER) {
+						// the menu made as it opens: one more cover each time
+						while (::GetMenuItemCount(nm->hMenu) > 0)
+							::DeleteMenu(nm->hMenu, 0, MF_BYPOSITION);
+						g_covers++;
+						for (int i = 0; i < g_covers && i < 50; i++) {
+							CString text;
+							text.Format(L"Cover %d", i + 1);
+							::AppendMenuW(nm->hMenu, MF_STRING, CMD_COVER_FIRST + i, text);
+							g_names[CMD_COVER_FIRST + i] = (LPCWSTR)text;
+						}
+					}
+					else if (nm->id == CMD_TABLE) {
+						// the app's own UI instead of a menu (a real app would show a grid of cells)
+						HMENU grid = ::CreatePopupMenu();
+						::AppendMenuW(grid, MF_STRING, CMD_TABLE_2X2, L"2 x 2 (the app's own popup)");
+						::AppendMenuW(grid, MF_STRING, CMD_TABLE_3X3, L"3 x 3");
+						UINT cmd = ::TrackPopupMenu(grid, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, nm->rcItem.left, nm->rcItem.bottom, 0, hwnd, nullptr);
+						::DestroyMenu(grid);
+						line.Format(L"own UI: %s", cmd == CMD_TABLE_2X2 ? L"2 x 2" : cmd == CMD_TABLE_3X3 ? L"3 x 3" : L"canceled");
+						Log(line);
+						return 1;
+					}
+					return 0;
+				}
 				case RIBN_HEIGHTCHANGED:
 					Log(L"RIBN_HEIGHTCHANGED");
 					Layout(hwnd);
@@ -502,6 +656,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		::ImageList_Destroy(g_large);
 	if (g_small)
 		::ImageList_Destroy(g_small);
+	for (auto m : g_menus)
+		if (m)
+			::DestroyMenu(m);
 	_Module.Term();
 	return 0;
 }
