@@ -1,6 +1,8 @@
 // BreadcrumbDemo: a folder browser over the file system or the registry, with a breadcrumb bar above the folder's
 // contents. The bar asks the demo for what's under a segment (BRCN_GETCHILDREN) and says where the user wants to go
-// (BRCN_NAVIGATE); the demo goes there and sets the bar's path. The log at the bottom shows the notifications.
+// (BRCN_NAVIGATE); the demo goes there and sets the bar's path. Clicking the bar's empty part (or Alt+D, Ctrl+L) edits
+// the path, with suggestions from the demo (BRCN_GETSUGGESTIONS); F4 shows the paths typed before, kept in
+// HKCU\Software\WTLHelper\BreadcrumbDemo. The log at the bottom shows the notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -32,7 +34,7 @@ CAppModule _Module;
 enum : UINT {
 	IDC_CRUMB = 100, IDC_LIST, IDC_LOG,
 	CMD_EXIT = 1000, CMD_FILES, CMD_REGISTRY, CMD_NAV, CMD_UP, CMD_ICON, CMD_ROOTCHEVRON, CMD_HISTORY, CMD_BUTTONS,
-	CMD_DARKMODE, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_CLEARLOG,
+	CMD_DARKMODE, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_CLEARLOG, CMD_EDITING,
 	CMD_REFRESH = 2000, CMD_SEARCH,
 };
 
@@ -44,6 +46,7 @@ static HFONT g_font, g_largeFont;
 static bool g_registry;
 static std::wstring g_path;           // the file system's ("" This PC) or the registry's ("Computer\HKEY_...")
 static int g_folderIcon = -1, g_pcIcon = -1;
+static const wchar_t StateKey[] = L"Software\\WTLHelper\\BreadcrumbDemo";
 
 struct Entry {
 	std::wstring text, name;
@@ -160,6 +163,29 @@ static std::vector<Entry> FileSegments(const std::wstring& path) {
 	return segs;
 }
 
+// a typed path as the demo keeps it: "This PC" is "", '/' is '\', a drive's root ends with '\', no other path does,
+// and each part in the case it has on disk
+static std::wstring FileCanonical(std::wstring text) {
+	std::replace(text.begin(), text.end(), L'/', L'\\');
+	if (!_wcsicmp(text.c_str(), L"This PC"))
+		return L"";
+	if (!IsDrive(text))
+		return text;
+	std::wstring path(1, (wchar_t)towupper(text[0]));
+	path += L":\\";
+	for (auto& part : Split(text.substr(2))) {
+		WIN32_FIND_DATAW fd;
+		HANDLE h = ::FindFirstFileExW(Join(path, part).c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, 0);
+		if (h == INVALID_HANDLE_VALUE) {
+			path = Join(path, part);
+			continue;
+		}
+		::FindClose(h);
+		path = Join(path, fd.cFileName);
+	}
+	return path;
+}
+
 static bool FileExists(const std::wstring& path) {
 	if (path.empty())
 		return true;
@@ -224,6 +250,35 @@ static std::vector<Entry> RegistryChildren(const std::wstring& path) {
 	return entries;
 }
 
+// a typed key: "Computer\\" may be left out, and the hives can be named short (HKCU)
+static std::wstring RegistryCanonical(const std::wstring& text) {
+	static const struct {
+		const wchar_t* shortName;
+		const wchar_t* name;
+	} Short[] = {
+		{ L"HKCR", L"HKEY_CLASSES_ROOT" }, { L"HKCU", L"HKEY_CURRENT_USER" }, { L"HKLM", L"HKEY_LOCAL_MACHINE" },
+		{ L"HKU", L"HKEY_USERS" }, { L"HKCC", L"HKEY_CURRENT_CONFIG" },
+	};
+	auto parts = Split(text);
+	if (parts.empty())
+		return text;
+	if (_wcsicmp(parts[0].c_str(), L"Computer"))
+		parts.insert(parts.begin(), L"Computer");
+	parts[0] = L"Computer";
+	if (parts.size() > 1) {
+		for (auto& s : Short)
+			if (!_wcsicmp(parts[1].c_str(), s.shortName))
+				parts[1] = s.name;
+		for (auto& h : Hives)
+			if (!_wcsicmp(parts[1].c_str(), h.name))
+				parts[1] = h.name;
+	}
+	std::wstring path;
+	for (auto& part : parts)
+		path = path.empty() ? part : path + L'\\' + part;
+	return path;
+}
+
 static std::vector<Entry> RegistrySegments(const std::wstring& path) {
 	std::vector<Entry> segs;
 	for (auto& part : Split(path))
@@ -277,8 +332,30 @@ static bool GoTo(const std::wstring& path) {
 	return true;
 }
 
+static void SaveHistory() {
+	wchar_t text[16384];
+	g_crumb.GetHistory(text, _countof(text));
+	::RegSetKeyValueW(HKEY_CURRENT_USER, StateKey, g_registry ? L"RegistryHistory" : L"FilesHistory", REG_SZ, text,
+		(DWORD)(wcslen(text) + 1) * sizeof(wchar_t));
+}
+
+static void LoadHistory() {
+	wchar_t text[16384]{};
+	DWORD size = sizeof(text);
+	if (::RegGetValueW(HKEY_CURRENT_USER, StateKey, g_registry ? L"RegistryHistory" : L"FilesHistory", RRF_RT_REG_SZ, nullptr,
+		text, &size) != ERROR_SUCCESS)
+		text[0] = 0;
+	g_crumb.SetHistory(text);
+}
+
 static void SetMode(bool registry) {
+	if (g_crumb.IsEditing())
+		g_crumb.EndEdit();
+	if (registry != g_registry)
+		SaveHistory();
 	g_registry = registry;
+	LoadHistory();
+	g_crumb.SetSeparators(registry ? L"\\" : L"\\/");
 	::CheckMenuRadioItem(g_menu, CMD_FILES, CMD_REGISTRY, registry ? CMD_REGISTRY : CMD_FILES, MF_BYCOMMAND);
 	if (registry)
 		GoTo(L"Computer\\HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer");
@@ -375,6 +452,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_ICON, L"Location &Icon");
 	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_ROOTCHEVRON, L"&Root Chevron");
 	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_HISTORY, L"&History Arrow");
+	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_EDITING, L"&Editing");
 	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_BUTTONS, L"&Action Buttons");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 #ifdef DEMO_WTLHELPER
@@ -400,6 +478,7 @@ static void OnCommand(UINT id) {
 		case CMD_ICON: ToggleStyle(id, BRCS_NOICON); break;
 		case CMD_ROOTCHEVRON: ToggleStyle(id, BRCS_NOROOTCHEVRON); break;
 		case CMD_HISTORY: ToggleStyle(id, BRCS_NOHISTORY); break;
+		case CMD_EDITING: ToggleStyle(id, BRCS_NOEDIT); break;
 		case CMD_BUTTONS: {
 			bool on = !(::GetMenuState(g_menu, id, MF_BYCOMMAND) & MF_CHECKED);
 			::CheckMenuItem(g_menu, id, on ? MF_CHECKED : MF_UNCHECKED);
@@ -467,11 +546,44 @@ static LRESULT OnNotify(NMHDR* hdr) {
 		switch (hdr->code) {
 			case BRCN_NAVIGATE: {
 				auto nm = (NMBRCNAVIGATE*)hdr;
-				Log(L"BRCN_NAVIGATE %s %d \"%s\" -> \"%s\"", nm->source == BRCNS_CHILD ? L"child of" : L"segment", nm->index, nm->pszText, nm->pszPath);
-				if (!GoTo(nm->pszPath))
-					Log(L"  not found");
+				static const wchar_t* Sources[] = { L"segment", L"child of", L"typed" };
+				Log(L"BRCN_NAVIGATE %s %d \"%s\" -> \"%s\"", Sources[std::min(nm->source, 2u)], nm->index, nm->pszText, nm->pszPath);
+				std::wstring path = nm->pszPath;
+				if (nm->source == BRCNS_TYPED)
+					path = g_registry ? RegistryCanonical(path) : FileCanonical(path);
+				if (GoTo(path))
+					return 0;
+				// a typed path that isn't there: editing goes on
+				Log(L"  not found");
+				::MessageBeep(MB_ICONWARNING);
+				return 1;
+			}
+			case BRCN_GETSUGGESTIONS: {
+				auto nm = (NMBRCSUGGEST*)hdr;
+				std::wstring parent = nm->pszParent;
+				int count = 0;
+				if (parent.empty()) {
+					// the top level: the drives, or Computer
+					for (auto& e : g_registry ? std::vector<Entry>{ { L"Computer", L"Computer" } } : FileChildren(L""))
+						count += g_crumb.AddSuggestion(e.name.c_str());
+				}
+				else {
+					auto lookup = g_registry ? RegistryCanonical(parent) : FileCanonical(parent);
+					if (!g_registry && lookup.empty())
+						lookup = L"?";   // "This PC\" isn't a folder
+					for (auto& e : Children(lookup))
+						count += g_crumb.AddSuggestion((parent + e.name).c_str());
+				}
+				Log(L"BRCN_GETSUGGESTIONS \"%s\" under \"%s\": %d", nm->pszText, nm->pszParent, count);
 				return 0;
 			}
+			case BRCN_BEGINEDIT:
+				Log(L"BRCN_BEGINEDIT");
+				return 0;
+			case BRCN_ENDEDIT:
+				Log(L"BRCN_ENDEDIT");
+				SaveHistory();   // a path typed may have gone into it
+				return 0;
 			case BRCN_GETCHILDREN: {
 				auto nm = (NMBRCCHILDREN*)hdr;
 				int count = 0;
@@ -564,11 +676,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			return 0;
 		}
 		case WM_DESTROY:
+			SaveHistory();
 			::PostQuitMessage(0);
 			return 0;
 	}
 	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
+
+// the bar's keys wherever the focus is: Alt+D and Ctrl+L edit the path, F4 drops down its history
+struct KeyFilter : CMessageFilter {
+	BOOL PreTranslateMessage(MSG* pMsg) override {
+		if (!g_crumb.IsWindow() || pMsg->hwnd == g_crumb.GetEditControl())
+			return FALSE;
+		bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
+		if ((pMsg->message == WM_SYSKEYDOWN && pMsg->wParam == 'D') || (pMsg->message == WM_KEYDOWN && pMsg->wParam == 'L' && ctrl))
+			return g_crumb.BeginEdit();
+		if (pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_F4 && !ctrl)
+			return g_crumb.ShowHistory();
+		return FALSE;
+	}
+};
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow) {
 	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -594,8 +721,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow
 	::ShowWindow(hwnd, nCmdShow);
 
 	CMessageLoop loop;
+	KeyFilter keys;
 	_Module.AddMessageLoop(&loop);
+	loop.AddMessageFilter(&keys);
 	loop.Run();
+	loop.RemoveMessageFilter(&keys);
 	_Module.RemoveMessageLoop();
 
 	if (g_font)

@@ -101,6 +101,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\BreadcrumbCtrl.cpp" />
+    <ClCompile Include="src\BreadcrumbEdit.cpp" />
     <ClCompile Include="src\BreadcrumbList.cpp" />
     <ClCompile Include="src\BreadcrumbModel.cpp" />
     <ClCompile Include="src\BreadcrumbPaint.cpp" />

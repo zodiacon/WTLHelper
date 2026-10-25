@@ -85,18 +85,23 @@ void CBreadcrumbCtrl::OpenDropDown(const BrcHit& from, bool pressed) {
 		SetFocus();   // the keys come here and go on to the list
 	d.opened = from;
 	d.openedIndex = index;
+	d.listKind = BrcList::Children;
 	SetHot(from);
 	Invalidate(FALSE);
 
-	if (!d.list)
-		d.list = std::make_unique<BrcDropList>(this);
-	if (!d.list->IsWindow())
-		d.list->Create(m_hWnd, nullptr, nullptr, WS_POPUP | WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
-
+	EnsureList();
 	RECT part = from.part == BrcPart::Chevron ? d.layout.chevron[index] : d.layout.overflow;
 	RECT under{ part.left, d.layout.box.top, part.right, d.layout.box.bottom };
 	::MapWindowPoints(m_hWnd, nullptr, (POINT*)&under, 2);
 	d.list->Show(std::move(rows), under, pressed);
+}
+
+void CBreadcrumbCtrl::EnsureList() {
+	auto& d = *m_Data;
+	if (!d.list)
+		d.list = std::make_unique<BrcDropList>(this);
+	if (!d.list->IsWindow())
+		d.list->Create(m_hWnd, nullptr, nullptr, WS_POPUP | WS_CLIPSIBLINGS, WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
 }
 
 void CBreadcrumbCtrl::CloseDropDown() {
@@ -109,7 +114,14 @@ void CBreadcrumbCtrl::DropPicked(int tag) {
 	auto& d = *m_Data;
 	int index = d.openedIndex;
 	d.list->Close();
-	if (tag >= BrcTagChild)
+	if (tag >= BrcTagText) {
+		// a suggestion or a path typed before: as if typed
+		if (tag - BrcTagText < (int)d.texts.size() && d.editing) {
+			SetText(d.texts[tag - BrcTagText], false);
+			Commit();
+		}
+	}
+	else if (tag >= BrcTagChild)
 		Navigate(BRCNS_CHILD, index, tag - BrcTagChild);
 	else if (tag >= 0)
 		Navigate(BRCNS_SEGMENT, tag, -1);
@@ -117,12 +129,14 @@ void CBreadcrumbCtrl::DropPicked(int tag) {
 
 void CBreadcrumbCtrl::DropClosed() {
 	auto& d = *m_Data;
+	auto kind = d.listKind;
+	d.listKind = BrcList::None;
 	d.opened = {};
 	d.openedIndex = -2;
 	if (!IsWindow())
 		return;
 	Invalidate(FALSE);
-	if (!d.switching) {
+	if (kind == BrcList::Children && !d.switching) {
 		HWND f = d.focusBefore;
 		d.focusBefore = nullptr;
 		if (f && ::IsWindow(f) && ::GetFocus() == m_hWnd)
@@ -154,13 +168,19 @@ int BrcDropList::Scale(int dips) const {
 	return m_Owner->Scale(dips);
 }
 
-void BrcDropList::Show(std::vector<BrcRow> rows, const RECT& under, bool pressed) {
+void BrcDropList::Show(std::vector<BrcRow> rows, const RECT& under, bool pressed, bool capture, int fixedWidth) {
 	auto* o = m_Owner;
+	if (m_Open && m_Capture && !capture && GetCapture() == m_hWnd) {
+		m_Closing = true;
+		ReleaseCapture();
+		m_Closing = false;
+	}
 	m_Rows = std::move(rows);
 	m_Hot = m_Pressed = m_ThumbGrab = -1;
 	m_Scroll = 0;
 	m_Typed.clear();
 	m_FromOpener = pressed;
+	m_Capture = capture;
 	// taking the capture sends a WM_MOUSEMOVE where the mouse rests, maybe over another chevron
 	::GetCursorPos(&m_Mouse);
 
@@ -212,6 +232,8 @@ void BrcDropList::Show(std::vector<BrcRow> rows, const RECT& under, bool pressed
 
 	int width = m_TextX + text + Scale(28) + m_Scrollbar + 2 * m_Border;
 	width = std::clamp(width, Scale(160), std::max(Scale(160), (int)(work.right - work.left) / 2));
+	if (fixedWidth > 0)
+		width = std::min(fixedWidth, (int)(work.right - work.left));
 	const int height = m_Height + 2 * m_Border;
 	const int x = std::clamp((int)under.left, (int)work.left, std::max((int)work.left, (int)work.right - width));
 	const int top = down ? (int)under.bottom : (int)under.top - height;
@@ -227,7 +249,8 @@ void BrcDropList::Show(std::vector<BrcRow> rows, const RECT& under, bool pressed
 	SetWindowPos(HWND_TOP, x, top, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 	::InvalidateRect(m_hWnd, nullptr, FALSE);
 	m_Open = true;
-	SetCapture();
+	if (m_Capture)
+		SetCapture();
 }
 
 void BrcDropList::Close() {
@@ -235,7 +258,7 @@ void BrcDropList::Close() {
 		return;
 	m_Open = false;
 	m_Closing = true;
-	if (GetCapture() == m_hWnd)
+	if (m_Capture && GetCapture() == m_hWnd)
 		ReleaseCapture();
 	ShowWindow(SW_HIDE);
 	m_Closing = false;
@@ -310,7 +333,7 @@ void BrcDropList::Move(int from, int step) {
 		SetHot(target, true);
 }
 
-bool BrcDropList::KeyDown(UINT vk) {
+void BrcDropList::MoveHot(UINT vk) {
 	const int page = std::max(1, m_Height / std::max(1, m_RowHeight) - 1);
 	switch (vk) {
 		case VK_DOWN: Move(m_Hot, 1); break;
@@ -319,6 +342,19 @@ bool BrcDropList::KeyDown(UINT vk) {
 		case VK_END: Move((int)m_Rows.size(), -1); break;
 		case VK_NEXT: Move(m_Hot, page); break;
 		case VK_PRIOR: Move(m_Hot < 0 ? (int)m_Rows.size() : m_Hot, -page); break;
+	}
+}
+
+bool BrcDropList::KeyDown(UINT vk) {
+	switch (vk) {
+		case VK_DOWN:
+		case VK_UP:
+		case VK_HOME:
+		case VK_END:
+		case VK_NEXT:
+		case VK_PRIOR:
+			MoveHot(vk);
+			break;
 		case VK_RETURN:
 			if (Pickable(m_Hot))
 				m_Owner->DropPicked(m_Rows[m_Hot].tag);
@@ -389,6 +425,8 @@ LRESULT BrcDropList::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		SetHot(Pickable(row) ? row : -1, false);
 		return 0;
 	}
+	if (!m_Capture)
+		return 0;
 	// outside: onto another chevron of the bar, its list opens instead
 	POINT cp = pt;
 	ClientToScreen(&cp);
@@ -419,6 +457,8 @@ LRESULT BrcDropList::OnButtonDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&
 		}
 		return 0;
 	}
+	if (!m_Capture)
+		return 0;
 	// outside: it closes, as a menu does, and the click is eaten; but on the bar, away from what opened the list, the
 	// bar gets it (another segment)
 	POINT cp = pt;
@@ -452,7 +492,7 @@ LRESULT BrcDropList::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 }
 
 LRESULT BrcDropList::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
-	if (m_Open && !m_Closing)
+	if (m_Open && m_Capture && !m_Closing)
 		Close();
 	return 0;
 }

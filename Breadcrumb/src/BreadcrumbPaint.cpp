@@ -135,13 +135,19 @@ void CBreadcrumbCtrl::Paint(WTL::CDCHandle dc) {
 
 	PaintNav(dc, c);
 	if (!::IsRectEmpty(&l.box)) {
-		RoundFill(dc, l.box, c.crBox, d.hotBox || d.opened.part != BrcPart::None ? c.crHotBorder : c.crBorder, Scale(8));
+		RoundFill(dc, l.box, c.crBox, d.editing || d.hotBox || d.opened.part != BrcPart::None ? c.crHotBorder : c.crBorder, Scale(8));
+		if (d.editing) {
+			// the focus: an accent line along the box's bottom, as Windows 11's edit boxes
+			const int radius = Scale(4), thick = std::max(2, Scale(2));
+			FillSolid(dc, { l.box.left + radius, l.box.bottom - thick, l.box.right - radius, l.box.bottom }, c.crAccent);
+		}
 		// the location's icon: the last segment's
 		if (m_Images && !::IsRectEmpty(&l.icon) && !d.segments.empty() && d.segments.back().image >= 0)
 			::ImageList_Draw(m_Images, d.segments.back().image, dc, l.icon.left, l.icon.top, ILD_TRANSPARENT);
 		const int saved = dc.SaveDC();
 		dc.IntersectClipRect(l.box.left + 1, l.box.top + 1, l.box.right - 1, l.box.bottom - 1);
-		PaintSegments(dc, c);
+		if (!d.editing)   // the edit box is over them
+			PaintSegments(dc, c);
 		PaintButtons(dc, c);
 		dc.RestoreDC(saved);
 	}
@@ -235,8 +241,10 @@ void CBreadcrumbCtrl::PaintButtons(WTL::CDCHandle dc, const BRCCOLORS& c) {
 	auto& l = d.layout;
 	const int width = std::max(1, Scale(1));
 	if (!::IsRectEmpty(&l.history)) {
-		// the typed paths' list comes with editing (a later phase)
-		Chevron(dc, (l.history.left + l.history.right) / 2, (l.history.top + l.history.bottom) / 2, Scale(8), VK_DOWN, c.crDimText, width);
+		BrcHit part{ BrcPart::History };
+		PaintButtonBack(dc, l.history, part, c);
+		Chevron(dc, (l.history.left + l.history.right) / 2, (l.history.top + l.history.bottom) / 2, Scale(8), VK_DOWN,
+			d.history.Paths().empty() ? c.crDimText : c.crText, width);
 	}
 	for (int i = 0; i < (int)d.buttons.size() && i < (int)l.actions.size(); i++) {
 		auto& b = d.buttons[i];

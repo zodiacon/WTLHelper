@@ -3,10 +3,11 @@
 // Breadcrumb bar: the path to a location as a row of segments ("This PC > C: > Users > pavel"), as in Explorer's
 // address bar. Clicking a segment goes there; the chevron after it drops down a list of what's under it (the app adds
 // those when BRCN_GETCHILDREN asks), and picking one goes there. When the bar is too narrow the leftmost segments fold
-// into the chevron before the first one, whose list then shows them. The app owns the hierarchy: the control only
-// says where the user wants to go (BRCN_NAVIGATE), and the app shows it with SetPath. The location's icon is at the
-// left, and the app's buttons (Refresh) at the box's right. The API follows the common controls: C-style structures
-// and WM_NOTIFY codes (BRCN_*) sent to the parent.
+// into the chevron before the first one, whose list then shows them. Clicking the box's empty part edits the path as
+// text, with suggestions as the user types (BRCN_GETSUGGESTIONS) and the paths typed before under the history arrow.
+// The app owns the hierarchy: the control only says where the user wants to go (BRCN_NAVIGATE), and the app shows it
+// with SetPath. The location's icon is at the left, and the app's buttons (Refresh) at the box's right. The API
+// follows the common controls: C-style structures and WM_NOTIFY codes (BRCN_*) sent to the parent.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -30,6 +31,7 @@ constexpr wchar_t WC_BREADCRUMB[] = L"WC_Breadcrumb";
 #define BRCS_NOICON          0x0004   // no location icon
 #define BRCS_NOROOTCHEVRON   0x0008   // no chevron before the first segment, unless segments fold into it
 #define BRCS_NOHISTORY       0x0010   // no history arrow at the box's right
+#define BRCS_NOEDIT          0x0020   // the path can't be edited as text (no history arrow either)
 
 // ---- Segments and children ----------------------------------------------------------
 
@@ -79,6 +81,7 @@ struct BRCCOLORS {
 	COLORREF crPressedBack;           // pressed, or its list open
 	COLORREF crListBack;              // the drop-down lists
 	COLORREF crListHotBack;           // a list's row under the mouse or the keys
+	COLORREF crAccent;                // the box's frame while the path is edited
 };
 
 // ---- Notifications -------------------------------------------------------------
@@ -88,16 +91,21 @@ struct BRCCOLORS {
 #define BRCN_GETCHILDREN     (BRCN_FIRST - 1)   // NMBRCCHILDREN; a list drops down: AddChild what's under the segment
 #define BRCN_BUTTONCLICK     (BRCN_FIRST - 2)   // NMBRCBUTTON; non-zero: done, no WM_COMMAND
 #define BRCN_HEIGHTCHANGED   (BRCN_FIRST - 3)   // NMHDR; GetIdealHeight changed (DPI, font): lay the window out again
+#define BRCN_GETSUGGESTIONS  (BRCN_FIRST - 4)   // NMBRCSUGGEST; the user types under a new parent: AddSuggestion its items
+#define BRCN_BEGINEDIT       (BRCN_FIRST - 5)   // NMHDR; the path is about to be edited: non-zero vetoes (SetEditText may set the text)
+#define BRCN_ENDEDIT         (BRCN_FIRST - 6)   // NMHDR; editing ended
 
 // where a BRCN_NAVIGATE comes from
 #define BRCNS_SEGMENT        0        // a segment clicked, or picked from the folded ones
 #define BRCNS_CHILD          1        // picked from a segment's list (index: that segment's, -1 the root chevron's)
+#define BRCNS_TYPED          2        // typed, or picked from the suggestions or the history (index -1, pszPath the text):
+                                      // non-zero rejects it, and editing goes on (the app tells the user why)
 
 struct NMBRCNAVIGATE {
 	NMHDR   hdr;
 	UINT    source;                   // BRCNS_*
 	int     index;                    // the segment's
-	LPCWSTR pszPath;                  // the path text there: the segments' names up to it (and the child's)
+	LPCWSTR pszPath;                  // the path text there: the segments' names up to it (and the child's), or what was typed
 	LPCWSTR pszText;                  // the segment's or the child's text
 	LPARAM  lParam;                   // the segment's or the child's
 };
@@ -109,6 +117,15 @@ struct NMBRCCHILDREN {
 	int     index;                    // the segment's; -1: the root's (the chevron before the first segment)
 	LPCWSTR pszPath;                  // the path text there
 	LPARAM  lParam;                   // the segment's
+};
+
+// While it's sent, the app calls AddSuggestion for the items under the parent, as whole paths ("C:\Users\" -> "C:\Users\
+// Public"); the control keeps those that start with what's typed (after the history's) and asks again only when the
+// parent changes. The parent ends with a separator, or is empty for the top level ("C" typed).
+struct NMBRCSUGGEST {
+	NMHDR   hdr;
+	LPCWSTR pszText;                  // what's typed
+	LPCWSTR pszParent;                // its part up to the last separator
 };
 
 struct NMBRCBUTTON {
@@ -161,6 +178,14 @@ public:
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_BEFOREPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		MESSAGE_HANDLER(WM_COMMAND, OnCommand)
+		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
+	ALT_MSG_MAP(1)   // the edit box
+		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnEditChar)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnEditGetDlgCode)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnEditKillFocus)
+		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 	END_MSG_MAP()
 
 	// ---- The path ----------------------------------------------------------------------------------
@@ -178,6 +203,28 @@ public:
 	BOOL    AddChild(const BRCITEM* item);
 	BOOL    AddChild(LPCWSTR text, int image = -1, LPARAM lParam = 0, LPCWSTR name = nullptr);
 	void    CloseDropDown();
+
+	// ---- Editing -------------------------------------------------------------------------------------
+	//
+	// Clicking the box's empty part or the icon edits the path as text (an app's Alt+D or Ctrl+L calls BeginEdit).
+	// Enter sends BRCN_NAVIGATE (BRCNS_TYPED); Escape, or the focus going elsewhere, ends it. As the user types, the
+	// suggestions drop down: the history's paths that start with the text, then the app's (BRCN_GETSUGGESTIONS); Up and
+	// Down go through them, Tab completes. The history arrow (or F4) drops down the paths typed before. A typed path
+	// the app accepted goes first in the history, which GetHistory/SetHistory keep between runs (a path a line).
+
+	BOOL    BeginEdit();                                          // FALSE: BRCS_NOEDIT, or BRCN_BEGINEDIT vetoed
+	void    EndEdit();                                            // the focus goes back where it was
+	bool    IsEditing() const;
+	// The text to edit: by default the path text (or the last segment's text if the path text is empty). Set during
+	// BRCN_BEGINEDIT, or before; SetPath forgets it. While editing: replaces what's typed.
+	void    SetEditText(LPCWSTR text);
+	HWND    GetEditControl() const;                               // the edit box (nullptr before the window is made)
+	// While BRCN_GETSUGGESTIONS is sent: one path. FALSE at any other time.
+	BOOL    AddSuggestion(LPCWSTR path);
+	BOOL    ShowHistory();                                        // edits, and drops down the history (FALSE if it's empty)
+	void    AddToHistory(LPCWSTR path);                           // first
+	int     GetHistory(LPWSTR text, int cch) const;               // a path a line; the length with the terminator
+	void    SetHistory(LPCWSTR text);                             // nullptr: empty
 
 	// ---- Buttons -------------------------------------------------------------------------------------
 
@@ -219,6 +266,12 @@ private:
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCommand(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCtlColorEdit(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditKillFocus(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -234,7 +287,17 @@ private:
 	void    ClickButton(int index);
 	std::wstring PathTo(int count) const;
 
+	// editing (BreadcrumbEdit.cpp)
+	void    EndEditing(bool restoreFocus);
+	void    PlaceEdit();
+	void    SetText(const std::wstring& text, bool selectAll);   // no suggestions for it
+	std::wstring EditText() const;
+	void    Suggest(bool force);                                  // the suggestions for what's typed (force: open with nothing typed)
+	void    ShowTextList(const std::vector<std::wstring>& texts, int kind);
+	void    Commit();
+
 	// the drop-down lists (BreadcrumbList.cpp)
+	void    EnsureList();
 	void    OpenDropDown(const BrcHit& from, bool pressed);       // pressed: the button is down (released on a row picks it)
 	void    DropPicked(int tag);
 	void    DropClosed();
@@ -248,6 +311,9 @@ private:
 	void    PaintButtonBack(WTL::CDCHandle dc, const RECT& rc, const BrcHit& part, const BRCCOLORS& c);
 
 	std::unique_ptr<BrcData> m_Data;
+	ATL::CContainedWindowT<WTL::CEdit> m_Edit;
+	WTL::CBrush m_EditBrush;
+	COLORREF m_EditBrushColor = CLR_INVALID;
 	HIMAGELIST m_Images = nullptr;
 	HWND    m_Owner = nullptr;
 

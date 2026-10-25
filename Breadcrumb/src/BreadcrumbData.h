@@ -15,9 +15,10 @@ struct BrcRow {
 	int  tag = -1;             // the control's: what picking it does
 };
 
-// A list dropped down from the bar (a segment's children, the folded segments). It doesn't take the activation: the
-// control keeps the focus and passes it the keys, and the list takes the mouse capture as a menu does, so a click
-// anywhere else closes it. One window, shown again for each list.
+// A list dropped down from the bar (a segment's children, the folded segments, the suggestions while editing). It
+// doesn't take the activation: the control (or its edit box) keeps the focus and passes it the keys. A segment's list
+// takes the mouse capture as a menu does, so a click anywhere else closes it; the suggestions don't, as the user goes
+// on typing (the edit box losing the focus closes them). One window, shown again for each list.
 class BrcDropList : public ATL::CWindowImpl<BrcDropList> {
 public:
 	DECLARE_WND_CLASS_EX(L"BrcDropList", CS_DROPSHADOW, -1)
@@ -42,13 +43,17 @@ public:
 	END_MSG_MAP()
 
 	// under: the screen rect it drops from (below it, or above if there's no room); pressed: the mouse button is down
-	// (from the press that opened it: released on a row, that row is picked)
-	void Show(std::vector<BrcRow> rows, const RECT& under, bool pressed);
+	// (from the press that opened it: released on a row, that row is picked); capture: as a menu; width: 0 to fit
+	void Show(std::vector<BrcRow> rows, const RECT& under, bool pressed, bool capture = true, int width = 0);
 	void Close();                                // hidden; the control is told (DropClosed)
 	bool IsOpen() const {
 		return m_Open;
 	}
 	bool KeyDown(UINT vk);                       // the keys the control gets meanwhile; true if used
+	void MoveHot(UINT vk);                       // Up, Down, Page Up, Page Down, Home, End
+	int  HotTag() const {                        // -1 if no row is
+		return m_Hot >= 0 && m_Hot < (int)m_Rows.size() ? m_Rows[m_Hot].tag : -1;
+	}
 	void Char(wchar_t ch);                       // type to find a row
 	void Wheel(int delta);
 	void Invalidate() {
@@ -96,6 +101,7 @@ private:
 	bool m_FromOpener = false;                    // the opening press is still down
 	bool m_Open = false;
 	bool m_Closing = false;
+	bool m_Capture = true;
 	int  m_ThumbGrab = -1;                        // the thumb dragged: the mouse's offset into it
 	POINT m_Mouse{};                              // screen: a WM_MOUSEMOVE where the mouse already was isn't a move
 	std::wstring m_Typed;
@@ -103,6 +109,9 @@ private:
 };
 
 // ---- The control's state -----------------------------------------------------------------------------
+
+// what the drop-down list shows
+enum class BrcList : uint8_t { None, Children, Suggestions, History };
 
 struct BrcChild {
 	std::wstring text, name;
@@ -142,10 +151,26 @@ struct BrcData {
 	HWND focusBefore = nullptr;                   // given back when the list closes
 	bool switching = false;                       // one list closed for another to open: the focus stays
 	bool hotBox = false;                          // the mouse in the box: its frame drawn hot
+	BrcList listKind = BrcList::None;             // what the open list shows
+
+	// editing
+	bool editing = false;
+	bool committing = false;                      // in BRCN_NAVIGATE for what's typed: a message box taking the focus doesn't end it
+	bool settingText = false;                     // the edit box's text set, not typed: no suggestions
+	std::wstring editText;                        // the app's (SetEditText); empty: the path text
+	HWND editFocusBefore = nullptr;
+	BrcRecent history;
+	std::vector<std::wstring> candidates;         // the app's suggestions under candidatesParent
+	std::wstring candidatesParent;
+	bool haveCandidates = false;
+	std::vector<std::wstring>* collectingSuggestions = nullptr;
+	std::vector<std::wstring> texts;              // the suggestions' or the history's list
 };
 
-// the list's tags: a folded segment's index, or a child's (BrcTagChild + its index)
+// the list's tags: a folded segment's index, a child's (BrcTagChild + its index), or a suggestion's or a history path's
+// (BrcTagText + its index in BrcData::texts)
 constexpr int BrcTagChild = 0x10000;
+constexpr int BrcTagText = 0x20000;
 
 // ---- Drawing helpers ------------------------------------------------------------------------------
 

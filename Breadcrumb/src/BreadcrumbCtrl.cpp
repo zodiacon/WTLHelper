@@ -41,7 +41,7 @@ namespace {
 
 // ---- Construction ------------------------------------------------------------------
 
-CBreadcrumbCtrl::CBreadcrumbCtrl() : m_Data(std::make_unique<BrcData>()) {
+CBreadcrumbCtrl::CBreadcrumbCtrl() : m_Data(std::make_unique<BrcData>()), m_Edit(this, 1) {
 }
 
 CBreadcrumbCtrl::~CBreadcrumbCtrl() {
@@ -53,6 +53,11 @@ CBreadcrumbCtrl::~CBreadcrumbCtrl() {
 
 LRESULT CBreadcrumbCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
+	ModifyStyle(0, WS_CLIPCHILDREN);
+	// a real "Edit" (CContainedWindow::Create would make an "ATL:Edit" superclass, which the system's accessibility
+	// doesn't know), shown while editing
+	HWND edit = ::CreateWindowExW(0, WC_EDITW, nullptr, WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
+	m_Edit.SubclassWindow(edit);
 	UpdateFonts();
 	UpdateMetrics();
 	m_LastHeight = GetIdealHeight();
@@ -83,6 +88,8 @@ LRESULT CBreadcrumbCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CBreadcrumbCtrl::OnStyleChanged(UINT, WPARAM wParam, LPARAM, BOOL&) {
 	if (wParam == GWL_STYLE) {   // the parts shown
+		if (GetStyle() & BRCS_NOEDIT)
+			EndEditing(true);
 		CloseDropDown();
 		m_Data->hot = m_Data->pressed = {};
 		Changed(false);
@@ -125,6 +132,8 @@ void CBreadcrumbCtrl::UpdateFonts() {
 	::GetObjectW(m_hFont, sizeof(lf), &lf);
 	lf.lfWeight = FW_BOLD;
 	m_hBold = ::CreateFontIndirectW(&lf);
+	if (m_Edit.IsWindow())
+		m_Edit.SetFont(m_hFont);
 }
 
 void CBreadcrumbCtrl::UpdateMetrics() {
@@ -190,6 +199,8 @@ LRESULT CBreadcrumbCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bHan
 
 LRESULT CBreadcrumbCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	Invalidate();
+	if (m_Edit.IsWindow())
+		m_Edit.Invalidate();
 	if (m_Data->list)
 		m_Data->list->Invalidate();
 	bHandled = FALSE;
@@ -225,6 +236,8 @@ void CBreadcrumbCtrl::SetColors(const BRCCOLORS* colors) {
 		m_Colors = *colors;
 	if (IsWindow())
 		Invalidate();
+	if (m_Edit.IsWindow())
+		m_Edit.Invalidate();
 	if (m_Data->list)
 		m_Data->list->Invalidate();
 }
@@ -246,6 +259,7 @@ BRCCOLORS CBreadcrumbCtrl::GetColors() const {
 	c.crPressedBack = Blend(c.crBox, text, dark ? 20 : 15);
 	c.crListBack = dark ? Blend(window, text, 7) : window;
 	c.crListHotBack = Blend(c.crListBack, highlight, dark ? 32 : 16);
+	c.crAccent = dark ? Blend(highlight, RGB(255, 255, 255), 30) : highlight;
 	return c;
 }
 
@@ -268,6 +282,7 @@ BOOL CBreadcrumbCtrl::SetPath(const BRCITEM* items, int count) {
 		d.segments.push_back(std::move(s));
 	}
 	d.hot = d.pressed = {};
+	d.editText.clear();   // the app's text was for the path it replaces
 	Changed(true);
 	return TRUE;
 }
@@ -403,13 +418,15 @@ void CBreadcrumbCtrl::EnsureLayout() {
 	parts.up = !(style & BRCS_NOUP);
 	parts.icon = !(style & BRCS_NOICON);
 	parts.rootChevron = !(style & BRCS_NOROOTCHEVRON);
-	parts.history = !(style & BRCS_NOHISTORY);
+	parts.history = !(style & (BRCS_NOHISTORY | BRCS_NOEDIT));
 	parts.actions = (int)d.buttons.size();
 	auto m = d.m;
 	if (rc.bottom > 0)
 		m.height = rc.bottom;   // the box fills the window's height
 	d.layout = BrcLayoutBar(d.segments, parts, rc.right, m);
 	d.dirty = false;
+	if (d.editing)
+		PlaceEdit();
 }
 
 // ---- Mouse ---------------------------------------------------------------------------------------
@@ -426,8 +443,14 @@ BrcHit CBreadcrumbCtrl::HitTest(POINT pt) {
 			if (m_Data->buttons[hit.index].state & BRCBS_DISABLED)
 				hit = {};
 			break;
+		case BrcPart::Empty:
+		case BrcPart::Icon:
+		case BrcPart::History:
+			if (GetStyle() & BRCS_NOEDIT)
+				hit = {};
+			break;
 		default:
-			hit = {};   // the history and editing come with the next phases
+			hit = {};   // back, forward and up come with the history (a later phase)
 			break;
 	}
 	return hit;
@@ -483,6 +506,16 @@ LRESULT CBreadcrumbCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 			SetHot(hit);
 			SetCapture();
 			Invalidate(FALSE);
+			break;
+		case BrcPart::Empty:
+		case BrcPart::Icon:
+			BeginEdit();
+			break;
+		case BrcPart::History:
+			if (d.list && d.list->IsOpen() && d.listKind == BrcList::History)
+				d.list->Close();
+			else
+				ShowHistory();
 			break;
 		default:
 			break;
