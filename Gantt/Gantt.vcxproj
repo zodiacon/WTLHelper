@@ -95,10 +95,14 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\Gantt.h" />
+    <ClInclude Include="src\GanttData.h" />
     <ClInclude Include="src\GanttModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\GanttCtrl.cpp" />
     <ClCompile Include="src\GanttModel.cpp" />
+    <ClCompile Include="src\GanttPaint.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

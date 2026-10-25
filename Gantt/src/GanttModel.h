@@ -158,6 +158,9 @@ public:
 	// Moves the tasks after id by links that start before those links allow, later (never earlier), and theirs in
 	// turn; the tasks moved.
 	std::vector<UINT> PushSuccessors(UINT id);
+	// Every task that starts before its links allow, moved later (never earlier), in the links' order (each after
+	// those before it: a task that didn't move still holds back the ones after it); the tasks moved.
+	std::vector<UINT> Schedule();
 
 	State Save() const;
 	void Restore(const State& state);

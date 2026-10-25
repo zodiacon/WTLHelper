@@ -465,6 +465,36 @@ std::vector<UINT> GntProject::PushSuccessors(UINT id) {
 	return moved;
 }
 
+std::vector<UINT> GntProject::Schedule() {
+	// the tasks in the links' order (Kahn's): each when all those before it are placed
+	std::unordered_map<UINT, int> before;
+	for (auto& t : m_Tasks)
+		if (!t.summary)
+			before[t.id] = 0;
+	for (auto& l : m_Links)
+		before[l.to]++;
+	std::vector<UINT> ready, moved;
+	for (auto& t : m_Tasks)
+		if (!t.summary && before[t.id] == 0)
+			ready.push_back(t.id);
+	for (size_t q = 0; q < ready.size(); q++) {
+		const UINT id = ready[q];
+		auto t = Find(id);
+		const GntTime e = EarliestStart(id);
+		if (t && t->start < e) {
+			t->start = e;
+			t->finish = Finish(*t);
+			moved.push_back(id);
+		}
+		for (auto& l : m_Links)
+			if (l.from == id && --before[l.to] == 0)
+				ready.push_back(l.to);
+	}
+	if (!moved.empty())
+		Recompute();
+	return moved;
+}
+
 GntProject::State GntProject::Save() const {
 	return { m_Tasks, m_Links };
 }

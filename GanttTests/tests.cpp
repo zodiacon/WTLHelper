@@ -263,6 +263,24 @@ TEST(Links) {
 	q.AddLink({ 1, 2, GntLinkType::FinishFinish });
 	CHECK_INT(q.EarliestStart(2), At(-3, 8));   // to finish with it: the Friday before
 	CHECK(q.PushSuccessors(1).empty());        // never earlier
+
+	// the whole project: a task that doesn't move (it may start with a milestone) still holds back the ones after it
+	GntProject r;
+	r.Add(Task(1, At(0, 8), 0));         // a milestone
+	r.Add(Task(2, At(0, 8), 2 * Day));
+	r.Add(Task(3, At(0, 8), Day));
+	r.Add(Task(4, At(0, 8), Day));
+	r.AddLink({ 1, 2 });
+	r.AddLink({ 2, 3 });
+	r.AddLink({ 2, 4 });
+	r.AddLink({ 3, 4 });
+	CHECK(r.PushSuccessors(1).empty());   // 2 needn't move: the push stops there
+	auto scheduled = r.Schedule();
+	CHECK(scheduled == std::vector<UINT>({ 3, 4 }));
+	CHECK_INT(r.Find(2)->start, At(0, 8));
+	CHECK_INT(r.Find(3)->start, At(2, 8));
+	CHECK_INT(r.Find(4)->start, At(3, 8));   // after 3, the later of its two
+	CHECK(r.Schedule().empty());
 }
 
 TEST(Bars) {
