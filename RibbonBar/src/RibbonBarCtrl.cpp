@@ -48,6 +48,10 @@ LRESULT CRibbonBarCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
 	ModifyStyle(0, WS_CLIPCHILDREN);
 	m_Data->main.hwnd = m_hWnd;
+	m_hTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+		0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
+	::SendMessage(m_hTip, TTM_SETMAXTIPWIDTH, 0, Scale(320));    // a description wraps
+	AddTipTool(m_hWnd);
 	UpdateFonts();
 	UpdateMetrics();
 	m_LastHeight = GetIdealHeight();
@@ -64,6 +68,7 @@ LRESULT CRibbonBarCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CRibbonBarCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	ExitKeyMode(false);
 	HidePopups(0);
+	DisconnectAccessible(m_Data->acc);
 	DestroyHidden();
 	bHandled = FALSE;
 	return 0;
@@ -89,6 +94,8 @@ HWND CRibbonBarCtrl::Owner() const {
 }
 
 LRESULT CRibbonBarCtrl::OnForward(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
+	if (uMsg == WM_NOTIFY && TipNotify((NMHDR*)lParam))
+		return 0;
 	// a hosted window's notifications and colors are the parent's to answer
 	return ::SendMessage(GetParent(), uMsg, wParam, lParam);
 }
@@ -276,6 +283,7 @@ void CRibbonBarCtrl::EnsureLayout() {
 		}
 	d.layout = false;
 	PlaceWindows();
+	NotifyAccessible(m_hWnd, EVENT_OBJECT_REORDER, CHILDID_SELF);
 }
 
 void CRibbonBarCtrl::LayoutSurface(RibSurface& s) {
@@ -438,6 +446,11 @@ void CRibbonBarCtrl::UserSelectTab(int visible) {
 	d.main.hot = d.main.pressed = {};
 	d.main.scroll = 0;
 	Changed(false);
+	RibKeyTarget tab;
+	tab.kind = RibKeyTarget::Kind::Tab;
+	tab.index = visible;
+	tab.hwnd = m_hWnd;
+	NotifyAccessible(m_hWnd, EVENT_OBJECT_SELECTION, AccChildId(tab));
 	NMRIBTAB nm{};
 	nm.id = d.tabs[d.selected].id;
 	FireNotify(&nm.hdr, RIBN_TABCHANGED);
@@ -479,7 +492,10 @@ void CRibbonBarCtrl::SetHotTab(int tab) {
 	auto& d = *m_Data;
 	if (tab == d.hotTab)
 		return;
+	bool button = tab == RibData::MinimizeButton || d.hotTab == RibData::MinimizeButton;
 	d.hotTab = tab;
+	if (button)
+		UpdateTip(m_hWnd);
 	RECT row;
 	GetClientRect(&row);
 	row.bottom = m_TabHeight;
@@ -674,8 +690,11 @@ BOOL CRibbonBarCtrl::SetItemState(UINT id, UINT state, UINT mask) {
 		hidden = hidden || ((s ^ item.state) & RibStateHidden);
 		item.state = s;
 	});
-	if (changed)
+	if (changed) {
 		Changed(hidden);   // shown or hidden: the groups shrink differently (a window enabled: placed again)
+		if (!hidden)
+			NotifyItemState(id);
+	}
 	return found;
 }
 
@@ -730,6 +749,25 @@ BOOL CRibbonBarCtrl::SetItemMenu(UINT id, HMENU menu) {
 		found = true;
 	});
 	return found;
+}
+
+void CRibbonBarCtrl::NotifyItemState(UINT id) {
+	auto& d = *m_Data;
+	if (!d.acc && std::none_of(d.popups.begin(), d.popups.end(), [](auto& p) { return p->acc != nullptr; }))
+		return;
+	for (HWND hwnd : { m_hWnd }) {
+		auto kids = AccChildren(hwnd);
+		for (size_t k = 0; k < kids.size(); k++)
+			if (auto item = AccItem(kids[k]); item && item->id == id)
+				NotifyAccessible(hwnd, EVENT_OBJECT_STATECHANGE, (long)k + 1);
+	}
+	for (auto& p : d.popups)
+		if (!p->hidden && p->acc) {
+			auto kids = AccChildren(p->m_hWnd);
+			for (size_t k = 0; k < kids.size(); k++)
+				if (auto item = AccItem(kids[k]); item && item->id == id)
+					NotifyAccessible(p->m_hWnd, EVENT_OBJECT_STATECHANGE, (long)k + 1);
+		}
 }
 
 void CRibbonBarCtrl::UpdateUI() {
@@ -823,6 +861,14 @@ LRESULT CRibbonBarCtrl::SurfaceMouse(RibSurface& s, UINT msg, WPARAM, LPARAM lPa
 			::InvalidateRect(s.hwnd, nullptr, FALSE);
 		}
 	};
+	auto setTip = [&](RibHit hit) {
+		if (hit.part == RibPart::Arrow)
+			hit.part = RibPart::Item;
+		if (!Same(hit, s.tip)) {
+			s.tip = hit;
+			UpdateTip(s.hwnd);
+		}
+	};
 	switch (msg) {
 		case WM_MOUSEMOVE: {
 			if (!s.tracking) {
@@ -830,6 +876,7 @@ LRESULT CRibbonBarCtrl::SurfaceMouse(RibSurface& s, UINT msg, WPARAM, LPARAM lPa
 				s.tracking = ::TrackMouseEvent(&tme) != FALSE;
 			}
 			auto hit = HitSurface(s, pt);
+			setTip(hit);
 			if (disabled(hit))
 				hit = { RibPart::None, hit.group, -1 };   // a disabled item isn't hot
 			if (::GetCapture() == s.hwnd && !Same(hit, s.pressed))
@@ -839,6 +886,7 @@ LRESULT CRibbonBarCtrl::SurfaceMouse(RibSurface& s, UINT msg, WPARAM, LPARAM lPa
 		}
 		case WM_MOUSELEAVE:
 			s.tracking = false;
+			setTip({});
 			if (::GetCapture() != s.hwnd)
 				setHot({});
 			return 0;
@@ -1121,6 +1169,7 @@ RibPopup* CRibbonBarCtrl::ShowPopup(std::unique_ptr<RibPopup> popup, HWND owner,
 	auto& s = popup->surface;
 	s.hwnd = popup->m_hWnd;
 	s.panel = { 1, 1, rc.right - rc.left - 1, rc.bottom - rc.top - 1 };
+	AddTipTool(s.hwnd);
 	LayoutSurface(s);
 	auto raw = popup.get();
 	d.popups.push_back(std::move(popup));
@@ -1167,6 +1216,8 @@ void CRibbonBarCtrl::HidePopups(size_t from) {
 		if (p->IsWindow())
 			p->ShowWindow(SW_HIDE);
 	}
+	if (!closing.empty() && m_hTip)
+		::SendMessage(m_hTip, TTM_POP, 0, 0);
 	if (!closing.empty() && IsWindow()) {
 		PlaceWindows();
 		PostMessage(WM_RIB_CLOSEPOPUPS);
@@ -1176,8 +1227,10 @@ void CRibbonBarCtrl::HidePopups(size_t from) {
 void CRibbonBarCtrl::DestroyHidden() {
 	auto& popups = m_Data->popups;
 	for (auto& p : popups)
-		if (p->hidden && p->IsWindow())
+		if (p->hidden && p->IsWindow()) {
+			RemoveTipTool(p->m_hWnd);
 			p->DestroyWindow();
+		}
 	popups.erase(std::remove_if(popups.begin(), popups.end(), [](auto& p) { return p->hidden; }), popups.end());
 }
 
@@ -1197,7 +1250,7 @@ LRESULT RibPopup::OnPaint(UINT, WPARAM, LPARAM, BOOL&) {
 	WTL::CMemoryDC mdc(dc, dc.m_ps.rcPaint);
 	m_Ribbon->SendUpdateUI(true);
 	m_Ribbon->EnsureLayout();
-	auto c = m_Ribbon->GetColors();
+	auto c = m_Ribbon->PaintColors();
 	RECT rc;
 	GetClientRect(&rc);
 	WTL::CBrush line;
@@ -1275,6 +1328,8 @@ LRESULT RibPopup::OnContextMenu(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandl
 }
 
 LRESULT RibPopup::OnForward(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
+	if (uMsg == WM_NOTIFY && m_Ribbon->TipNotify((NMHDR*)lParam))
+		return 0;
 	return ::SendMessage(m_Ribbon->GetParent(), uMsg, wParam, lParam);
 }
 

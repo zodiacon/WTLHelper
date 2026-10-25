@@ -177,6 +177,8 @@ struct RibHit;
 struct RibKeyTarget;
 class RibPopup;
 class RibTipWindow;
+class RibAccessible;
+struct RibItem;
 
 class CRibbonBarCtrl : public ATL::CWindowImpl<CRibbonBarCtrl> {
 public:
@@ -186,6 +188,7 @@ public:
 	~CRibbonBarCtrl();
 	friend class RibPopup;
 	friend class RibTipWindow;
+	friend class RibAccessible;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -220,6 +223,8 @@ public:
 		MESSAGE_HANDLER(WM_DPICHANGED_BEFOREPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_RIB_CLOSEPOPUPS, OnClosePopups)
+		MESSAGE_HANDLER(WM_RIB_ACCACTION, OnAccAction)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 		// the hosted windows' messages, for the parent
 		MESSAGE_HANDLER(WM_COMMAND, OnForward)
 		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
@@ -318,9 +323,12 @@ public:
 	RIBCOLORS GetColors() const;
 	int     GetIdealHeight() const;                               // the tab row and the groups (minimized: the tabs)
 	void    SetOwner(HWND owner);                                 // gets WM_COMMAND; default (nullptr): the parent
+	// High contrast: the system's colors (over the app's too), the hot and checked states framed in the highlight color.
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
+	bool    IsHighContrast() const;
 
 private:
-	enum : UINT { WM_RIB_CLOSEPOPUPS = WM_USER + 100 };
+	enum : UINT { WM_RIB_CLOSEPOPUPS = WM_USER + 100, WM_RIB_ACCACTION };
 
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
@@ -345,6 +353,8 @@ private:
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnClosePopups(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -393,8 +403,8 @@ private:
 	void    RestoreFocus(HWND window);                            // unless a popup is open
 	void    KeyLevel(HWND level);                                 // key tips: the tab row (nullptr) or a surface's
 	void    NavLevel(HWND level);                                 // navigating: the tab row and the ribbon (nullptr), or a popup
-	void    AddSurfaceTargets(RibSurface& s, std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed);
-	void    AddRowTargets(std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed);
+	void    AddSurfaceTargets(std::vector<RibKeyTarget>& out, RibSurface& s, std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed);
+	void    AddRowTargets(std::vector<RibKeyTarget>& out, std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed);
 	std::vector<std::wstring> RowTips();
 	void    ActivateTarget(int index);
 	void    KeyBack();
@@ -423,6 +433,30 @@ private:
 	void    PaintItem(WTL::CDCHandle dc, RibSurface& s, int group, int item, const RECT& rc, const RIBCOLORS& c);
 	void    PaintImage(WTL::CDCHandle dc, int image, bool large, int x, int y, bool disabled);
 	void    PaintQat(WTL::CDCHandle dc, const RIBCOLORS& c);
+	RIBCOLORS PaintColors();                                      // GetColors, and high contrast for the painting
+
+	// MSAA (RibbonBarAccessible.cpp): the ribbon's window and each popup's
+	LRESULT AccObject(HWND hwnd, RibAccessible*& slot, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+	void    DisconnectAccessible(RibAccessible*& slot);
+	void    NotifyAccessible(HWND hwnd, DWORD event, long child);  // once a client has asked
+	std::vector<RibKeyTarget> AccChildren(HWND hwnd);
+	long    AccChildId(const RibKeyTarget& t);                    // CHILDID_SELF if it isn't one
+	long    AccFocus(HWND hwnd);
+	RibItem* AccItem(const RibKeyTarget& t);                      // an item's or a quick access button's
+	std::wstring AccWindowName(HWND hwnd);
+	std::wstring AccName(const RibKeyTarget& t);
+	std::wstring AccDescription(const RibKeyTarget& t);
+	long    AccState(const RibKeyTarget& t);
+	std::wstring AccShortcut(const RibKeyTarget& t);
+	void    PostAccAction(const RibKeyTarget& t);
+	void    NotifyItemState(UINT id);
+
+	// the tooltip: one tool for each surface's window, on what's hot there (RibbonBarQat.cpp)
+	void    AddTipTool(HWND hwnd);
+	void    RemoveTipTool(HWND hwnd);
+	void    UpdateTip(HWND hwnd);                                 // the hot thing changed
+	RibKeyTarget HotTarget(HWND hwnd);                            // hwnd nullptr: nothing hot
+	bool    TipNotify(NMHDR* hdr);                                // TRUE: the tooltip's
 	void    PaintKeys(WTL::CDCHandle dc, HWND hwnd, const RIBCOLORS& c);   // the keyboard's focus on hwnd
 	void    PaintTip(WTL::CDCHandle dc, const RECT& rc, const std::wstring& text, bool disabled);
 
@@ -434,6 +468,9 @@ private:
 
 	RIBCOLORS m_Colors{};
 	bool    m_SystemColors = true;
+	int     m_ForceHighContrast = -1;
+	HWND    m_hTip = nullptr;
+	std::wstring m_TipText;
 
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;

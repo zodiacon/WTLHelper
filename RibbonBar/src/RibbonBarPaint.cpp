@@ -9,12 +9,18 @@ using namespace RibDraw;
 // ---- Helpers -----------------------------------------------------------------------
 
 namespace {
+	// high contrast while painting (PaintColors): the hot and checked states are framed in the highlight color, the
+	// fills all being the window's
+	bool s_HighContrast = false;
+
 	void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color) {
 		dc.SetBkColor(color);
 		dc.ExtTextOut(0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
 	}
 
 	void RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius) {
+		if (s_HighContrast && border == fill)
+			border = ::GetSysColor(COLOR_HIGHLIGHT);
 		WTL::CBrush brush;
 		brush.CreateSolidBrush(fill);
 		WTL::CPen pen;
@@ -24,6 +30,11 @@ namespace {
 		dc.RoundRect(&rc, { radius, radius });
 		dc.SelectBrush(oldBrush);
 		dc.SelectPen(oldPen);
+	}
+
+	// the tab row's hot and pressed backgrounds
+	COLORREF RowBack(const RIBCOLORS& c, int percent) {
+		return s_HighContrast ? c.crBack : Blend(c.crBack, c.crTabText, percent);
 	}
 
 	void RoundFrame(WTL::CDCHandle dc, const RECT& rc, COLORREF color, int width, int radius) {
@@ -111,7 +122,34 @@ namespace {
 
 // ---- Colors ------------------------------------------------------------------------------
 
+void CRibbonBarCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow())
+		InvalidateAll();
+}
+
+bool CRibbonBarCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+RIBCOLORS CRibbonBarCtrl::PaintColors() {
+	s_HighContrast = IsHighContrast();
+	return GetColors();
+}
+
 RIBCOLORS CRibbonBarCtrl::GetColors() const {
+	if (IsHighContrast()) {
+		// the user's colors, over the app's too
+		RIBCOLORS c;
+		c.crBack = c.crPanel = c.crHotBack = c.crPressedBack = c.crCheckedBack = ::GetSysColor(COLOR_WINDOW);
+		c.crTabText = c.crText = c.crLine = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crDimText = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crCheckedBorder = c.crAccent = ::GetSysColor(COLOR_HIGHLIGHT);
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
@@ -154,7 +192,7 @@ LRESULT CRibbonBarCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 
 void CRibbonBarCtrl::Paint(WTL::CDCHandle dc, const RECT&) {
 	auto& d = *m_Data;
-	auto c = GetColors();
+	auto c = PaintColors();
 	RECT rc;
 	GetClientRect(&rc);
 	FillSolid(dc, rc, c.crBack);
@@ -179,14 +217,15 @@ void CRibbonBarCtrl::PaintTabs(WTL::CDCHandle dc, const RIBCOLORS& c) {
 		COLORREF accent = c.crAccent, text = c.crTabText;
 		if (auto context = tab.context ? d.FindContext(tab.context) : nullptr) {
 			// a contextual tab: tinted, a band of its set's color on top
-			FillSolid(dc, rc, Blend(c.crBack, context->color, 14));
+			if (!s_HighContrast)
+				FillSolid(dc, rc, Blend(c.crBack, context->color, 14));
 			FillSolid(dc, { rc.left, rc.top, rc.right, rc.top + Scale(3) }, context->color);
 			accent = context->color;
 		}
 		if (v == d.hotTab && !selected) {
 			RECT hot = rc;
 			::InflateRect(&hot, -Scale(2), -Scale(4));
-			COLORREF back = Blend(c.crBack, c.crTabText, 10);
+			COLORREF back = RowBack(c, 10);
 			RoundFill(dc, hot, back, back, Scale(4));
 		}
 		dc.SetTextColor(selected ? accent : text);
@@ -204,7 +243,7 @@ void CRibbonBarCtrl::PaintTabs(WTL::CDCHandle dc, const RIBCOLORS& c) {
 		if (d.hotTab == RibData::MinimizeButton) {
 			RECT hot = b;
 			::InflateRect(&hot, -Scale(3), -Scale(3));
-			COLORREF back = Blend(c.crBack, c.crTabText, 10);
+			COLORREF back = RowBack(c, 10);
 			RoundFill(dc, hot, back, back, Scale(4));
 		}
 		Chevron(dc, (b.left + b.right) / 2, (b.top + b.bottom) / 2, Scale(10), m_Minimized ? VK_DOWN : VK_UP, c.crTabText,
@@ -217,7 +256,7 @@ void CRibbonBarCtrl::PaintQat(WTL::CDCHandle dc, const RIBCOLORS& c) {
 	auto& m = d.m;
 	if (::IsRectEmpty(&d.qatCustomize))
 		return;
-	COLORREF hotBack = Blend(c.crBack, c.crTabText, 10), pressedBack = Blend(c.crBack, c.crTabText, 18);
+	COLORREF hotBack = RowBack(c, 10), pressedBack = RowBack(c, 18);
 	int radius = Scale(4);
 	for (int q = 0; q < (int)d.qatRects.size(); q++) {
 		RECT rc = d.qatRects[q];
@@ -234,7 +273,7 @@ void CRibbonBarCtrl::PaintQat(WTL::CDCHandle dc, const RIBCOLORS& c) {
 		if (item->smallImage >= 0)
 			PaintImage(dc, item->smallImage, false, (rc.left + rc.right - m.smallIcon) / 2, (rc.top + rc.bottom - m.smallIcon) / 2, disabled);
 		else {
-			dc.SetTextColor(disabled ? Blend(c.crBack, c.crTabText, 45) : c.crTabText);
+			dc.SetTextColor(disabled ? (s_HighContrast ? c.crDimText : Blend(c.crBack, c.crTabText, 45)) : c.crTabText);
 			dc.DrawText(item->text.c_str(), (int)item->text.size(), &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 		}
 	}
@@ -265,8 +304,9 @@ void CRibbonBarCtrl::PaintKeys(WTL::CDCHandle dc, HWND hwnd, const RIBCOLORS& c)
 }
 
 void CRibbonBarCtrl::PaintTip(WTL::CDCHandle dc, const RECT& rc, const std::wstring& text, bool disabled) {
-	auto c = GetColors();
-	FillSolid(dc, rc, Blend(c.crPanel, c.crText, disabled ? 40 : 80));
+	auto c = PaintColors();
+	// the panel's colors the other way round
+	FillSolid(dc, rc, s_HighContrast ? (disabled ? c.crDimText : c.crText) : Blend(c.crPanel, c.crText, disabled ? 40 : 80));
 	auto old = dc.SelectFont(m_hFont);
 	dc.SetBkMode(TRANSPARENT);
 	dc.SetTextColor(c.crPanel);
@@ -354,7 +394,7 @@ void CRibbonBarCtrl::PaintGroup(WTL::CDCHandle dc, RibSurface& s, int g, int x, 
 	}
 	RECT label = place.label;
 	::OffsetRect(&label, x, top);
-	dc.SetTextColor(c.crDimText);
+	dc.SetTextColor(s_HighContrast ? c.crText : c.crDimText);    // not disabled's
 	dc.DrawText(group.text.c_str(), (int)group.text.size(), &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 	if (place.launcher.right > place.launcher.left) {
 		RECT r = place.launcher;
@@ -365,7 +405,7 @@ void CRibbonBarCtrl::PaintGroup(WTL::CDCHandle dc, RibSurface& s, int g, int x, 
 			::InflateRect(&back, Scale(2), Scale(2));
 			RoundFill(dc, back, Same(s.pressed, s.hot) ? c.crPressedBack : c.crHotBack, c.crHotBack, Scale(3));
 		}
-		Launcher(dc, r, hot ? c.crText : c.crDimText);
+		Launcher(dc, r, hot || s_HighContrast ? c.crText : c.crDimText);
 	}
 }
 

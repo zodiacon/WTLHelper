@@ -50,7 +50,7 @@ enum {
 	CMD_READMODE = 1201, CMD_PRINTLAYOUT, CMD_WEBLAYOUT, CMD_RULER, CMD_GRIDLINES, CMD_NAVPANE,
 	CMD_ZOOM, CMD_ZOOM100, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_NEWWINDOW, CMD_ARRANGE, CMD_SPLIT,
 	CMD_DARKMODE = 1301, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_HIDEEDITING, CMD_DISABLECLIPBOARD, CMD_PICTURESEL, CMD_TABLESEL,
-	CMD_MINIMIZE,
+	CMD_MINIMIZE, CMD_HIGHCONTRAST,
 	CMD_BRIGHTNESS = 1401, CMD_RECOLOR, CMD_FORWARD, CMD_BACKWARD, CMD_TABLESTYLE, CMD_SHADING, CMD_INSERTABOVE, CMD_INSERTBELOW,
 	CMD_DELETEROWS,
 	// the menus' commands
@@ -244,6 +244,16 @@ static void Add(UINT group, UINT id, const wchar_t* text, int image, UINT size =
 	item.radio = radio;
 	item.state = state;
 	item.hMenu = menu;
+	// a few with descriptions: the tooltip shows the name in bold over it
+	static const std::map<UINT, const wchar_t*> tips = {
+		{ CMD_PASTE, L"Add the clipboard's text to the document." },
+		{ CMD_FORMATPAINTER, L"Copy formatting from one place and apply it to another." },
+		{ CMD_BOLD, L"Make your text bold." },
+		{ CMD_FIND, L"Find text in the document." },
+		{ CMD_COVER, L"A fully formatted cover page: pick one, then type your title." },
+	};
+	if (auto it = tips.find(id); it != tips.end())
+		item.pszTip = it->second;
 	g_ribbon.AddItem(group, &item);
 	g_names[id] = text;
 }
@@ -368,6 +378,7 @@ static void BuildRibbon() {
 #endif
 	Add(GRP_APPEARANCE, CMD_CUSTOMCOLORS, L"Custom Colors", IMG_COLORS, RIBSZ_LARGE, RIBIK_TOGGLE);
 	Add(GRP_APPEARANCE, CMD_LARGEFONT, L"Larger Font", IMG_FONT, RIBSZ_LARGE, RIBIK_TOGGLE);
+	Add(GRP_APPEARANCE, CMD_HIGHCONTRAST, L"High Contrast", IMG_COLORS, RIBSZ_LARGE, RIBIK_TOGGLE);   // as if Windows' were on
 	Group(TAB_RIBBON, GRP_STATES, L"States");
 	Add(GRP_STATES, CMD_HIDEEDITING, L"Hide Editing", IMG_HIDE, RIBSZ_LARGE, RIBIK_TOGGLE);
 	Add(GRP_STATES, CMD_DISABLECLIPBOARD, L"Disable Clipboard", IMG_LOCK, RIBSZ_LARGE, RIBIK_TOGGLE);
@@ -493,6 +504,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case CMD_MINIMIZE:
 			g_ribbon.SetMinimized((g_ribbon.GetItemState(CMD_MINIMIZE) & RIBIS_CHECKED) != 0);
+			break;
+		case CMD_HIGHCONTRAST:
+			g_ribbon.ForceHighContrast((g_ribbon.GetItemState(CMD_HIGHCONTRAST) & RIBIS_CHECKED) ? 1 : -1);
 			break;
 		case CMD_QAT_ADDBOLD:
 			g_ribbon.AddToQat(CMD_BOLD);

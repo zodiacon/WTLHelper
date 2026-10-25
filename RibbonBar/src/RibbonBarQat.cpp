@@ -150,6 +150,118 @@ void CRibbonBarCtrl::SetHotQat(int index) {
 		return;
 	d.hotQat = index;
 	InvalidateTabRow();
+	UpdateTip(m_hWnd);
+}
+
+// ---- Tooltips ---------------------------------------------------------------------------------------------
+//
+// The command's name in bold over its description (RIBITEM::pszTip), or its name alone. One tool for each surface's
+// window, its id the window, moved onto what's hot there: the tooltip shows again as the mouse goes to another.
+
+void CRibbonBarCtrl::AddTipTool(HWND hwnd) {
+	if (!m_hTip)
+		return;
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.uFlags = TTF_SUBCLASS | TTF_TRANSPARENT;
+	ti.hwnd = hwnd;
+	ti.uId = (UINT_PTR)hwnd;
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	::SendMessage(m_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+}
+
+void CRibbonBarCtrl::RemoveTipTool(HWND hwnd) {
+	if (!m_hTip)
+		return;
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = hwnd;
+	ti.uId = (UINT_PTR)hwnd;
+	::SendMessage(m_hTip, TTM_DELTOOLW, 0, (LPARAM)&ti);
+}
+
+RibKeyTarget CRibbonBarCtrl::HotTarget(HWND hwnd) {
+	// none while a menu is open or the keyboard's on
+	auto& d = *m_Data;
+	using Kind = RibKeyTarget::Kind;
+	RibKeyTarget t;
+	t.hwnd = hwnd;
+	auto s = SurfaceOf(hwnd);
+	if (!s || d.keyMode != RibKeyMode::Off || d.qatMenu || s->menu) {
+		t.hwnd = nullptr;
+		return t;
+	}
+	if (hwnd == m_hWnd && d.hotQat >= 0) {
+		t.kind = Kind::Qat;
+		t.index = d.hotQat;
+	}
+	else if (hwnd == m_hWnd && d.hotQat == RibData::Customize)
+		t.kind = Kind::Customize;
+	else if (hwnd == m_hWnd && d.hotTab == RibData::MinimizeButton)
+		t.kind = Kind::Minimize;
+	else if (s->tip.part == RibPart::Item && AccItem({ Kind::Item, -1, s->tip.group, s->tip.item, hwnd })) {
+		t.kind = Kind::Item;
+		t.group = s->tip.group;
+		t.item = s->tip.item;
+		if (AccItem(t)->kind == RibKind::Window)
+			t.hwnd = nullptr;
+	}
+	else if (s->tip.part == RibPart::Group && s->opened != s->tip.group) {
+		t.kind = Kind::Group;
+		t.group = s->tip.group;
+	}
+	else if (s->tip.part == RibPart::Launcher) {
+		t.kind = Kind::Launcher;
+		t.group = s->tip.group;
+	}
+	else
+		t.hwnd = nullptr;
+	return t;
+}
+
+void CRibbonBarCtrl::UpdateTip(HWND hwnd) {
+	if (!m_hTip || !::IsWindow(hwnd))
+		return;
+	::SendMessage(m_hTip, TTM_POP, 0, 0);
+	auto t = HotTarget(hwnd);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.hwnd = hwnd;
+	ti.uId = (UINT_PTR)hwnd;
+	if (t.hwnd)
+		ti.rect = TargetRect(t);
+	::SendMessage(m_hTip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+	if (t.hwnd) {
+		// the move that made it hot reached the tooltip before the tool was there: once more
+		MSG msg{ hwnd, WM_MOUSEMOVE };
+		::GetCursorPos(&msg.pt);
+		POINT pt = msg.pt;
+		::ScreenToClient(hwnd, &pt);
+		msg.lParam = MAKELPARAM(pt.x, pt.y);
+		msg.time = ::GetMessageTime();
+		::SendMessage(m_hTip, TTM_RELAYEVENT, 0, (LPARAM)&msg);
+	}
+	// the title before it shows: its size is measured with it
+	auto item = t.hwnd ? AccItem(t) : nullptr;
+	bool titled = item && !item->tip.empty() && !item->text.empty();
+	::SendMessage(m_hTip, TTM_SETTITLEW, TTI_NONE, (LPARAM)(titled ? AccName(t).c_str() : L""));
+}
+
+bool CRibbonBarCtrl::TipNotify(NMHDR* hdr) {
+	if (!m_hTip || hdr->hwndFrom != m_hTip)
+		return false;
+	if (hdr->code == TTN_GETDISPINFOW) {
+		auto info = (NMTTDISPINFOW*)hdr;
+		auto t = HotTarget((HWND)hdr->idFrom);
+		m_TipText.clear();
+		bool titled = false;
+		if (t.hwnd) {
+			auto item = AccItem(t);
+			titled = item && !item->tip.empty() && !item->text.empty();
+			m_TipText = titled ? item->tip : AccName(t);
+		}
+		// the title again: it's the tooltip's, not the tool's, and another window's tool may have changed it since
+		::SendMessage(m_hTip, TTM_SETTITLEW, TTI_NONE, (LPARAM)(titled ? AccName(t).c_str() : L""));
+		info->lpszText = const_cast<LPWSTR>(m_TipText.c_str());
+	}
+	return true;
 }
 
 // ---- Mouse ------------------------------------------------------------------------------------------------

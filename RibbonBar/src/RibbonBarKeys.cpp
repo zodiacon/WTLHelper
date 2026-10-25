@@ -116,6 +116,8 @@ void CRibbonBarCtrl::EnterKeyMode() {
 		d.restoreFocus = focus == m_hWnd || IsOurWindow(focus) ? nullptr : focus;
 		HidePopups(0);
 	}
+	if (m_hTip)
+		::SendMessage(m_hTip, TTM_POP, 0, 0);
 	d.keyMode = RibKeyMode::Tips;
 	KeyLevel(nullptr);
 	SetFocus();    // the keys come here
@@ -269,14 +271,14 @@ bool CRibbonBarCtrl::KeyDown(UINT msg, UINT vk, LPARAM lParam) {
 
 // ---- Levels -------------------------------------------------------------------------------------------------
 
-void CRibbonBarCtrl::AddRowTargets(std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed) {
+void CRibbonBarCtrl::AddRowTargets(std::vector<RibKeyTarget>& out, std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed) {
 	auto& d = *m_Data;
 	for (int v = 0; v < (int)d.visible.size(); v++) {
 		RibKeyTarget t;
 		t.kind = Kind::Tab;
 		t.index = v;
 		t.hwnd = m_hWnd;
-		d.targets.push_back(t);
+		out.push_back(t);
 		if (labels) {
 			labels->push_back(d.tabs[d.visible[v]].text);
 			fixed->push_back(d.tabs[d.visible[v]].keyTip);
@@ -290,7 +292,7 @@ void CRibbonBarCtrl::AddRowTargets(std::vector<std::wstring>* labels, std::vecto
 		t.kind = Kind::Qat;
 		t.index = q;
 		t.hwnd = m_hWnd;
-		d.targets.push_back(t);
+		out.push_back(t);
 		if (labels) {
 			labels->push_back({});
 			fixed->push_back(RibQatKeyTip(shown));
@@ -299,7 +301,8 @@ void CRibbonBarCtrl::AddRowTargets(std::vector<std::wstring>* labels, std::vecto
 	}
 }
 
-void CRibbonBarCtrl::AddSurfaceTargets(RibSurface& s, std::vector<std::wstring>* labels, std::vector<std::wstring>* fixed) {
+void CRibbonBarCtrl::AddSurfaceTargets(std::vector<RibKeyTarget>& out, RibSurface& s, std::vector<std::wstring>* labels,
+	std::vector<std::wstring>* fixed) {
 	auto& d = *m_Data;
 	if (s.tab < 0 || s.tab >= (int)d.tabs.size())
 		return;
@@ -310,7 +313,7 @@ void CRibbonBarCtrl::AddSurfaceTargets(RibSurface& s, std::vector<std::wstring>*
 		t.group = g;
 		t.item = i;
 		t.hwnd = s.hwnd;
-		d.targets.push_back(t);
+		out.push_back(t);
 		if (labels) {
 			labels->push_back(label);
 			fixed->push_back(tip);
@@ -345,13 +348,10 @@ void CRibbonBarCtrl::AddSurfaceTargets(RibSurface& s, std::vector<std::wstring>*
 
 std::vector<std::wstring> CRibbonBarCtrl::RowTips() {
 	// the tab row's tips, without changing the targets shown
-	auto& d = *m_Data;
 	EnsureLayout();
-	auto saved = std::move(d.targets);
-	d.targets.clear();
+	std::vector<RibKeyTarget> row;
 	std::vector<std::wstring> labels, fixed;
-	AddRowTargets(&labels, &fixed);
-	d.targets = std::move(saved);
+	AddRowTargets(row, &labels, &fixed);
 	return RibAssignKeyTips(labels, fixed);
 }
 
@@ -365,9 +365,9 @@ void CRibbonBarCtrl::KeyLevel(HWND level) {
 	d.focus = -1;
 	std::vector<std::wstring> labels, fixed;
 	if (!level)
-		AddRowTargets(&labels, &fixed);
+		AddRowTargets(d.targets, &labels, &fixed);
 	else if (auto s = SurfaceOf(level))
-		AddSurfaceTargets(*s, &labels, &fixed);
+		AddSurfaceTargets(d.targets, *s, &labels, &fixed);
 	auto tips = RibAssignKeyTips(labels, fixed);
 	for (size_t k = 0; k < d.targets.size() && k < tips.size(); k++)
 		d.targets[k].tip = tips[k];
@@ -385,12 +385,12 @@ void CRibbonBarCtrl::NavLevel(HWND level) {
 	d.focus = -1;
 	if (level) {
 		if (auto s = SurfaceOf(level))
-			AddSurfaceTargets(*s, nullptr, nullptr);
+			AddSurfaceTargets(d.targets, *s, nullptr, nullptr);
 	}
 	else {
-		AddRowTargets(nullptr, nullptr);
+		AddRowTargets(d.targets, nullptr, nullptr);
 		if (!m_Minimized)
-			AddSurfaceTargets(d.main, nullptr, nullptr);
+			AddSurfaceTargets(d.targets, d.main, nullptr, nullptr);
 	}
 	DestroyTips();
 	InvalidateAll();
@@ -501,6 +501,10 @@ RECT CRibbonBarCtrl::TargetRect(const RibKeyTarget& t) const {
 		return t.index >= 0 && t.index < (int)d.tabRects.size() ? d.tabRects[t.index] : RECT{};
 	if (t.kind == Kind::Qat)
 		return t.index >= 0 && t.index < (int)d.qatRects.size() ? d.qatRects[t.index] : RECT{};
+	if (t.kind == Kind::Customize)
+		return d.qatCustomize;
+	if (t.kind == Kind::Minimize)
+		return d.minimizeButton;
 	auto s = SurfaceOf(t.hwnd);
 	if (!s || t.group < 0 || t.group >= (int)s->places.size())
 		return {};
@@ -626,7 +630,9 @@ void CRibbonBarCtrl::SetFocusTarget(int index) {
 			case Kind::Item: if (s) s->hot = { RibPart::Item, t.group, t.item }; break;
 			case Kind::Group: if (s) s->hot = { RibPart::Group, t.group, -1 }; break;
 			case Kind::Launcher: if (s) s->hot = { RibPart::Launcher, t.group, -1 }; break;
+			default: break;
 		}
+		NotifyAccessible(t.hwnd, EVENT_OBJECT_FOCUS, AccChildId(t));
 	}
 	InvalidateAll();
 }
@@ -731,6 +737,8 @@ void CRibbonBarCtrl::ActivateTarget(int index) {
 			RestoreFocus(focus);
 			return;
 		}
+		default:
+			return;
 		case Kind::Item: {
 			auto s = SurfaceOf(t.hwnd);
 			if (!s || s->tab < 0)
