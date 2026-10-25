@@ -403,6 +403,20 @@ TEST(KeyTips) {
 	CHECK_STR(RibQatKeyTip(18), L"0A");
 	CHECK_STR(RibQatKeyTip(100), L"");
 
+	// the tab row as the control asks: the tabs' labels, then the quick access buttons' tips as fixed ones (the tenth
+	// is "09"): a tab out of letters takes neither a digit of theirs nor 0
+	std::vector<std::wstring> labels{ L"X", L"X" }, fixed{ {}, {} };
+	for (int q = 0; q < 10; q++) {
+		labels.push_back({});
+		fixed.push_back(RibQatKeyTip(q));
+	}
+	tips = RibAssignKeyTips(labels, fixed);
+	CHECK_STR(tips[0], L"X");
+	CHECK_STR(tips[2], L"1");
+	CHECK_STR(tips[11], L"09");
+	CHECK(tips[1].size() == 2 && tips[1][0] != L'0' && tips[1][0] != L'X');
+	CHECK(PrefixFree(tips));
+
 	std::vector<std::wstring> level{ L"H", L"FA", L"FB" };
 	int count = 0;
 	CHECK(RibMatchKeyTip(level, L"F", &count) == -1 && count == 2);

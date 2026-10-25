@@ -101,8 +101,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\RibbonBarCtrl.cpp" />
+    <ClCompile Include="src\RibbonBarKeys.cpp" />
     <ClCompile Include="src\RibbonBarModel.cpp" />
     <ClCompile Include="src\RibbonBarPaint.cpp" />
+    <ClCompile Include="src\RibbonBarQat.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

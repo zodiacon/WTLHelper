@@ -56,6 +56,10 @@ public:
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnMouse)
 		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYUP, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSCHAR, OnKeyDown)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
 		MESSAGE_HANDLER(WM_COMMAND, OnForward)
 		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
 		MESSAGE_HANDLER(WM_DRAWITEM, OnForward)
@@ -76,7 +80,54 @@ private:
 	LRESULT OnMouse(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnActivate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
+
+	CRibbonBarCtrl* m_Ribbon;
+};
+
+// The keyboard: key tips (Alt) and moving between the commands with the arrow keys.
+enum class RibKeyMode : uint8_t { Off, Tips, Navigate };
+
+// What a key tip or the keyboard focus can be on.
+struct RibKeyTarget {
+	enum class Kind : uint8_t { Tab, Qat, Item, Group, Launcher };
+	Kind kind = Kind::Item;
+	int  index = -1;                  // Tab: in visible; Qat: in qat
+	int  group = -1;                  // Item, Group (folded), Launcher
+	int  item = -1;
+	HWND hwnd = nullptr;              // the surface's window (the ribbon's for the tab row)
+	std::wstring tip;
+};
+
+// A key tip: a small window of its own, over the hosted windows and past the surface's edges.
+class RibTipWindow : public ATL::CWindowImpl<RibTipWindow, ATL::CWindow, ATL::CWinTraits<WS_POPUP, WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE>> {
+public:
+	DECLARE_WND_CLASS_EX(L"RibKeyTip", 0, -1)
+
+	explicit RibTipWindow(CRibbonBarCtrl* ribbon) : m_Ribbon(ribbon) {}
+
+	BEGIN_MSG_MAP(RibTipWindow)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_NCHITTEST, OnNcHitTest)
+		MESSAGE_HANDLER(WM_MOUSEACTIVATE, OnMouseActivate)
+	END_MSG_MAP()
+
+	std::wstring text;
+	bool   disabled = false;
+
+private:
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
+		return 1;
+	}
+	LRESULT OnNcHitTest(UINT, WPARAM, LPARAM, BOOL&) {
+		return HTTRANSPARENT;    // clicks go to what's under it
+	}
+	LRESULT OnMouseActivate(UINT, WPARAM, LPARAM, BOOL&) {
+		return MA_NOACTIVATE;
+	}
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
 
 	CRibbonBarCtrl* m_Ribbon;
 };
@@ -99,6 +150,26 @@ struct RibData {
 
 	int  hotTab = -1;                 // in visible, or MinimizeButton
 
+	// the quick access bar, at the left of the tab row: item ids (those with no item aren't shown)
+	std::vector<UINT> qat;
+	std::vector<RECT> qatRects;       // by qat; empty: not shown
+	RECT qatCustomize{};              // its menu's button; empty with RIBS_NOQAT
+	int  qatLine = 0;                 // the line between it and the tabs
+	int  hotQat = -1;                 // in qat, or Customize
+	int  pressedQat = -1;
+	bool qatMenu = false;             // the hot one's menu is open
+
+	// the keyboard (RibbonBarKeys.cpp)
+	RibKeyMode keyMode = RibKeyMode::Off;
+	HWND keyLevel = nullptr;          // the surface whose targets show (nullptr: the tab row; navigating, with the ribbon's)
+	std::vector<RibKeyTarget> targets;
+	std::vector<std::unique_ptr<RibTipWindow>> tips;   // by target, while the tips show
+	std::wstring typed;               // the key tip's characters so far
+	int  focus = -1;                  // navigating: in targets
+	HWND restoreFocus = nullptr;      // where the focus was before
+	bool altPending = false;          // Alt down, no other key since
+	bool eatAltUp = false;            // Alt+key ran something: Alt's release isn't the system menu's
+
 	// the popup that closed last, as a click deactivated it: that click doesn't open it again
 	HWND closedFrom = nullptr;
 	int  closedTab = -1;
@@ -106,6 +177,31 @@ struct RibData {
 	ULONGLONG closedTick = 0;
 
 	static constexpr int MinimizeButton = -2;
+	static constexpr int Customize = -2;   // hotQat
+
+	// the first item with the id (its image, text and state stand for the others')
+	RibItem* FindItem(UINT id, int* tab = nullptr, int* group = nullptr, int* index = nullptr) {
+		for (int t = 0; t < (int)tabs.size(); t++)
+			for (int g = 0; g < (int)tabs[t].groups.size(); g++) {
+				auto& items = tabs[t].groups[g].items;
+				for (int i = 0; i < (int)items.size(); i++)
+					if (items[i].id == id && items[i].kind != RibKind::Separator) {
+						if (tab)
+							*tab = t;
+						if (group)
+							*group = g;
+						if (index)
+							*index = i;
+						return &items[i];
+					}
+			}
+		return nullptr;
+	}
+	// an item the quick access bar can show: a command, not a window
+	bool QatAllowed(UINT id) {
+		auto item = FindItem(id);
+		return item && item->kind != RibKind::Window;
+	}
 
 	RibTab* Selected() {
 		return selected >= 0 && selected < (int)tabs.size() ? &tabs[selected] : nullptr;

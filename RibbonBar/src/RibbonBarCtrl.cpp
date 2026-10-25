@@ -62,6 +62,7 @@ LRESULT CRibbonBarCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CRibbonBarCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	ExitKeyMode(false);
 	HidePopups(0);
 	DestroyHidden();
 	bHandled = FALSE;
@@ -73,6 +74,7 @@ LRESULT CRibbonBarCtrl::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CRibbonBarCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
+	ExitKeyMode(true);   // the items move and fold
 	HidePopups(0);   // a minimized tab's is the ribbon's width
 	Changed(false);
 	return 0;
@@ -201,8 +203,11 @@ void CRibbonBarCtrl::NotifyHeight() {
 // ---- Layout ---------------------------------------------------------------------------
 
 void CRibbonBarCtrl::Changed(bool measure) {
-	if (measure)
+	if (measure) {
 		m_Data->measure = true;
+		if (!m_InUpdate)
+			ExitKeyMode(true);   // items added, removed, shown or hidden: the targets aren't those
+	}
 	m_Data->layout = true;
 	if (IsWindow() && !m_NoInvalidate) {
 		Invalidate(FALSE);
@@ -245,6 +250,7 @@ void CRibbonBarCtrl::EnsureLayout() {
 		d.selected = d.visible.empty() ? -1 : d.visible[0];
 	d.tabRects.clear();
 	int x = Scale(4), context = 0;
+	LayoutQat(x);
 	for (int t : d.visible) {
 		if (d.tabs[t].context != context) {
 			context = d.tabs[t].context;
@@ -838,6 +844,7 @@ LRESULT CRibbonBarCtrl::SurfaceMouse(RibSurface& s, UINT msg, WPARAM, LPARAM lPa
 			return 0;
 		case WM_LBUTTONDOWN:
 		case WM_LBUTTONDBLCLK: {
+			ExitKeyMode(true);
 			auto hit = HitSurface(s, pt);
 			if (disabled(hit))
 				return 0;
@@ -885,12 +892,8 @@ LRESULT CRibbonBarCtrl::SurfaceMouse(RibSurface& s, UINT msg, WPARAM, LPARAM lPa
 				return 0;
 			if (hit.part == RibPart::Item)
 				Execute(s.tab, hit.group, hit.item);
-			else if (hit.part == RibPart::Launcher) {
-				auto& group = d.tabs[s.tab].groups[hit.group];
-				UINT id = group.launcherId ? group.launcherId : group.id;
-				HidePopups(0);
-				::PostMessage(Owner(), WM_COMMAND, MAKEWPARAM(id, 0), 0);
-			}
+			else if (hit.part == RibPart::Launcher)
+				RunLauncher(s, hit.group);
 			return 0;
 		}
 		case WM_CAPTURECHANGED:
@@ -901,19 +904,45 @@ LRESULT CRibbonBarCtrl::SurfaceMouse(RibSurface& s, UINT msg, WPARAM, LPARAM lPa
 	return 0;
 }
 
+void CRibbonBarCtrl::RunLauncher(const RibSurface& s, int group) {
+	auto& g = m_Data->tabs[s.tab].groups[group];
+	UINT id = g.launcherId ? g.launcherId : g.id;
+	HidePopups(0);
+	::PostMessage(Owner(), WM_COMMAND, MAKEWPARAM(id, 0), 0);
+}
+
 LRESULT CRibbonBarCtrl::OnMouseMove(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
+	auto& d = *m_Data;
 	EnsureLayout();
-	SetHotTab(::GetCapture() == m_hWnd ? -1 : TabAt(PointOf(lParam)));
-	return SurfaceMouse(m_Data->main, uMsg, wParam, lParam);
+	POINT pt = PointOf(lParam);
+	bool captured = ::GetCapture() == m_hWnd;
+	SetHotTab(captured ? -1 : TabAt(pt));
+	if (!d.qatMenu) {
+		int q = QatAt(pt);
+		SetHotQat(captured ? (d.pressedQat >= 0 && q == d.pressedQat ? q : -1) : q);   // pressed: hot only while over it
+	}
+	return SurfaceMouse(d.main, uMsg, wParam, lParam);
 }
 
 LRESULT CRibbonBarCtrl::OnMouseLeave(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
 	SetHotTab(-1);
+	if (!m_Data->qatMenu && ::GetCapture() != m_hWnd)
+		SetHotQat(-1);
 	return SurfaceMouse(m_Data->main, uMsg, wParam, lParam);
 }
 
 LRESULT CRibbonBarCtrl::OnLButtonDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
 	EnsureLayout();
+	ExitKeyMode(true);    // a click ends the keyboard's
+	int q = QatAt(PointOf(lParam));
+	if (q == RibData::Customize) {
+		CustomizeMenu();
+		return 0;
+	}
+	if (q >= 0) {
+		QatMouseDown(q);
+		return 0;
+	}
 	int tab = TabAt(PointOf(lParam));
 	if (tab == RibData::MinimizeButton) {
 		SetMinimized(!m_Minimized);
@@ -937,11 +966,24 @@ LRESULT CRibbonBarCtrl::OnLButtonDblClk(UINT, WPARAM wParam, LPARAM lParam, BOOL
 }
 
 LRESULT CRibbonBarCtrl::OnLButtonUp(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
-	return SurfaceMouse(m_Data->main, uMsg, wParam, lParam);
+	auto& d = *m_Data;
+	if (d.pressedQat >= 0 && ::GetCapture() == m_hWnd) {
+		int q = d.pressedQat;
+		::ReleaseCapture();
+		if (QatAt(PointOf(lParam)) == q)
+			RunQat(q);
+		return 0;
+	}
+	return SurfaceMouse(d.main, uMsg, wParam, lParam);
 }
 
 LRESULT CRibbonBarCtrl::OnCaptureChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
-	return SurfaceMouse(m_Data->main, uMsg, wParam, lParam);
+	auto& d = *m_Data;
+	if (d.pressedQat >= 0) {
+		d.pressedQat = -1;
+		InvalidateTabRow();
+	}
+	return SurfaceMouse(d.main, uMsg, wParam, lParam);
 }
 
 LRESULT CRibbonBarCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
@@ -967,27 +1009,7 @@ void CRibbonBarCtrl::DropDown(RibSurface& s, int group, int item) {
 	s.menu = true;
 	::InvalidateRect(s.hwnd, nullptr, FALSE);
 	::UpdateWindow(s.hwnd);
-	RECT screen = rc;
-	::MapWindowPoints(s.hwnd, nullptr, (POINT*)&screen, 2);
-	NMRIBDROPDOWN nm{};
-	nm.id = i.id;
-	nm.hMenu = i.menu;
-	nm.rcItem = screen;
-	nm.lParam = i.lParam;
-	UINT cmd = 0;
-	if (!FireNotify(&nm.hdr, RIBN_DROPDOWN) && nm.hMenu) {
-		TPMPARAMS tpm{ sizeof(tpm), screen };
-		// the owner gets the menu's messages (WM_INITMENUPOPUP: an app's CUpdateUI)
-		cmd = (UINT)::TrackPopupMenuEx(nm.hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_VERTICAL | TPM_RETURNCMD | TPM_RIGHTBUTTON,
-			screen.left, screen.bottom, Owner(), &tpm);
-		// the click that closed the menu over this item isn't one that opens it again
-		MSG msg;
-		if (::PeekMessage(&msg, s.hwnd, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_NOREMOVE)) {
-			POINT p = PointOf(msg.lParam);
-			if (::PtInRect(&rc, p))
-				::PeekMessage(&msg, s.hwnd, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE);
-		}
-	}
+	UINT cmd = ItemMenu(i.id, i.menu, i.lParam, s.hwnd, rc);
 	s.menu = false;
 	s.pressed = s.hot = {};
 	::InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -995,6 +1017,37 @@ void CRibbonBarCtrl::DropDown(RibSurface& s, int group, int item) {
 		HidePopups(0);
 		::PostMessage(Owner(), WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
 	}
+}
+
+UINT CRibbonBarCtrl::ItemMenu(UINT id, HMENU menu, LPARAM lParam, HWND hwnd, const RECT& rc) {
+	RECT screen = rc;
+	::MapWindowPoints(hwnd, nullptr, (POINT*)&screen, 2);
+	NMRIBDROPDOWN nm{};
+	nm.id = id;
+	nm.hMenu = menu;
+	nm.rcItem = screen;
+	nm.lParam = lParam;
+	if (FireNotify(&nm.hdr, RIBN_DROPDOWN) || !nm.hMenu)
+		return 0;
+	return TrackMenu(nm.hMenu, hwnd, rc, { screen.left, screen.bottom });
+}
+
+UINT CRibbonBarCtrl::TrackMenu(HMENU menu, HWND hwnd, const RECT& rc, POINT screen) {
+	RECT button = rc;
+	::MapWindowPoints(hwnd, nullptr, (POINT*)&button, 2);
+	TPMPARAMS tpm{ sizeof(tpm), button };
+	bool under = !::IsRectEmpty(&rc);
+	// the owner gets the menu's messages (WM_INITMENUPOPUP: an app's CUpdateUI)
+	UINT cmd = (UINT)::TrackPopupMenuEx(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON | (under ? TPM_VERTICAL : 0),
+		screen.x, screen.y, Owner(), under ? &tpm : nullptr);
+	// the click that closed the menu over its button isn't one that opens it again
+	MSG msg;
+	if (under && ::PeekMessage(&msg, hwnd, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_NOREMOVE)) {
+		POINT p = PointOf(msg.lParam);
+		if (::PtInRect(&rc, p))
+			::PeekMessage(&msg, hwnd, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE);
+	}
+	return cmd;
 }
 
 // ---- Popups ------------------------------------------------------------------------------------
@@ -1085,6 +1138,12 @@ void CRibbonBarCtrl::HidePopups(size_t from) {
 			d.popups[k]->hidden = true;
 			closing.push_back(d.popups[k].get());
 		}
+	if (d.keyMode != RibKeyMode::Off && d.keyLevel)
+		for (auto p : closing)
+			if (p->m_hWnd == d.keyLevel) {
+				ExitKeyMode(false);
+				break;
+			}
 	for (auto it = closing.rbegin(); it != closing.rend(); ++it) {
 		auto p = *it;
 		// its hosted windows back to the ribbon first: destroying the popup would destroy them
@@ -1146,6 +1205,7 @@ LRESULT RibPopup::OnPaint(UINT, WPARAM, LPARAM, BOOL&) {
 	auto old = mdc.SelectFont(m_Ribbon->m_hFont);
 	mdc.SetBkMode(TRANSPARENT);
 	m_Ribbon->PaintSurface(mdc.m_hDC, surface, c);
+	m_Ribbon->PaintKeys(mdc.m_hDC, m_hWnd, c);
 	mdc.FrameRect(&rc, line);
 	mdc.SelectFont(old);
 	return 0;
@@ -1188,8 +1248,10 @@ LRESULT RibPopup::OnActivate(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 	return 0;
 }
 
-LRESULT RibPopup::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
-	if (wParam != VK_ESCAPE) {
+LRESULT RibPopup::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if (m_Ribbon->KeyDown(uMsg, (UINT)wParam, lParam))
+		return 0;
+	if (uMsg != WM_KEYDOWN || wParam != VK_ESCAPE) {
 		bHandled = FALSE;
 		return 0;
 	}
@@ -1200,6 +1262,15 @@ LRESULT RibPopup::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 			m_Ribbon->HidePopups(k);
 			break;
 		}
+	return 0;
+}
+
+LRESULT RibPopup::OnContextMenu(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if ((HWND)wParam != m_hWnd) {
+		bHandled = FALSE;    // a hosted window's
+		return 0;
+	}
+	m_Ribbon->ContextMenu(m_hWnd, lParam);
 	return 0;
 }
 

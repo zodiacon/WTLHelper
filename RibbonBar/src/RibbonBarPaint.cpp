@@ -26,6 +26,16 @@ namespace {
 		dc.SelectPen(oldPen);
 	}
 
+	void RoundFrame(WTL::CDCHandle dc, const RECT& rc, COLORREF color, int width, int radius) {
+		WTL::CPen pen;
+		pen.CreatePen(PS_INSIDEFRAME, width, color);
+		auto oldBrush = dc.SelectBrush((HBRUSH)::GetStockObject(NULL_BRUSH));
+		auto oldPen = dc.SelectPen(pen);
+		dc.RoundRect(&rc, { radius, radius });
+		dc.SelectBrush(oldBrush);
+		dc.SelectPen(oldPen);
+	}
+
 	// a drop-down arrow, pointing down, centered on (cx, cy)
 	void Arrow(WTL::CDCHandle dc, int cx, int cy, int width, COLORREF color) {
 		int half = width / 2;
@@ -154,11 +164,13 @@ void CRibbonBarCtrl::Paint(WTL::CDCHandle dc, const RECT&) {
 	if (!m_Minimized)
 		PaintSurface(dc, d.main, c);
 	FillSolid(dc, { 0, d.main.panel.bottom, rc.right, d.main.panel.bottom + 1 }, c.crLine);
+	PaintKeys(dc, m_hWnd, c);
 	dc.SelectFont(oldFont);
 }
 
 void CRibbonBarCtrl::PaintTabs(WTL::CDCHandle dc, const RIBCOLORS& c) {
 	auto& d = *m_Data;
+	PaintQat(dc, c);
 	for (int v = 0; v < (int)d.visible.size(); v++) {
 		int t = d.visible[v];
 		auto& tab = d.tabs[t];
@@ -198,6 +210,77 @@ void CRibbonBarCtrl::PaintTabs(WTL::CDCHandle dc, const RIBCOLORS& c) {
 		Chevron(dc, (b.left + b.right) / 2, (b.top + b.bottom) / 2, Scale(10), m_Minimized ? VK_DOWN : VK_UP, c.crTabText,
 			std::max(1, Scale(1)));
 	}
+}
+
+void CRibbonBarCtrl::PaintQat(WTL::CDCHandle dc, const RIBCOLORS& c) {
+	auto& d = *m_Data;
+	auto& m = d.m;
+	if (::IsRectEmpty(&d.qatCustomize))
+		return;
+	COLORREF hotBack = Blend(c.crBack, c.crTabText, 10), pressedBack = Blend(c.crBack, c.crTabText, 18);
+	int radius = Scale(4);
+	for (int q = 0; q < (int)d.qatRects.size(); q++) {
+		RECT rc = d.qatRects[q];
+		auto item = ::IsRectEmpty(&rc) ? nullptr : d.FindItem(d.qat[q]);
+		if (!item)
+			continue;
+		bool disabled = (item->state & RibStateDisabled) != 0;
+		bool hot = !disabled && d.hotQat == q;
+		bool pressed = hot && d.pressedQat == q;
+		if (item->state & RibStateChecked)
+			RoundFill(dc, rc, hot ? Blend(c.crCheckedBack, c.crText, 6) : c.crCheckedBack, c.crCheckedBorder, radius);
+		else if (hot)
+			RoundFill(dc, rc, pressed ? pressedBack : hotBack, pressed ? pressedBack : hotBack, radius);
+		if (item->smallImage >= 0)
+			PaintImage(dc, item->smallImage, false, (rc.left + rc.right - m.smallIcon) / 2, (rc.top + rc.bottom - m.smallIcon) / 2, disabled);
+		else {
+			dc.SetTextColor(disabled ? Blend(c.crBack, c.crTabText, 45) : c.crTabText);
+			dc.DrawText(item->text.c_str(), (int)item->text.size(), &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+		}
+	}
+	// its menu's button: a bar over an arrow
+	RECT b = d.qatCustomize;
+	if (d.hotQat == RibData::Customize) {
+		COLORREF back = d.qatMenu ? pressedBack : hotBack;
+		RoundFill(dc, b, back, back, radius);
+	}
+	int cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+	FillSolid(dc, { cx - m.arrow / 2, cy - Scale(4), cx + m.arrow / 2 + 1, cy - Scale(4) + std::max(1, Scale(1)) }, c.crTabText);
+	Arrow(dc, cx, cy + Scale(1), m.arrow, c.crTabText);
+	FillSolid(dc, { d.qatLine, Scale(7), d.qatLine + 1, m_TabHeight - Scale(7) }, c.crLine);
+}
+
+void CRibbonBarCtrl::PaintKeys(WTL::CDCHandle dc, HWND hwnd, const RIBCOLORS& c) {
+	auto& d = *m_Data;
+	if (d.keyMode != RibKeyMode::Navigate || d.focus < 0 || d.focus >= (int)d.targets.size() || d.targets[d.focus].hwnd != hwnd)
+		return;
+	using Kind = RibKeyTarget::Kind;
+	auto& t = d.targets[d.focus];
+	RECT f = TargetRect(t);
+	if (t.kind == Kind::Tab)
+		::InflateRect(&f, -Scale(2), -Scale(4));
+	else if (t.kind == Kind::Launcher)
+		::InflateRect(&f, Scale(2), Scale(2));
+	RoundFrame(dc, f, c.crAccent, std::max(1, Scale(2)), Scale(4));
+}
+
+void CRibbonBarCtrl::PaintTip(WTL::CDCHandle dc, const RECT& rc, const std::wstring& text, bool disabled) {
+	auto c = GetColors();
+	FillSolid(dc, rc, Blend(c.crPanel, c.crText, disabled ? 40 : 80));
+	auto old = dc.SelectFont(m_hFont);
+	dc.SetBkMode(TRANSPARENT);
+	dc.SetTextColor(c.crPanel);
+	RECT r = rc;
+	dc.DrawText(text.c_str(), (int)text.size(), &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+	dc.SelectFont(old);
+}
+
+LRESULT RibTipWindow::OnPaint(UINT, WPARAM, LPARAM, BOOL&) {
+	WTL::CPaintDC dc(m_hWnd);
+	RECT rc;
+	GetClientRect(&rc);
+	m_Ribbon->PaintTip(dc.m_hDC, rc, text, disabled);
+	return 0;
 }
 
 void CRibbonBarCtrl::PaintSurface(WTL::CDCHandle dc, RibSurface& s, const RIBCOLORS& c) {

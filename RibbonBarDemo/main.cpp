@@ -58,6 +58,7 @@ enum {
 	CMD_COLOR_GREEN, CMD_SHAPE_LINE, CMD_SHAPE_RECT, CMD_SHAPE_OVAL, CMD_SCREEN_WINDOW, CMD_SCREEN_CLIP, CMD_TEXTBOX_SIMPLE,
 	CMD_TEXTBOX_QUOTE, CMD_SYMBOL_PI, CMD_SYMBOL_OMEGA, CMD_TABLE_2X2, CMD_TABLE_3X3,
 	CMD_COVER_FIRST = 1601,     // Cover Page's menu, made as it opens (RIBN_DROPDOWN)
+	CMD_QAT_ADDBOLD = 1701,     // the app's item in the quick access bar's menu (RIBN_CONTEXTMENU)
 };
 
 // ---- Images ----------------------------------------------------------------------
@@ -176,6 +177,9 @@ static bool g_disableClipboard;
 static HWND g_fontName, g_fontSize, g_search;
 static HMENU g_pasteMenu, g_menus[8];
 static int g_covers;               // Cover Page's menu grows each time it opens
+static bool g_resetState;          // /reset: not the state saved last time
+
+static const wchar_t StateKey[] = L"Software\\WTLHelper\\RibbonBarDemo";
 
 static const RIBCOLORS g_colors = {
 	RGB(0x1E, 0x3A, 0x5F), RGB(0xE8, 0xEE, 0xF5), RGB(0xF4, 0xF1, 0xEA), RGB(0x20, 0x20, 0x20), RGB(0x6E, 0x6A, 0x60), RGB(0xD6, 0xD0, 0xC2),
@@ -257,12 +261,22 @@ static void Group(UINT tab, UINT id, const wchar_t* text, int priority = 0, UINT
 	g_ribbon.AddGroup(tab, &group);
 }
 
+static void Tab(UINT id, const wchar_t* text, const wchar_t* keyTip, int context = 0) {
+	RIBTAB tab;
+	tab.id = id;
+	tab.pszText = text;
+	tab.pszKeyTip = keyTip;
+	tab.context = context;
+	g_ribbon.AddTab(&tab);
+}
+
 static void BuildRibbon() {
 	auto& r = g_ribbon;
-	r.AddTab(TAB_HOME, L"Home");
-	r.AddTab(TAB_INSERT, L"Insert");
-	r.AddTab(TAB_VIEW, L"View");
-	r.AddTab(TAB_RIBBON, L"Ribbon");
+	// Office's key tips for these; the others are chosen from the names
+	Tab(TAB_HOME, L"Home", L"H");
+	Tab(TAB_INSERT, L"Insert", L"N");
+	Tab(TAB_VIEW, L"View", L"W");
+	Tab(TAB_RIBBON, L"Ribbon", nullptr);
 	// contextual: shown from the Ribbon tab, as if a picture or a table were selected
 	r.AddContext(CTX_PICTURE, L"Picture Tools", RGB(0x88, 0x5C, 0xD6));
 	r.AddContext(CTX_TABLE, L"Table Tools", RGB(0x10, 0x89, 0x3E));
@@ -377,6 +391,31 @@ static void BuildRibbon() {
 	Add(GRP_ROWS, CMD_DELETEROWS, L"Delete", IMG_HIDE, RIBSZ_SMALL);
 }
 
+// the tab, minimized and the quick access bar, kept between runs
+static void LoadState() {
+	CRegKey key;
+	wchar_t text[512] = L"";
+	ULONG chars = (ULONG)std::size(text);
+	if (!g_resetState && key.Open(HKEY_CURRENT_USER, StateKey, KEY_READ) == ERROR_SUCCESS &&
+		key.QueryStringValue(L"Ribbon", text, &chars) == ERROR_SUCCESS && g_ribbon.SetState(text)) {
+		Log(CString(L"SetState: ") + text);
+		return;
+	}
+	// the first run: a few commands to start with
+	for (UINT id : { (UINT)CMD_UNDO, (UINT)CMD_REDO, (UINT)CMD_BULLETS })
+		g_ribbon.AddToQat(id);
+}
+
+static void SaveState() {
+	int n = g_ribbon.GetState(nullptr, 0);
+	CString text;
+	g_ribbon.GetState(text.GetBuffer(n), n);
+	text.ReleaseBuffer();
+	CRegKey key;
+	if (key.Create(HKEY_CURRENT_USER, StateKey) == ERROR_SUCCESS)
+		key.SetStringValue(L"Ribbon", text);
+}
+
 // ---- Window -----------------------------------------------------------------------
 
 static void Layout(HWND hwnd) {
@@ -455,6 +494,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case CMD_MINIMIZE:
 			g_ribbon.SetMinimized((g_ribbon.GetItemState(CMD_MINIMIZE) & RIBIS_CHECKED) != 0);
 			break;
+		case CMD_QAT_ADDBOLD:
+			g_ribbon.AddToQat(CMD_BOLD);
+			break;
 		case CMD_PICTURESEL:
 		case CMD_TABLESEL: {
 			bool on = (g_ribbon.GetItemState(id) & RIBIS_CHECKED) != 0;
@@ -476,7 +518,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_main = hwnd;
 			g_ribbon.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, IDC_RIBBON);
 			g_edit = ::CreateWindowExW(0, WC_EDITW, L"Select some text: Cut and Copy follow the selection, Paste the clipboard (RIBN_UPDATEUI).\r\n\r\n"
-				L"Make the window narrower: the groups shrink from the right, Editing first, Undo last.",
+				L"Make the window narrower: the groups shrink from the right, Editing first, Undo last.\r\n\r\n"
+				L"Press Alt for the key tips (Alt+H: Home's), then the arrow keys to move between the commands. Right-click a command "
+				L"to add it to the quick access bar. The tab, minimized and the bar are kept for the next run (/reset: not).",
 				WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_NOHIDESEL, 0, 0, 0, 0, hwnd, (HMENU)IDC_EDIT, nullptr, nullptr);
 			g_log = ::CreateWindowExW(0, WC_LISTBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | WS_BORDER,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_LOG, nullptr, nullptr);
@@ -497,6 +541,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			UpdateFonts(hwnd);
 			BuildRibbon();
 			UpdateImages();
+			LoadState();
+			g_ribbon.CheckItem(CMD_MINIMIZE, g_ribbon.IsMinimized());
 			Layout(hwnd);
 			return 0;
 		}
@@ -597,11 +643,43 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 					Log(L"RIBN_HEIGHTCHANGED");
 					Layout(hwnd);
 					return 0;
+				case RIBN_QATCHANGED: {
+					UINT ids[64];
+					int n = g_ribbon.GetQatItems(ids, (int)std::size(ids));
+					line = L"RIBN_QATCHANGED:";
+					for (int i = 0; i < n && i < (int)std::size(ids); i++) {
+						auto it = g_names.find(ids[i]);
+						line += L" ";
+						line += it != g_names.end() ? it->second.c_str() : L"?";
+					}
+					Log(line);
+					return 0;
+				}
+				case RIBN_CONTEXTMENU: {
+					auto nm = (NMRIBCONTEXTMENU*)lParam;
+					auto it = g_names.find(nm->id);
+					static const wchar_t* where[] = { L"ribbon", L"item", L"quick access button", L"quick access menu" };
+					line.Format(L"RIBN_CONTEXTMENU: %s%s%s", nm->where < std::size(where) ? where[nm->where] : L"?",
+						nm->id ? L" " : L"", nm->id ? (it != g_names.end() ? it->second.c_str() : L"?") : L"");
+					Log(line);
+					// the app's own item: Bold offered while it isn't there
+					if (nm->where == RIBCM_CUSTOMIZE && !g_ribbon.IsInQat(CMD_BOLD)) {
+						int pos = ::GetMenuItemCount(nm->hMenu);
+						for (int i = 0; i < pos; i++)
+							if (::GetMenuItemID(nm->hMenu, i) == RIBCMD_MINIMIZE) {
+								pos = i - 1;    // before the separator above Minimize
+								break;
+							}
+						::InsertMenuW(nm->hMenu, pos, MF_BYPOSITION | MF_STRING, CMD_QAT_ADDBOLD, L"Bold");
+					}
+					return 0;
+				}
 			}
 			return 0;
 		}
 
 		case WM_DESTROY:
+			SaveState();
 			::PostQuitMessage(0);
 			return 0;
 	}
@@ -621,7 +699,15 @@ struct IdleUpdate : CIdleHandler {
 	}
 };
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+// the keys go by the ribbon first: Alt and F10 wherever the focus is
+struct KeyFilter : CMessageFilter {
+	BOOL PreTranslateMessage(MSG* pMsg) override {
+		return g_ribbon.IsWindow() && g_ribbon.PreTranslateMessage(pMsg);
+	}
+};
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow) {
+	g_resetState = cmdLine && ::wcsstr(cmdLine, L"/reset");
 	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 	INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
 	::InitCommonControlsEx(&icc);
@@ -646,9 +732,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	CMessageLoop loop;
 	IdleUpdate idle;
+	KeyFilter keys;
 	_Module.AddMessageLoop(&loop);
 	loop.AddIdleHandler(&idle);
+	loop.AddMessageFilter(&keys);
 	loop.Run();
+	loop.RemoveMessageFilter(&keys);
 	loop.RemoveIdleHandler(&idle);
 	_Module.RemoveMessageLoop();
 
