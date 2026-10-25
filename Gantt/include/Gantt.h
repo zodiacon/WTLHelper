@@ -7,7 +7,8 @@
 // drags a bar to move it, its ends to change its dates, its progress handle, and from its link handle to another bar
 // to link them; each change is the app's to allow, and Ctrl+Z undoes it. The keys: Up and Down select, Left and
 // Right collapse and expand, Alt+Left and Alt+Right move the task (with Shift: its finish), F2 renames it, Delete
-// removes the link clicked. Tooltips tell a bar's dates. Markers are labeled lines at times. The API
+// removes the link clicked. Tooltips tell a bar's dates. Markers are labeled lines at times. In high contrast it draws
+// with the system colors only (over the app's). Accessibility: an outline of the rows (MSAA). The API
 // follows the common controls: C-style structures and WM_NOTIFY codes (GNTN_*) sent to the parent. Times are local
 // SYSTEMTIMEs; durations are working minutes (GetMinutesPerDay: a working day's).
 
@@ -158,6 +159,7 @@ struct GntData;
 struct GntHitInfo;
 
 class CGanttCtrl : public ATL::CWindowImpl<CGanttCtrl> {
+	friend class GntAccessible;
 public:
 	DECLARE_WND_CLASS_EX(L"WC_Gantt", CS_DBLCLKS, -1)
 
@@ -193,6 +195,8 @@ public:
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_GNT_ACCACTION, OnAccAction)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
@@ -261,9 +265,13 @@ public:
 	void    SetColumns(const UINT* columns, const int* widthsDips, int count);   // GNTCOL_*, in order
 	void    SetGridWidth(int dips);                               // the grid's, left of the splitter (the user drags it)
 	void    SetColors(const GNTCOLORS* colors);                   // nullptr: from the system colors (follows WTLHelper dark mode)
-	GNTCOLORS GetColors() const;
+	GNTCOLORS GetColors() const;                                  // in high contrast: the system's
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
+	bool    IsHighContrast() const;
 
 private:
+	enum : UINT { WM_GNT_ACCACTION = WM_USER + 100 };              // an accessibility client's default action, done later
+
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
@@ -285,6 +293,8 @@ private:
 	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
@@ -312,6 +322,10 @@ private:
 	void    CancelDrag();
 	void    Commit(UINT id, UINT change);                         // a drag done: pushed, undoable, notified
 	bool    Apply(UINT id, UINT change);                          // the task changed (before kept): the app may veto, else Commit
+	void    LinkTo(UINT from, UINT to);
+	int     MarkerAt(POINT pt) const;                             // the marker's index; -1 if none
+	void    PaintEditing(WTL::CDCHandle dc, const GNTCOLORS& c);  // the drag's line, label and target
+	void    PaintMarkers(WTL::CDCHandle dc, const GNTCOLORS& c);
 	// the keys (GanttKeys.cpp)
 	bool    KeyDown(UINT vk, bool alt, bool shift);
 	void    SelectRow(int row);                                   // notified, scrolled into view
@@ -321,10 +335,11 @@ private:
 	int     LinkAt(POINT pt);                                     // the link's index under pt; -1 if none
 	std::vector<POINT> LinkRoute(int link, bool* shown);          // client coords
 	void    UpdateTip();
-	void    LinkTo(UINT from, UINT to);
-	int     MarkerAt(POINT pt) const;                             // the marker's index; -1 if none
-	void    PaintEditing(WTL::CDCHandle dc, const GNTCOLORS& c);  // the drag's line, label and target
-	void    PaintMarkers(WTL::CDCHandle dc, const GNTCOLORS& c);
+	// accessibility (GanttAccessible.cpp)
+	long    AccChildId(UINT id) const;                            // its row's, 1..; CHILDID_SELF if it isn't shown
+	std::wstring AccDescription(int task) const;
+	void    NotifyAccessible(DWORD event, long child);            // once a client has asked
+	void    DisconnectAccessible();
 
 	// painting (GanttPaint.cpp)
 	void    Paint(WTL::CDCHandle dc);
@@ -339,6 +354,7 @@ private:
 	HWND    m_hTip = nullptr;
 	GNTCOLORS m_Colors{};
 	bool    m_SystemColors = true;
+	int     m_ForceHighContrast = -1;
 	HFONT   m_hFont = nullptr;
 	HFONT   m_hBold = nullptr;
 	bool    m_OwnFont = true;

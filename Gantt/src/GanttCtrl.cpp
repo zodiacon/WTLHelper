@@ -64,6 +64,7 @@ LRESULT CGanttCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CGanttCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	DisconnectAccessible();
 	if (m_hTip)
 		::DestroyWindow(m_hTip);
 	m_hTip = nullptr;
@@ -71,8 +72,10 @@ LRESULT CGanttCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	return 0;
 }
 
-LRESULT CGanttCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CGanttCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	Invalidate(FALSE);   // the selection's color
+	if (uMsg == WM_SETFOCUS)
+		NotifyAccessible(EVENT_OBJECT_FOCUS, AccChildId(m_Data->selected));
 	return 0;
 }
 
@@ -199,6 +202,7 @@ void CGanttCtrl::Changed() {
 	d.hotLink = -1;
 	if (d.renaming && !d.project.Find(d.renaming))
 		EndRename(false);
+	NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);   // the rows, or what they say
 	UpdateLayout();
 }
 
@@ -545,6 +549,11 @@ void CGanttCtrl::SetSelected(UINT id, bool notify) {
 		return;
 	d.selected = id;
 	Invalidate(FALSE);
+	if (const long child = AccChildId(id); child != CHILDID_SELF) {
+		NotifyAccessible(EVENT_OBJECT_SELECTION, child);
+		if (::GetFocus() == m_hWnd)
+			NotifyAccessible(EVENT_OBJECT_FOCUS, child);
+	}
 	if (notify)
 		NotifyTask(GNTN_SELCHANGED, id);
 }

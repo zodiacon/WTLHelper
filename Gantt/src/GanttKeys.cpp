@@ -248,6 +248,7 @@ void CGanttCtrl::EndRename(bool commit) {
 		r->name = (LPCWSTR)text;
 	d.history.Push(d.before, d.project.Save());
 	Invalidate(FALSE);
+	NotifyAccessible(EVENT_OBJECT_NAMECHANGE, AccChildId(id));
 	FireNotify(&nm.hdr, GNTN_RENAMED);
 }
 

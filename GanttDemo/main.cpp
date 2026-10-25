@@ -32,7 +32,7 @@ enum : UINT {
 	IDC_GANTT = 100, IDC_LOG,
 	CMD_EXIT = 1000, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_HOURS, CMD_DAYS, CMD_WEEKS, CMD_MONTHS, CMD_TODAY, CMD_EXPANDALL,
 	CMD_COLLAPSEALL, CMD_ADDTASK, CMD_DELETE, CMD_SATURDAY, CMD_HOLIDAY, CMD_PROGRESSCOL, CMD_DARKMODE, CMD_LARGEFONT,
-	CMD_CLEARLOG, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_VETO, CMD_NOAUTO,
+	CMD_CLEARLOG, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_VETO, CMD_NOAUTO, CMD_HIGHCONTRAST,
 };
 
 static CGanttCtrl g_gantt;
@@ -170,6 +170,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"Dar&k Mode");
 #endif
 	::AppendMenuW(view, MF_STRING, CMD_LARGEFONT, L"&Larger Font");
+	::AppendMenuW(view, MF_STRING, CMD_HIGHCONTRAST, L"Force &High Contrast");
 	::AppendMenuW(view, MF_STRING, CMD_CLEARLOG, L"Clear L&og");
 	HMENU tasks = ::CreatePopupMenu();
 	::AppendMenuW(tasks, MF_STRING, CMD_EXPANDALL, L"&Expand All");
@@ -292,6 +293,7 @@ static void OnCommand(UINT id) {
 				g_gantt.ModifyStyle(GNTS_READONLY, 0);
 			break;
 		case CMD_VETO: Toggle(id); break;
+		case CMD_HIGHCONTRAST: g_gantt.ForceHighContrast(Toggle(id) ? 1 : -1); break;
 		case CMD_NOAUTO:
 			if (Toggle(id))
 				g_gantt.ModifyStyle(0, GNTS_NOAUTOSCHEDULE);
@@ -376,7 +378,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			// the log first: the test script finds the first list box
 			g_log = ::CreateWindowExW(0, WC_LISTBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | WS_BORDER,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_LOG, nullptr, nullptr);
-			g_gantt.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, IDC_GANTT);
+			g_gantt.Create(hwnd, nullptr, L"Website relaunch", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, IDC_GANTT);
 			g_gantt.SetGridWidth(390);
 			UpdateFonts();
 			// this week's Monday

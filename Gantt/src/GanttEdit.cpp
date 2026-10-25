@@ -176,6 +176,7 @@ void CGanttCtrl::Commit(UINT id, UINT change) {
 		d.project.PushSuccessors(id);
 	d.history.Push(d.before, d.project.Save());
 	Changed();
+	NotifyAccessible(EVENT_OBJECT_DESCRIPTIONCHANGE, AccChildId(id));
 	auto t = d.project.Find(id);
 	if (!t)
 		return;
@@ -297,7 +298,8 @@ void CGanttCtrl::PaintMarkers(WTL::CDCHandle dc, const GNTCOLORS& c) {
 	auto& d = *m_Data;
 	const RECT& ch = d.chart;
 	for (auto& marker : d.markers) {
-		const COLORREF color = marker.color != CLR_INVALID ? marker.color : IsDark(c.crBack) ? RGB(0xB3, 0x8B, 0xF0) : RGB(0x6B, 0x3F, 0xC4);
+		const COLORREF color = HighContrast ? ::GetSysColor(COLOR_HIGHLIGHT) : marker.color != CLR_INVALID ? marker.color
+			: IsDark(c.crBack) ? RGB(0xB3, 0x8B, 0xF0) : RGB(0x6B, 0x3F, 0xC4);
 		RECT tag = MarkerTag(dc, d, marker, Scale(2));
 		if (tag.right < ch.left || tag.left > ch.right)
 			continue;
@@ -309,7 +311,7 @@ void CGanttCtrl::PaintMarkers(WTL::CDCHandle dc, const GNTCOLORS& c) {
 		dc.LineTo(tag.left, ch.bottom);
 		dc.SelectPen(old);
 		RoundFill(dc, tag, color, color, Scale(6));
-		dc.SetTextColor(c.crBack);
+		dc.SetTextColor(HighContrast ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : c.crBack);
 		dc.DrawText(marker.label.c_str(), (int)marker.label.size(), &tag, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 	}
 }
@@ -371,6 +373,6 @@ void CGanttCtrl::PaintEditing(WTL::CDCHandle dc, const GNTCOLORS& c) {
 	if (box.top < d.chart.top)
 		::OffsetRect(&box, 0, bar.rc.bottom - box.top + Scale(2));   // no room above: under it
 	RoundFill(dc, box, c.crHeaderBack, c.crGrid, Scale(6));
-	dc.SetTextColor(c.crText);
+	dc.SetTextColor(c.crHeaderText);
 	dc.DrawText(text.c_str(), (int)text.size(), &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }

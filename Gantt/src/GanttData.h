@@ -28,6 +28,8 @@ struct GntColumn {
 	int  dips = 100;
 };
 
+class GntAccessible;
+
 struct GntData {
 	GntProject project;
 	GntScale scale;                // origin: the time at the chart's left
@@ -67,6 +69,7 @@ struct GntData {
 	UINT    renaming = 0;                     // the task whose name is being edited
 	std::wstring tipText;                     // the tooltip's, on tipRect
 	RECT    tipRect{};
+	GntAccessible* acc = nullptr;             // once a client has asked
 };
 
 namespace GntDraw {
@@ -82,6 +85,13 @@ namespace GntDraw {
 	inline void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color) {
 		dc.SetBkColor(color);
 		dc.ExtTextOut(0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+	}
+
+	extern bool HighContrast;   // set as a paint starts
+
+	// a color between two; in high contrast the second (no shades between the system's colors)
+	inline COLORREF Shade(COLORREF a, COLORREF b, int percentB) {
+		return HighContrast ? b : Blend(a, b, percentB);
 	}
 
 	void RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius);

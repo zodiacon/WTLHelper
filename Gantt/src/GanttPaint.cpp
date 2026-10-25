@@ -5,6 +5,8 @@
 
 using namespace GntDraw;
 
+bool GntDraw::HighContrast = false;
+
 // ---- Helpers ----------------------------------------------------------------------------------------
 
 void GntDraw::RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius) {
@@ -70,10 +72,22 @@ namespace {
 // ---- Colors and texts ---------------------------------------------------------------------------------
 
 GNTCOLORS CGanttCtrl::GetColors() const {
+	GNTCOLORS c;
+	if (IsHighContrast()) {
+		// the system's colors, over the app's: the theme's pairs, nothing between them
+		const COLORREF window = ::GetSysColor(COLOR_WINDOW), text = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crBack = c.crNonWork = c.crBar = window;
+		c.crText = c.crBarBorder = c.crSummary = c.crMilestone = c.crLink = text;
+		c.crHeaderBack = ::GetSysColor(COLOR_BTNFACE);
+		c.crHeaderText = ::GetSysColor(COLOR_BTNTEXT);
+		c.crGrid = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crSelBack = c.crBarDone = ::GetSysColor(COLOR_HIGHLIGHT);
+		c.crToday = ::GetSysColor(COLOR_HOTLIGHT);
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
-	GNTCOLORS c;
 	COLORREF window = ::GetSysColor(COLOR_WINDOW), text = ::GetSysColor(COLOR_WINDOWTEXT), highlight = ::GetSysColor(COLOR_HIGHLIGHT);
 	const bool dark = IsDark(window);
 	const COLORREF accent = dark ? RGB(0x4C, 0xA0, 0xE8) : RGB(0x2B, 0x7C, 0xD3);
@@ -156,6 +170,21 @@ std::wstring CGanttCtrl::UnitLabel(int unit, LONGLONG start, int width) const {
 	}
 }
 
+// ---- High contrast ------------------------------------------------------------------------------------
+
+void CGanttCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow())
+		Invalidate();
+}
+
+bool CGanttCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
 // ---- Painting ---------------------------------------------------------------------------------------
 
 LRESULT CGanttCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
@@ -171,7 +200,10 @@ LRESULT CGanttCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 
 void CGanttCtrl::Paint(WTL::CDCHandle dc) {
 	auto& d = *m_Data;
+	HighContrast = IsHighContrast();
 	auto c = GetColors();
+	if (!HighContrast && ::GetFocus() != m_hWnd && ::GetFocus() != m_Edit.m_hWnd)
+		c.crSelBack = Blend(c.crBack, c.crSelBack, 55);   // the keys are elsewhere: a quieter selection
 	RECT rc;
 	GetClientRect(&rc);
 	FillSolid(dc, rc, c.crBack);
@@ -247,8 +279,10 @@ void CGanttCtrl::PaintGrid(WTL::CDCHandle dc, const GNTCOLORS& c) {
 		const int task = d.rows[r];
 		auto& t = d.project.Tasks()[task];
 		const int y = g.top + r * rh - d.scrollY;
-		if (t.id == d.selected)
+		const bool selected = t.id == d.selected;
+		if (selected)
 			FillSolid(dc, { g.left, y, g.right, y + rh }, c.crSelBack);
+		const COLORREF text = selected && HighContrast ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : c.crText;
 		int x = g.left;
 		for (auto& col : d.columns) {
 			const int w = Scale(col.dips);
@@ -257,18 +291,18 @@ void CGanttCtrl::PaintGrid(WTL::CDCHandle dc, const GNTCOLORS& c) {
 				// indented by its depth, a summary's expander before it
 				const int ex = x + Scale(2) + t.depth * d.indent;
 				if (t.summary)
-					Chevron(dc, ex + d.indent / 2, y + rh / 2, Scale(8), t.expanded, c.crText);
+					Chevron(dc, ex + d.indent / 2, y + rh / 2, Scale(8), t.expanded, text);
 				cell.left = ex + d.indent;
 			}
 			dc.SelectFont(t.summary && col.id == GNTCOL_NAME ? m_hBold : m_hFont);
-			dc.SetTextColor(c.crText);
-			auto text = CellText(task, col.id);
+			dc.SetTextColor(text);
+			auto cellText = CellText(task, col.id);
 			const UINT align = col.id == GNTCOL_DURATION || col.id == GNTCOL_PROGRESS ? DT_RIGHT : DT_LEFT;
-			dc.DrawText(text.c_str(), (int)text.size(), &cell, align | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+			dc.DrawText(cellText.c_str(), (int)cellText.size(), &cell, align | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 			x += w;
-			FillSolid(dc, { x - 1, y, x, y + rh }, Blend(c.crBack, c.crGrid, 50));
+			FillSolid(dc, { x - 1, y, x, y + rh }, Shade(c.crBack, c.crGrid, 50));
 		}
-		FillSolid(dc, { g.left, y + rh - 1, g.right, y + rh }, Blend(c.crBack, c.crGrid, 60));
+		FillSolid(dc, { g.left, y + rh - 1, g.right, y + rh }, Shade(c.crBack, c.crGrid, 60));
 	}
 	dc.SelectFont(m_hFont);
 	dc.RestoreDC(saved);
@@ -285,19 +319,29 @@ void CGanttCtrl::PaintChart(WTL::CDCHandle dc, const GNTCOLORS& c) {
 		return ch.left + (int)std::lround(d.scale.X(t));
 	};
 
-	// non-working time: the days off, and (by the hour) the hours off
+	// non-working time: the days off, and (by the hour) the hours off; hatched in high contrast
+	WTL::CBrush hatch;
+	if (HighContrast)
+		hatch.CreateHatchBrush(HS_BDIAGONAL, c.crGrid);
+	auto off = [&](GntTime a, GntTime b) {
+		RECT r{ X(a), ch.top, X(b), ch.bottom };
+		if (HighContrast)
+			dc.FillRect(&r, hatch);
+		else
+			FillSolid(dc, r, c.crNonWork);
+	};
 	if (GntDay / d.scale.minutesPerPixel >= Scale(5))   // narrower: stripes
 		for (int64_t day = GntDayOf(from), last = GntDayOf(to); day <= last; day++) {
 			const GntTime t = GntTimeOf(day);
 			if (!cal.IsWorkingDay(day))
-				FillSolid(dc, { X(t), ch.top, X(t + GntDay), ch.bottom }, c.crNonWork);
+				off(t, t + GntDay);
 			else if (d.lower == GntUnit::Hour) {
-				FillSolid(dc, { X(t), ch.top, X(t + cal.dayStart), ch.bottom }, c.crNonWork);
-				FillSolid(dc, { X(t + cal.dayEnd), ch.top, X(t + GntDay), ch.bottom }, c.crNonWork);
+				off(t, t + cal.dayStart);
+				off(t + cal.dayEnd, t + GntDay);
 			}
 		}
 	// the lower tier's cells
-	const COLORREF line = Blend(c.crBack, c.crGrid, 60);
+	const COLORREF line = Shade(c.crBack, c.crGrid, 60);
 	for (auto& cell : GntCells(d.lower, from, to + 1))
 		if (X(cell.end) - X(cell.start) >= Scale(10))
 			FillSolid(dc, { X(cell.start), ch.top, X(cell.start) + 1, ch.bottom }, line);
@@ -369,22 +413,26 @@ void CGanttCtrl::PaintChart(WTL::CDCHandle dc, const GNTCOLORS& c) {
 		if (b.rc.right < ch.left - Scale(400) || b.rc.left > ch.right)
 			continue;
 		const bool hot = d.hot.area == GntArea::Chart && d.hot.task == d.rows[r] && d.hot.part != GntPart::None;
+		// on the selected row in high contrast: in the color that reads on the highlight
+		const bool inked = HighContrast && t.id == d.selected;
+		const COLORREF ink = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
 		if (b.milestone) {
 			const int cx = (b.rc.left + b.rc.right) / 2, cy = (b.rc.top + b.rc.bottom) / 2, h = (b.rc.right - b.rc.left) / 2;
 			POINT diamond[4] = { { cx, cy - h }, { cx + h, cy }, { cx, cy + h }, { cx - h, cy } };
-			Polygon(dc, diamond, 4, hot ? c.crText : c.crMilestone);
+			Polygon(dc, diamond, 4, inked ? ink : hot ? c.crText : c.crMilestone);
 		}
 		else if (b.summary) {
-			FillSolid(dc, b.rc, c.crSummary);
+			const COLORREF summary = inked ? ink : c.crSummary;
+			FillSolid(dc, b.rc, summary);
 			// the ends point down at the children
 			const int cap = Scale(5);
 			POINT left[3] = { { b.rc.left, b.rc.bottom }, { b.rc.left + cap, b.rc.bottom }, { b.rc.left, b.rc.bottom + cap } };
 			POINT right[3] = { { b.rc.right, b.rc.bottom }, { b.rc.right - cap, b.rc.bottom }, { b.rc.right, b.rc.bottom + cap } };
-			Polygon(dc, left, 3, c.crSummary);
-			Polygon(dc, right, 3, c.crSummary);
+			Polygon(dc, left, 3, summary);
+			Polygon(dc, right, 3, summary);
 		}
 		else {
-			const bool own = t.color != CLR_INVALID;
+			const bool own = t.color != CLR_INVALID && !HighContrast;
 			const COLORREF fill = own ? t.color : c.crBar;
 			RoundFill(dc, b.rc, fill, hot ? c.crText : own ? Blend(t.color, c.crText, 30) : c.crBarBorder, Scale(4));
 			if (b.done.right > b.rc.left + 1) {
@@ -401,6 +449,7 @@ void CGanttCtrl::PaintChart(WTL::CDCHandle dc, const GNTCOLORS& c) {
 			label.left = handle.right + Scale(4);
 		}
 		dc.SelectFont(t.summary ? m_hBold : m_hFont);
+		dc.SetTextColor(HighContrast && t.id == d.selected ? ::GetSysColor(COLOR_HIGHLIGHTTEXT) : c.crText);
 		dc.DrawText(t.name.c_str(), (int)t.name.size(), &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 	}
 	dc.SelectFont(m_hFont);
