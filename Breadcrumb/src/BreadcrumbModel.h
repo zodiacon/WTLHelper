@@ -123,6 +123,8 @@ public:
 	void Navigate(const BrcLocation& location);
 	// offset < 0 goes back, > 0 forward; false if there's no such entry
 	bool Go(int offset);
+	// the current entry, as the app showed it (after going back to a path it then wrote differently); none: Navigate
+	void Replace(const BrcLocation& location);
 	bool CanGo(int offset) const;
 	const BrcLocation* At(int offset) const;    // nullptr if none
 	const BrcLocation* Current() const {

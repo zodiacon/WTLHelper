@@ -265,7 +265,7 @@ BRCCOLORS CBreadcrumbCtrl::GetColors() const {
 
 // ---- The path ----------------------------------------------------------------------------------
 
-BOOL CBreadcrumbCtrl::SetPath(const BRCITEM* items, int count) {
+BOOL CBreadcrumbCtrl::SetPath(const BRCITEM* items, int count, LPCWSTR location) {
 	if (count < 0 || (count > 0 && !items))
 		return FALSE;
 	CloseDropDown();
@@ -283,8 +283,67 @@ BOOL CBreadcrumbCtrl::SetPath(const BRCITEM* items, int count) {
 	}
 	d.hot = d.pressed = {};
 	d.editText.clear();   // the app's text was for the path it replaces
+	if (count > 0) {
+		BrcLocation loc{ location ? std::wstring(location) : PathTo(-1), d.segments.back().text, d.segments.back().image };
+		if (d.pendingOffset && d.backForward.Go(d.pendingOffset))
+			d.backForward.Replace(loc);   // back or forward: there, as the app wrote it now
+		else
+			d.backForward.Navigate(loc);
+		d.pendingOffset = 0;
+	}
 	Changed(true);
 	return TRUE;
+}
+
+// ---- Back, forward, up ------------------------------------------------------------------------------
+
+bool CBreadcrumbCtrl::CanGo(int offset) const {
+	return offset != 0 && m_Data->backForward.CanGo(offset);
+}
+
+BOOL CBreadcrumbCtrl::Go(int offset) {
+	auto& d = *m_Data;
+	auto loc = offset ? d.backForward.At(offset) : nullptr;
+	if (!loc)
+		return FALSE;
+	auto path = loc->path, text = loc->text;
+	NMBRCNAVIGATE nm{};
+	nm.source = BRCNS_BACKFORWARD;
+	nm.index = offset;
+	nm.pszPath = path.c_str();
+	nm.pszText = text.c_str();
+	d.pendingOffset = offset;   // the app's SetPath goes along the list
+	FireNotify(&nm.hdr, BRCN_NAVIGATE);
+	d.pendingOffset = 0;
+	return TRUE;
+}
+
+BOOL CBreadcrumbCtrl::GoUp() {
+	auto& d = *m_Data;
+	const int parent = (int)d.segments.size() - 2;
+	if (parent < 0)
+		return FALSE;
+	auto path = PathTo(parent + 1);
+	auto text = d.segments[parent].text;
+	NMBRCNAVIGATE nm{};
+	nm.source = BRCNS_UP;
+	nm.index = parent;
+	nm.pszPath = path.c_str();
+	nm.pszText = text.c_str();
+	nm.lParam = d.segments[parent].lParam;
+	FireNotify(&nm.hdr, BRCN_NAVIGATE);
+	return TRUE;
+}
+
+void CBreadcrumbCtrl::ClearBackForward() {
+	auto& d = *m_Data;
+	auto current = d.backForward.Current() ? *d.backForward.Current() : BrcLocation{};
+	bool had = d.backForward.Current() != nullptr;
+	d.backForward.Clear();
+	if (had)
+		d.backForward.Navigate(current);
+	if (IsWindow())
+		Invalidate(FALSE);
 }
 
 int CBreadcrumbCtrl::GetItemCount() const {
@@ -449,8 +508,15 @@ BrcHit CBreadcrumbCtrl::HitTest(POINT pt) {
 			if (GetStyle() & BRCS_NOEDIT)
 				hit = {};
 			break;
+		case BrcPart::Back:
+		case BrcPart::Forward:
+		case BrcPart::Recent:
+		case BrcPart::Up:
+			if (!Enabled(hit))
+				hit = {};
+			break;
 		default:
-			hit = {};   // back, forward and up come with the history (a later phase)
+			hit = {};
 			break;
 	}
 	return hit;
@@ -498,10 +564,14 @@ LRESULT CBreadcrumbCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	switch (hit.part) {
 		case BrcPart::Chevron:
 		case BrcPart::Overflow:
+		case BrcPart::Recent:
 			OpenDropDown(hit, true);
 			break;
 		case BrcPart::Text:
 		case BrcPart::Action:
+		case BrcPart::Back:
+		case BrcPart::Forward:
+		case BrcPart::Up:
 			d.pressed = hit;
 			SetHot(hit);
 			SetCapture();
@@ -535,10 +605,14 @@ LRESULT CBreadcrumbCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	Invalidate(FALSE);
 	if (!(hit == pressed))
 		return 0;
-	if (pressed.part == BrcPart::Text)
-		Navigate(BRCNS_SEGMENT, pressed.index, -1);
-	else if (pressed.part == BrcPart::Action)
-		ClickButton(pressed.index);
+	switch (pressed.part) {
+		case BrcPart::Text: Navigate(BRCNS_SEGMENT, pressed.index, -1); break;
+		case BrcPart::Action: ClickButton(pressed.index); break;
+		case BrcPart::Back: Go(-1); break;
+		case BrcPart::Forward: Go(1); break;
+		case BrcPart::Up: GoUp(); break;
+		default: break;
+	}
 	return 0;
 }
 
@@ -564,7 +638,16 @@ LRESULT CBreadcrumbCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL& bHandle
 
 LRESULT CBreadcrumbCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
-	if (!d.list || !d.list->IsOpen() || !d.list->KeyDown((UINT)wParam))
+	const UINT vk = (UINT)wParam;
+	if (d.list && d.list->IsOpen()) {
+		// Left and Right go to the next list, as on a menu bar
+		if (d.listKind == BrcList::Children && (vk == VK_LEFT || vk == VK_RIGHT) && DropAdjacent(vk == VK_LEFT ? -1 : 1))
+			return 0;
+		if (!d.list->KeyDown(vk))
+			bHandled = FALSE;
+		return 0;
+	}
+	if (d.editing || !KeyDown(vk))
 		bHandled = FALSE;
 	return 0;
 }
@@ -573,13 +656,25 @@ LRESULT CBreadcrumbCtrl::OnChar(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
 	if (d.list && d.list->IsOpen())
 		d.list->Char((wchar_t)wParam);
+	else if (wParam > L' ' && !d.editing && BeginEdit()) {   // (Space is Enter's)
+		// typing edits the path, starting with what was typed
+		SetText(std::wstring(1, (wchar_t)wParam), false);
+		Suggest(false);
+	}
 	else
 		bHandled = FALSE;
 	return 0;
 }
 
+LRESULT CBreadcrumbCtrl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	Invalidate(FALSE);   // the keys' part framed
+	bHandled = FALSE;
+	return 0;
+}
+
 LRESULT CBreadcrumbCtrl::OnKillFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
+	Invalidate(FALSE);
 	if (d.list && d.list->IsOpen() && !d.switching) {
 		d.focusBefore = nullptr;   // the focus went somewhere: it stays there
 		CloseDropDown();
@@ -590,7 +685,7 @@ LRESULT CBreadcrumbCtrl::OnKillFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 
 LRESULT CBreadcrumbCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
-	return d.list && d.list->IsOpen() ? DLGC_WANTALLKEYS : 0;
+	return d.list && d.list->IsOpen() ? DLGC_WANTALLKEYS : DLGC_WANTARROWS | DLGC_WANTCHARS;
 }
 
 // ---- Going places -----------------------------------------------------------------------------

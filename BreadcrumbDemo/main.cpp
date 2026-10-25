@@ -2,7 +2,10 @@
 // contents. The bar asks the demo for what's under a segment (BRCN_GETCHILDREN) and says where the user wants to go
 // (BRCN_NAVIGATE); the demo goes there and sets the bar's path. Clicking the bar's empty part (or Alt+D, Ctrl+L) edits
 // the path, with suggestions from the demo (BRCN_GETSUGGESTIONS); F4 shows the paths typed before, kept in
-// HKCU\Software\WTLHelper\BreadcrumbDemo. The log at the bottom shows the notifications.
+// HKCU\Software\WTLHelper\BreadcrumbDemo. The bar keeps the back and forward list itself (Alt+Left, Alt+Right, Alt+Up,
+// Backspace in the list); Tab or F6 moves the focus to the bar, whose parts the arrow keys go along. File > Shell
+// Namespace browses with CBreadcrumbShell, which handles the bar's notifications itself. The log at the bottom shows the
+// notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -14,6 +17,7 @@
 #include <shlobj.h>
 
 #include "Breadcrumb.h"
+#include "BreadcrumbShell.h"
 
 // WTLHelper's dark mode (its Detours and WIL come from vcpkg, set up for x64 only)
 #ifdef _M_X64
@@ -22,6 +26,7 @@
 #endif
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -34,7 +39,7 @@ CAppModule _Module;
 enum : UINT {
 	IDC_CRUMB = 100, IDC_LIST, IDC_LOG,
 	CMD_EXIT = 1000, CMD_FILES, CMD_REGISTRY, CMD_NAV, CMD_UP, CMD_ICON, CMD_ROOTCHEVRON, CMD_HISTORY, CMD_BUTTONS,
-	CMD_DARKMODE, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_CLEARLOG, CMD_EDITING,
+	CMD_DARKMODE, CMD_CUSTOMCOLORS, CMD_LARGEFONT, CMD_CLEARLOG, CMD_EDITING, CMD_SHELL,
 	CMD_REFRESH = 2000, CMD_SEARCH,
 };
 
@@ -44,6 +49,19 @@ static HMENU g_menu;
 static HIMAGELIST g_images;           // the system's small icons
 static HFONT g_font, g_largeFont;
 static bool g_registry;
+static bool g_shell;                  // File > Shell Namespace: CBreadcrumbShell does the browsing
+static std::unique_ptr<CBreadcrumbShell> g_shellNav;
+
+struct PidlFree {
+	void operator()(PIDLIST_ABSOLUTE p) const {
+		::ILFree(p);
+	}
+};
+struct ListItem {
+	std::unique_ptr<std::remove_pointer_t<PIDLIST_ABSOLUTE>, PidlFree> pidl;
+	bool folder = false;
+};
+static std::vector<ListItem> g_shellItems;   // the list view's in shell mode
 static std::wstring g_path;           // the file system's ("" This PC) or the registry's ("Computer\HKEY_...")
 static int g_folderIcon = -1, g_pcIcon = -1;
 static const wchar_t StateKey[] = L"Software\\WTLHelper\\BreadcrumbDemo";
@@ -332,38 +350,114 @@ static bool GoTo(const std::wstring& path) {
 	return true;
 }
 
+static const wchar_t* HistoryValue() {
+	return g_shell ? L"ShellHistory" : g_registry ? L"RegistryHistory" : L"FilesHistory";
+}
+
 static void SaveHistory() {
 	wchar_t text[16384];
 	g_crumb.GetHistory(text, _countof(text));
-	::RegSetKeyValueW(HKEY_CURRENT_USER, StateKey, g_registry ? L"RegistryHistory" : L"FilesHistory", REG_SZ, text,
-		(DWORD)(wcslen(text) + 1) * sizeof(wchar_t));
+	::RegSetKeyValueW(HKEY_CURRENT_USER, StateKey, HistoryValue(), REG_SZ, text, (DWORD)(wcslen(text) + 1) * sizeof(wchar_t));
 }
 
 static void LoadHistory() {
 	wchar_t text[16384]{};
 	DWORD size = sizeof(text);
-	if (::RegGetValueW(HKEY_CURRENT_USER, StateKey, g_registry ? L"RegistryHistory" : L"FilesHistory", RRF_RT_REG_SZ, nullptr,
-		text, &size) != ERROR_SUCCESS)
+	if (::RegGetValueW(HKEY_CURRENT_USER, StateKey, HistoryValue(), RRF_RT_REG_SZ, nullptr, text, &size) != ERROR_SUCCESS)
 		text[0] = 0;
 	g_crumb.SetHistory(text);
 }
 
-static void SetMode(bool registry) {
+// the shell mode's list view: the location's folders and files (in the file system folders first, by name; else as
+// the folder gives them: sorting Gallery's thousands of pictures with CompareIDs takes minutes), cut short at Most
+static void FillShellList(PCIDLIST_ABSOLUTE location) {
+	const size_t Most = 3000;
+	g_shellItems.clear();
+	::SendMessageW(g_list, WM_SETREDRAW, FALSE, 0);
+	ListView_DeleteAllItems(g_list);
+	CComPtr<IShellFolder> folder;
+	if (ILIsEmpty(location))
+		::SHGetDesktopFolder(&folder);
+	else
+		::SHBindToObject(nullptr, location, nullptr, IID_PPV_ARGS(&folder));
+	CComPtr<IEnumIDList> e;
+	if (folder && folder->EnumObjects(g_main, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS, &e) == S_OK && e) {
+		struct Kid {
+			ListItem item;
+			std::wstring name;
+			int image;
+		};
+		std::vector<Kid> kids;
+		bool fileSystem = true;
+		for (PITEMID_CHILD child; kids.size() < Most && e->Next(1, &child, nullptr) == S_OK;) {
+			STRRET sr;
+			wchar_t name[MAX_PATH];
+			if (FAILED(folder->GetDisplayNameOf(child, SHGDN_NORMAL | SHGDN_INFOLDER, &sr)) || FAILED(::StrRetToBufW(&sr, child, name, _countof(name))))
+				name[0] = 0;
+			SFGAOF attrs = SFGAO_FOLDER | SFGAO_STREAM | SFGAO_FILESYSTEM;
+			folder->GetAttributesOf(1, (PCUITEMID_CHILD_ARRAY)&child, &attrs);
+			fileSystem = fileSystem && (attrs & SFGAO_FILESYSTEM);
+			Kid kid;
+			kid.name = name;
+			kid.image = ::SHMapPIDLToSystemImageListIndex(folder, child, nullptr);
+			kid.item.pidl.reset(ILIsEmpty(location) ? (PIDLIST_ABSOLUTE)::ILCloneFull((PCIDLIST_ABSOLUTE)child) : (PIDLIST_ABSOLUTE)::ILCombine(location, child));
+			kid.item.folder = (attrs & SFGAO_FOLDER) && !(attrs & SFGAO_STREAM);
+			kids.push_back(std::move(kid));
+			::CoTaskMemFree(child);
+		}
+		if (fileSystem)
+			std::stable_sort(kids.begin(), kids.end(), [](auto& a, auto& b) {
+				if (a.item.folder != b.item.folder)
+					return a.item.folder;
+				return ::CompareStringEx(LOCALE_NAME_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a.name.c_str(), -1,
+					b.name.c_str(), -1, nullptr, nullptr, 0) == CSTR_LESS_THAN;
+			});
+		g_shellItems.reserve(kids.size());
+		for (auto& kid : kids) {
+			LVITEMW item{ LVIF_TEXT | LVIF_IMAGE };
+			item.iItem = (int)g_shellItems.size();
+			item.pszText = kid.name.data();
+			item.iImage = kid.image;
+			ListView_InsertItem(g_list, &item);
+			g_shellItems.push_back(std::move(kid.item));
+		}
+	}
+	::SendMessageW(g_list, WM_SETREDRAW, TRUE, 0);
+	wchar_t text[256];
+	g_crumb.GetItemText(g_crumb.GetItemCount() - 1, text, _countof(text));
+	std::wstring title = std::wstring(text) + L" - Breadcrumb Demo";
+	::SetWindowTextW(g_main, title.c_str());
+}
+
+static void SetMode(int mode) {
 	if (g_crumb.IsEditing())
 		g_crumb.EndEdit();
-	if (registry != g_registry)
-		SaveHistory();
-	g_registry = registry;
+	static bool started;
+	if (started)
+		SaveHistory();   // the mode's before (at the start, none was loaded yet)
+	started = true;
+	g_registry = mode == 1;
+	g_shell = mode == 2;
 	LoadHistory();
-	g_crumb.SetSeparators(registry ? L"\\" : L"\\/");
-	::CheckMenuRadioItem(g_menu, CMD_FILES, CMD_REGISTRY, registry ? CMD_REGISTRY : CMD_FILES, MF_BYCOMMAND);
-	if (registry)
+	g_crumb.ClearBackForward();   // another hierarchy's locations
+	g_crumb.SetSeparators(g_registry ? L"\\" : L"\\/");
+	::CheckMenuItem(g_menu, CMD_FILES, mode == 0 ? MF_CHECKED : MF_UNCHECKED);
+	::CheckMenuItem(g_menu, CMD_REGISTRY, mode == 1 ? MF_CHECKED : MF_UNCHECKED);
+	::CheckMenuItem(g_menu, CMD_SHELL, mode == 2 ? MF_CHECKED : MF_UNCHECKED);
+	if (g_shell) {
+		g_shellNav->NavigateTo(L"%USERPROFILE%");
+		g_crumb.ClearBackForward();
+	}
+	else if (g_registry) {
 		GoTo(L"Computer\\HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer");
+		g_crumb.ClearBackForward();
+	}
 	else {
 		wchar_t* home = nullptr;
 		::SHGetKnownFolderPath(FOLDERID_Profile, 0, nullptr, &home);
 		GoTo(home ? home : L"C:\\");
 		::CoTaskMemFree(home);
+		g_crumb.ClearBackForward();
 	}
 }
 
@@ -444,6 +538,7 @@ static HMENU BuildMenu() {
 	HMENU file = ::CreatePopupMenu();
 	::AppendMenuW(file, MF_STRING, CMD_FILES, L"&File System");
 	::AppendMenuW(file, MF_STRING, CMD_REGISTRY, L"&Registry");
+	::AppendMenuW(file, MF_STRING, CMD_SHELL, L"&Shell Namespace");
 	::AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(file, MF_STRING, CMD_EXIT, L"E&xit");
 	HMENU view = ::CreatePopupMenu();
@@ -471,8 +566,9 @@ static HMENU BuildMenu() {
 static void OnCommand(UINT id) {
 	switch (id) {
 		case CMD_EXIT: ::DestroyWindow(g_main); break;
-		case CMD_FILES: SetMode(false); break;
-		case CMD_REGISTRY: SetMode(true); break;
+		case CMD_FILES: SetMode(0); break;
+		case CMD_REGISTRY: SetMode(1); break;
+		case CMD_SHELL: SetMode(2); break;
 		case CMD_NAV: ToggleStyle(id, BRCS_NONAV); break;
 		case CMD_UP: ToggleStyle(id, BRCS_NOUP); break;
 		case CMD_ICON: ToggleStyle(id, BRCS_NOICON); break;
@@ -535,19 +631,35 @@ static void OnCommand(UINT id) {
 		case CMD_CLEARLOG: ::SendMessageW(g_log, LB_RESETCONTENT, 0, 0); break;
 		case CMD_REFRESH:
 			Log(L"WM_COMMAND Refresh");
-			GoTo(g_path);
+			if (g_shell)
+				g_shellNav->NavigateTo(g_shellNav->GetLocation());
+			else
+				GoTo(g_path);
 			break;
 		case CMD_SEARCH: Log(L"WM_COMMAND Search"); break;
 	}
 }
 
 static LRESULT OnNotify(NMHDR* hdr) {
+	static const wchar_t* Sources[] = { L"segment", L"child of", L"typed", L"back/forward", L"up" };
+	if (hdr->hwndFrom == g_crumb.m_hWnd && g_shell) {
+		// the shell helper browses: it answers what it handles
+		LRESULT result;
+		if (g_shellNav->HandleNotify(hdr, &result)) {
+			if (hdr->code == BRCN_NAVIGATE) {
+				auto nm = (NMBRCNAVIGATE*)hdr;
+				Log(L"BRCN_NAVIGATE %s %d \"%s\" (shell): %s", Sources[std::min(nm->source, 4u)], nm->index, nm->pszText, result ? L"rejected" : L"ok");
+			}
+			else
+				Log(L"shell handled 0x%X", hdr->code);
+			return result;
+		}
+	}
 	if (hdr->hwndFrom == g_crumb.m_hWnd) {
 		switch (hdr->code) {
 			case BRCN_NAVIGATE: {
 				auto nm = (NMBRCNAVIGATE*)hdr;
-				static const wchar_t* Sources[] = { L"segment", L"child of", L"typed" };
-				Log(L"BRCN_NAVIGATE %s %d \"%s\" -> \"%s\"", Sources[std::min(nm->source, 2u)], nm->index, nm->pszText, nm->pszPath);
+				Log(L"BRCN_NAVIGATE %s %d \"%s\" -> \"%s\"", Sources[std::min(nm->source, 4u)], nm->index, nm->pszText, nm->pszPath);
 				std::wstring path = nm->pszPath;
 				if (nm->source == BRCNS_TYPED)
 					path = g_registry ? RegistryCanonical(path) : FileCanonical(path);
@@ -610,7 +722,11 @@ static LRESULT OnNotify(NMHDR* hdr) {
 	}
 	if (hdr->hwndFrom == g_list && hdr->code == LVN_ITEMACTIVATE) {
 		int i = ((NMITEMACTIVATE*)hdr)->iItem;
-		if (i >= 0 && i < (int)g_contents.size())
+		if (g_shell) {
+			if (i >= 0 && i < (int)g_shellItems.size() && g_shellItems[i].folder)
+				g_shellNav->NavigateTo(g_shellItems[i].pidl.get());
+		}
+		else if (i >= 0 && i < (int)g_contents.size())
 			GoTo(Join(g_path, g_contents[i].name));
 	}
 	return 0;
@@ -622,7 +738,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_main = hwnd;
 			g_menu = BuildMenu();
 			::SetMenu(hwnd, g_menu);
-			::CheckMenuRadioItem(g_menu, CMD_FILES, CMD_REGISTRY, CMD_FILES, MF_BYCOMMAND);
 			// the log first: the test script finds the first list box
 			g_log = ::CreateWindowExW(0, WC_LISTBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | WS_BORDER,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_LOG, nullptr, nullptr);
@@ -641,14 +756,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			}
 			ListView_SetImageList(g_list, g_images, LVSIL_SMALL);
 
-			g_crumb.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, IDC_CRUMB);
+			g_crumb.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, IDC_CRUMB);
 			g_crumb.SetImageList(g_images);
+			g_shellNav = std::make_unique<CBreadcrumbShell>(g_crumb);
+			g_shellNav->OnNavigated = [](PCIDLIST_ABSOLUTE location) {
+				FillShellList(location);
+			};
 			AddButtons();
 			UpdateFonts();
 			Layout();
 			auto cs = (CREATESTRUCTW*)lParam;
-			bool registry = cs->lpCreateParams && wcsstr((const wchar_t*)cs->lpCreateParams, L"/reg");
-			SetMode(registry);
+			auto args = (const wchar_t*)cs->lpCreateParams;
+			SetMode(args && wcsstr(args, L"/reg") ? 1 : args && wcsstr(args, L"/shell") ? 2 : 0);
 			return 0;
 		}
 		case WM_SIZE:
@@ -666,6 +785,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_COMMAND:
 			OnCommand(LOWORD(wParam));
 			return 0;
+		case WM_APPCOMMAND:
+			// the mouse's back and forward buttons
+			switch (GET_APPCOMMAND_LPARAM(lParam)) {
+				case APPCOMMAND_BROWSER_BACKWARD: g_crumb.Go(-1); return TRUE;
+				case APPCOMMAND_BROWSER_FORWARD: g_crumb.Go(1); return TRUE;
+			}
+			break;
 		case WM_NOTIFY:
 			return OnNotify((NMHDR*)lParam);
 		case WM_DPICHANGED: {
@@ -677,22 +803,48 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		}
 		case WM_DESTROY:
 			SaveHistory();
+			g_shellItems.clear();
+			g_shellNav.reset();
 			::PostQuitMessage(0);
 			return 0;
 	}
 	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-// the bar's keys wherever the focus is: Alt+D and Ctrl+L edit the path, F4 drops down its history
+// the bar's keys wherever the focus is: Alt+D and Ctrl+L edit the path, F4 drops down its history, Alt+Left and
+// Alt+Right go back and forward, Alt+Up up; Backspace in the list goes back; Tab and F6 move between the list and the bar
 struct KeyFilter : CMessageFilter {
 	BOOL PreTranslateMessage(MSG* pMsg) override {
 		if (!g_crumb.IsWindow() || pMsg->hwnd == g_crumb.GetEditControl())
 			return FALSE;
 		bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
-		if ((pMsg->message == WM_SYSKEYDOWN && pMsg->wParam == 'D') || (pMsg->message == WM_KEYDOWN && pMsg->wParam == 'L' && ctrl))
-			return g_crumb.BeginEdit();
-		if (pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_F4 && !ctrl)
-			return g_crumb.ShowHistory();
+		if (pMsg->message == WM_SYSKEYDOWN) {
+			switch (pMsg->wParam) {
+				case 'D': return g_crumb.BeginEdit();
+				case VK_LEFT: g_crumb.Go(-1); return TRUE;
+				case VK_RIGHT: g_crumb.Go(1); return TRUE;
+				case VK_UP: g_crumb.GoUp(); return TRUE;
+			}
+			return FALSE;
+		}
+		if (pMsg->message != WM_KEYDOWN)
+			return FALSE;
+		switch (pMsg->wParam) {
+			case 'L':
+				return ctrl && g_crumb.BeginEdit();
+			case VK_F4:
+				return !ctrl && pMsg->hwnd != g_crumb.m_hWnd && g_crumb.ShowHistory();
+			case VK_BACK:
+				if (pMsg->hwnd == g_list) {
+					g_crumb.Go(-1);
+					return TRUE;
+				}
+				return FALSE;
+			case VK_TAB:
+			case VK_F6:
+				::SetFocus(::GetFocus() == g_crumb.m_hWnd ? g_list : g_crumb.m_hWnd);
+				return TRUE;
+		}
 		return FALSE;
 	}
 };

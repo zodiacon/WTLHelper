@@ -235,6 +235,13 @@ bool BrcHistory::Go(int offset) {
 	return true;
 }
 
+void BrcHistory::Replace(const BrcLocation& location) {
+	if (m_Current < 0)
+		Navigate(location);
+	else
+		m_Entries[m_Current] = location;
+}
+
 const BrcLocation* BrcHistory::At(int offset) const {
 	return CanGo(offset) ? &m_Entries[m_Current + offset] : nullptr;
 }

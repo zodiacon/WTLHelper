@@ -96,15 +96,18 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\Breadcrumb.h" />
+    <ClInclude Include="include\BreadcrumbShell.h" />
     <ClInclude Include="src\BreadcrumbData.h" />
     <ClInclude Include="src\BreadcrumbModel.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\BreadcrumbCtrl.cpp" />
     <ClCompile Include="src\BreadcrumbEdit.cpp" />
+    <ClCompile Include="src\BreadcrumbKeys.cpp" />
     <ClCompile Include="src\BreadcrumbList.cpp" />
     <ClCompile Include="src\BreadcrumbModel.cpp" />
     <ClCompile Include="src\BreadcrumbPaint.cpp" />
+    <ClCompile Include="src\BreadcrumbShell.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

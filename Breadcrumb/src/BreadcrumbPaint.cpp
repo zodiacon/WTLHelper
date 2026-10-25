@@ -151,6 +151,7 @@ void CBreadcrumbCtrl::Paint(WTL::CDCHandle dc) {
 		PaintButtons(dc, c);
 		dc.RestoreDC(saved);
 	}
+	PaintFocus(dc, c);
 	dc.SelectFont(oldFont);
 }
 
@@ -168,25 +169,21 @@ void CBreadcrumbCtrl::PaintButtonBack(WTL::CDCHandle dc, const RECT& rc, const B
 void CBreadcrumbCtrl::PaintNav(WTL::CDCHandle dc, const BRCCOLORS& c) {
 	auto& l = m_Data->layout;
 	const int size = Scale(12), width = std::max(1, Scale(1));
-	auto center = [](const RECT& r, int& x, int& y) {
-		x = (r.left + r.right) / 2;
-		y = (r.top + r.bottom) / 2;
+	// the buttons are on the bar's background: their hot and pressed shades are of it
+	BRCCOLORS bar = c;
+	bar.crHotBack = Blend(c.crBack, c.crText, IsDark(c.crBack) ? 12 : 8);
+	bar.crPressedBack = Blend(c.crBack, c.crText, IsDark(c.crBack) ? 20 : 15);
+	auto paint = [&](const RECT& r, BrcPart part, auto&& glyph) {
+		if (::IsRectEmpty(&r))
+			return;
+		BrcHit hit{ part };
+		PaintButtonBack(dc, r, hit, bar);
+		glyph((r.left + r.right) / 2, (r.top + r.bottom) / 2, Enabled(hit) ? c.crText : c.crDimText);
 	};
-	int x, y;
-	// back, forward and up go with the history (a later phase): disabled until then
-	const COLORREF color = c.crDimText;
-	if (!::IsRectEmpty(&l.back)) {
-		center(l.back, x, y);
-		Arrow(dc, x, y, size, VK_LEFT, color, width);
-		center(l.forward, x, y);
-		Arrow(dc, x, y, size, VK_RIGHT, color, width);
-		center(l.recent, x, y);
-		Chevron(dc, x, y, Scale(8), VK_DOWN, color, width);
-	}
-	if (!::IsRectEmpty(&l.up)) {
-		center(l.up, x, y);
-		Arrow(dc, x, y, size, VK_UP, color, width);
-	}
+	paint(l.back, BrcPart::Back, [&](int x, int y, COLORREF color) { Arrow(dc, x, y, size, VK_LEFT, color, width); });
+	paint(l.forward, BrcPart::Forward, [&](int x, int y, COLORREF color) { Arrow(dc, x, y, size, VK_RIGHT, color, width); });
+	paint(l.recent, BrcPart::Recent, [&](int x, int y, COLORREF color) { Chevron(dc, x, y, Scale(8), VK_DOWN, color, width); });
+	paint(l.up, BrcPart::Up, [&](int x, int y, COLORREF color) { Arrow(dc, x, y, size, VK_UP, color, width); });
 }
 
 void CBreadcrumbCtrl::PaintSegments(WTL::CDCHandle dc, const BRCCOLORS& c) {

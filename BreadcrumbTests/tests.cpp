@@ -297,6 +297,19 @@ TEST(History) {
 	l.Clear();
 	CHECK(l.Current() == nullptr);
 	CHECK_INT(l.Size(), 0);
+
+	// going back to a path the app writes differently: the entry is replaced, the ones ahead kept
+	BrcHistory r;
+	for (auto p : { L"A", L"B", L"C" })
+		r.Navigate(Loc(p));
+	r.Go(-1);
+	r.Replace(Loc(L"b2"));
+	CHECK_INT(r.Size(), 3);
+	CHECK_STR(r.Current()->path, L"b2");
+	CHECK_STR(r.At(1)->path, L"C");
+	BrcHistory e;
+	e.Replace(Loc(L"X"));
+	CHECK_STR(e.Current()->path, L"X");
 }
 
 TEST(Recent) {

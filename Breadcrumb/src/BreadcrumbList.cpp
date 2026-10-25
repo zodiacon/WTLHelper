@@ -22,7 +22,7 @@ namespace {
 
 // ---- The control's side -----------------------------------------------------------------------
 
-void CBreadcrumbCtrl::OpenDropDown(const BrcHit& from, bool pressed) {
+void CBreadcrumbCtrl::OpenDropDown(const BrcHit& from, bool pressed, bool keyboard) {
 	auto& d = *m_Data;
 	EnsureLayout();
 	const bool wasOpen = d.list && d.list->IsOpen();
@@ -37,11 +37,18 @@ void CBreadcrumbCtrl::OpenDropDown(const BrcHit& from, bool pressed) {
 
 	// the root chevron's list: the folded segments, the deepest first, then the root's children
 	std::vector<BrcRow> rows;
-	if (from.part == BrcPart::Overflow)
+	if (from.part == BrcPart::Recent) {
+		// the recent locations: ahead first, the current one in bold, then back
+		for (int offset : d.backForward.MenuOffsets(16)) {
+			auto loc = d.backForward.At(offset);
+			rows.push_back({ loc->text.empty() ? loc->path : loc->text, loc->image, offset == 0, false, BrcTagBackForward + offset });
+		}
+	}
+	else if (from.part == BrcPart::Overflow)
 		for (int i : BrcFoldedSegments(d.layout))
 			rows.push_back({ d.segments[i].text, d.segments[i].image, false, false, i });
 	d.children.clear();
-	if (from.part == BrcPart::Chevron || !(GetStyle() & BRCS_NOROOTCHEVRON)) {
+	if (from.part == BrcPart::Chevron || (from.part == BrcPart::Overflow && !(GetStyle() & BRCS_NOROOTCHEVRON))) {
 		auto path = index >= 0 ? PathTo(index + 1) : std::wstring();
 		NMBRCCHILDREN nm{};
 		nm.index = index;
@@ -90,10 +97,12 @@ void CBreadcrumbCtrl::OpenDropDown(const BrcHit& from, bool pressed) {
 	Invalidate(FALSE);
 
 	EnsureList();
-	RECT part = from.part == BrcPart::Chevron ? d.layout.chevron[index] : d.layout.overflow;
+	RECT part = from.part == BrcPart::Chevron ? d.layout.chevron[index] : from.part == BrcPart::Recent ? d.layout.recent : d.layout.overflow;
 	RECT under{ part.left, d.layout.box.top, part.right, d.layout.box.bottom };
 	::MapWindowPoints(m_hWnd, nullptr, (POINT*)&under, 2);
 	d.list->Show(std::move(rows), under, pressed);
+	if (keyboard)
+		d.list->SelectFirst();
 }
 
 void CBreadcrumbCtrl::EnsureList() {
@@ -114,7 +123,9 @@ void CBreadcrumbCtrl::DropPicked(int tag) {
 	auto& d = *m_Data;
 	int index = d.openedIndex;
 	d.list->Close();
-	if (tag >= BrcTagText) {
+	if (tag >= BrcTagBackForward - 0x1000)
+		Go(tag - BrcTagBackForward);
+	else if (tag >= BrcTagText) {
 		// a suggestion or a path typed before: as if typed
 		if (tag - BrcTagText < (int)d.texts.size() && d.editing) {
 			SetText(d.texts[tag - BrcTagText], false);
@@ -154,7 +165,7 @@ void CBreadcrumbCtrl::DropClosed() {
 bool CBreadcrumbCtrl::DropMouse(POINT pt) {
 	auto& d = *m_Data;
 	auto hit = HitTest(pt);
-	if ((hit.part == BrcPart::Chevron || hit.part == BrcPart::Overflow) && !(hit == d.opened)) {
+	if ((hit.part == BrcPart::Chevron || hit.part == BrcPart::Overflow || hit.part == BrcPart::Recent) && !(hit == d.opened)) {
 		// as on a menu bar: the list of what the mouse moved onto
 		OpenDropDown(hit, ::GetKeyState(VK_LBUTTON) < 0);
 		return true;
@@ -331,6 +342,15 @@ void BrcDropList::Move(int from, int step) {
 		}
 	if (target >= 0)
 		SetHot(target, true);
+}
+
+void BrcDropList::SelectFirst() {
+	for (int i = 0; i < (int)m_Rows.size(); i++)
+		if (m_Rows[i].bold && Pickable(i)) {
+			SetHot(i, true);
+			return;
+		}
+	Move(-1, 1);
 }
 
 void BrcDropList::MoveHot(UINT vk) {

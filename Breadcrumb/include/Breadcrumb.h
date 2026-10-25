@@ -6,8 +6,10 @@
 // into the chevron before the first one, whose list then shows them. Clicking the box's empty part edits the path as
 // text, with suggestions as the user types (BRCN_GETSUGGESTIONS) and the paths typed before under the history arrow.
 // The app owns the hierarchy: the control only says where the user wants to go (BRCN_NAVIGATE), and the app shows it
-// with SetPath. The location's icon is at the left, and the app's buttons (Refresh) at the box's right. The API
-// follows the common controls: C-style structures and WM_NOTIFY codes (BRCN_*) sent to the parent.
+// with SetPath. The control keeps the locations shown for its back and forward buttons and up goes to the parent. The
+// keys move a focus along the bar (Left, Right; Enter, Down). The location's icon is at the left, and the app's buttons
+// (Refresh) at the box's right. The API follows the common controls: C-style structures and WM_NOTIFY codes (BRCN_*)
+// sent to the parent. BreadcrumbShell.h has a helper that browses the shell's namespace with it.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -100,11 +102,15 @@ struct BRCCOLORS {
 #define BRCNS_CHILD          1        // picked from a segment's list (index: that segment's, -1 the root chevron's)
 #define BRCNS_TYPED          2        // typed, or picked from the suggestions or the history (index -1, pszPath the text):
                                       // non-zero rejects it, and editing goes on (the app tells the user why)
+#define BRCNS_BACKFORWARD    3        // back, forward, or picked from the recent locations (index: the offset, -1 back;
+                                      // pszPath the location SetPath was given). The app's SetPath meanwhile moves
+                                      // along the list rather than adding to it.
+#define BRCNS_UP             4        // the up button (index: the parent segment's)
 
 struct NMBRCNAVIGATE {
 	NMHDR   hdr;
 	UINT    source;                   // BRCNS_*
-	int     index;                    // the segment's
+	int     index;                    // the segment's (BRCNS_BACKFORWARD: the offset)
 	LPCWSTR pszPath;                  // the path text there: the segments' names up to it (and the child's), or what was typed
 	LPCWSTR pszText;                  // the segment's or the child's text
 	LPARAM  lParam;                   // the segment's or the child's
@@ -170,6 +176,7 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_CHAR, OnChar)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
@@ -190,7 +197,9 @@ public:
 
 	// ---- The path ----------------------------------------------------------------------------------
 
-	BOOL    SetPath(const BRCITEM* items, int count);             // closes a list that's open; no notification
+	// Closes a list that's open; no notification. location: what the back and forward buttons know it by, and give back in
+	// BRCN_NAVIGATE (nullptr: the path text); its text and icon in the recent locations are the last segment's.
+	BOOL    SetPath(const BRCITEM* items, int count, LPCWSTR location = nullptr);
 	int     GetItemCount() const;
 	int     GetItemText(int index, LPWSTR text, int cch) const;   // the length with the terminator; text may be nullptr
 	LPARAM  GetItemParam(int index) const;                        // 0 if out of range
@@ -203,6 +212,16 @@ public:
 	BOOL    AddChild(const BRCITEM* item);
 	BOOL    AddChild(LPCWSTR text, int image = -1, LPARAM lParam = 0, LPCWSTR name = nullptr);
 	void    CloseDropDown();
+
+	// ---- Back, forward, up ------------------------------------------------------------------------------
+	//
+	// Each SetPath adds its location to the list the back and forward buttons go along (the one shown again only
+	// updates it); the arrow beside them drops down the nearest. These send BRCN_NAVIGATE as the buttons do.
+
+	BOOL    Go(int offset);                                       // -1 back, 1 forward; FALSE if there's no such location
+	bool    CanGo(int offset) const;
+	BOOL    GoUp();                                               // to the parent segment; FALSE at the top
+	void    ClearBackForward();                                   // the current location stays
 
 	// ---- Editing -------------------------------------------------------------------------------------
 	//
@@ -261,6 +280,7 @@ private:
 	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKillFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
@@ -296,9 +316,19 @@ private:
 	void    ShowTextList(const std::vector<std::wstring>& texts, int kind);
 	void    Commit();
 
+	// the keyboard (BreadcrumbKeys.cpp)
+	std::vector<BrcHit> FocusOrder();                             // the parts the keys go along, left to right
+	bool    Enabled(const BrcHit& part);
+	void    SetKeyFocus(const BrcHit& part);
+	bool    KeyDown(UINT vk);                                     // no list open, not editing
+	void    Activate(const BrcHit& part);                         // Enter on it
+	bool    DropAdjacent(int step);                               // in an open list: the next part with one opens its own
+	void    PaintFocus(WTL::CDCHandle dc, const BRCCOLORS& c);
+
 	// the drop-down lists (BreadcrumbList.cpp)
 	void    EnsureList();
-	void    OpenDropDown(const BrcHit& from, bool pressed);       // pressed: the button is down (released on a row picks it)
+	// pressed: the button is down (released on a row picks it); keyboard: a row selected (the next segment, else the first)
+	void    OpenDropDown(const BrcHit& from, bool pressed, bool keyboard = false);
 	void    DropPicked(int tag);
 	void    DropClosed();
 	bool    DropMouse(POINT pt);                                  // the mouse over the bar while a list is open: TRUE if it opened another

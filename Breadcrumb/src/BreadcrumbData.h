@@ -51,6 +51,7 @@ public:
 	}
 	bool KeyDown(UINT vk);                       // the keys the control gets meanwhile; true if used
 	void MoveHot(UINT vk);                       // Up, Down, Page Up, Page Down, Home, End
+	void SelectFirst();                          // the bold row, else the first
 	int  HotTag() const {                        // -1 if no row is
 		return m_Hot >= 0 && m_Hot < (int)m_Rows.size() ? m_Rows[m_Hot].tag : -1;
 	}
@@ -140,6 +141,10 @@ struct BrcData {
 
 	BrcHit hot;
 	BrcHit pressed;                               // a part pressed (Text, Action): released on it, it runs
+	BrcHit keyFocus;                              // the keys' part, framed while the control has the focus
+
+	BrcHistory backForward;                       // the locations SetPath showed
+	int  pendingOffset = 0;                       // BRCN_NAVIGATE for back or forward is being sent: SetPath goes there
 	bool tracking = false;                        // TrackMouseEvent
 
 	// the open list: what dropped it, and the children it shows
@@ -171,6 +176,7 @@ struct BrcData {
 // (BrcTagText + its index in BrcData::texts)
 constexpr int BrcTagChild = 0x10000;
 constexpr int BrcTagText = 0x20000;
+constexpr int BrcTagBackForward = 0x38000;        // + the offset
 
 // ---- Drawing helpers ------------------------------------------------------------------------------
 
