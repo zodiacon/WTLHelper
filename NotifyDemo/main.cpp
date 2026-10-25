@@ -1,6 +1,7 @@
 // NotifyDemo: an info bar over a text area, and toasts in a corner of the window. The Info Bar menu adds messages of
 // each kind (severities, buttons and links, progress, details, "don't show again", long text), the Toasts menu shows
-// toasts (and where); the log at the bottom shows the notifications.
+// toasts (and where); the log at the bottom shows the notifications. F6 moves the keys between the bar and the text;
+// Ctrl+Shift+T gives them to the newest toast (Escape gives them back).
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -440,7 +441,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				0, 0, 0, 0, hwnd, (HMENU)IDC_LOG, nullptr, nullptr);
 			g_edit = ::CreateWindowExW(0, WC_EDITW, L"The document's text.", WS_CHILD | WS_VISIBLE | ES_MULTILINE | WS_VSCROLL,
 				0, 0, 0, 0, hwnd, (HMENU)IDC_EDIT, nullptr, nullptr);
-			g_bar.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, IDC_BAR);
+			g_bar.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, IDC_BAR);
 			g_toasts.Attach(hwnd, IDC_TOASTS);
 			::CheckMenuRadioItem(g_menu, CMD_T_TOPLEFT, CMD_T_BOTTOMRIGHT, CMD_T_BOTTOMRIGHT, MF_BYCOMMAND);
 			::CheckMenuRadioItem(g_menu, CMD_T_MAX1, CMD_T_MAXALL, CMD_T_MAXALL, MF_BYCOMMAND);
@@ -483,6 +484,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// the keys wherever they are: F6 between the bar and the text, Ctrl+Shift+T to the toasts
+struct KeyFilter : CMessageFilter {
+	BOOL PreTranslateMessage(MSG* pMsg) override {
+		if (pMsg->message != WM_KEYDOWN)
+			return FALSE;
+		if (pMsg->wParam == VK_F6) {
+			::SetFocus(::GetFocus() == g_bar.m_hWnd ? g_edit : g_bar.m_hWnd);
+			return TRUE;
+		}
+		if (pMsg->wParam == 'T' && ::GetKeyState(VK_CONTROL) < 0 && ::GetKeyState(VK_SHIFT) < 0) {
+			if (!g_toasts.Focus())
+				Log(L"no toast to focus");
+			return TRUE;
+		}
+		return FALSE;
+	}
+};
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow) {
 	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 	INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
@@ -507,8 +526,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow
 	::ShowWindow(hwnd, nCmdShow);
 
 	CMessageLoop loop;
+	KeyFilter keys;
 	_Module.AddMessageLoop(&loop);
+	loop.AddMessageFilter(&keys);
 	loop.Run();
+	loop.RemoveMessageFilter(&keys);
 	_Module.RemoveMessageLoop();
 
 	if (g_font)

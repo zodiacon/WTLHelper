@@ -27,6 +27,10 @@ struct NtfItem {
 	bool appearing = false;
 	bool going = false;
 
+	bool Indeterminate() const {   // its progress bar moves
+		return !going && m.progressKind == NtfProgress::Indeterminate;
+	}
+
 	double Shown(ULONGLONG now, UINT duration) const {   // how much of it shows
 		if (going)
 			return 1.0 - NtfAnimate(animStart, duration, now);
@@ -74,6 +78,17 @@ namespace NtfDraw {
 
 	// the part at pt, relative to the message's top left (the item isn't set)
 	NtfHit HitMessage(const NtfItem& item, POINT pt, const NtfMetrics& m);
+
+	// the parts the keys go along, in order: the links (the details toggle too), the checkbox, the buttons, the close
+	// button (the item isn't set)
+	std::vector<NtfHit> FocusParts(const NtfItem& item);
+	// where a part is, relative to the message's top left: a link's pieces, else one rect
+	std::vector<RECT> PartRects(const NtfItem& item, const NtfHit& part, const NtfMetrics& m);
+	void PaintFocus(WTL::CDCHandle dc, const std::vector<RECT>& rects, COLORREF color, int dpi);
+
+	// the message as text (the title, the text, the details), and to the clipboard
+	std::wstring CopyText(const NtfItem& item);
+	bool ToClipboard(HWND hwnd, const std::wstring& text);
 }
 
 // ---- The info bar's state --------------------------------------------------------------------------
@@ -95,6 +110,7 @@ struct NtfBarData {
 	int  maxRows = 3;
 	bool showAll = false;                         // the strip clicked: all of them, "Show fewer"
 	NtfHit hot, pressed;
+	NtfHit focus;                                 // the keys' part (FocusPart resolves it)
 	bool tracking = false;
 	UINT nextId = 0x8000;
 	std::wstring strings[NTFSTR_COUNT];

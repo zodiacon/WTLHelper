@@ -70,7 +70,10 @@ struct NtfToastData {
 	NtfFonts fonts;
 	NtfMetrics m;
 	UINT nextId = 0x8000;
-	bool hovered = false;                               // the mouse over a toast: the clocks stop
+	bool hovered = false;                               // the mouse over a toast
+	bool focused = false;                               // a toast has the keys
+	bool stopped = false;                               // either: the clocks stop
+	HWND focusBefore = nullptr;                         // where the keys go back to (Escape)
 
 	~NtfToastData();
 	int  Scale(int dips) const {
@@ -101,6 +104,11 @@ struct NtfToastData {
 	void Close(NtfToastWnd* t, UINT reason);            // the user's: NTFN_CLOSED, then it fades out
 	void Remove(NtfToastWnd* t);                        // fades out
 	void Hover(bool on);
+	void UpdateClocks();
+	bool IsToast(HWND hwnd) const;
+	bool FocusToast(NtfToastWnd* t);
+	void FocusNeighbor(NtfToastWnd* from, int dir);     // the toast above (-1) or below (1) on the screen
+	void ReturnFocus();
 	LRESULT Fire(NtfToastWnd* t, NMHDR* pnm, UINT code);
 	void Clear();                                       // all of them, at once
 
@@ -130,6 +138,10 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnKillFocus)
+		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
 	END_MSG_MAP()
 
 	NtfItem item;
@@ -144,6 +156,7 @@ public:
 	bool moving = false;
 	int  border = 1;                              // 0 where DWM draws it
 	NtfHit hot, pressed;
+	NtfHit focus;                                 // the keys' part (in FocusParts; none: the toast itself)
 	bool tracking = false;
 
 	void Created() {
@@ -180,7 +193,12 @@ private:
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKillFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnActivate(UINT, WPARAM, LPARAM, BOOL&);
 	NtfHit  HitTest(POINT pt) const;
+	NtfHit  FocusPart() const;                    // the keys' part, the first if it's gone; none if the toast has no parts
 	void    Click(const NtfHit& hit);
 
 	NtfToastData* m_Host;
@@ -197,6 +215,22 @@ LRESULT NtfToastWnd::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 		auto old = dc.SelectFont(h.fonts.normal);
 		PaintMessage(dc, item, 0, border, border, back, c, h.fonts, h.images, hot, pressed, h.m, h.dpi);
 		dc.SelectFont(old);
+		if (::GetFocus() == m_hWnd) {
+			// the keys' part, or the toast itself
+			auto part = FocusPart();
+			std::vector<RECT> rects;
+			if (part.part != NtfPart::None) {
+				rects = PartRects(item, part, h.m);
+				for (auto& r : rects)
+					::OffsetRect(&r, border, border);
+			}
+			else {
+				RECT r = rc;
+				::InflateRect(&r, -h.Scale(3), -h.Scale(3));
+				rects.push_back(r);
+			}
+			PaintFocus(dc, rects, c.crAccent, h.dpi);
+		}
 		if (border) {
 			WTL::CBrush brush;
 			brush.CreateSolidBrush(c.crBorder);
@@ -333,6 +367,90 @@ void NtfToastWnd::Click(const NtfHit& hit) {
 	}
 }
 
+NtfHit NtfToastWnd::FocusPart() const {
+	auto parts = FocusParts(item);
+	if (parts.empty())
+		return {};
+	for (auto& p : parts)
+		if (p.part == focus.part && p.index == focus.index)
+			return p;
+	return parts[0];
+}
+
+LRESULT NtfToastWnd::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	auto& h = *m_Host;
+	if (going) {
+		bHandled = FALSE;
+		return 0;
+	}
+	auto parts = FocusParts(item);
+	auto current = FocusPart();
+	int i = 0;
+	for (int k = 0; k < (int)parts.size(); k++)
+		if (parts[k].part == current.part && parts[k].index == current.index)
+			i = k;
+	const bool shift = ::GetKeyState(VK_SHIFT) < 0, ctrl = ::GetKeyState(VK_CONTROL) < 0;
+	auto step = [&](int by) {
+		if (!parts.empty()) {
+			focus = parts[(i + by + (int)parts.size()) % (int)parts.size()];
+			Invalidate(FALSE);
+		}
+	};
+	switch (wParam) {
+		case VK_TAB: step(shift ? -1 : 1); return 0;
+		case VK_LEFT: step(-1); return 0;
+		case VK_RIGHT: step(1); return 0;
+		case VK_UP: h.FocusNeighbor(this, -1); return 0;
+		case VK_DOWN: h.FocusNeighbor(this, 1); return 0;
+		case VK_RETURN:
+		case VK_SPACE: {
+			// the part, or the toast's body (button 0)
+			NtfHit hit = current;
+			hit.item = 0;
+			Click(hit);
+			return 0;
+		}
+		case VK_DELETE:
+			if (item.m.closable)
+				h.Close(this, NTFR_CLOSEBUTTON);
+			return 0;
+		case VK_ESCAPE:
+			h.ReturnFocus();
+			return 0;
+		case 'C':
+			if (ctrl) {
+				ToClipboard(m_hWnd, CopyText(item));
+				return 0;
+			}
+			break;
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT NtfToastWnd::OnSetFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	m_Host->focused = true;
+	m_Host->UpdateClocks();
+	Invalidate(FALSE);
+	return 0;
+}
+
+LRESULT NtfToastWnd::OnKillFocus(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	// to another toast: the clocks stay stopped
+	m_Host->focused = m_Host->IsToast((HWND)wParam);
+	m_Host->UpdateClocks();
+	Invalidate(FALSE);
+	return 0;
+}
+
+LRESULT NtfToastWnd::OnActivate(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	// the window keeps looking active while a toast has the keys
+	if (LOWORD(wParam) != WA_INACTIVE)
+		::SendMessage(GetWindow(GW_OWNER), WM_NCACTIVATE, TRUE, 0);
+	bHandled = FALSE;
+	return 0;
+}
+
 LRESULT NtfTickWnd::OnTimer(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Host->Tick();
 	return 0;
@@ -441,7 +559,7 @@ void NtfToastData::Place(bool animate) {
 			}
 			else
 				t.timer.Resume(now);
-			if (hovered)
+			if (stopped)
 				t.timer.Pause(now);
 			continue;
 		}
@@ -492,6 +610,8 @@ void NtfToastData::Tick() {
 			}
 		}
 		else if (t.shown) {
+			if (t.item.Indeterminate())
+				t.Invalidate(FALSE);   // its progress bar moves
 			if (t.fading) {
 				double f = NtfAnimate(t.fadeStart, FadeDuration, now);
 				t.SetAlpha((int)std::lround(255 * f));
@@ -504,7 +624,7 @@ void NtfToastData::Tick() {
 				t.SetWindowPos(nullptr, &r, SWP_NOZORDER | SWP_NOACTIVATE);
 				t.moving = f < 1.0;
 			}
-			if (!hovered && t.timer.Expired(now)) {
+			if (!stopped && t.timer.Expired(now)) {
 				Close(&t, NTFR_TIMEOUT);
 				continue;   // it's going now: the next tick fades it
 			}
@@ -518,17 +638,68 @@ void NtfToastData::Tick() {
 }
 
 void NtfToastData::Hover(bool on) {
-	if (hovered == on)
-		return;
 	hovered = on;
+	UpdateClocks();
+}
+
+void NtfToastData::UpdateClocks() {
+	const bool stop = hovered || focused;
+	if (stop == stopped)
+		return;
+	stopped = stop;
 	const ULONGLONG now = ::GetTickCount64();
 	for (auto& t : toasts)
 		if (t->shown && !t->going) {
-			if (on)
+			if (stop)
 				t->timer.Pause(now);
 			else
 				t->timer.Resume(now);
 		}
+}
+
+bool NtfToastData::IsToast(HWND hwnd) const {
+	return hwnd && std::any_of(toasts.begin(), toasts.end(), [&](auto& t) { return t->m_hWnd == hwnd && !t->going; });
+}
+
+bool NtfToastData::FocusToast(NtfToastWnd* t) {
+	if (!t || !t->IsWindow() || !t->shown || t->going)
+		return false;
+	HWND f = ::GetFocus();
+	if (!IsToast(f))
+		focusBefore = f;
+	// a toast doesn't take the activation from a click, but it can be given it
+	::SetActiveWindow(t->m_hWnd);
+	::SetFocus(t->m_hWnd);
+	return ::GetFocus() == t->m_hWnd;
+}
+
+void NtfToastData::FocusNeighbor(NtfToastWnd* from, int dir) {
+	const RECT at = from->Current();
+	NtfToastWnd* best = nullptr;
+	LONG bestDistance = LONG_MAX;
+	for (auto& t : toasts) {
+		if (t.get() == from || !t->shown || t->going)
+			continue;
+		const RECT r = t->Current();
+		const LONG distance = dir < 0 ? at.top - r.top : r.top - at.top;
+		if (distance > 0 && distance < bestDistance) {
+			bestDistance = distance;
+			best = t.get();
+		}
+	}
+	if (best)
+		FocusToast(best);
+}
+
+void NtfToastData::ReturnFocus() {
+	HWND f = focusBefore;
+	focusBefore = nullptr;
+	if (f && ::IsWindow(f)) {
+		::SetActiveWindow(::GetAncestor(f, GA_ROOT));
+		::SetFocus(f);
+	}
+	else if (owner && ::IsWindow(owner))
+		::SetActiveWindow(::GetAncestor(owner, GA_ROOT));
 }
 
 LRESULT NtfToastData::Fire(NtfToastWnd* t, NMHDR* pnm, UINT code) {
@@ -553,7 +724,16 @@ void NtfToastData::Close(NtfToastWnd* t, UINT reason) {
 void NtfToastData::Remove(NtfToastWnd* t) {
 	if (t->going)
 		return;
+	const bool hadFocus = ::GetFocus() == t->m_hWnd;
 	t->going = true;
+	if (hadFocus) {
+		// the keys to the next toast, else back where they were
+		FocusNeighbor(t, 1);
+		if (::GetFocus() == t->m_hWnd)
+			FocusNeighbor(t, -1);
+		if (::GetFocus() == t->m_hWnd)
+			ReturnFocus();
+	}
 	if (t->shown && AnimationsOn()) {
 		t->fading = true;
 		t->fadeStart = ::GetTickCount64();
@@ -575,7 +755,7 @@ void NtfToastData::Clear() {
 	for (auto& t : toasts)
 		dead.push_back(std::move(t));
 	toasts.clear();
-	hovered = false;
+	hovered = focused = stopped = false;
 }
 
 void CALLBACK NtfToastData::OnWinEvent(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
@@ -653,7 +833,7 @@ UINT CToastHost::Show(const NTFMESSAGE* message) {
 		t.hot = t.pressed = {};
 		if (t.started)
 			t.timer.Start(::GetTickCount64(), t.item.m.timeout);
-		if (d.hovered)
+		if (d.stopped)
 			t.timer.Pause(::GetTickCount64());
 		d.Layout(t);
 		t.Invalidate(FALSE);
@@ -699,6 +879,14 @@ void CToastHost::CloseAll() {
 			live.push_back(t.get());
 	for (auto t : live)
 		d.Remove(t);
+}
+
+BOOL CToastHost::Focus() {
+	auto& d = *m_Data;
+	for (auto& t : d.toasts)   // the newest first
+		if (t->shown && !t->going)
+			return d.FocusToast(t.get());
+	return FALSE;
 }
 
 bool CToastHost::IsShown(UINT id) const {

@@ -128,6 +128,10 @@ struct NMNTFCLOSED {
 };
 
 // ---- Info bar ---------------------------------------------------------------------------------
+//
+// The keys (the app makes it a tab stop: WS_TABSTOP): Tab and the arrow keys go along the rows' links, checkboxes,
+// buttons and close buttons (Tab past the last goes on to the next control); Enter or Space presses, Delete closes the
+// row, Ctrl+C copies its message.
 
 struct NtfBarData;
 struct NtfHit;
@@ -159,6 +163,10 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
@@ -212,6 +220,9 @@ private:
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -231,6 +242,8 @@ private:
 	void    Click(const NtfHit& hit);
 	void    Close(int item, UINT reason);                         // the user's: NTFN_CLOSED, then it slides out
 	int     Find(UINT id) const;                                  // the item; -1 if none (or going)
+	std::vector<NtfHit> FocusOrder();                             // the parts the keys go along
+	int     FocusIndex(const std::vector<NtfHit>& order) const;   // the keys' part in it (the first if it's gone); -1 if none
 	std::wstring String(UINT which, int number = 0) const;
 
 	std::unique_ptr<NtfBarData> m_Data;
@@ -250,7 +263,9 @@ private:
 // when their time (NTFMESSAGE::timeout) runs out; the mouse over any of them stops the clocks. They don't take the
 // activation. The notifications are the info bar's, sent to the window (hwndFrom: the toast's popup, idFrom: the id
 // given to Attach); a click on a toast's body is NTFN_BUTTONCLICK with the button 0 (it closes, unless non-zero). The
-// host isn't a window: call Detach before the window is destroyed (its WM_DESTROY).
+// host isn't a window: call Detach before the window is destroyed (its WM_DESTROY). The keys: Focus (an app's
+// shortcut) gives them to the newest toast, whose links and buttons Tab goes along; Up and Down go to the next toast,
+// Enter presses, Delete closes, Ctrl+C copies, Escape gives the keys back. A toast with the keys stops the clocks too.
 
 #define NTFC_TOPLEFT         0
 #define NTFC_TOPRIGHT        1
@@ -273,6 +288,7 @@ public:
 	UINT    Show(const NTFMESSAGE* message);                      // its id; a toast with the id is replaced; 0 if it can't
 	UINT    Show(UINT severity, LPCWSTR title, LPCWSTR text, UINT timeout = 5000, UINT id = 0);
 	BOOL    Close(UINT id);                                       // fades out; no NTFN_CLOSED
+	BOOL    Focus();                                              // the keys to the newest toast; FALSE if none shows
 	void    CloseAll();
 	bool    IsShown(UINT id) const;                               // shown or waiting (one going isn't)
 	int     GetCount() const;

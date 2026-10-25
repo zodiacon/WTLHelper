@@ -319,7 +319,10 @@ bool CInfoBarCtrl::AnimationsOn() const {
 }
 
 bool CInfoBarCtrl::Animating() const {
-	return std::any_of(m_Data->items.begin(), m_Data->items.end(), [](auto& item) { return item.appearing || item.going; });
+	// rows sliding, or a progress bar moving
+	return std::any_of(m_Data->items.begin(), m_Data->items.end(), [](auto& item) {
+		return item.appearing || item.going || item.Indeterminate();
+	});
 }
 
 void CInfoBarCtrl::LayoutItems() {
@@ -460,6 +463,26 @@ LRESULT CInfoBarCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 		}
 		if (d.height > 0)
 			FillSolid(dc, { 0, d.height - 1, rc.right, d.height }, c.crBorder);
+		// the keys' part
+		if (::GetFocus() == m_hWnd) {
+			auto order = FocusOrder();
+			int i = FocusIndex(order);
+			if (i >= 0 && order[i].part == NtfPart::More) {
+				RECT r = d.strip;
+				::InflateRect(&r, -Scale(2), -Scale(2));
+				PaintFocus(dc, { r }, c.crAccent, m_Dpi);
+			}
+			else if (i >= 0)
+				for (size_t r = 0; r < d.rowItems.size(); r++)
+					if (d.rowItems[r] == order[i].item) {
+						auto& item = d.items[order[i].item];
+						auto rects = PartRects(item, order[i], d.m);
+						const int y = d.rowTops[r] + d.rowHeights[r] - item.layout.height;
+						for (auto& one : rects)
+							::OffsetRect(&one, 0, y);
+						PaintFocus(dc, rects, c.crAccent, m_Dpi);
+					}
+		}
 		dc.SelectFont(oldFont);
 	};
 	if (uMsg == WM_PRINTCLIENT) {
@@ -633,4 +656,106 @@ void CInfoBarCtrl::Close(int index, UINT reason) {
 	nm.lParam = item.lParam;
 	FireNotify(&nm.hdr, NTFN_CLOSED);
 	RemoveMessage(id);   // unless the app did
+}
+
+// ---- Keyboard -------------------------------------------------------------------------------------------
+
+std::vector<NtfHit> CInfoBarCtrl::FocusOrder() {
+	auto& d = *m_Data;
+	EnsureLayout();
+	std::vector<NtfHit> order;
+	for (int item : d.rowItems) {
+		if (d.items[item].going)
+			continue;
+		for (auto part : FocusParts(d.items[item])) {
+			part.item = item;
+			order.push_back(part);
+		}
+	}
+	if (!::IsRectEmpty(&d.strip))
+		order.push_back({ -1, NtfPart::More });
+	return order;
+}
+
+int CInfoBarCtrl::FocusIndex(const std::vector<NtfHit>& order) const {
+	auto it = std::find(order.begin(), order.end(), m_Data->focus);
+	if (it != order.end())
+		return (int)(it - order.begin());
+	return order.empty() ? -1 : 0;
+}
+
+LRESULT CInfoBarCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	auto& d = *m_Data;
+	auto order = FocusOrder();
+	const int i = FocusIndex(order);
+	if (i < 0) {
+		bHandled = FALSE;
+		return 0;
+	}
+	const bool shift = ::GetKeyState(VK_SHIFT) < 0, ctrl = ::GetKeyState(VK_CONTROL) < 0;
+	auto focus = [&](int k) {
+		d.focus = order[std::clamp(k, 0, (int)order.size() - 1)];
+		Invalidate(FALSE);
+	};
+	switch (wParam) {
+		case VK_TAB: {
+			const int next = i + (shift ? -1 : 1);
+			if (next < 0 || next >= (int)order.size()) {
+				bHandled = FALSE;   // on to the next control
+				return 0;
+			}
+			focus(next);
+			return 0;
+		}
+		case VK_LEFT: case VK_UP: focus(i - 1); return 0;
+		case VK_RIGHT: case VK_DOWN: focus(i + 1); return 0;
+		case VK_HOME: focus(0); return 0;
+		case VK_END: focus((int)order.size() - 1); return 0;
+		case VK_RETURN:
+		case VK_SPACE:
+			d.focus = order[i];
+			Click(order[i]);
+			return 0;
+		case VK_DELETE:
+			if (order[i].item >= 0 && d.items[order[i].item].m.closable)
+				Close(order[i].item, NTFR_CLOSEBUTTON);
+			return 0;
+		case 'C':
+			if (ctrl && order[i].item >= 0) {
+				ToClipboard(m_hWnd, CopyText(d.items[order[i].item]));
+				return 0;
+			}
+			break;
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CInfoBarCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	// the arrows; Tab while there's a part to go to; the keys that press and close
+	LRESULT code = DLGC_WANTARROWS;
+	auto msg = (MSG*)lParam;
+	if (msg && msg->message == WM_KEYDOWN) {
+		switch (msg->wParam) {
+			case VK_TAB: {
+				auto order = FocusOrder();
+				const int next = FocusIndex(order) + (::GetKeyState(VK_SHIFT) < 0 ? -1 : 1);
+				if (!order.empty() && next >= 0 && next < (int)order.size())
+					code |= DLGC_WANTTAB;
+				break;
+			}
+			case VK_RETURN:
+			case VK_SPACE:
+			case VK_DELETE:
+				code |= DLGC_WANTMESSAGE;
+				break;
+		}
+	}
+	return code;
+}
+
+LRESULT CInfoBarCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	Invalidate(FALSE);   // the keys' part framed, or not
+	bHandled = FALSE;
+	return 0;
 }

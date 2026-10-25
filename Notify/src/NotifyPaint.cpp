@@ -215,8 +215,15 @@ void NtfDraw::PaintMessage(WTL::CDCHandle dc, const NtfItem& item, int index, in
 		const int w = (int)(track.right - track.left);
 		if (msg.progressKind == NtfProgress::Value)
 			fill.right = fill.left + w * msg.progress / 100;
-		else
-			fill.right = fill.left + w * 3 / 10;   // a part of it: moving in a later phase
+		else {
+			// a part of it sweeping across, again and again (the controls' timers repaint it)
+			const ULONGLONG Period = 1600;
+			const int part = w * 3 / 10;
+			const double f = (double)(::GetTickCount64() % Period) / Period;
+			const int start = (int)track.left - part + (int)((w + part) * f);
+			fill.left = std::max((int)track.left, start);
+			fill.right = std::min((int)track.right, start + part);
+		}
 		if (fill.right > fill.left)
 			RoundFill(dc, fill, c.crAccent, c.crAccent, radius);
 	}
@@ -291,4 +298,90 @@ NtfHit NtfDraw::HitMessage(const NtfItem& item, POINT pt, const NtfMetrics& m) {
 		hit.index = run;
 	}
 	return hit;
+}
+
+// ---- The keys ---------------------------------------------------------------------------------------
+
+std::vector<NtfHit> NtfDraw::FocusParts(const NtfItem& item) {
+	auto& l = item.layout;
+	std::vector<NtfHit> parts;
+	for (int r = 0; r < (int)l.textRuns.size(); r++)
+		if (l.textRuns[r].IsLink())
+			parts.push_back({ -1, NtfPart::Link, r });
+	if (!::IsRectEmpty(&l.check))
+		parts.push_back({ -1, NtfPart::Check });
+	for (int i = 0; i < (int)l.buttons.size(); i++)
+		parts.push_back({ -1, NtfPart::Button, i });
+	if (!::IsRectEmpty(&l.close))
+		parts.push_back({ -1, NtfPart::Close });
+	return parts;
+}
+
+std::vector<RECT> NtfDraw::PartRects(const NtfItem& item, const NtfHit& part, const NtfMetrics& m) {
+	auto& l = item.layout;
+	std::vector<RECT> rects;
+	switch (part.part) {
+		case NtfPart::Close: rects.push_back(l.close); break;
+		case NtfPart::Check: rects.push_back(l.check); break;
+		case NtfPart::Button:
+			if (part.index >= 0 && part.index < (int)l.buttons.size())
+				rects.push_back(l.buttons[part.index]);
+			break;
+		case NtfPart::Link:
+			for (auto& p : l.textLayout.pieces)
+				if (p.run == part.index) {
+					const int top = (int)l.text.top + p.line * m.lineHeight;
+					rects.push_back({ (int)l.text.left + p.x, top, (int)l.text.left + p.x + p.width, top + m.lineHeight });
+				}
+			break;
+		default:
+			break;
+	}
+	return rects;
+}
+
+void NtfDraw::PaintFocus(WTL::CDCHandle dc, const std::vector<RECT>& rects, COLORREF color, int dpi) {
+	const int w = std::max(1, ::MulDiv(2, dpi, 96)), r = ::MulDiv(6, dpi, 96);
+	WTL::CPen pen;
+	pen.CreatePen(PS_INSIDEFRAME, w, color);
+	auto oldPen = dc.SelectPen(pen);
+	auto oldBrush = dc.SelectBrush((HBRUSH)::GetStockObject(NULL_BRUSH));
+	for (RECT rc : rects) {
+		::InflateRect(&rc, w, w / 2);
+		dc.RoundRect(&rc, { r, r });
+	}
+	dc.SelectBrush(oldBrush);
+	dc.SelectPen(oldPen);
+}
+
+std::wstring NtfDraw::CopyText(const NtfItem& item) {
+	std::wstring text = item.m.title;
+	auto body = NtfPlainText(item.m.runs);
+	if (!body.empty())
+		text += (text.empty() ? L"" : L"\r\n") + body;
+	if (!item.m.details.empty()) {
+		std::wstring details;
+		for (wchar_t ch : item.m.details)
+			details += ch == L'\n' ? std::wstring(L"\r\n") : std::wstring(1, ch);
+		text += L"\r\n\r\n" + details;
+	}
+	return text;
+}
+
+bool NtfDraw::ToClipboard(HWND hwnd, const std::wstring& text) {
+	if (!::OpenClipboard(hwnd))
+		return false;
+	::EmptyClipboard();
+	const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+	HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+	bool done = false;
+	if (mem) {
+		memcpy(::GlobalLock(mem), text.c_str(), bytes);
+		::GlobalUnlock(mem);
+		done = ::SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+		if (!done)
+			::GlobalFree(mem);
+	}
+	::CloseClipboard();
+	return done;
 }
