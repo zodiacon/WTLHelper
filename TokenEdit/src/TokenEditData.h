@@ -5,6 +5,90 @@
 #include "TokenEdit.h"
 #include "TokenEditModel.h"
 
+// ---- The suggestions' list ------------------------------------------------------------------------
+
+struct TkeSuggestionItem {
+	std::wstring text, detail, token;
+	int    image = -1;
+	LPARAM lParam = 0;
+};
+
+struct TkeSuggestRow {
+	int  index = 0;                               // in TkeData::suggestions
+	TkeMatch match;
+	bool onDetail = false;                        // the match is in the detail
+};
+
+// The matching suggestions, dropped down under the typing area. It doesn't take the activation: the edit keeps the
+// focus and passes it the keys (SuggestKey). One window, shown again as the text changes.
+class TkeSuggestList : public ATL::CWindowImpl<TkeSuggestList> {
+public:
+	DECLARE_WND_CLASS_EX(L"TkeSuggestList", CS_DROPSHADOW, -1)
+
+	explicit TkeSuggestList(CTokenEditCtrl* owner) : m_Owner(owner) {
+	}
+
+	BEGIN_MSG_MAP(TkeSuggestList)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_PRINTCLIENT, OnPaint)
+		MESSAGE_HANDLER(WM_MOUSEACTIVATE, OnMouseActivate)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
+	END_MSG_MAP()
+
+	// under: the screen rect it drops from (below it, or above if there's no room)
+	void Show(std::vector<TkeSuggestRow> rows, const RECT& under);
+	void Close();
+	bool IsOpen() const {
+		return m_Open;
+	}
+	const std::vector<TkeSuggestRow>& Rows() const {
+		return m_Rows;
+	}
+	int  Hot() const {
+		return m_Hot;
+	}
+	void MoveHot(UINT vk);                       // Up, Down, Page Up, Page Down
+	void Wheel(int delta);
+	void Invalidate() {
+		if (IsWindow())
+			::InvalidateRect(m_hWnd, nullptr, FALSE);
+	}
+
+private:
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
+		return 1;
+	}
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseActivate(UINT, WPARAM, LPARAM, BOOL&) {
+		return MA_NOACTIVATE;
+	}
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
+		Wheel(GET_WHEEL_DELTA_WPARAM(wParam));
+		return 0;
+	}
+
+	int  RowAt(POINT pt) const;                  // client coords; -1 none
+	void SetHot(int row);
+	void ScrollTo(int top);
+	int  Visible() const;                        // rows shown at once
+
+	CTokenEditCtrl* m_Owner;
+	std::vector<TkeSuggestRow> m_Rows;
+	int  m_RowHeight = 0;
+	int  m_Border = 1;                            // 0 where DWM rounds the corners and draws it
+	int  m_Top = 0;                               // the first row shown
+	int  m_Hot = -1;
+	bool m_Open = false;
+	POINT m_Mouse{ -1, -1 };                      // screen: a WM_MOUSEMOVE where the mouse already was isn't a move
+};
+
+// ---- The control's state -----------------------------------------------------------------------------
+
 struct TkeData {
 	TkeTokenList tokens;
 	std::wstring separators = L",;";
@@ -26,6 +110,12 @@ struct TkeData {
 	bool tokenizing = false;
 	std::vector<UINT> lastSelection;              // the ids TKEN_SELCHANGED last told
 
+	int  focus = -1;                              // the token the keys are on (with the control focused)
+
+	std::vector<TkeSuggestionItem> suggestions;
+	std::unique_ptr<TkeSuggestList> list;
+	bool suggestingAll = false;                   // the list shows all of them (Alt+Down with nothing typed)
+
 	TkeHistory history;
 };
 
@@ -44,6 +134,10 @@ namespace TkeDraw {
 	void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color);
 	void RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius);
 	void Cross(WTL::CDCHandle dc, const RECT& rc, int size, COLORREF color, int width);
+	// text from x on the line's middle, the part [boldStart, boldStart + boldLength) in bold; cut at right. Returns
+	// where it ended.
+	int  RunText(WTL::CDCHandle dc, const std::wstring& text, int x, const RECT& line, int boldStart, int boldLength,
+		HFONT normal, HFONT bold);
 }
 
 inline bool operator==(const TkeHit& a, const TkeHit& b) {

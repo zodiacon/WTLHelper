@@ -134,12 +134,13 @@ void CTokenEditCtrl::SetEditAt(int index) {
 
 // ---- Tokenizing ---------------------------------------------------------------------------------
 
-std::vector<std::wstring> CTokenEditCtrl::AddTyped(const std::vector<std::wstring>& pieces, UINT source) {
+std::vector<std::wstring> CTokenEditCtrl::AddTyped(std::vector<TkeToken> tokens, UINT source) {
 	auto& d = *m_Data;
 	std::vector<std::wstring> refused;
 	auto before = d.tokens.Save();
 	bool added = false;
-	for (auto& piece : pieces) {
+	for (auto& preset : tokens) {
+		const std::wstring& piece = preset.text;
 		if (d.maxTokens && (int)d.tokens.Size() >= d.maxTokens) {
 			refused.push_back(piece);
 			continue;
@@ -150,8 +151,12 @@ std::vector<std::wstring> CTokenEditCtrl::AddTyped(const std::vector<std::wstrin
 		nm.index = d.editAt < 0 ? (int)d.tokens.Size() : d.editAt;
 		nm.source = source;
 		nm.pszText = piece.c_str();
-		nm.iImage = -1;
-		nm.crBack = nm.crText = CLR_DEFAULT;
+		nm.pszTip = preset.tip.empty() ? nullptr : preset.tip.c_str();
+		nm.iImage = preset.image;
+		nm.crBack = preset.back;
+		nm.crText = preset.fore;
+		nm.flags = (preset.invalid ? TKEF_INVALID : 0) | (preset.locked ? TKEF_LOCKED : 0);
+		nm.lParam = preset.lParam;
 		if (FireNotify(&nm.hdr, TKEN_TOKENADDING) || !nm.pszText || !*nm.pszText) {
 			if (!IsWindow())
 				return {};
@@ -215,8 +220,12 @@ void CTokenEditCtrl::Tokenize(UINT source, bool final) {
 			SetTyped(rest, false); // only separators typed
 		return;
 	}
+	std::vector<TkeToken> tokens(pieces.size());
+	for (size_t i = 0; i < pieces.size(); i++)
+		tokens[i].text = std::move(pieces[i]);
+	CloseSuggestions();
 	d.tokenizing = true;
-	auto refused = AddTyped(pieces, source);
+	auto refused = AddTyped(std::move(tokens), source);
 	d.tokenizing = false;
 	if (!IsWindow())
 		return;
@@ -252,6 +261,8 @@ LRESULT CTokenEditCtrl::OnCommand(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHan
 			Changed(false);   // its width
 		if (IsWindow())
 			ScrollToShow(d.layout.edit);
+		if (IsWindow() && !d.tokenizing)
+			UpdateSuggestions(false);
 	}
 	return 0;
 }
@@ -276,6 +287,8 @@ LRESULT CTokenEditCtrl::OnCtlColorEdit(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 
 LRESULT CTokenEditCtrl::OnEditKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
+	if (SuggestKey((UINT)wParam) || EditKey((UINT)wParam))
+		return 0;
 	switch (wParam) {
 		case VK_RETURN:
 			if (!EditText().empty()) {
@@ -290,11 +303,7 @@ LRESULT CTokenEditCtrl::OnEditKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandle
 			m_Edit.GetSel(start, end);
 			const int before = (d.editAt < 0 ? (int)d.tokens.Size() : d.editAt) - 1;
 			if (start == 0 && end == 0 && before >= 0) {
-				d.tokens.Select(before, TkeSelect::Only);
-				SetFocus();
-				ScrollToShow(d.layout.tokens[before].rc);
-				Invalidate(FALSE);
-				NotifySelection();
+				FocusToken(before, false);
 				return 0;
 			}
 			break;
@@ -305,8 +314,10 @@ LRESULT CTokenEditCtrl::OnEditKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandle
 }
 
 LRESULT CTokenEditCtrl::OnEditChar(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
-	if (wParam == L'\r' || wParam == L'\n')
-		return 0;   // Enter made a token (or isn't the edit's): no beep
+	if (wParam == L'\r' || wParam == L'\n' || wParam == L'\t' || wParam == 27)
+		return 0;   // Enter made a token, Tab picked a suggestion, Escape closed them (or they aren't the edit's): no beep
+	if (wParam == 1 && EditText().empty())
+		return 0;   // Ctrl+A selected the tokens
 	bHandled = FALSE;
 	return 0;
 }
@@ -314,9 +325,14 @@ LRESULT CTokenEditCtrl::OnEditChar(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) 
 LRESULT CTokenEditCtrl::OnEditGetDlgCode(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
 	LRESULT code = m_Edit.DefWindowProc(uMsg, wParam, lParam);
 	// Enter with something typed makes a token rather than pressing the dialog's default button
+	// and while suggestions are shown, Tab, Escape and Enter are theirs
 	auto msg = (const MSG*)lParam;
-	if (msg && msg->message == WM_KEYDOWN && msg->wParam == VK_RETURN && !EditText().empty())
-		code |= DLGC_WANTALLKEYS;
+	if (msg && msg->message == WM_KEYDOWN) {
+		if (msg->wParam == VK_RETURN && !EditText().empty())
+			code |= DLGC_WANTALLKEYS;
+		if ((msg->wParam == VK_TAB || msg->wParam == VK_ESCAPE || msg->wParam == VK_RETURN) && IsSuggesting())
+			code |= DLGC_WANTALLKEYS;
+	}
 	return code;
 }
 
@@ -334,6 +350,7 @@ LRESULT CTokenEditCtrl::OnEditSetFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 LRESULT CTokenEditCtrl::OnEditKillFocus(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	bHandled = FALSE;
 	// to the control (tokens selected), what's typed waits there; leaving the control, it becomes a token
+	CloseSuggestions();
 	if ((HWND)wParam != m_hWnd)
 		LeaveTyping();
 	Invalidate(FALSE);
@@ -363,8 +380,11 @@ LRESULT CTokenEditCtrl::OnEditPaste(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	auto text = EditText();
 	start = std::clamp(start, 0, (int)text.size());
 	end = std::clamp(end, start, (int)text.size());
+	// pasted at the end, all of it becomes tokens; in the middle of what's typed, what follows the last separator
+	// is still being typed
+	const bool atEnd = end == (int)text.size();
 	text = text.substr(0, start) + clip + text.substr(end);
 	SetTyped(text, false);
-	Tokenize(TKEA_PASTED, false);
+	Tokenize(TKEA_PASTED, atEnd);
 	return 0;
 }

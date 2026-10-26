@@ -7,9 +7,11 @@
 // token, and pasted text is split the same way, quotes keeping a separator in a token ("Smith, John"). Each new
 // token goes through TKEN_TOKENADDING, which may refuse it (its text goes back to be fixed), rewrite it, or mark it
 // invalid (red, a wavy underline). A token can have an icon from the image list, its own colors, a tooltip and a close
-// button; clicking tokens selects them (Ctrl, Shift), and Delete or Backspace removes the selected ones. The API follows
-// the common controls: C-style structures and WM_NOTIFY codes (TKEN_*) sent to the parent; the API's own changes
-// notify nothing.
+// button; clicking tokens selects them (Ctrl, Shift), and Delete or Backspace removes the selected ones. While the
+// user types, the app's suggestions that match drop down (AddSuggestion, TKEN_GETSUGGESTIONS); Up and Down go through
+// them, Enter or Tab picks one. The arrow keys go from the typed text into the tokens and along them (Shift extends
+// the selection); Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste tokens as text. The API follows the common controls:
+// C-style structures and WM_NOTIFY codes (TKEN_*) sent to the parent; the API's own changes notify nothing.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -31,6 +33,7 @@ constexpr wchar_t WC_TOKENEDIT[] = L"WC_TokenEdit";
 #define TKES_NOCLOSE         0x0001   // no close buttons on the tokens
 #define TKES_NODUPLICATES    0x0002   // a token whose text is there already (ignoring case) isn't added again
 #define TKES_READONLY        0x0004   // no typing, nothing removed; the tokens can still be selected and copied
+#define TKES_SUGGESTINSIDE   0x0008   // suggestions match the typed text anywhere, not only at a word's start
 
 // ---- Tokens ----------------------------------------------------------------------
 
@@ -55,6 +58,20 @@ struct TKETOKEN {
 	COLORREF crBack = CLR_DEFAULT;    // CLR_DEFAULT: the control's
 	COLORREF crText = CLR_DEFAULT;    // CLR_DEFAULT: the control's, or what reads on crBack
 	UINT     flags = 0;               // TKEF_*
+	LPARAM   lParam = 0;
+};
+
+// ---- Suggestions -------------------------------------------------------------------
+//
+// The app's list: those that match what's typed (at the text's start, then a word's, by the text or else the detail)
+// drop down, leaving out those already tokens. Picking one makes its token (pszToken, else pszText) with its image and
+// lParam, through TKEN_TOKENADDING (TKEA_SUGGESTION) as typed text does.
+
+struct TKESUGGESTION {
+	LPCWSTR  pszText = nullptr;       // shown, and matched
+	LPCWSTR  pszDetail = nullptr;     // shown dimmed after it, and matched ("ada@example.com")
+	LPCWSTR  pszToken = nullptr;      // the token's text; nullptr: pszText
+	int      iImage = -1;
 	LPARAM   lParam = 0;
 };
 
@@ -85,12 +102,14 @@ struct TKECOLORS {
 #define TKEN_CHANGED         (TKEN_FIRST - 4)   // NMHDR; the user changed the tokens (after the notifications above)
 #define TKEN_SELCHANGED      (TKEN_FIRST - 5)   // NMHDR; the selected tokens changed
 #define TKEN_HEIGHTCHANGED   (TKEN_FIRST - 6)   // NMHDR; GetIdealHeight changed (lines, DPI, font): lay the window out again
+#define TKEN_GETSUGGESTIONS  (TKEN_FIRST - 7)   // NMTKESUGGEST; the typed text changed: the app may change the list
 
 // where a TKEN_TOKENADDING's text comes from
 #define TKEA_TYPED           0        // a separator typed, or Enter
 #define TKEA_FOCUS           1        // the box lost the focus with text typed
 #define TKEA_PASTED          2
 #define TKEA_COMMIT          3        // CommitText
+#define TKEA_SUGGESTION      4        // a suggestion picked (its image and lParam already set)
 
 // TKEN_TOKENADDING: the app may change pszText (to a string of its own that lives until the notification returns),
 // the image, the colors, the flags (TKEF_INVALID, TKEF_LOCKED), the tip and lParam. A refused text goes back into the
@@ -112,7 +131,16 @@ struct NMTKETOKEN {
 // ---- Control class --------------------------------------------------------------------------
 
 struct TkeData;
+// While it's sent the app may ClearSuggestions and AddSuggestion those for the text (from a search of its own); the
+// control then matches them. With nothing typed (Alt+Down), pszText is empty and all of them are shown.
+struct NMTKESUGGEST {
+	NMHDR    hdr;
+	LPCWSTR  pszText;                 // what's typed, trimmed
+};
+
 struct TkeHit;
+struct TkeToken;
+class TkeSuggestList;
 
 class CTokenEditCtrl : public ATL::CWindowImpl<CTokenEditCtrl> {
 public:
@@ -120,6 +148,7 @@ public:
 
 	CTokenEditCtrl();
 	~CTokenEditCtrl();
+	friend class TkeSuggestList;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -156,8 +185,12 @@ public:
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_COMMAND, OnCommand)
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
+		MESSAGE_HANDLER(WM_COPY, OnCopy)
+		MESSAGE_HANDLER(WM_CUT, OnCut)
+		MESSAGE_HANDLER(WM_PASTE, OnPaste)
 	ALT_MSG_MAP(1)   // the typing area
 		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnEditSysKeyDown)
 		MESSAGE_HANDLER(WM_CHAR, OnEditChar)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnEditGetDlgCode)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnEditSetFocus)
@@ -207,6 +240,23 @@ public:
 	void    SetCueBanner(LPCWSTR text);                           // shown while there are no tokens and nothing typed
 	void    SetMaxTokens(int count);                              // 0: no limit; past it typing stops making tokens
 
+	// ---- Suggestions ---------------------------------------------------------------------------------
+
+	BOOL    AddSuggestion(const TKESUGGESTION* suggestion);
+	BOOL    AddSuggestion(LPCWSTR text, LPCWSTR detail = nullptr, int image = -1, LPARAM lParam = 0);
+	void    ClearSuggestions();
+	BOOL    ShowSuggestions(BOOL show = TRUE);                    // for what's typed (all of them if nothing is); FALSE: none match
+	bool    IsSuggesting() const;
+
+	// ---- Clipboard -----------------------------------------------------------------------------------
+	//
+	// The selected tokens as text (TkeJoin: the first separator and a space, quoted where needed); pasting splits text
+	// into tokens at the typing area's place, as typing does. WM_COPY, WM_CUT and WM_PASTE do the same.
+
+	BOOL    Copy();                                               // FALSE: nothing selected
+	BOOL    Cut();                                                // the user's: TKEN_TOKENREMOVING for each
+	BOOL    Paste();
+
 	// ---- Appearance and size -------------------------------------------------------------------------
 	//
 	// The image list holds small icons (16x16 at 96 DPI); its size sets the icons' (the app gives one for the DPI on
@@ -246,11 +296,15 @@ private:
 	LRESULT OnCommand(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCtlColorEdit(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditSysKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditSetFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditKillFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditPaste(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCopy(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCut(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPaste(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -280,12 +334,26 @@ private:
 	// what's typed into tokens: all of it (final), or what's before the last separator
 	void    Tokenize(UINT source, bool final);
 	// pieces through TKEN_TOKENADDING into tokens at the edit's place; returns the refused ones
-	std::vector<std::wstring> AddTyped(const std::vector<std::wstring>& pieces, UINT source);
+	std::vector<std::wstring> AddTyped(std::vector<TkeToken> tokens, UINT source);
 	void    LeaveTyping();                                        // the focus left the control: what's typed becomes a token
 	void    PlaceEdit();
 	void    FocusEdit();
 	void    SetEditAt(int index);                                 // where the typing area sits among the tokens (-1: last)
 	int     EditWidth() const;                                    // what's typed, measured, with room for the caret
+
+	// suggestions (TokenEditSuggest.cpp)
+	void    UpdateSuggestions(bool all);                          // as typed; all: everything (nothing typed)
+	void    CloseSuggestions();
+	void    PickSuggestion(int index);                            // in m_Data->suggestions
+	bool    SuggestKey(UINT vk);                                  // the edit's key while they're shown; true if used
+
+	// the keyboard (TokenEditKeys.cpp)
+	bool    KeyDown(UINT vk);                                     // the control's (tokens selected)
+	bool    EditKey(UINT vk);                                     // the edit's, at its ends
+	void    FocusToken(int index, bool extend);                   // selects it (extend: from the anchor) and gives it the keys
+	void    FocusEditAt(bool start);                              // the typing area, the caret at its start or end
+	bool    SetClipboardText(const std::wstring& text);
+	std::wstring SelectedText() const;
 
 	// painting (TokenEditPaint.cpp)
 	TKECOLORS PaintColors() const;
@@ -302,6 +370,7 @@ private:
 	bool    m_SystemColors = true;
 
 	HFONT   m_hFont = nullptr;
+	HFONT   m_hBold = nullptr;                                    // the suggestions' matched text
 	bool    m_OwnFont = true;
 	UINT    m_Dpi = 96;
 	int     m_TextHeight = 16;

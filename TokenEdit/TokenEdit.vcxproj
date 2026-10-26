@@ -102,8 +102,10 @@
   <ItemGroup>
     <ClCompile Include="src\TokenEditCtrl.cpp" />
     <ClCompile Include="src\TokenEditInput.cpp" />
+    <ClCompile Include="src\TokenEditKeys.cpp" />
     <ClCompile Include="src\TokenEditModel.cpp" />
     <ClCompile Include="src\TokenEditPaint.cpp" />
+    <ClCompile Include="src\TokenEditSuggest.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

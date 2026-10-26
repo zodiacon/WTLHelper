@@ -47,6 +47,8 @@ CTokenEditCtrl::CTokenEditCtrl() : m_Data(std::make_unique<TkeData>()), m_Edit(t
 CTokenEditCtrl::~CTokenEditCtrl() {
 	if (m_OwnFont && m_hFont)
 		::DeleteObject(m_hFont);
+	if (m_hBold)
+		::DeleteObject(m_hBold);
 }
 
 LRESULT CTokenEditCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
@@ -68,6 +70,12 @@ LRESULT CTokenEditCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CTokenEditCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	auto& d = *m_Data;
+	if (d.list) {
+		if (d.list->IsWindow())
+			d.list->DestroyWindow();
+		d.list.reset();
+	}
 	bHandled = FALSE;
 	return 0;
 }
@@ -77,6 +85,7 @@ LRESULT CTokenEditCtrl::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CTokenEditCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
+	CloseSuggestions();   // they drop from where the typing area was
 	Changed(false);
 	return 0;
 }
@@ -149,10 +158,17 @@ void CTokenEditCtrl::UpdateFonts() {
 		::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, m_Dpi);
 		m_hFont = ::CreateFontIndirectW(&ncm.lfMessageFont);
 	}
+	if (m_hBold)
+		::DeleteObject(m_hBold);
+	LOGFONTW lf{};
+	::GetObjectW(m_hFont, sizeof(lf), &lf);
+	lf.lfWeight = FW_BOLD;
+	m_hBold = ::CreateFontIndirectW(&lf);
 	if (m_Edit.IsWindow()) {
 		m_Edit.SetFont(m_hFont);
 		m_Edit.SetMargins(0, 0);
 	}
+	CloseSuggestions();
 }
 
 void CTokenEditCtrl::UpdateMetrics() {
@@ -216,6 +232,8 @@ LRESULT CTokenEditCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	Invalidate();
 	if (m_Edit.IsWindow())
 		m_Edit.Invalidate();
+	if (m_Data->list)
+		m_Data->list->Invalidate();
 	bHandled = FALSE;
 	return 0;
 }
@@ -384,6 +402,8 @@ BOOL CTokenEditCtrl::RemoveToken(UINT id) {
 	d.tokens.Remove(i);
 	if (d.editAt > i)
 		d.editAt--;
+	if (d.focus >= i)
+		d.focus--;
 	d.hot = d.pressed = {};
 	ClearHistory();
 	Changed(true);
@@ -394,7 +414,7 @@ BOOL CTokenEditCtrl::RemoveToken(UINT id) {
 void CTokenEditCtrl::RemoveAll() {
 	auto& d = *m_Data;
 	d.tokens.Clear();
-	d.editAt = -1;
+	d.editAt = d.focus = -1;
 	d.hot = d.pressed = {};
 	d.scroll = 0;
 	ClearHistory();
@@ -678,6 +698,7 @@ LRESULT CTokenEditCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&)
 			const bool ctrl = (wParam & MK_CONTROL) != 0, shift = (wParam & MK_SHIFT) != 0;
 			d.tokens.Select(hit.index, ctrl && shift ? TkeSelect::ExtendAdd : shift ? TkeSelect::Extend : ctrl ? TkeSelect::Toggle
 				: TkeSelect::Only);
+			d.focus = hit.index;
 			SetFocus();
 			ScrollToShow(d.layout.tokens[hit.index].rc);
 			Invalidate(FALSE);
@@ -747,37 +768,8 @@ LRESULT CTokenEditCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 // ---- Keyboard ----------------------------------------------------------------------------------
 
 LRESULT CTokenEditCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
-	auto& d = *m_Data;
-	const bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
-	switch (wParam) {
-		case VK_DELETE:
-		case VK_BACK:
-			if (!ReadOnly() && d.tokens.SelectedCount()) {
-				RemoveByUser(d.tokens.Selection());
-				FocusEdit();
-			}
-			return 0;
-
-		case VK_ESCAPE:
-			if (d.tokens.SelectedCount()) {
-				d.tokens.SelectAll(false);
-				Invalidate(FALSE);
-				NotifySelection();
-				FocusEdit();
-				return 0;
-			}
-			break;
-
-		case 'A':
-			if (ctrl) {
-				d.tokens.SelectAll();
-				Invalidate(FALSE);
-				NotifySelection();
-				return 0;
-			}
-			break;
-	}
-	bHandled = FALSE;
+	if (!KeyDown((UINT)wParam))
+		bHandled = FALSE;
 	return 0;
 }
 
@@ -860,6 +852,8 @@ bool CTokenEditCtrl::RemoveByUser(std::vector<size_t> indexes) {
 		d.tokens.Remove(i);
 		if (d.editAt > i)
 			d.editAt--;
+		if (d.focus >= i)
+			d.focus--;
 		removed = true;
 		nm = NotifyOf(gone, i);
 		FireNotify(&nm.hdr, TKEN_TOKENREMOVED);

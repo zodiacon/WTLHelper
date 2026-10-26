@@ -2,8 +2,10 @@
 // "Name <address>" with its icon, an address is kept, anything else is marked invalid. "Tags" makes each tag lower case
 // in a color of its own, with no duplicates (and refuses "spam" if Edit says so). Type, then a comma, a semicolon,
 // Enter or Tab to make a token; paste lines or a list; click tokens to select them (Ctrl, Shift), Delete or Backspace
-// removes them, as does their close button. The boxes grow to four lines, then scroll. The log at the bottom shows the
-// notifications.
+// removes them, as does their close button. Typing drops down the address book's or the tags' suggestions (Alt+Down
+// all of them; Up, Down, Enter or Tab). The arrows go from the typed text into the tokens and along them; Ctrl+C,
+// Ctrl+X and Ctrl+V copy, cut and paste tokens as text. The boxes grow to four lines, then scroll. The log at the bottom
+// shows the notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -280,9 +282,11 @@ static LRESULT ToAdding(NMTKETOKEN* nm) {
 	static std::wstring rewritten;
 	std::wstring text = nm->pszText;
 	for (auto& c : Contacts) {
+		auto full = std::wstring(c.name) + L" <" + c.address + L">";   // a suggestion's token
 		if (::CompareStringOrdinal(text.c_str(), -1, c.name, -1, TRUE) == CSTR_EQUAL ||
-			::CompareStringOrdinal(text.c_str(), -1, c.address, -1, TRUE) == CSTR_EQUAL) {
-			rewritten = std::wstring(c.name) + L" <" + c.address + L">";
+			::CompareStringOrdinal(text.c_str(), -1, c.address, -1, TRUE) == CSTR_EQUAL ||
+			::CompareStringOrdinal(text.c_str(), -1, full.c_str(), -1, TRUE) == CSTR_EQUAL) {
+			rewritten = full;
 			nm->pszText = rewritten.c_str();
 			nm->iImage = c.image;
 			nm->pszTip = c.address;
@@ -319,11 +323,11 @@ static LRESULT OnNotify(NMHDR* hdr) {
 	if (hdr->hwndFrom != g_to.m_hWnd && hdr->hwndFrom != g_tags.m_hWnd)
 		return 0;
 	auto nm = (NMTKETOKEN*)hdr;
-	static const wchar_t* const Sources[] = { L"typed", L"focus", L"pasted", L"commit" };
+	static const wchar_t* const Sources[] = { L"typed", L"focus", L"pasted", L"commit", L"suggestion" };
 	const wchar_t* box = Name(hdr->hwndFrom);
 	switch (hdr->code) {
 		case TKEN_TOKENADDING:
-			Log(L"%s: TKEN_TOKENADDING \"%s\" at %d (%s)", box, nm->pszText, nm->index, Sources[std::min(nm->source, 3u)]);
+			Log(L"%s: TKEN_TOKENADDING \"%s\" at %d (%s)", box, nm->pszText, nm->index, Sources[std::min(nm->source, 4u)]);
 			return hdr->hwndFrom == g_to.m_hWnd ? ToAdding(nm) : TagsAdding(nm);
 		case TKEN_TOKENADDED: Log(L"%s: TKEN_TOKENADDED %u \"%s\"", box, nm->id, nm->pszText); break;
 		case TKEN_TOKENREMOVING: Log(L"%s: TKEN_TOKENREMOVING %u \"%s\"", box, nm->id, nm->pszText); break;
@@ -337,6 +341,9 @@ static LRESULT OnNotify(NMHDR* hdr) {
 		case TKEN_HEIGHTCHANGED:
 			Log(L"%s: TKEN_HEIGHTCHANGED %d", box, (hdr->hwndFrom == g_to.m_hWnd ? g_to : g_tags).GetIdealHeight());
 			Layout();
+			break;
+		case TKEN_GETSUGGESTIONS:
+			Log(L"%s: TKEN_GETSUGGESTIONS \"%s\"", box, ((NMTKESUGGEST*)hdr)->pszText);
 			break;
 	}
 	return 0;
@@ -370,6 +377,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				t.crBack = RGB(0xDB, 0xEA, 0xFE);
 				g_tags.InsertToken(&t);
 			}
+			// the address book and the tags used before, suggested as the user types
+			for (auto& c : Contacts) {
+				auto full = std::wstring(c.name) + L" <" + c.address + L">";
+				TKESUGGESTION s;
+				s.pszText = c.name;
+				s.pszDetail = c.address;
+				s.pszToken = full.c_str();
+				s.iImage = c.image;
+				g_to.AddSuggestion(&s);
+			}
+			for (auto tag : { L"review", L"finance", L"q3", L"q4", L"design", L"budget", L"hiring", L"roadmap", L"urgent",
+				L"follow-up", L"legal", L"marketing", L"research", L"release" })
+				g_tags.AddSuggestion(tag);
 			Layout();
 			return 0;
 		}
