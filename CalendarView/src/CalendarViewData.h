@@ -48,6 +48,7 @@ struct ClvData {
 	bool fetching = false;         // CLVN_GETITEMS is out: AddItem lays out once it's back
 
 	std::wstring titleBuffer, tipBuffer;   // GetItem's
+	std::vector<std::pair<HWND, RECT>> placed;   // the items' windows as last placed (empty: hidden)
 };
 
 namespace ClvDraw {

@@ -3,7 +3,11 @@
 // dark mode and a larger font. Items adds an item over the slots selected (click a slot, or a day in the strip for an
 // all-day one) and deletes the one selected. Data > Virtual Mode makes the control again with CLVS_VIRTUAL: then the
 // items come from a generator that knows every day, asked for the days shown, so going back and forth goes on forever.
-// The log at the bottom shows the notifications.
+// This week has items that are windows: a build's progress bar, a meeting's Join button, an agenda list, read-only
+// notes (on the item's color: WM_CTLCOLORSTATIC) and one too short for its window; their notifications and commands
+// come here through the control. "Burndown" is a custom item drawn here (CDDS_ITEMPOSTPAINT), and View > Dim Past
+// Items changes the colors of the items that are over (CDDS_ITEMPREPAINT). The log at the bottom shows the
+// notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -30,10 +34,10 @@
 CAppModule _Module;
 
 enum : UINT {
-	IDC_CALENDAR = 100, IDC_LOG,
+	IDC_CALENDAR = 100, IDC_LOG, IDC_PROGRESS = 200, IDC_JOIN, IDC_AGENDA, IDC_NOTES, IDC_SHORT,
 	CMD_EXIT = 1000, CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK, CMD_PREV, CMD_NEXT, CMD_TODAY, CMD_SLOT15,
 	CMD_SLOT30, CMD_SLOT60, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_NOW, CMD_ADD,
-	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH,
+	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST,
 };
 
 static std::unique_ptr<CCalendarViewCtrl> g_calendar;   // made again for virtual mode: a new control's state
@@ -44,6 +48,8 @@ static ULONGLONG g_nextId = 1000;
 static SYSTEMTIME g_monday;   // this week's, at 0:00
 static bool g_virtual;
 static int g_fetched, g_released;
+static HWND g_progress;
+constexpr UINT_PTR ProgressTimer = 1;
 
 // ---- Helpers ------------------------------------------------------------------------------------
 
@@ -122,6 +128,77 @@ static void Build() {
 	Add(21, L"Team offsite", At(4), At(5), CLVF_ALLDAY, Green);
 	Add(22, L"On call", At(0, 9), At(2, 9), 0, Orange);   // two days: the strip's
 	Add(23, L"Release week", At(0), At(5), CLVF_ALLDAY);
+
+	// items that are windows: made the days' window's children, or adopted from elsewhere
+	HWND days = g_calendar->GetDaysWindow();
+	auto window = [&](ULONGLONG id, LPCWSTR title, const SYSTEMTIME& start, const SYSTEMTIME& end, HWND hwnd, COLORREF color = CLR_INVALID) {
+		::SendMessageW(hwnd, WM_SETFONT, (WPARAM)(g_largeFont ? g_largeFont : g_font), FALSE);
+		CLVITEM item;
+		item.id = id;
+		item.pszTitle = title;
+		item.start = start;
+		item.end = end;
+		item.color = color;
+		item.content = CLVC_WINDOW;
+		item.hwnd = hwnd;
+		g_calendar->AddItem(&item);
+	};
+	g_progress = ::CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD, 0, 0, 0, 0, days, (HMENU)IDC_PROGRESS, nullptr, nullptr);
+	::SendMessageW(g_progress, PBM_SETSTEP, 2, 0);
+	window(30, L"Build #1234", At(2, 9, 45), At(2, 11, 30), g_progress, Green);
+	window(31, L"Daily sync", At(3, 10), At(3, 11, 30), ::CreateWindowExW(0, WC_BUTTONW, L"Join meeting",
+		WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, days, (HMENU)IDC_JOIN, nullptr, nullptr));
+	HWND agenda = ::CreateWindowExW(0, WC_LISTBOXW, nullptr, WS_CHILD | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+		0, 0, 0, 0, days, (HMENU)IDC_AGENDA, nullptr, nullptr);
+	for (auto line : { L"1. Last sprint", L"2. Demo", L"3. Risks", L"4. Next steps", L"5. Questions", L"6. Wrap-up" })
+		::SendMessageW(agenda, LB_ADDSTRING, 0, (LPARAM)line);
+	window(32, L"Agenda", At(3, 13), At(3, 15, 30), agenda, Purple);
+	// made a child of the main window: the control adopts it
+	window(33, L"Notes", At(4, 10), At(4, 12), ::CreateWindowExW(0, WC_EDITW,
+		L"Ship the release notes.\r\nAsk Dana about the offsite.\r\nBook the room for Monday.",
+		WS_CHILD | ES_MULTILINE | ES_READONLY, 0, 0, 0, 0, g_main, (HMENU)IDC_NOTES, nullptr, nullptr), Orange);
+	window(34, L"Too short for its window", At(4, 13), At(4, 13, 15), ::CreateWindowExW(0, WC_BUTTONW, L"Hidden",
+		WS_CHILD, 0, 0, 0, 0, days, (HMENU)IDC_SHORT, nullptr, nullptr));
+
+	// a custom item: the control draws its background, the demo a chart on it
+	CLVITEM burndown;
+	burndown.id = 40;
+	burndown.pszTitle = L"Burndown";
+	burndown.start = At(0, 13);
+	burndown.end = At(0, 15, 30);
+	burndown.content = CLVC_CUSTOM;
+	g_calendar->AddItem(&burndown);
+}
+
+// the custom item's chart: its title, then bars falling to the end of the sprint
+static void DrawBurndown(NMCLVCUSTOMDRAW* cd) {
+	HDC dc = cd->nmcd.hdc;
+	RECT rc = cd->rcContent;
+	::SetBkMode(dc, TRANSPARENT);
+	::SetTextColor(dc, cd->crText);
+	RECT title = rc;
+	::DrawTextW(dc, L"Burndown", -1, &title, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+	::DrawTextW(dc, L"Burndown", -1, &title, DT_SINGLELINE | DT_NOPREFIX);
+	rc.top = title.bottom + Scale(4);
+	if (rc.bottom - rc.top < Scale(8))
+		return;
+	static const int left[] = { 100, 92, 85, 70, 66, 52, 40, 31, 18, 9 };
+	const int n = _countof(left), w = (rc.right - rc.left) / n;
+	HBRUSH brush = ::CreateSolidBrush(cd->crColor);
+	for (int i = 0; i < n && w > 1; i++) {
+		RECT bar{ rc.left + i * w, rc.bottom - (rc.bottom - rc.top) * left[i] / 100, rc.left + (i + 1) * w - 1, rc.bottom };
+		::FillRect(dc, &bar, brush);
+	}
+	::DeleteObject(brush);
+}
+
+static bool IsOver(ULONGLONG id) {
+	CLVITEM item;
+	if (!g_calendar->GetItem(id, &item))
+		return false;
+	SYSTEMTIME now;
+	::GetLocalTime(&now);
+	return Ticks(item.end) <= Ticks(now);
 }
 
 // virtual mode: every day's items, made up from the day (the same each time it's asked for)
@@ -200,6 +277,7 @@ static void CreateCalendar() {
 		g_calendar->DestroyWindow();
 	g_calendar = std::make_unique<CCalendarViewCtrl>();
 	g_fetched = g_released = 0;
+	g_progress = nullptr;
 	g_calendar->Create(g_main, nullptr, L"Calendar", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP |
 		(g_virtual ? CLVS_VIRTUAL : 0), 0, IDC_CALENDAR);
 	::SetWindowPos(*g_calendar, g_log, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -233,6 +311,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_ZOOMOUT, L"Zoom O&ut");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(view, MF_STRING, CMD_NOW, L"No Line at &Now");
+	::AppendMenuW(view, MF_STRING, CMD_DIMPAST, L"Di&m Past Items (Custom Draw)");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"Dar&k Mode");
 #endif
@@ -325,8 +404,23 @@ static void OnCommand(UINT id) {
 			break;
 		}
 		case CMD_DELETE:
-			if (ULONGLONG sel = g_calendar->GetSelected(); sel && g_calendar->RemoveItem(sel))
-				Log(L"removed %llu", sel);
+			if (ULONGLONG sel = g_calendar->GetSelected()) {
+				CLVITEM item;
+				g_calendar->GetItem(sel, &item);
+				if (g_calendar->RemoveItem(sel)) {
+					Log(L"removed %llu", sel);
+					if (item.hwnd) {
+						// the control hid it: it's the app's to destroy
+						if (item.hwnd == g_progress)
+							g_progress = nullptr;
+						::DestroyWindow(item.hwnd);
+					}
+				}
+			}
+			break;
+		case CMD_DIMPAST:
+			Toggle(id);
+			g_calendar->RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 			break;
 		case CMD_VIRTUAL:
 			g_virtual = Toggle(id);
@@ -373,6 +467,25 @@ static LRESULT OnNotify(NMHDR* hdr) {
 		case CLVN_RELEASEITEM:
 			g_released++;
 			break;
+		case CLVN_CUSTOMDRAW: {
+			auto cd = (NMCLVCUSTOMDRAW*)hdr;
+			const bool dim = ::GetMenuState(g_menu, CMD_DIMPAST, MF_BYCOMMAND) & MF_CHECKED;
+			switch (cd->nmcd.dwDrawStage) {
+				case CDDS_PREPAINT:
+					return dim ? CDRF_NOTIFYITEMDRAW : CDRF_DODEFAULT;
+				case CDDS_ITEMPREPAINT:
+					if (dim && !(cd->nmcd.uItemState & CDIS_SELECTED) && IsOver(cd->id)) {
+						cd->crFill = ::GetSysColor(COLOR_BTNFACE);
+						cd->crText = ::GetSysColor(COLOR_GRAYTEXT);
+					}
+					return CDRF_DODEFAULT;
+				case CDDS_ITEMPOSTPAINT:
+					if (cd->id == 40)
+						DrawBurndown(cd);
+					return CDRF_DODEFAULT;
+			}
+			break;
+		}
 	}
 	return 0;
 }
@@ -391,6 +504,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_monday = FromTicks(Ticks(g_monday) - (ULONGLONG)((g_monday.wDayOfWeek + 6) % 7) * DayTicks);
 			UpdateFonts();
 			CreateCalendar();
+			::SetTimer(hwnd, ProgressTimer, 200, nullptr);
 			return 0;
 		}
 		case WM_SIZE:
@@ -401,7 +515,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				g_calendar->SetFocus();
 			return 0;
 		case WM_COMMAND:
-			OnCommand(LOWORD(wParam));
+			// the items' windows' commands come through the control
+			if (lParam && LOWORD(wParam) == IDC_JOIN && HIWORD(wParam) == BN_CLICKED)
+				Log(L"Join meeting clicked");
+			else if (lParam && LOWORD(wParam) == IDC_AGENDA && HIWORD(wParam) == LBN_SELCHANGE)
+				Log(L"agenda: item %d", (int)::SendMessageW((HWND)lParam, LB_GETCURSEL, 0, 0));
+			else if (!lParam)
+				OnCommand(LOWORD(wParam));
+			return 0;
+		case WM_TIMER:
+			if (wParam == ProgressTimer && g_progress && ::IsWindow(g_progress))
+				::SendMessageW(g_progress, PBM_STEPIT, 0, 0);   // wraps around at 100
 			return 0;
 		case WM_NOTIFY:
 			return OnNotify((NMHDR*)lParam);

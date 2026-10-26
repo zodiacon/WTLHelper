@@ -1,10 +1,12 @@
 #include "CalendarViewData.h"
 
 #include <commctrl.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 static_assert(CLVC_WINDOW == (int)ClvContent::Window);
 
@@ -34,6 +36,8 @@ CCalendarViewCtrl::~CCalendarViewCtrl() {
 		::DeleteObject(m_hFont);
 	if (m_hBold)
 		::DeleteObject(m_hBold);
+	if (m_hStaticBrush)
+		::DeleteObject(m_hStaticBrush);
 }
 
 LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
@@ -41,8 +45,10 @@ LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
 	d.isVirtual = (GetStyle() & CLVS_VIRTUAL) != 0;
 	ModifyStyleEx(0, WS_EX_CONTROLPARENT);
-	m_Days->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+	// a container too: Tab goes into the items' windows
+	m_Days->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT);
 	SetTimer(NowTimer, 30 * 1000);
+	UpdateScrollBarTheme();
 	UpdateFonts();
 	RangeChanged(false);
 	return 0;
@@ -201,6 +207,7 @@ LRESULT CCalendarViewCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bH
 }
 
 LRESULT CCalendarViewCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	UpdateScrollBarTheme();
 	Invalidate();
 	if (m_Days->IsWindow())
 		m_Days->Invalidate();
@@ -213,9 +220,22 @@ void CCalendarViewCtrl::SetColors(const CLVCOLORS* colors) {
 	if (colors)
 		m_Colors = *colors;
 	if (IsWindow()) {
+		UpdateScrollBarTheme();
 		Invalidate();
 		m_Days->Invalidate();
 	}
+}
+
+void CCalendarViewCtrl::UpdateScrollBarTheme() {
+	// the dark Explorer theme makes the scroll bar dark; set only when it changes
+	if (!m_Days->IsWindow())
+		return;
+	const int dark = ClvDraw::IsDark(GetColors().crBack) ? 1 : 0;
+	if (dark == m_DarkScrollBars)
+		return;
+	m_DarkScrollBars = dark;
+	::SetWindowTheme(m_Days->m_hWnd, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	m_Days->SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 // ---- Layout and scrolling ---------------------------------------------------------------------------
@@ -264,6 +284,7 @@ void CCalendarViewCtrl::ScrollDays(int y) {
 	si.nPos = d.scrollY;
 	m_Days->SetScrollInfo(SB_VERT, &si);
 	m_Days->Invalidate(FALSE);
+	PlaceWindows();
 }
 
 void CCalendarViewCtrl::ScrollStrip(int y) {
@@ -285,7 +306,9 @@ void CCalendarViewCtrl::ZoomAt(int slotHeight, int y) {
 	ScrollDays(d.axis.Y(minute) - y);
 }
 
-LRESULT CCalendarViewCtrl::OnDaysVScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
+LRESULT CCalendarViewCtrl::OnDaysVScroll(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if (lParam)
+		return OnForward(uMsg, wParam, lParam, bHandled);   // an item's window's scroll bar
 	auto& d = *m_Data;
 	SCROLLINFO si{ sizeof(si), SIF_ALL };
 	m_Days->GetScrollInfo(SB_VERT, &si);
@@ -594,9 +617,12 @@ void CCalendarViewCtrl::SetSelected(ULONGLONG id, bool notify) {
 		ClearSlots();
 	if (d.selected == id)
 		return;
+	const ULONGLONG old = d.selected;
 	d.selected = id;
 	Invalidate(FALSE);
 	m_Days->Invalidate(FALSE);
+	RedrawWindowOf(old);
+	RedrawWindowOf(id);
 	if (notify)
 		NotifyItem(CLVN_SELCHANGED, id);
 }
@@ -716,4 +742,120 @@ LRESULT CCalendarViewCtrl::OnDaysLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL
 	if (hit.box >= 0)
 		NotifyItem(CLVN_ITEMACTIVATE, hit.Id(d.layout, false));
 	return 0;
+}
+
+// ---- The items' windows -------------------------------------------------------------------------------
+
+void CCalendarViewCtrl::PlaceWindows() {
+	auto& d = *m_Data;
+	if (!m_Days->IsWindow())
+		return;
+	// where each window goes: its first piece with room for it, inside the color bar and the border (else hidden)
+	const int bar = 1 + Scale(4);
+	std::vector<std::pair<HWND, RECT>> want;
+	for (auto& item : d.store.Items()) {
+		if (item.content != ClvContent::Window || !item.hwnd || !::IsWindow(item.hwnd))
+			continue;
+		RECT rc{};
+		for (auto& box : d.layout.timed)
+			if (box.id == item.id && !::IsRectEmpty(&box.body)) {
+				rc = { box.body.left + bar, box.body.top - d.scrollY, box.body.right - 1, box.body.bottom - 1 - d.scrollY };
+				break;
+			}
+		if (rc.right <= rc.left || rc.bottom <= rc.top)
+			rc = {};
+		want.push_back({ item.hwnd, rc });
+	}
+	auto find = [](const std::vector<std::pair<HWND, RECT>>& list, HWND hwnd) {
+		auto it = std::find_if(list.begin(), list.end(), [&](auto& p) { return p.first == hwnd; });
+		return it == list.end() ? nullptr : &*it;
+	};
+
+	HDWP dwp = ::BeginDeferWindowPos((int)(want.size() + d.placed.size()));
+	auto defer = [&](HWND hwnd, const RECT* rc) {
+		const UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (rc ? SWP_SHOWWINDOW : SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE);
+		const int x = rc ? rc->left : 0, y = rc ? rc->top : 0, cx = rc ? rc->right - rc->left : 0, cy = rc ? rc->bottom - rc->top : 0;
+		if (dwp)
+			dwp = ::DeferWindowPos(dwp, hwnd, nullptr, x, y, cx, cy, flags);
+		else
+			::SetWindowPos(hwnd, nullptr, x, y, cx, cy, flags);
+	};
+	// the windows of items removed or let go of: hidden (the app's to destroy)
+	for (auto& [hwnd, rc] : d.placed)
+		if (!find(want, hwnd) && ::IsWindow(hwnd) && ::IsWindowVisible(hwnd) && ::GetParent(hwnd) == m_Days->m_hWnd)
+			defer(hwnd, nullptr);
+	for (auto& [hwnd, rc] : want) {
+		if (::GetParent(hwnd) != m_Days->m_hWnd) {
+			// made the days' window's child: it scrolls and clips with them
+			if (dwp) {
+				::EndDeferWindowPos(dwp);
+				dwp = nullptr;
+			}
+			const LONG_PTR style = ::GetWindowLongPtr(hwnd, GWL_STYLE);
+			if (!(style & WS_CHILD))
+				::SetWindowLongPtr(hwnd, GWL_STYLE, (style & ~WS_POPUP) | WS_CHILD);
+			::SetParent(hwnd, m_Days->m_hWnd);
+			dwp = ::BeginDeferWindowPos((int)want.size());
+		}
+		auto before = find(d.placed, hwnd);
+		const bool visible = ::IsWindowVisible(hwnd) != FALSE;
+		if (::IsRectEmpty(&rc)) {
+			if (visible)
+				defer(hwnd, nullptr);
+		}
+		else if (!visible || !before || !::EqualRect(&before->second, &rc))
+			defer(hwnd, &rc);
+	}
+	if (dwp)
+		::EndDeferWindowPos(dwp);
+	d.placed = std::move(want);
+}
+
+void CCalendarViewCtrl::RedrawWindowOf(ULONGLONG id) {
+	auto item = id ? m_Data->store.Find(id) : nullptr;
+	if (item && item->hwnd && ::IsWindow(item->hwnd))
+		::RedrawWindow(item->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+LRESULT CCalendarViewCtrl::OnDaysParentNotify(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	auto& d = *m_Data;
+	bHandled = FALSE;
+	if (LOWORD(wParam) != WM_LBUTTONDOWN && LOWORD(wParam) != WM_RBUTTONDOWN)
+		return 0;
+	// a press in an item's window selects the item (the window keeps the press)
+	const POINT pt = PointOf(lParam);
+	for (auto& [hwnd, rc] : d.placed)
+		if (::PtInRect(&rc, pt))
+			for (auto& item : d.store.Items())
+				if (item.hwnd == hwnd) {
+					SetSelected(item.id, true);
+					return 0;
+				}
+	return 0;
+}
+
+LRESULT CCalendarViewCtrl::OnForward(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
+	return ::SendMessage(GetParent(), uMsg, wParam, lParam);
+}
+
+LRESULT CCalendarViewCtrl::OnCtlColor(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	auto& d = *m_Data;
+	if (uMsg == WM_CTLCOLORSTATIC) {
+		// a static (or a read-only edit) that is an item's window: on the item's fill
+		for (auto& item : d.store.Items())
+			if (item.hwnd == (HWND)lParam) {
+				COLORREF fill, text;
+				ItemColors(item, GetColors(), &fill, &text);
+				if (fill != m_StaticColor || !m_hStaticBrush) {
+					if (m_hStaticBrush)
+						::DeleteObject(m_hStaticBrush);
+					m_hStaticBrush = ::CreateSolidBrush(fill);
+					m_StaticColor = fill;
+				}
+				::SetTextColor((HDC)wParam, text);
+				::SetBkColor((HDC)wParam, fill);
+				return (LRESULT)m_hStaticBrush;
+			}
+	}
+	return OnForward(uMsg, wParam, lParam, bHandled);
 }

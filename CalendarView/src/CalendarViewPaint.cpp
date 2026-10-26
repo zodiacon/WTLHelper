@@ -19,6 +19,19 @@ void ClvDraw::RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORR
 }
 
 namespace {
+	// the custom draw notification's answer, with the DC as it was afterwards, clipped to the item meanwhile
+	LRESULT CustomDraw(const CCalendarViewCtrl* ctrl, NMCLVCUSTOMDRAW& cd, DWORD stage) {
+		cd.nmcd.dwDrawStage = stage;
+		cd.nmcd.hdr.hwndFrom = ctrl->m_hWnd;
+		cd.nmcd.hdr.idFrom = ::GetDlgCtrlID(ctrl->m_hWnd);
+		cd.nmcd.hdr.code = CLVN_CUSTOMDRAW;
+		const int saved = ::SaveDC(cd.nmcd.hdc);
+		::IntersectClipRect(cd.nmcd.hdc, cd.nmcd.rc.left, cd.nmcd.rc.top, cd.nmcd.rc.right, cd.nmcd.rc.bottom);
+		const LRESULT result = ::SendMessage(ctrl->GetParent(), WM_NOTIFY, cd.nmcd.hdr.idFrom, (LPARAM)&cd);
+		::RestoreDC(cd.nmcd.hdc, saved);
+		return result;
+	}
+
 	ClvTime Now() {
 		SYSTEMTIME st;
 		::GetLocalTime(&st);
@@ -117,6 +130,13 @@ std::wstring CCalendarViewCtrl::TimeText(LONGLONG start, LONGLONG end, bool allD
 	return text;
 }
 
+bool CCalendarViewCtrl::Prepaint(WTL::CDCHandle dc, const RECT& rc) const {
+	NMCLVCUSTOMDRAW cd{};
+	cd.nmcd.hdc = dc;
+	cd.nmcd.rc = rc;
+	return (CustomDraw(this, cd, CDDS_PREPAINT) & CDRF_NOTIFYITEMDRAW) != 0;
+}
+
 // ---- The days' names and the strip ------------------------------------------------------------------
 
 LRESULT CCalendarViewCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
@@ -180,6 +200,7 @@ void CCalendarViewCtrl::Paint(WTL::CDCHandle dc) {
 		HLine(dc, 0, rc.right, d.header.bottom - 1, c.crGrid);
 		HLine(dc, 0, rc.right, strip.bottom - 1, c.crGrid);
 
+		const bool notify = Prepaint(dc, rc);
 		RECT rows{ area.left, strip.top + d.m.stripPad, area.right, strip.bottom - d.m.stripPad };
 		dc.IntersectClipRect(&rows);
 		int selected = -1;
@@ -187,9 +208,9 @@ void CCalendarViewCtrl::Paint(WTL::CDCHandle dc) {
 			if (d.layout.strip[i].id == d.selected)
 				selected = i;
 			else
-				PaintItem(dc, c, i, true);
+				PaintItem(dc, c, i, true, notify);
 		if (selected >= 0)
-			PaintItem(dc, c, selected, true);
+			PaintItem(dc, c, selected, true, notify);
 		dc.SelectClipRgn(nullptr);
 	}
 	dc.SelectFont(oldFont);
@@ -276,6 +297,7 @@ void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 		VLine(dc, cols.Left(i), rcPaint.top, rcPaint.bottom, c.crGrid);
 
 	// the items, the selected one on top
+	const bool notify = Prepaint(dc, rc);
 	int selected = -1;
 	for (int i = 0; i < (int)d.layout.timed.size(); i++) {
 		const auto& box = d.layout.timed[i];
@@ -284,10 +306,10 @@ void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 		if (box.id == d.selected)
 			selected = i;
 		else
-			PaintItem(dc, c, i, false);
+			PaintItem(dc, c, i, false, notify);
 	}
 	if (selected >= 0)
-		PaintItem(dc, c, selected, false);
+		PaintItem(dc, c, selected, false, notify);
 
 	// the line at now, across today
 	const ClvTime now = Now();
@@ -313,61 +335,99 @@ void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 
 // ---- Items --------------------------------------------------------------------------------------------
 
-void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int index, bool strip) {
+void CCalendarViewCtrl::ItemColors(const ClvItem& item, const CLVCOLORS& c, COLORREF* fill, COLORREF* text) const {
+	const COLORREF color = item.color != CLR_INVALID ? item.color : c.crItem;
+	*fill = Blend(c.crBack, color, IsDark(c.crBack) ? 40 : 22);
+	*text = c.crText;
+	if (item.id == m_Data->selected) {
+		*fill = ::GetFocus() == m_hWnd ? color : Blend(c.crBack, color, IsDark(c.crBack) ? 65 : 50);
+		*text = IsDark(*fill) ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
+	}
+}
+
+
+void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int index, bool strip, bool notify) {
 	auto& d = *m_Data;
 	const auto& box = strip ? d.layout.strip[index] : d.layout.timed[index];
 	const auto& item = d.store.Items()[box.item];
-	RECT rc = box.rc;
-	if (strip)
-		::OffsetRect(&rc, 0, d.strip.top + d.m.stripPad - d.stripScroll);
-	else
-		::OffsetRect(&rc, 0, -d.scrollY);
+	RECT rc = box.rc, caption = box.caption;
+	const int dy = strip ? d.strip.top + d.m.stripPad - d.stripScroll : -d.scrollY;
+	::OffsetRect(&rc, 0, dy);
+	::OffsetRect(&caption, 0, dy);
 	if (rc.right - rc.left < 2 || rc.bottom - rc.top < 2)
 		return;
 
 	const bool selected = item.id == d.selected;
-	const bool focused = ::GetFocus() == m_hWnd;
 	const COLORREF color = item.color != CLR_INVALID ? item.color : c.crItem;
-	const bool dark = IsDark(c.crBack);
-	COLORREF fill = Blend(c.crBack, color, dark ? 40 : 22);
-	COLORREF text = c.crText;
-	if (selected) {
-		fill = focused ? color : Blend(c.crBack, color, dark ? 65 : 50);
-		text = IsDark(fill) ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0);
-	}
-	RoundFill(dc, rc, fill, Blend(color, c.crBack, selected ? 0 : 25), Scale(6));
-
-	// the color's bar at the left (none on a strip piece going on from before)
+	COLORREF fill, text;
+	ItemColors(item, c, &fill, &text);
 	const int bar = Scale(4);
+	const bool window = item.content == ClvContent::Window;
+	RECT inner{ rc.left + 1 + bar + Scale(4), rc.top + Scale(2), rc.right - Scale(4), rc.bottom - Scale(1) };
+	if (window || strip)
+		inner = { inner.left, window ? caption.top : rc.top, inner.right, window ? caption.bottom : rc.bottom };
+
+	// the app's turn first: custom items always, the others when it asked
+	NMCLVCUSTOMDRAW cd{};
+	bool post = item.content == ClvContent::Custom;
+	if (notify || post) {
+		cd.nmcd.hdc = dc;
+		cd.nmcd.rc = rc;
+		cd.nmcd.uItemState = (selected ? CDIS_SELECTED : 0) | (selected && ::GetFocus() == m_hWnd ? CDIS_FOCUS : 0);
+		cd.nmcd.lItemlParam = item.lParam;
+		cd.nmcd.dwItemSpec = (DWORD_PTR)item.id;
+		cd.id = item.id;
+		cd.rcContent = inner;
+		cd.crFill = fill;
+		cd.crText = text;
+		cd.crColor = color;
+		cd.strip = strip;
+		cd.continuesBefore = box.before;
+		cd.continuesAfter = box.after;
+		const LRESULT result = CustomDraw(this, cd, CDDS_ITEMPREPAINT);
+		if (result & CDRF_SKIPDEFAULT)
+			return;
+		fill = cd.crFill;
+		text = cd.crText;
+		post = post || (result & CDRF_NOTIFYPOSTPAINT);
+	}
+
+	RoundFill(dc, rc, fill, Blend(color, c.crBack, selected ? 0 : 25), Scale(6));
+	// the color's bar at the left (none on a strip piece going on from before)
 	if (!(strip && box.before)) {
 		RECT side{ rc.left + 1, rc.top + 1, rc.left + 1 + bar, rc.bottom - 1 };
 		FillSolid(dc, side, color);
 	}
 
-	RECT inner{ rc.left + 1 + bar + Scale(4), rc.top + Scale(2), rc.right - Scale(4), rc.bottom - Scale(1) };
-	if (inner.right <= inner.left)
-		return;
-	dc.SetTextColor(text);
-	TEXTMETRICW tm{};
-	dc.SelectFont(m_hBold);
-	dc.GetTextMetrics(&tm);
-	const UINT format = DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
-	if (strip) {
-		inner.top = rc.top;
-		dc.DrawText(item.title.c_str(), (int)item.title.size(), &inner, format | DT_VCENTER);
+	if (inner.right > inner.left && item.content != ClvContent::Custom) {
+		dc.SetTextColor(text);
+		TEXTMETRICW tm{};
+		dc.SelectFont(m_hBold);
+		dc.GetTextMetrics(&tm);
+		const UINT format = DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
+		if (strip || window)
+			dc.DrawText(item.title.c_str(), (int)item.title.size(), &inner, format | DT_VCENTER);
+		else {
+			RECT line = inner;
+			line.bottom = std::min(inner.bottom, inner.top + tm.tmHeight);
+			dc.DrawText(item.title.c_str(), (int)item.title.size(), &line, format);
+			// the time under the title, when there's room
+			if (inner.bottom - line.bottom >= tm.tmHeight) {
+				dc.SelectFont(m_hFont);
+				auto time = TimeText(item.start, item.end, item.allDay);
+				line.top = line.bottom;
+				line.bottom = line.top + tm.tmHeight;
+				dc.SetTextColor(selected ? text : Blend(c.crText, fill, 30));
+				dc.DrawText(time.c_str(), (int)time.size(), &line, format);
+			}
+		}
 		dc.SelectFont(m_hFont);
-		return;
 	}
-	RECT line = inner;
-	line.bottom = std::min(inner.bottom, inner.top + tm.tmHeight);
-	dc.DrawText(item.title.c_str(), (int)item.title.size(), &line, format);
-	dc.SelectFont(m_hFont);
-	// the time under the title, when there's room
-	if (inner.bottom - line.bottom >= tm.tmHeight) {
-		auto time = TimeText(item.start, item.end, item.allDay);
-		line.top = line.bottom;
-		line.bottom = line.top + tm.tmHeight;
-		dc.SetTextColor(selected ? text : Blend(c.crText, fill, 30));
-		dc.DrawText(time.c_str(), (int)time.size(), &line, format);
+
+	if (post) {
+		cd.crFill = fill;
+		cd.crText = text;
+		dc.SetTextColor(text);
+		CustomDraw(this, cd, CDDS_ITEMPOSTPAINT);
 	}
 }

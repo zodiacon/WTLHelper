@@ -4,7 +4,9 @@
 // days' names on top, under them a strip of the all-day items (and those a day or longer), and the days' time below,
 // scrolled and zoomed (Ctrl+wheel), with the working hours apart and a line at the time now. Items are drawn by the
 // control, by the app (custom draw), or are the app's own windows placed in the days, under a caption the control
-// draws. Overlapping items go side by side. The items are the control's own (AddItem), or in virtual mode
+// draws: it makes the window a child of its days' window (GetDaysWindow), places it under the caption, hides it when
+// its item is too short, in the strip or not shown, and passes the window's notifications, commands and colors on to its
+// own parent. Overlapping items go side by side. The items are the control's own (AddItem), or in virtual mode
 // (CLVS_VIRTUAL) the app's: the control asks for those of the days it shows (CLVN_GETITEMS) and lets go of the ones
 // that leave them (CLVN_RELEASEITEM). The API follows the common controls: C-style structures and WM_NOTIFY codes
 // (CLVN_*) sent to the parent. Times are local SYSTEMTIMEs (seconds ignored).
@@ -42,8 +44,9 @@ constexpr wchar_t WC_CALENDARVIEW[] = L"WC_CalendarView";
 
 // CLVITEM::content
 #define CLVC_DEFAULT         0        // the control draws it
-#define CLVC_CUSTOM          1        // the app draws it (custom draw)
-#define CLVC_WINDOW          2        // hwnd shows it, under a caption the control draws
+#define CLVC_CUSTOM          1        // the control draws its background, the app what's on it (CDDS_ITEMPOSTPAINT)
+#define CLVC_WINDOW          2        // hwnd shows it, under a caption the control draws; hwnd stays the app's (hidden
+                                      // once the item is removed or released: the app destroys it)
 
 // CLVITEM::mask: the fields SetItem changes
 #define CLVIF_TIME           0x0001   // start, end
@@ -92,6 +95,7 @@ struct CLVCOLORS {
 #define CLVN_GETITEMS        (CLVN_FIRST - 3)   // NMCLVRANGE; virtual: AddItem the items over the days, now
 #define CLVN_RELEASEITEM     (CLVN_FIRST - 4)   // NMCLVITEM; virtual: an item left the days shown (its window is the app's again)
 #define CLVN_SLOTCHANGED     (CLVN_FIRST - 5)   // NMCLVRANGE; the user selected slots (GetSelectedSlots)
+#define CLVN_CUSTOMDRAW      (CLVN_FIRST - 6)   // NMCLVCUSTOMDRAW; see below
 
 struct NMCLVITEM {
 	NMHDR   hdr;
@@ -105,6 +109,22 @@ struct NMCLVRANGE {
 	SYSTEMTIME start;                 // [start, end)
 	SYSTEMTIME end;
 	BOOL    allDay;                   // CLVN_SLOTCHANGED: the strip's days
+};
+
+// Custom draw, as the common controls': CDDS_PREPAINT once a paint (return CDRF_NOTIFYITEMDRAW for every item's);
+// CDDS_ITEMPREPAINT for each item asked for, and always for CLVC_CUSTOM items: return CDRF_SKIPDEFAULT to draw it all,
+// or change crFill and crText, and CDRF_NOTIFYPOSTPAINT for CDDS_ITEMPOSTPAINT after the control's drawing (always sent
+// for CLVC_CUSTOM items: draw in rcContent). The DC is clipped to the item, and its font is the control's.
+struct NMCLVCUSTOMDRAW {
+	NMCUSTOMDRAW nmcd;                // rc: the item's piece; uItemState: CDIS_SELECTED, CDIS_FOCUS; lItemlParam: its lParam
+	ULONGLONG id;
+	RECT    rcContent;                // inside its color bar and pads (a window item's: its caption's)
+	COLORREF crFill;                  // the colors it's drawn in (ITEMPREPAINT: the app may change them)
+	COLORREF crText;
+	COLORREF crColor;                 // the item's color (its bar)
+	BOOL    strip;                    // in the all-day strip
+	BOOL    continuesBefore;          // the item goes on before the piece (an earlier day), or after it
+	BOOL    continuesAfter;
 };
 
 // ---- Control class --------------------------------------------------------------------------
@@ -155,6 +175,18 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnDaysLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnDaysLButtonDblClk)
+		MESSAGE_HANDLER(WM_PARENTNOTIFY, OnDaysParentNotify)
+		// the items' windows': on to the control's parent
+		MESSAGE_HANDLER(WM_HSCROLL, OnForward)
+		MESSAGE_HANDLER(WM_COMMAND, OnForward)
+		MESSAGE_HANDLER(WM_NOTIFY, OnForward)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnForward)
+		MESSAGE_HANDLER(WM_MEASUREITEM, OnForward)
+		MESSAGE_HANDLER(WM_COMPAREITEM, OnForward)
+		MESSAGE_HANDLER(WM_DELETEITEM, OnForward)
+		MESSAGE_HANDLER(WM_VKEYTOITEM, OnForward)
+		MESSAGE_HANDLER(WM_CHARTOITEM, OnForward)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnCtlColor)
 	END_MSG_MAP()
 
 	// ---- Items -----------------------------------------------------------------------------------------
@@ -217,6 +249,9 @@ private:
 	LRESULT OnDaysVScroll(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDaysLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDaysLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDaysParentNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -228,6 +263,9 @@ private:
 	void    ZoomAt(int slotHeight, int y);                        // y: a days' window y that stays at its time
 	ClvHit  HitStrip(POINT pt) const;                             // pt: the control's client coords
 	ClvHit  HitDays(POINT pt) const;                              // pt: the days' window's
+	void    UpdateScrollBarTheme();                               // the days' scroll bar dark on a dark background
+	void    PlaceWindows();                                       // the items' windows under their captions, or hidden
+	void    RedrawWindowOf(ULONGLONG id);                         // its window's background follows its item's
 	void    SetSelected(ULONGLONG id, bool notify);
 	void    SelectSlots(LONGLONG start, LONGLONG end, bool allDay, bool notify);
 	void    ClearSlots();
@@ -239,7 +277,9 @@ private:
 	// painting (CalendarViewPaint.cpp)
 	void    Paint(WTL::CDCHandle dc);                             // the days' names and the strip
 	void    PaintDays(WTL::CDCHandle dc, const RECT& rcPaint);    // the ruler and the days' time
-	void    PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int box, bool strip);
+	void    PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int box, bool strip, bool notify);
+	bool    Prepaint(WTL::CDCHandle dc, const RECT& rc) const;   // CDDS_PREPAINT: whether the app wants each item's
+	void    ItemColors(const ClvItem& item, const CLVCOLORS& c, COLORREF* fill, COLORREF* text) const;   // as it's drawn
 	std::wstring DayName(LONGLONG day, int width, WTL::CDCHandle dc) const;
 	int     RulerWidth(WTL::CDCHandle dc) const;                 // the widest hour's label and its pads
 	std::wstring TimeText(LONGLONG start, LONGLONG end, bool allDay) const;
@@ -250,6 +290,9 @@ private:
 	bool    m_SystemColors = true;
 	HFONT   m_hFont = nullptr;
 	HFONT   m_hBold = nullptr;
+	HBRUSH  m_hStaticBrush = nullptr;                             // WM_CTLCOLORSTATIC's: an item's fill
+	COLORREF m_StaticColor = CLR_INVALID;
 	bool    m_OwnFont = true;
 	UINT    m_Dpi = 96;
+	int     m_DarkScrollBars = -1;                                // as last set: 0, 1 (-1: not yet)
 };
