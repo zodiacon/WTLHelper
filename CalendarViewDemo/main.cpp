@@ -1,4 +1,5 @@
-// CalendarViewDemo: a week of meetings in a calendar view. The View menu shows a day, three days, the work week or the
+// CalendarViewDemo: a week of meetings in a calendar view. View > Month (Ctrl+4) shows their month: items as bars and
+// lines, "+N more" listing a crowded day's. The View menu shows a day, three days, the work week or the
 // whole week, goes back and forth and to today, changes the slots and the zoom (Ctrl+wheel zooms too), and switches
 // dark mode and a larger font. Items adds an item over the slots selected (click a slot, or a day in the strip for an
 // all-day one) and deletes the one selected. Data > Virtual Mode makes the control again with CLVS_VIRTUAL: then the
@@ -42,7 +43,7 @@ enum : UINT {
 	IDC_CALENDAR = 100, IDC_LOG, IDC_PROGRESS = 200, IDC_JOIN, IDC_AGENDA, IDC_NOTES, IDC_SHORT,
 	CMD_EXIT = 1000, CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK, CMD_PREV, CMD_NEXT, CMD_TODAY, CMD_SLOT15,
 	CMD_SLOT30, CMD_SLOT60, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_NOW, CMD_ADD,
-	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND, CMD_HIGHCONTRAST, CMD_NAVBAR, CMD_PICKDATE,
+	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND, CMD_HIGHCONTRAST, CMD_NAVBAR, CMD_PICKDATE, CMD_MONTH,
 };
 
 static std::unique_ptr<CCalendarViewCtrl> g_calendar;   // made again for virtual mode: a new control's state
@@ -263,8 +264,9 @@ static void UpdateFonts() {
 }
 
 static void ShowDays(int days) {
-	for (UINT id : { CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK })
+	for (UINT id : { CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK, CMD_MONTH })
 		::CheckMenuItem(g_menu, id, MF_UNCHECKED);
+	g_calendar->SetView(CLVV_DAY);
 	::CheckMenuItem(g_menu, days == 1 ? CMD_DAY : days == 3 ? CMD_THREEDAYS : days == 5 ? CMD_WORKWEEK : CMD_WEEK, MF_CHECKED);
 	SYSTEMTIME first;
 	g_calendar->GetRange(&first, nullptr);
@@ -304,6 +306,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_THREEDAYS, L"&Three Days\tCtrl+3");
 	::AppendMenuW(view, MF_STRING, CMD_WORKWEEK, L"&Work Week\tCtrl+5");
 	::AppendMenuW(view, MF_STRING, CMD_WEEK, L"W&eek\tCtrl+7");
+	::AppendMenuW(view, MF_STRING, CMD_MONTH, L"&Month\tCtrl+4");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(view, MF_STRING, CMD_PREV, L"&Previous\tCtrl+Left");
 	::AppendMenuW(view, MF_STRING, CMD_NEXT, L"&Next\tCtrl+Right");
@@ -359,6 +362,12 @@ static void OnCommand(UINT id) {
 		case CMD_THREEDAYS: ShowDays(3); break;
 		case CMD_WORKWEEK: ShowDays(5); break;
 		case CMD_WEEK: ShowDays(7); break;
+		case CMD_MONTH:
+			for (UINT cmd : { CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK })
+				::CheckMenuItem(g_menu, cmd, MF_UNCHECKED);
+			::CheckMenuItem(g_menu, id, MF_CHECKED);
+			g_calendar->SetView(CLVV_MONTH);
+			break;
 		case CMD_PREV:
 		case CMD_NEXT: {
 			SYSTEMTIME first;
@@ -541,6 +550,7 @@ static LRESULT OnNotify(NMHDR* hdr) {
 		case CLVN_ITEMDELETING: Log(L"CLVN_ITEMDELETING %llu", ((NMCLVITEM*)hdr)->id); break;
 		case CLVN_ITEMDELETED: Log(L"CLVN_ITEMDELETED %llu (its window kept for undo)", ((NMCLVITEM*)hdr)->id); break;
 		case CLVN_RESTORED: Log(L"CLVN_RESTORED"); break;
+		case CLVN_VIEWCHANGED: Log(L"CLVN_VIEWCHANGED: %s", g_calendar->GetView() == CLVV_MONTH ? L"month" : L"day"); break;
 		case CLVN_CUSTOMDRAW: {
 			auto cd = (NMCLVCUSTOMDRAW*)hdr;
 			const bool dim = ::GetMenuState(g_menu, CMD_DIMPAST, MF_BYCOMMAND) & MF_CHECKED;
@@ -642,7 +652,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow
 
 	ACCEL accels[] = {
 		{ FCONTROL | FVIRTKEY, '1', CMD_DAY }, { FCONTROL | FVIRTKEY, '3', CMD_THREEDAYS }, { FCONTROL | FVIRTKEY, '5', CMD_WORKWEEK },
-		{ FCONTROL | FVIRTKEY, '7', CMD_WEEK }, { FCONTROL | FVIRTKEY, VK_LEFT, CMD_PREV }, { FCONTROL | FVIRTKEY, VK_RIGHT, CMD_NEXT },
+		{ FCONTROL | FVIRTKEY, '7', CMD_WEEK }, { FCONTROL | FVIRTKEY, '4', CMD_MONTH }, { FCONTROL | FVIRTKEY, VK_LEFT, CMD_PREV }, { FCONTROL | FVIRTKEY, VK_RIGHT, CMD_NEXT },
 		{ FCONTROL | FVIRTKEY, 'T', CMD_TODAY }, { FCONTROL | FVIRTKEY, 'N', CMD_ADD },
 	};
 	HACCEL accel = ::CreateAcceleratorTableW(accels, _countof(accels));

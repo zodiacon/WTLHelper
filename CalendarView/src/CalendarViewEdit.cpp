@@ -25,6 +25,10 @@ namespace {
 
 ClvHit CCalendarViewCtrl::HitAt(POINT pt, bool* strip) const {
 	auto& d = *m_Data;
+	if (IsMonth()) {
+		*strip = true;   // whole days, as the strip's
+		return ClvHitMonth(d.month, pt, d.m, d.selected);
+	}
 	*strip = pt.y < d.daysTop;
 	return *strip ? HitStrip(pt) : HitDays({ pt.x, pt.y - d.daysTop });
 }
@@ -42,13 +46,23 @@ LPCWSTR CCalendarViewCtrl::CursorAt(POINT pt) const {
 		return nullptr;
 	bool strip;
 	auto hit = HitAt(pt, &strip);
-	if (hit.box < 0 || d.store.Items()[(strip ? d.layout.strip : d.layout.timed)[hit.box].item].readOnly)
+	if (hit.box < 0 || d.store.Items()[HitBox(hit, strip)->item].readOnly)
 		return nullptr;
 	switch (hit.part) {
 		case ClvPart::Start: case ClvPart::End: return strip ? IDC_SIZEWE : IDC_SIZENS;
 		case ClvPart::Caption: return IDC_SIZEALL;   // a window item's handle
 		default: return nullptr;
 	}
+}
+
+// the month view's day under pt (from the range's first), held to the weeks shown
+int CCalendarViewCtrl::MonthDayAt(POINT pt) const {
+	auto& l = m_Data->month;
+	if (l.rowTops.size() < 2)
+		return 0;
+	pt.x = std::clamp((int)pt.x, l.columns.left, l.columns.left + std::max(1, l.columns.width) - 1);
+	pt.y = std::clamp((int)pt.y, l.rowTops.front(), l.rowTops.back() - 1);
+	return std::max(0, l.DayAt(pt));
 }
 
 // ---- Pressing ---------------------------------------------------------------------------------------
@@ -63,7 +77,7 @@ void CCalendarViewCtrl::Press(POINT pt, bool dbl) {
 	bool strip;
 	auto hit = HitAt(pt, &strip);
 	if (hit.box >= 0) {
-		const auto& box = (strip ? d.layout.strip : d.layout.timed)[hit.box];
+		const auto& box = *HitBox(hit, strip);
 		const auto& item = d.store.Items()[box.item];
 		const ULONGLONG id = item.id;
 		SetSelected(id, true);
@@ -92,6 +106,10 @@ void CCalendarViewCtrl::Press(POINT pt, bool dbl) {
 		d.grabDay = d.range.first + std::max(0, hit.day);
 		d.grab = strip ? ClvTimeOf(d.grabDay) : d.layout.TimeAt(std::max(0, hit.day), hit.minute);
 		SetCapture();
+		return;
+	}
+	if (hit.part == ClvPart::More) {
+		ShowMore(hit.day);
 		return;
 	}
 	if (hit.part != ClvPart::Slot)
@@ -135,7 +153,7 @@ void CCalendarViewCtrl::DragTo(POINT pt) {
 	const bool inStrip = pt.y < d.daysTop;
 	const int minute = std::min((int)ClvDay - 1, d.axis.Minute(pt.y - d.daysTop + d.scrollY));
 	const ClvTime at = d.layout.TimeAt(col, minute);
-	const int64_t day = d.range.first + col;
+	const int64_t day = d.range.first + (IsMonth() ? MonthDayAt(pt) : col);
 	const int slot = d.axis.slotMinutes;
 
 	if (d.drag == ClvDrag::Select) {
@@ -157,7 +175,9 @@ void CCalendarViewCtrl::DragTo(POINT pt) {
 		ClvSpan r = o;
 		switch (d.drag) {
 			case ClvDrag::Move:
-				if (inStrip)
+				if (IsMonth())
+					r = ClvDragMoveDays(o, d.grabDay, day);   // its time of day kept
+				else if (inStrip)
 					r = ClvDragMoveStrip(o, d.grabDay, day);
 				else {
 					// from the strip into the days: an hour at the slot under the mouse

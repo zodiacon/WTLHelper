@@ -73,6 +73,7 @@ LRESULT CCalendarViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(NowTimer);
 	DisconnectAccessible();
 	m_Picker.reset();
+	m_More.reset();
 	if (m_hTip)
 		::DestroyWindow(m_hTip);
 	m_hTip = nullptr;
@@ -93,8 +94,10 @@ LRESULT CCalendarViewCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	Invalidate(FALSE);   // the selection's color
 	if (m_Days->IsWindow())
 		m_Days->Invalidate(FALSE);
-	if (uMsg == WM_KILLFOCUS)
+	if (uMsg == WM_KILLFOCUS) {
 		ClosePicker();
+		CloseMore();
+	}
 	if (uMsg == WM_SETFOCUS)
 		NotifyAccessible(EVENT_OBJECT_FOCUS, m_Data->selected ? AccChildId(m_Data->selected) : AccSlotsId());
 	return 0;
@@ -277,6 +280,14 @@ void CCalendarViewCtrl::UpdateLayout() {
 		return;
 	RECT rc;
 	GetClientRect(&rc);
+	if (IsMonth()) {
+		LayoutNavBar(rc.right);
+		LayoutMonth(rc);
+		NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);
+		return;
+	}
+	if (!m_Days->IsWindowVisible())
+		m_Days->ShowWindow(SW_SHOWNA);
 	// the days' window always has its scroll bar (SIF_DISABLENOSCROLL): its client is that much narrower
 	const int width = std::max(0, (int)rc.right - ::GetSystemMetricsForDpi(SM_CXVSCROLL, m_Dpi));
 	const ClvColumns columns{ d.m.rulerWidth, std::max(0, width - d.m.rulerWidth), d.range.days };
@@ -363,6 +374,11 @@ LRESULT CCalendarViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL
 		m_Picker->Wheel(delta);   // its months
 		return 0;
 	}
+	if (IsMonth()) {
+		CloseMore();
+		Navigate(delta > 0 ? -1 : 1);   // the months
+		return 0;
+	}
 	POINT pt = PointOf(lParam);   // screen coords, whichever window has it
 	POINT client = pt;
 	ScreenToClient(&client);
@@ -393,6 +409,7 @@ LRESULT CCalendarViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL
 void CCalendarViewCtrl::RangeChanged(bool notify) {
 	auto& d = *m_Data;
 	CancelDrag();
+	CloseMore();   // its day may be gone
 	if (d.isVirtual && IsWindow()) {
 		// let go of the items that left the days, and ask for the days not asked for yet
 		for (auto& item : d.store.Keep(d.range.Start(), d.range.End()))
@@ -410,9 +427,45 @@ void CCalendarViewCtrl::RangeChanged(bool notify) {
 }
 
 BOOL CCalendarViewCtrl::SetView(UINT view) {
-	if (view != CLVV_DAY)
-		return FALSE;   // the month view is to come
-	m_Data->view = view;
+	auto& d = *m_Data;
+	if (view != CLVV_DAY && view != CLVV_MONTH)
+		return FALSE;
+	if (view == d.view)
+		return TRUE;
+	CancelDrag();
+	EndRename(true);
+	ClosePicker();
+	CloseMore();
+	// the day the other view is about: the selected item's, the slots', today if it's shown, else where it is
+	const int64_t today = ClvDayOf(Now());
+	int64_t focus = d.range.first;
+	if (auto item = d.selected ? d.store.Find(d.selected) : nullptr)
+		focus = std::clamp(ClvFirstDay(*item), d.range.first, d.range.Last());
+	else if (d.slots)
+		focus = ClvDayOf(d.slot.start);
+	else if (d.range.Contains(today))
+		focus = today;
+	else if (d.view == CLVV_MONTH)
+		focus = ClvMonthStart(d.dayRange.first) == d.monthFirst ? d.dayRange.first : d.monthFirst;
+	const int firstWeekday = GetFirstDayOfWeek();
+	if (view == CLVV_MONTH) {
+		d.dayRange = d.range;
+		d.monthFirst = ClvMonthStart(focus);
+		d.range = ClvMonthRange(focus, firstWeekday);
+	}
+	else
+		d.range = { ClvFirstShown(focus, d.dayRange.days, firstWeekday), d.dayRange.days };
+	d.view = view;
+	d.cursor = -1;
+	ClearSlots();
+	if (IsWindow() && view == CLVV_DAY)
+		m_Days->ShowWindow(SW_SHOWNA);
+	RangeChanged(true);
+	NMHDR nm{};
+	if (IsWindow())
+		FireNotify(&nm, CLVN_VIEWCHANGED);
+	if (view == CLVV_DAY && d.selected)
+		EnsureVisible(d.selected);
 	return TRUE;
 }
 
@@ -423,6 +476,15 @@ UINT CCalendarViewCtrl::GetView() const {
 void CCalendarViewCtrl::SetDate(const SYSTEMTIME& first) {
 	auto& d = *m_Data;
 	const int64_t day = ClvDayOf(ClvFromSystemTime(first));
+	if (IsMonth()) {
+		// the month it's in
+		if (ClvMonthStart(day) == d.monthFirst)
+			return;
+		d.monthFirst = ClvMonthStart(day);
+		d.range = ClvMonthRange(day, GetFirstDayOfWeek());
+		RangeChanged(true);
+		return;
+	}
 	if (day == d.range.first)
 		return;
 	d.range.first = day;
@@ -432,6 +494,10 @@ void CCalendarViewCtrl::SetDate(const SYSTEMTIME& first) {
 void CCalendarViewCtrl::SetDayCount(int days) {
 	auto& d = *m_Data;
 	days = std::clamp(days, 1, 14);
+	if (IsMonth()) {
+		d.dayRange.days = days;   // for when the day view comes back
+		return;
+	}
 	if (days == d.range.days)
 		return;
 	d.range.days = days;
@@ -449,6 +515,14 @@ void CCalendarViewCtrl::GoToday() {
 	auto& d = *m_Data;
 	const ClvTime now = Now();
 	const int64_t today = ClvDayOf(now);
+	if (IsMonth()) {
+		if (ClvMonthStart(today) != d.monthFirst) {
+			d.monthFirst = ClvMonthStart(today);
+			d.range = ClvMonthRange(today, GetFirstDayOfWeek());
+			RangeChanged(true);
+		}
+		return;
+	}
 	if (!d.range.Contains(today)) {
 		// a week shown: the week holding today (a work week from its Monday)
 		d.range.first = ClvFirstShown(today, d.range.days, GetFirstDayOfWeek());
@@ -715,6 +789,12 @@ void CCalendarViewCtrl::EnsureVisible(ULONGLONG id) {
 	auto item = d.store.Find(id);
 	if (!item)
 		return;
+	if (IsMonth()) {
+		// its month, unless it's over the weeks shown
+		if (ClvLastDay(*item) < d.range.first || ClvFirstDay(*item) > d.range.Last())
+			SetDate(ClvToSystemTime(item->start));
+		return;
+	}
 	if (!d.range.Contains(ClvFirstDay(*item)) && !d.range.Contains(ClvLastDay(*item))) {
 		d.range.first = ClvFirstDay(*item);
 		RangeChanged(true);

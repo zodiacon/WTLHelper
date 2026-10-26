@@ -83,7 +83,12 @@ void CCalendarViewCtrl::Navigate(int steps) {
 	if (!steps)
 		return;
 	EndRename(true);
-	d.range.first += (int64_t)steps * ClvViewStep(d.range.days);
+	if (IsMonth()) {
+		d.monthFirst = ClvAddMonths(d.monthFirst, steps);
+		d.range = ClvMonthRange(d.monthFirst, GetFirstDayOfWeek());
+	}
+	else
+		d.range.first += (int64_t)steps * ClvViewStep(d.range.days);
 	d.cursor = -1;
 	RangeChanged(true);
 	Invalidate(FALSE);
@@ -92,6 +97,16 @@ void CCalendarViewCtrl::Navigate(int steps) {
 void CCalendarViewCtrl::PickDate(LONGLONG day) {
 	auto& d = *m_Data;
 	EndRename(true);
+	if (IsMonth()) {
+		if (ClvMonthStart(day) != d.monthFirst) {
+			d.monthFirst = ClvMonthStart(day);
+			d.range = ClvMonthRange(day, GetFirstDayOfWeek());
+			d.cursor = -1;
+			RangeChanged(true);
+		}
+		Invalidate(FALSE);
+		return;
+	}
 	const int64_t first = ClvFirstShown(day, d.range.days, GetFirstDayOfWeek());
 	if (first != d.range.first) {
 		d.range.first = first;
@@ -125,7 +140,7 @@ void CCalendarViewCtrl::ShowDatePicker() {
 	// under the bar's title, else under the days' names
 	RECT under = !::IsRectEmpty(&d.navbar) ? d.nav[ClvNavTitle] : RECT{ d.layout.columns.left, d.header.top, d.layout.columns.left + 1, d.header.bottom };
 	::MapWindowPoints(m_hWnd, nullptr, (POINT*)&under, 2);
-	m_Picker->Show(under, d.range.first);
+	m_Picker->Show(under, IsMonth() ? d.monthFirst : d.range.first);
 	InvalidateRect(&d.navbar, FALSE);
 }
 
@@ -133,6 +148,8 @@ void CCalendarViewCtrl::ShowDatePicker() {
 
 std::wstring CCalendarViewCtrl::RangeTitle() const {
 	auto& d = *m_Data;
+	if (IsMonth())
+		return DateText(d.monthFirst, DATE_YEARMONTH);
 	if (d.range.days == 1)
 		return DateText(d.range.first, DATE_LONGDATE);
 	const int64_t first = d.range.first, last = d.range.Last();
@@ -145,7 +162,7 @@ std::wstring CCalendarViewCtrl::RangeTitle() const {
 
 std::wstring CCalendarViewCtrl::NavName(int part) const {
 	const int step = ClvViewStep(m_Data->range.days);
-	const std::wstring span = step == 7 ? L"week" : step == 1 ? L"day" : std::to_wstring(step) + L" days";
+	const std::wstring span = IsMonth() ? L"month" : step == 7 ? L"week" : step == 1 ? L"day" : std::to_wstring(step) + L" days";
 	switch (part) {
 		case ClvNavToday: return L"Today";
 		case ClvNavPrev: return L"Previous " + span;
@@ -841,7 +858,7 @@ void ClvPicker::Paint(WTL::CDCHandle dc) {
 		RECT cell = l.DayRect(i);
 		RECT face = cell;
 		::InflateRect(&face, -o.Scale(2), -o.Scale(2));
-		const bool shown = d.range.Contains(day), inMonth = ClvMonthStart(day) == l.month;
+		const bool shown = o.IsMonth() ? ClvMonthStart(day) == d.monthFirst : d.range.Contains(day), inMonth = ClvMonthStart(day) == l.month;
 		COLORREF text = inMonth ? c.crText : (HighContrast ? ::GetSysColor(COLOR_GRAYTEXT) : Blend(c.crText, c.crBack, 55));
 		if (shown) {
 			RoundFill(dc, face, c.crSelection, c.crSelection, radius);

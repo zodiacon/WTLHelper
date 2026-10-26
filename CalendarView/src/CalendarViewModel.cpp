@@ -1,6 +1,7 @@
 #include "CalendarViewModel.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <numeric>
 #include <unordered_set>
@@ -350,6 +351,7 @@ ClvMetrics ClvMetrics::Scaled(int dpi) const {
 	m.minItem = s(minItem);
 	m.minBody = s(minBody);
 	m.edge = s(edge);
+	m.dayNumber = s(dayNumber);
 	return m;
 }
 
@@ -613,6 +615,11 @@ ClvSpan ClvSlotRange(ClvTime anchor, ClvTime at, int slot) {
 	return { std::min(a, b), std::max(a, b) + slot, false };
 }
 
+ClvSpan ClvDragMoveDays(ClvSpan item, int64_t grabDay, int64_t day) {
+	const ClvTime delta = (day - grabDay) * ClvDay;
+	return { item.start + delta, item.end + delta, item.allDay };
+}
+
 ClvSpan ClvDayRange(int64_t anchor, int64_t day) {
 	return { std::min(anchor, day) * ClvDay, (std::max(anchor, day) + 1) * ClvDay, true };
 }
@@ -720,30 +727,32 @@ int ClvZoom(int slotHeight, int steps, int minHeight, int maxHeight) {
 	return std::clamp(h, minHeight, maxHeight);
 }
 
-std::vector<uint64_t> ClvTabOrder(const ClvDayLayout& layout, const ClvItemStore& store) {
-	auto sorted = [&](const std::vector<ClvBox>& boxes) {
-		std::vector<int> items;
-		std::unordered_set<uint64_t> seen;
-		for (auto& box : boxes)
-			if (seen.insert(box.id).second)
-				items.push_back(box.item);
-		std::sort(items.begin(), items.end(), [&](int a, int b) {
-			const auto& x = store.Items()[a];
-			const auto& y = store.Items()[b];
-			if (x.start != y.start)
-				return x.start < y.start;
-			if (x.end - x.start != y.end - y.start)
-				return x.end - x.start > y.end - y.start;
-			return x.id < y.id;
-			});
-		return items;
-	};
+std::vector<uint64_t> ClvItemOrder(const std::vector<ClvBox>& boxes, const ClvItemStore& store) {
+	std::vector<int> items;
+	std::unordered_set<uint64_t> seen;
+	for (auto& box : boxes)
+		if (seen.insert(box.id).second)
+			items.push_back(box.item);
+	std::sort(items.begin(), items.end(), [&](int a, int b) {
+		const auto& x = store.Items()[a];
+		const auto& y = store.Items()[b];
+		if (x.start != y.start)
+			return x.start < y.start;
+		if (x.end - x.start != y.end - y.start)
+			return x.end - x.start > y.end - y.start;
+		return x.id < y.id;
+		});
 	std::vector<uint64_t> order;
-	order.reserve(layout.strip.size() + layout.timed.size());
-	for (int i : sorted(layout.strip))
+	order.reserve(items.size());
+	for (int i : items)
 		order.push_back(store.Items()[i].id);
-	for (int i : sorted(layout.timed))
-		order.push_back(store.Items()[i].id);
+	return order;
+}
+
+std::vector<uint64_t> ClvTabOrder(const ClvDayLayout& layout, const ClvItemStore& store) {
+	auto order = ClvItemOrder(layout.strip, store);
+	auto timed = ClvItemOrder(layout.timed, store);
+	order.insert(order.end(), timed.begin(), timed.end());
 	return order;
 }
 
@@ -756,6 +765,202 @@ uint64_t ClvNextItem(const std::vector<uint64_t>& order, uint64_t current, bool 
 	if (forward)
 		return it + 1 == order.end() ? 0 : *(it + 1);
 	return it == order.begin() ? 0 : *(it - 1);
+}
+
+// ---- The month view --------------------------------------------------------------------------------
+
+ClvRange ClvMonthRange(int64_t day, int firstWeekday) {
+	auto grid = ClvMonthGridOf(day, firstWeekday);
+	return { grid.first, grid.weeks * 7 };
+}
+
+RECT ClvMonthLayout::Cell(int day) const {
+	const int week = day / 7, col = day % 7;
+	if (day < 0 || week + 1 >= (int)rowTops.size())
+		return {};
+	return { columns.Left(col), rowTops[week], columns.Right(col), rowTops[week + 1] };
+}
+
+int ClvMonthLayout::DayAt(POINT pt) const {
+	const int col = columns.At(pt.x);
+	if (col < 0 || rowTops.size() < 2 || pt.y < rowTops.front() || pt.y >= rowTops.back())
+		return -1;
+	int week = 0;
+	while (week + 2 < (int)rowTops.size() && pt.y >= rowTops[week + 1])
+		week++;
+	return week * 7 + col;
+}
+
+const ClvBox* ClvMonthLayout::Find(uint64_t id) const {
+	for (auto& box : boxes)
+		if (box.id == id)
+			return &box;
+	return nullptr;
+}
+
+ClvMonthLayout ClvLayoutMonth(const ClvItemStore& store, int64_t month, ClvRange range, const ClvColumns& columns,
+	int top, int bottom, const ClvMetrics& m) {
+	ClvMonthLayout l;
+	l.range = range;
+	l.month = month;
+	l.columns = columns;
+	const int weeks = std::max(1, range.days / 7);
+	l.rowTops.resize(weeks + 1);
+	int least = INT_MAX;
+	for (int w = 0; w <= weeks; w++) {
+		l.rowTops[w] = top + (int)((int64_t)(bottom - top) * w / weeks);
+		if (w > 0)
+			least = std::min(least, l.rowTops[w] - l.rowTops[w - 1]);
+	}
+	l.lanes = std::max(0, (least - m.dayNumber - m.itemPad) / std::max(1, m.stripRow));
+	const int inset = 2 * m.itemPad;
+
+	const auto items = store.InRange(range.Start(), range.End());
+	for (int w = 0; w < weeks; w++) {
+		const int64_t first = range.first + 7 * w, last = first + 6;
+		// the bars over the week, packed; then the lines in the lanes they leave
+		std::vector<ClvPiece> bars;
+		std::vector<std::pair<int, int>> lines;   // item, column
+		for (int index : items) {
+			const auto& item = store.Items()[index];
+			const int64_t a = ClvFirstDay(item), b = ClvLastDay(item);
+			if (b < first || a > last)
+				continue;
+			if (ClvIsBar(item)) {
+				ClvPiece p;
+				p.item = index;
+				p.day = (int)(std::max(a, first) - first);
+				p.lastDay = (int)(std::min(b, last) - first);
+				p.before = a < first;
+				p.after = b > last;
+				bars.push_back(p);
+			}
+			else
+				lines.push_back({ index, (int)(a - first) });
+		}
+		std::vector<int> rows;
+		ClvPackStrip(bars, rows);
+		std::vector<std::vector<bool>> taken(7);  // by column, by lane
+		auto take = [&](int col, int lane) {
+			if ((int)taken[col].size() <= lane)
+				taken[col].resize(lane + 1);
+			taken[col][lane] = true;
+		};
+		for (size_t i = 0; i < bars.size(); i++)
+			for (int c = bars[i].day; c <= bars[i].lastDay; c++)
+				take(c, rows[i]);
+		std::vector<int> lineLanes(lines.size());
+		for (size_t i = 0; i < lines.size(); i++) {
+			const int col = lines[i].second;
+			int lane = 0;
+			while (lane < (int)taken[col].size() && taken[col][lane])
+				lane++;
+			take(col, lane);
+			lineLanes[i] = lane;
+		}
+
+		// what each day shows: its lanes, one fewer when "+N more" needs one
+		int shown[7], hidden[7] = {};
+		for (int c = 0; c < 7; c++) {
+			auto beyond = [&](int lanes) {
+				int n = 0;
+				for (size_t i = 0; i < bars.size(); i++)
+					n += c >= bars[i].day && c <= bars[i].lastDay && rows[i] >= lanes;
+				for (size_t i = 0; i < lines.size(); i++)
+					n += lines[i].second == c && lineLanes[i] >= lanes;
+				return n;
+			};
+			shown[c] = l.lanes;
+			if (beyond(l.lanes) > 0) {
+				shown[c] = std::max(0, l.lanes - 1);
+				hidden[c] = beyond(shown[c]);
+			}
+		}
+
+		const int cellTop = l.rowTops[w] + m.dayNumber;
+		auto laneRect = [&](int c1, int c2, int lane, bool before, bool after) {
+			const int y = cellTop + lane * m.stripRow;
+			return RECT{ columns.Left(c1) + (before ? 0 : inset), y + m.itemPad, columns.Right(c2) - (after ? 0 : inset), y + m.stripRow - m.itemPad };
+		};
+		auto add = [&](int index, int c1, int c2, int lane, bool before, bool after, bool line) {
+			const auto& item = store.Items()[index];
+			ClvBox box;
+			box.id = item.id;
+			box.item = index;
+			box.day = 7 * w + c1;
+			box.lastDay = 7 * w + c2;
+			box.row = lane;
+			box.before = before;
+			box.after = after;
+			box.line = line;
+			box.resizable = !item.readOnly && !line;
+			box.rc = laneRect(c1, c2, lane, before, after);
+			if (item.content == ClvContent::Window)
+				box.caption = box.rc;   // no room for the window: the caption only
+			else
+				box.body = box.rc;
+			l.boxes.push_back(box);
+		};
+		for (size_t i = 0; i < bars.size(); i++) {
+			// the runs of days where its lane is shown
+			const auto& p = bars[i];
+			for (int c = p.day; c <= p.lastDay; ) {
+				if (rows[i] >= shown[c]) {
+					c++;
+					continue;
+				}
+				int e = c;
+				while (e + 1 <= p.lastDay && rows[i] < shown[e + 1])
+					e++;
+				add(p.item, c, e, rows[i], c > p.day || p.before, e < p.lastDay || p.after, false);
+				c = e + 1;
+			}
+		}
+		for (size_t i = 0; i < lines.size(); i++)
+			if (lineLanes[i] < shown[lines[i].second])
+				add(lines[i].first, lines[i].second, lines[i].second, lineLanes[i], false, false, true);
+		for (int c = 0; c < 7; c++)
+			if (hidden[c] > 0) {
+				ClvMore more;
+				more.day = 7 * w + c;
+				more.count = hidden[c];
+				if (l.lanes > 0)
+					more.rc = laneRect(c, c, shown[c], false, false);
+				else   // no lane at all: beside the day's number
+					more.rc = { columns.Left(c) + (columns.Right(c) - columns.Left(c)) / 2, l.rowTops[w], columns.Right(c) - inset, cellTop };
+				l.more.push_back(more);
+			}
+	}
+	return l;
+}
+
+ClvHit ClvHitMonth(const ClvMonthLayout& layout, POINT pt, const ClvMetrics& m, uint64_t top) {
+	ClvHit hit;
+	hit.day = layout.DayAt(pt);
+	if (hit.day < 0)
+		return hit;
+	hit.box = BoxAt(layout.boxes, pt, top);
+	if (hit.box >= 0) {
+		const auto& box = layout.boxes[hit.box];
+		const int edge = std::min(m.edge, (int)(box.rc.right - box.rc.left) / 3);
+		if (box.resizable && !box.before && pt.x < box.rc.left + edge)
+			hit.part = ClvPart::Start;
+		else if (box.resizable && !box.after && pt.x >= box.rc.right - edge)
+			hit.part = ClvPart::End;
+		else if (!IsRectEmpty(&box.caption))
+			hit.part = ClvPart::Caption;
+		else
+			hit.part = ClvPart::Item;
+		return hit;
+	}
+	for (auto& more : layout.more)
+		if (In(more.rc, pt)) {
+			hit.part = ClvPart::More;
+			hit.day = more.day;
+			return hit;
+		}
+	hit.part = ClvPart::Slot;
+	return hit;
 }
 
 // ---- Undo ------------------------------------------------------------------------------------------

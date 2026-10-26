@@ -52,6 +52,8 @@ LRESULT CCalendarViewCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 	}
 	if (uMsg == WM_KEYDOWN && PickerOpen() && m_Picker->Key((UINT)wParam))
 		return 0;   // the date chooser's
+	if (uMsg == WM_KEYDOWN && m_More && m_More->IsOpen() && m_More->Key((UINT)wParam))
+		return 0;   // "+N more"'s
 	if (wParam == VK_ESCAPE && d.drag != ClvDrag::None) {
 		CancelDrag();
 		return 0;
@@ -93,7 +95,7 @@ bool CCalendarViewCtrl::KeyDown(UINT vk, bool ctrl, bool alt, bool shift) {
 	}
 	switch (vk) {
 		case VK_TAB: {
-			const ULONGLONG next = ClvNextItem(ClvTabOrder(d.layout, d.store), d.selected, !shift);
+			const ULONGLONG next = ClvNextItem(d.accOrder, d.selected, !shift);
 			if (!next)
 				return false;   // on to the dialog's next control
 			SetSelected(next, true);
@@ -135,7 +137,7 @@ LRESULT CCalendarViewCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
 	if (d.drag != ClvDrag::None || PickerOpen())
 		code |= DLGC_WANTALLKEYS;
 	// Tab while there's an item to go to, else the dialog's
-	if (ClvNextItem(ClvTabOrder(d.layout, d.store), d.selected, ::GetKeyState(VK_SHIFT) >= 0))
+	if (ClvNextItem(d.accOrder, d.selected, ::GetKeyState(VK_SHIFT) >= 0))
 		code |= DLGC_WANTTAB;
 	return code;
 }
@@ -143,6 +145,26 @@ LRESULT CCalendarViewCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
 void CCalendarViewCtrl::MoveSlots(int days, int slots, bool extend) {
 	auto& d = *m_Data;
 	const int slot = d.axis.slotMinutes;
+	if (IsMonth()) {
+		// a day at a time, a week up and down; past the weeks shown, the month it's in
+		if (d.cursor < 0 || !d.range.Contains(ClvDayOf(d.cursor))) {
+			auto item = d.selected ? d.store.Find(d.selected) : nullptr;
+			d.cursor = d.slots ? d.slot.start : item ? std::max(item->start, d.range.Start()) : ClvTimeOf(d.monthFirst);
+		}
+		const int64_t day = ClvDayOf(d.cursor) + days + 7 * slots;
+		if (!extend || !d.slots || !d.slot.allDay)
+			d.anchor = ClvTimeOf(day);
+		d.anchorStrip = true;
+		if (!d.range.Contains(day)) {
+			d.monthFirst = ClvMonthStart(day);
+			d.range = ClvMonthRange(day, GetFirstDayOfWeek());
+			RangeChanged(true);
+		}
+		d.cursor = ClvTimeOf(day);
+		auto span = ClvDayRange(ClvDayOf(d.anchor), day);
+		SelectSlots(span.start, span.end, true, true);
+		return;
+	}
 	if (d.cursor < 0 || !d.range.Contains(ClvDayOf(d.cursor))) {
 		// from the slots selected, else the item's start, else the working day's start
 		auto item = d.selected ? d.store.Find(d.selected) : nullptr;
@@ -189,6 +211,22 @@ void CCalendarViewCtrl::Nudge(int days, int slots, bool end) {
 	const bool strip = ClvInStrip(*item);
 	const ClvSpan o = ClvSpanOf(*item);
 	ClvSpan r = o;
+	if (IsMonth()) {
+		// by days, a week up and down; Shift: a bar's end
+		const int delta = days + 7 * slots;
+		if (end && !ClvIsBar(*item))
+			return;
+		r = end ? ClvDragStripEnd(o, ClvLastDay(*item) + delta) : ClvDragMoveDays(o, 0, delta);
+		if (r.start == o.start && r.end == o.end)
+			return;
+		d.before = d.store.Save();
+		item->start = r.start;
+		item->end = r.end;
+		Changed();
+		if (Apply(id, end ? CLVCH_END : CLVCH_MOVE))
+			EnsureVisible(id);
+		return;
+	}
 	if (end) {
 		r = strip ? ClvDragStripEnd(o, ClvLastDay(*item) + slots) : ClvDragEnd(o, o.end + (ClvTime)slots * slot, slot, slot);
 	}
@@ -223,9 +261,15 @@ BOOL CCalendarViewCtrl::EditTitle(ULONGLONG id) {
 	auto item = d.store.Find(id);
 	if (!item)
 		return FALSE;
-	// its piece: the strip's, or its first day's shown
+	// its piece: the month's, the strip's, or its first day's shown
 	RECT rc{};
-	if (auto box = d.layout.FindStrip(id)) {
+	if (IsMonth()) {
+		auto box = d.month.Find(id);
+		if (!box)
+			return FALSE;   // behind "+N more"
+		rc = box->rc;
+	}
+	else if (auto box = d.layout.FindStrip(id)) {
 		rc = box->rc;
 		::OffsetRect(&rc, 0, d.strip.top + d.m.stripPad - d.stripScroll);
 	}
@@ -328,13 +372,19 @@ void CCalendarViewCtrl::UpdateTip(HWND window, POINT pt) {
 	}
 	else if (d.drag == ClvDrag::None && !d.renaming) {
 		const bool strip = window == m_hWnd;
-		auto hit = strip ? HitStrip(pt) : HitDays(pt);
+		auto hit = IsMonth() ? HitAt(pt, (bool*)&strip) : strip ? HitStrip(pt) : HitDays(pt);
 		if (hit.box >= 0) {
-			const auto& box = (strip ? d.layout.strip : d.layout.timed)[hit.box];
+			const auto& box = *HitBox(hit, strip);
 			const auto& item = d.store.Items()[box.item];
 			text = item.tip.empty() ? item.title + L"\n" + ClvWhen(item, false) : item.tip;
-			rc = box.rc;
-			::OffsetRect(&rc, 0, strip ? d.strip.top + d.m.stripPad - d.stripScroll : -d.scrollY);
+			rc = BoxRect(box, strip);
+		}
+		else if (hit.part == ClvPart::More) {
+			for (auto& more : d.month.more)
+				if (more.day == hit.day) {
+					text = std::to_wstring(more.count) + (more.count == 1 ? L" more item" : L" more items");
+					rc = more.rc;
+				}
 		}
 	}
 	if (text == d.tipText && ::EqualRect(&rc, &d.tipRect) && window == d.tipWindow)

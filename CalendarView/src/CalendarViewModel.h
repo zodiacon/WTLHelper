@@ -5,7 +5,8 @@
 // items into the pieces a range of day columns shows (timed pieces per day, all-day and long ones in the strip), placing
 // overlapping pieces side by side, packing the strip's rows, the day view's boxes and their parts under the mouse,
 // dragging (moving, resizing, between the strip and the days, selecting slots), scrolling, zooming, the items' tab
-// order, undo, going from one range of days to the next, and the date chooser's month. Everything is in days and minutes, so a month view is another layout over the same pieces. Sizes are
+// order, undo, going from one range of days to the next, the date chooser's month, and the month view (week rows of
+// days, items as bars over their days and lines in a day, what doesn't fit counted). Everything is in days and minutes, so a month view is another layout over the same pieces. Sizes are
 // in pixels; the control scales the metrics for its DPI. Covered by CalendarViewTests.
 
 #include <windows.h>
@@ -193,6 +194,7 @@ struct ClvMetrics {
 	int minItem = 18;              // an item's least height
 	int minBody = 16;              // a window item's least window height, else it's hidden
 	int edge = 4;                  // the band at an item's ends that resizes it
+	int dayNumber = 20;            // the month view's day numbers, at a cell's top
 
 	ClvMetrics Scaled(int dpi) const;
 };
@@ -237,6 +239,7 @@ struct ClvBox {
 	RECT body{};                   // where its window goes (empty: hidden; not a window item: rc)
 	bool before = false, after = false;
 	bool resizable = true;
+	bool line = false;             // the month view's: a day's timed item (not a bar over days)
 };
 
 struct ClvDayLayout {
@@ -262,7 +265,8 @@ ClvDayLayout ClvLayoutDay(const ClvItemStore& store, ClvRange range, const ClvCo
 // Item: a default or custom item's body (a window item's caption); Caption: a window item's caption strip; Body: where
 // its window is (the window has the mouse there); Start, End: the edges that resize it (the strip's left and right);
 // Slot: no item, a day's time.
-enum class ClvPart : uint8_t { None, Item, Caption, Body, Start, End, Slot, Ruler };
+// More: the month view's "+N more" (day)
+enum class ClvPart : uint8_t { None, Item, Caption, Body, Start, End, Slot, Ruler, More };
 
 struct ClvHit {
 	ClvPart part = ClvPart::None;
@@ -304,6 +308,8 @@ ClvSpan ClvDragStripStart(ClvSpan item, int64_t day);
 ClvSpan ClvDragStripEnd(ClvSpan item, int64_t day);
 // The slots from anchor's to at's, both in (slot minutes long, aligned).
 ClvSpan ClvSlotRange(ClvTime anchor, ClvTime at, int slot);
+// Moved by days (grabDay at the press, day now), whatever it is: a timed item keeps its time of day (the month view).
+ClvSpan ClvDragMoveDays(ClvSpan item, int64_t grabDay, int64_t day);
 // The days from anchor to day, both in, as an all-day span.
 ClvSpan ClvDayRange(int64_t anchor, int64_t day);
 // A slot moved by days and slots, kept in its day (0 to the day's last slot).
@@ -355,8 +361,52 @@ int ClvZoom(int slotHeight, int steps, int minHeight, int maxHeight);
 // The items shown, in the order Tab goes through them: the strip's by first day, then the timed ones by start, the
 // longer first; each once.
 std::vector<uint64_t> ClvTabOrder(const ClvDayLayout& layout, const ClvItemStore& store);
+// The boxes' items, each once, by start, the longer first.
+std::vector<uint64_t> ClvItemOrder(const std::vector<ClvBox>& boxes, const ClvItemStore& store);
 // The item after (or before) current; 0 past the ends. With current 0 (or not there): the first (or last).
 uint64_t ClvNextItem(const std::vector<uint64_t>& order, uint64_t current, bool forward);
+
+// ---- The month view --------------------------------------------------------------------------------
+//
+// The month's weeks, a row each, their heights sharing the view. A cell has its day's number at the top, then lanes of
+// items: all-day items, and those over more than one day, as bars over their days in the week (packed as the strip's
+// rows), then each day's timed items as lines, by start, in the lanes its bars leave. A day with more than its cell
+// holds shows one lane fewer and "+N more" in it; a bar is shown over the days where its lane is.
+
+ClvRange ClvMonthRange(int64_t day, int firstWeekday);       // the weeks of day's month
+
+// a bar over its days (not a line in a day)
+inline bool ClvIsBar(const ClvItem& item) {
+	return ClvInStrip(item) || ClvFirstDay(item) != ClvLastDay(item);
+}
+
+struct ClvMore {
+	int day = 0;                   // from the range's first
+	int count = 0;                 // the items not shown
+	RECT rc{};
+};
+
+struct ClvMonthLayout {
+	ClvRange range;                // the weeks shown
+	int64_t month = 0;             // the month's first day
+	ClvColumns columns;
+	std::vector<int> rowTops;      // a week's top, and the last's bottom
+	int lanes = 0;                 // the items a cell has room for
+	std::vector<ClvBox> boxes;     // week by week: the bars, then the lines (day is from the range's first)
+	std::vector<ClvMore> more;
+
+	int Weeks() const {
+		return range.days / 7;
+	}
+	RECT Cell(int day) const;
+	int DayAt(POINT pt) const;                                // -1 if none
+	const ClvBox* Find(uint64_t id) const;                    // its first box
+};
+
+ClvMonthLayout ClvLayoutMonth(const ClvItemStore& store, int64_t month, ClvRange range, const ClvColumns& columns,
+	int top, int bottom, const ClvMetrics& m);
+// pt in the layout's coordinates; top: an item looked at first. A bar's ends are Start and End; More's day is hit.day.
+ClvHit ClvHitMonth(const ClvMonthLayout& layout, POINT pt, const ClvMetrics& m, uint64_t top = 0);
 
 // ---- Undo ------------------------------------------------------------------------------------------
 

@@ -105,6 +105,7 @@
     <ClCompile Include="src\CalendarViewEdit.cpp" />
     <ClCompile Include="src\CalendarViewKeys.cpp" />
     <ClCompile Include="src\CalendarViewModel.cpp" />
+    <ClCompile Include="src\CalendarViewMonth.cpp" />
     <ClCompile Include="src\CalendarViewNav.cpp" />
     <ClCompile Include="src\CalendarViewPaint.cpp" />
   </ItemGroup>

@@ -294,7 +294,6 @@ public:
 		::VariantInit(child);
 		if (!m_Ctrl)
 			return RPC_E_DISCONNECTED;
-		auto& d = *m_Ctrl->m_Data;
 		POINT pt{ x, y };
 		::ScreenToClient(m_Ctrl->m_hWnd, &pt);
 		RECT client;
@@ -324,7 +323,7 @@ public:
 		bool strip;
 		auto hit = m_Ctrl->HitAt(pt, &strip);
 		if (hit.box >= 0)
-			return Long(child, m_Ctrl->AccChildId(hit.Id(d.layout, strip)));
+			return Long(child, m_Ctrl->AccChildId(m_Ctrl->HitBox(hit, strip)->id));
 		return Long(child, CHILDID_SELF);
 	}
 
@@ -415,7 +414,16 @@ private:
 		}
 		RECT view{}, rc{};
 		HWND window = m_Ctrl->m_hWnd;
-		if (IsSlots(id)) {
+		if (m_Ctrl->IsMonth()) {
+			// the month's cells: the item's first box, or the selected days' first cell
+			::GetClientRect(window, &view);
+			view.top = d.header.bottom;
+			if (IsSlots(id))
+				rc = d.month.Cell((int)std::clamp<int64_t>(ClvDayOf(d.slot.start) - d.range.first, 0, d.range.days - 1));
+			else if (auto box = d.month.Find(Item(id).id))
+				rc = box->rc;
+		}
+		else if (IsSlots(id)) {
 			// the selected time's first day
 			const int col = (int)std::clamp<int64_t>(ClvDayOf(d.slot.start) - d.range.first, 0, d.range.days - 1);
 			if (d.slot.allDay) {

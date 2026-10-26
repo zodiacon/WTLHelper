@@ -214,6 +214,11 @@ void CCalendarViewCtrl::Paint(WTL::CDCHandle dc) {
 	PaintNavBar(dc, c);
 	auto oldFont = dc.SelectFont(m_hFont);
 	dc.SetBkMode(TRANSPARENT);
+	if (IsMonth()) {
+		PaintMonth(dc, c, Prepaint(dc, rc));
+		dc.SelectFont(oldFont);
+		return;
+	}
 
 	// the days' names
 	const int pad = Scale(6);
@@ -421,9 +426,13 @@ void CCalendarViewCtrl::ItemColors(const ClvItem& item, const CLVCOLORS& c, COLO
 void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int index, bool strip, bool notify) {
 	auto& d = *m_Data;
 	const auto& box = strip ? d.layout.strip[index] : d.layout.timed[index];
+	PaintBox(dc, c, box, strip ? d.strip.top + d.m.stripPad - d.stripScroll : -d.scrollY, strip, notify);
+}
+
+void CCalendarViewCtrl::PaintBox(WTL::CDCHandle dc, const CLVCOLORS& c, const ClvBox& box, int dy, bool strip, bool notify) {
+	auto& d = *m_Data;
 	const auto& item = d.store.Items()[box.item];
 	RECT rc = box.rc, caption = box.caption;
-	const int dy = strip ? d.strip.top + d.m.stripPad - d.stripScroll : -d.scrollY;
 	::OffsetRect(&rc, 0, dy);
 	::OffsetRect(&caption, 0, dy);
 	if (rc.right - rc.left < 2 || rc.bottom - rc.top < 2)
@@ -433,6 +442,8 @@ void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int ind
 	const COLORREF color = HighContrast ? c.crText : item.color != CLR_INVALID ? item.color : c.crItem;
 	COLORREF fill, text;
 	ItemColors(item, c, &fill, &text);
+	if (box.line && !selected)
+		fill = c.crBack;   // a month's line: its dot, time and title on the cell
 	const int bar = Scale(4);
 	const bool window = item.content == ClvContent::Window;
 	RECT inner{ rc.left + 1 + bar + Scale(4), rc.top + Scale(2), rc.right - Scale(4), rc.bottom - Scale(1) };
@@ -462,6 +473,38 @@ void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int ind
 		fill = cd.crFill;
 		text = cd.crText;
 		post = post || (result & CDRF_NOTIFYPOSTPAINT);
+	}
+
+	if (box.line) {
+		// a dot in its color, then the time and the title
+		if (selected)
+			RoundFill(dc, rc, fill, HighContrast ? text : fill, Scale(6));
+		const int dot = Scale(8), cy = (rc.top + rc.bottom) / 2;
+		RECT mark{ rc.left + Scale(4), cy - dot / 2, rc.left + Scale(4) + dot, cy - dot / 2 + dot };
+		RoundFill(dc, mark, selected && !HighContrast ? text : color, selected && !HighContrast ? text : color, dot);
+		if (item.content != ClvContent::Custom) {
+			RECT line{ mark.right + Scale(4), rc.top, rc.right - Scale(2), rc.bottom };
+			auto time = TimeText(item.start, item.start, false);
+			dc.SetTextColor(selected || HighContrast ? text : Blend(c.crText, c.crBack, 35));
+			dc.SelectFont(m_hFont);
+			SIZE size{};
+			dc.GetTextExtent(time.c_str(), (int)time.size(), &size);
+			dc.DrawText(time.c_str(), (int)time.size(), &line, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+			line.left += size.cx + Scale(4);
+			dc.SetTextColor(text);
+			dc.SelectFont(m_hBold);
+			if (line.right > line.left)
+				dc.DrawText(item.title.c_str(), (int)item.title.size(), &line, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+			dc.SelectFont(m_hFont);
+		}
+		if (post) {
+			cd.rcContent = { mark.right + Scale(4), rc.top, rc.right - Scale(2), rc.bottom };
+			cd.crFill = fill;
+			cd.crText = text;
+			dc.SetTextColor(text);
+			CustomDraw(this, cd, CDDS_ITEMPOSTPAINT);
+		}
+		return;
 	}
 
 	RoundFill(dc, rc, fill, HighContrast ? text : Blend(color, c.crBack, selected ? 0 : 25), Scale(6));

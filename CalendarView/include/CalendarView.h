@@ -14,7 +14,8 @@
 // draws with the system colors only (over the app's and the items' own). Accessibility: a list of the items (MSAA).
 // Ctrl+Page Up and Ctrl+Page Down go to the days before and after (a week in a week's view), Ctrl+Home to today, and
 // Ctrl+G or F4 opens a month to pick a date from; CLVS_NAVBAR adds a bar above the days with Today, back and forward,
-// and the days shown, which opens it too. The items are the control's own (AddItem), or in virtual mode
+// and the days shown, which opens it too. The month view (SetView(CLVV_MONTH)) shows a month's weeks: items as bars
+// over their days and lines in a day, what doesn't fit behind "+N more", which lists the day's items in a popup. The items are the control's own (AddItem), or in virtual mode
 // (CLVS_VIRTUAL) the app's: the control asks for those of the days it shows (CLVN_GETITEMS) and lets go of the ones
 // that leave them (CLVN_RELEASEITEM). The API follows the common controls: C-style structures and WM_NOTIFY codes
 // (CLVN_*) sent to the parent. Times are local SYSTEMTIMEs (seconds ignored).
@@ -43,7 +44,7 @@ constexpr wchar_t WC_CALENDARVIEW[] = L"WC_CalendarView";
 // ---- Views ----------------------------------------------------------------------
 
 #define CLVV_DAY             0        // day columns (SetDayCount)
-#define CLVV_MONTH           1        // a month's weeks (not yet)
+#define CLVV_MONTH           1        // a month's weeks (going between months; the day view's day count is kept)
 
 // ---- Items ----------------------------------------------------------------------
 
@@ -113,6 +114,7 @@ struct CLVCOLORS {
 #define CLVN_ITEMDELETING    (CLVN_FIRST - 12)  // NMCLVITEM; the user deletes an item (Delete): non-zero vetoes
 #define CLVN_ITEMDELETED     (CLVN_FIRST - 13)  // NMCLVITEM; removed (a window item's window hidden: undo may bring it back)
 #define CLVN_RESTORED        (CLVN_FIRST - 14)  // NMHDR; undo or redo changed the items: read them again
+#define CLVN_VIEWCHANGED     (CLVN_FIRST - 15)  // NMHDR; SetView switched the view (GetView)
 
 struct NMCLVITEM {
 	NMHDR   hdr;
@@ -179,6 +181,7 @@ struct NMCLVCUSTOMDRAW {
 struct ClvData;
 struct ClvHit;
 struct ClvItem;
+struct ClvBox;
 class ClvDaysWindow;
 
 class CCalendarViewCtrl : public ATL::CWindowImpl<CCalendarViewCtrl> {
@@ -186,6 +189,8 @@ class CCalendarViewCtrl : public ATL::CWindowImpl<CCalendarViewCtrl> {
 	friend class ClvAccessible;
 	friend class ClvPicker;
 	friend class ClvPickerAccessible;
+	friend class ClvMorePopup;
+	friend class ClvMoreAccessible;
 public:
 	DECLARE_WND_CLASS_EX(L"WC_CalendarView", CS_DBLCLKS, -1)
 
@@ -290,10 +295,10 @@ public:
 
 	// ---- The days shown ------------------------------------------------------------------------------
 
-	BOOL    SetView(UINT view);                                   // CLVV_*; FALSE: not there (yet)
+	BOOL    SetView(UINT view);                                   // CLVV_*: the day view comes back to the selected item's week
 	UINT    GetView() const;
 	void    SetDate(const SYSTEMTIME& first);                     // the first day shown
-	void    SetDayCount(int days);                                // 1 to 14
+	void    SetDayCount(int days);                                // 1 to 14 (the day view's)
 	void    GetRange(SYSTEMTIME* first, int* days) const;
 	void    GoToday();                                            // today shown (the first day, or in the week shown) and now in view
 	void    Navigate(int steps);                                  // the days after (or before): a week in a week's view, else the days shown
@@ -403,6 +408,17 @@ private:
 	void    PickDate(LONGLONG day);                               // the date chooser's pick: its view shown
 	void    ClosePicker();
 	bool    PickerOpen() const;
+	// the month view (CalendarViewMonth.cpp)
+	bool    IsMonth() const;
+	int     MonthDayAt(POINT pt) const;                             // the day under pt (held to the weeks), from the range's first
+	void    LayoutMonth(const RECT& client);
+	void    PaintMonth(WTL::CDCHandle dc, const CLVCOLORS& c, bool notify);
+	const ClvBox* HitBox(const ClvHit& hit, bool strip) const;   // the box hit, in the view's layout; nullptr if none
+	const ClvBox* BoxOf(ULONGLONG id) const;                      // an item's first box shown (the strip's, the days', the month's)
+	RECT    BoxRect(const ClvBox& box, bool strip) const;         // in the control's client coords (the days': the days' window's)
+	void    ShowMore(int day);                                    // the "+N more" popup over the day's cell (from the range's first)
+	void    CloseMore();
+	void    DragFromMore(ULONGLONG id, LONGLONG day, POINT screen);   // an item dragged out of the popup: the control's drag
 	// accessibility (CalendarViewAccessible.cpp)
 	long    AccChildId(ULONGLONG id) const;                       // its child's, 1..; CHILDID_SELF if it isn't shown
 	long    AccSlotsId() const;                                   // the selected time's child; CHILDID_SELF if none
@@ -424,6 +440,7 @@ private:
 	void    Paint(WTL::CDCHandle dc);                             // the days' names and the strip
 	void    PaintDays(WTL::CDCHandle dc, const RECT& rcPaint);    // the ruler and the days' time
 	void    PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int box, bool strip, bool notify);
+	void    PaintBox(WTL::CDCHandle dc, const CLVCOLORS& c, const ClvBox& box, int dy, bool strip, bool notify);   // strip: one line
 	bool    Prepaint(WTL::CDCHandle dc, const RECT& rc) const;   // CDDS_PREPAINT: whether the app wants each item's
 	void    ItemColors(const ClvItem& item, const CLVCOLORS& c, COLORREF* fill, COLORREF* text) const;   // as it's drawn
 	std::wstring DayName(LONGLONG day, int width, WTL::CDCHandle dc) const;
@@ -434,6 +451,7 @@ private:
 	std::unique_ptr<ClvDaysWindow> m_Days;
 	ATL::CContainedWindowT<WTL::CEdit> m_Edit;
 	std::unique_ptr<class ClvPicker> m_Picker;
+	std::unique_ptr<class ClvMorePopup> m_More;
 	HWND    m_hTip = nullptr;
 	CLVCOLORS m_Colors{};
 	bool    m_SystemColors = true;

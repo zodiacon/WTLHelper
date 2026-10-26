@@ -32,6 +32,80 @@ enum ClvNav { ClvNavToday, ClvNavPrev, ClvNavNext, ClvNavTitle, ClvNavCount };
 // The date chooser: a month of days in a popup that doesn't take the activation (the control keeps the focus and passes
 // it the keys). It has the mouse while it's open: a press outside it closes it, and is eaten.
 class ClvPickerAccessible;
+class ClvMoreAccessible;
+
+// The month view's "+N more": a day's items listed in a popup over its cell, that doesn't take the activation and has
+// the mouse while it's open (as the date chooser). A click selects an item, a double click opens it, a drag takes it
+// out to another day (the control's drag from then on).
+class ClvMorePopup : public ATL::CWindowImpl<ClvMorePopup> {
+public:
+	DECLARE_WND_CLASS_EX(L"ClvMore", CS_DROPSHADOW | CS_DBLCLKS, -1)
+
+	explicit ClvMorePopup(CCalendarViewCtrl* owner) : m_Owner(owner) {}
+	~ClvMorePopup();
+
+	enum : UINT { WM_MORE_ACCACTION = WM_USER + 102 };
+
+	BEGIN_MSG_MAP(ClvMorePopup)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_MOUSEACTIVATE, OnMouseActivate)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
+		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_MORE_ACCACTION, OnAccAction)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+	END_MSG_MAP()
+
+	void Show(const RECT& cell, int64_t day);     // cell: screen coords
+	void Close();
+	bool IsOpen() const {
+		return m_Open;
+	}
+	bool Key(UINT vk);
+	int64_t Day() const {
+		return m_Day;
+	}
+
+private:
+	friend class ClvMoreAccessible;
+
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
+		return 1;
+	}
+	LRESULT OnMouseActivate(UINT, WPARAM, LPARAM, BOOL&) {
+		return MA_NOACTIVATE;
+	}
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
+
+	int  RowAt(POINT pt) const;                   // client coords; -1 if none
+	RECT RowRect(int row) const;
+	void SetSel(int row);                         // the keys' row, selected in the control too
+	void Paint(WTL::CDCHandle dc);
+
+	CCalendarViewCtrl* m_Owner;
+	std::vector<uint64_t> m_Items;                // the day's, as InRange gives them
+	int64_t m_Day = 0;
+	int     m_Border = 1;
+	int     m_Title = 0, m_Row = 0, m_Pad = 0;
+	int     m_Hot = -1, m_Sel = -1;
+	int     m_Down = -1;                          // the row pressed (a drag may take it out)
+	POINT   m_DownPt{};
+	bool    m_Open = false;
+	bool    m_Closing = false;
+	ClvMoreAccessible* m_Acc = nullptr;
+};
 
 class ClvPicker : public ATL::CWindowImpl<ClvPicker> {
 public:
@@ -108,6 +182,9 @@ struct ClvData {
 	ClvAxis axis;                  // its slotHeight: slotDips scaled
 	int  slotDips = 22;
 	ClvDayLayout layout;
+	ClvMonthLayout month;          // the month view's
+	int64_t monthFirst = 0;        // the month shown's first day
+	ClvRange dayRange{ 0, 1 };     // the day view's while the month is shown (its day count)
 
 	// the layout (the control's client coords)
 	RECT header{};                 // the days' names

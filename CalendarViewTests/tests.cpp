@@ -607,6 +607,112 @@ TEST(MiniMonth) {
 	CHECK(big.cell == 45 && big.title == 48 && big.pad == 12);
 }
 
+// October 2026's weeks from Sunday, September 27: D0, Monday the 26th, is day 29 (week 4, column 1)
+static ClvItemStore MonthStore() {
+	ClvItemStore s;
+	s.Add(AllDay(1, 0, 3));                          // Mon to Wed
+	s.Add(Timed(2, At(0, 9), At(0, 10)));            // a line on Monday
+	s.Add(Timed(3, At(1, 22), At(2, 1)));            // over midnight: a bar, Tue to Wed
+	s.Add(AllDay(4, 4, 4));                          // Fri to the next Mon: cut at the month's end
+	for (int k = 0; k < 4; k++)                      // Thursday: more than it holds
+		s.Add(Timed(10 + k, At(3, 8 + k), At(3, 8 + k, 30)));
+	s.Add(AllDay(6, -2, 2));                         // Sat to Sun: over two weeks
+	return s;
+}
+
+TEST(MonthLayout) {
+	auto range = ClvMonthRange(D0, 0);
+	CHECK_INT(range.first, ClvDayFromDate(2026, 9, 27));
+	CHECK_INT(range.days, 35);
+	CHECK_INT(ClvMonthRange(ClvDayFromDate(2026, 8, 31), 0).days, 42);
+	CHECK(ClvIsBar(AllDay(1, 0, 1)) && ClvIsBar(Timed(1, At(0, 22), At(1, 1))) && !ClvIsBar(Timed(1, At(0, 9), At(0, 10))));
+
+	auto s = MonthStore();
+	ClvMetrics m;
+	auto l = ClvLayoutMonth(s, ClvDayFromDate(2026, 10, 1), range, { 0, 700, 7 }, 0, 500, m);
+	CHECK_INT(l.Weeks(), 5);
+	CHECK_INT(l.lanes, 3);
+	CHECK(l.rowTops.size() == 6 && l.rowTops[4] == 400 && l.rowTops[5] == 500);
+	CHECK(Same(l.Cell(29), 100, 400, 200, 500));
+	CHECK_INT(l.DayAt({ 150, 450 }), 29);
+	CHECK_INT(l.DayAt({ 750, 450 }), -1);
+	CHECK_INT(l.DayAt({ 150, 500 }), -1);
+
+	auto box = [&](uint64_t id, int day) -> const ClvBox* {
+		for (auto& b : l.boxes)
+			if (b.id == id && b.day == day)
+				return &b;
+		return nullptr;
+	};
+	auto b1 = box(1, 29), b2 = box(2, 29), b3 = box(3, 30), b4 = box(4, 33), b6a = box(6, 27), b6b = box(6, 28);
+	CHECK(b1 && b2 && b3 && b4 && b6a && b6b);
+	if (b1 && b2 && b3 && b4 && b6a && b6b) {
+		CHECK(Same(b1->rc, 102, 421, 398, 441) && b1->lastDay == 31 && b1->row == 0 && !b1->line);
+		CHECK(Same(b2->rc, 102, 443, 198, 463) && b2->line && !b2->resizable);   // under Monday's bar
+		CHECK(Same(b3->rc, 202, 443, 398, 463) && b3->row == 1);
+		CHECK(Same(b4->rc, 502, 421, 700, 441) && b4->after);
+		CHECK(Same(b6a->rc, 602, 321, 700, 341) && b6a->after && !b6a->before);
+		CHECK(Same(b6b->rc, 0, 421, 98, 441) && b6b->before && !b6b->after);
+	}
+	// Thursday: two lines, then "+2 more"
+	int thursday = 0;
+	for (auto& b : l.boxes)
+		thursday += b.day == 32;
+	CHECK_INT(thursday, 2);
+	CHECK(l.more.size() == 1 && l.more[0].day == 32 && l.more[0].count == 2 && Same(l.more[0].rc, 402, 465, 498, 485));
+	CHECK(l.Find(1) == b1);
+
+	auto hit = ClvHitMonth(l, { 150, 430 }, m);
+	CHECK(hit.part == ClvPart::Item);
+	CHECK(hit.box >= 0 && l.boxes[hit.box].id == 1 && hit.day == 29);
+	CHECK(ClvHitMonth(l, { 103, 430 }, m).part == ClvPart::Start);
+	CHECK(ClvHitMonth(l, { 396, 430 }, m).part == ClvPart::End);
+	CHECK(ClvHitMonth(l, { 103, 450 }, m).part == ClvPart::Item);   // a line has no ends
+	CHECK(ClvHitMonth(l, { 699, 430 }, m).part == ClvPart::Item);   // going on: no end there
+	hit = ClvHitMonth(l, { 450, 470 }, m);
+	CHECK(hit.part == ClvPart::More && hit.day == 32);
+	hit = ClvHitMonth(l, { 450, 495 }, m);
+	CHECK(hit.part == ClvPart::Slot && hit.day == 32);
+	CHECK(ClvHitMonth(l, { 50, 410 }, m).part == ClvPart::Slot);
+	CHECK(ClvHitMonth(l, { 750, 10 }, m).part == ClvPart::None);
+
+	// a bar whose lane a crowded day hides: cut there
+	ClvItemStore cut;
+	cut.Add(AllDay(1, 0, 2));                        // Mon to Tue: lanes 0 and 1
+	cut.Add(AllDay(2, 0, 2));
+	cut.Add(AllDay(3, 1, 3));                        // Tue to Thu: lane 2
+	for (int k = 0; k < 3; k++)                      // Wednesday's lines: lanes 0, 1 and 3, so lane 2 is "+2 more" there
+		cut.Add(Timed(4 + k, At(2, 9 + k), At(2, 9 + k, 30)));
+	l = ClvLayoutMonth(cut, ClvDayFromDate(2026, 10, 1), range, { 0, 700, 7 }, 0, 500, m);
+	int pieces = 0;
+	for (auto& b : l.boxes)
+		if (b.id == 3) {
+			pieces++;
+			CHECK((b.day == 30 && b.lastDay == 30 && b.after && !b.before) || (b.day == 32 && b.lastDay == 32 && b.before && !b.after));
+		}
+	CHECK_INT(pieces, 2);
+	CHECK(l.more.size() == 1 && l.more[0].day == 31 && l.more[0].count == 2);
+
+	// no room for any lane: "+N" beside the day's number
+	l = ClvLayoutMonth(s, ClvDayFromDate(2026, 10, 1), range, { 0, 700, 7 }, 0, 150, m);
+	CHECK_INT(l.lanes, 0);
+	CHECK(l.boxes.empty());
+	bool monday = false;
+	for (auto& more : l.more)
+		if (more.day == 29) {
+			monday = true;
+			CHECK_INT(more.count, 2);   // the bar over it and its line
+			CHECK(Same(more.rc, 150, 120, 198, 140));
+		}
+	CHECK(monday);
+
+	auto r = ClvDragMoveDays({ At(0, 9), At(0, 10), false }, D0, D0 + 3);
+	CHECK(r.start == At(3, 9) && r.end == At(3, 10) && !r.allDay);
+	r = ClvDragMoveDays({ At(0, 0), At(2, 0), true }, D0 + 1, D0 - 1);
+	CHECK(r.start == At(-2, 0) && r.end == At(0, 0) && r.allDay);
+	CHECK_INT(ClvMetrics{}.Scaled(144).dayNumber, 30);
+}
+
 TEST(Undo) {
 	ClvItemStore s;
 	ClvHistory h;
@@ -668,6 +774,7 @@ int wmain() {
 	Run_TabOrder();
 	Run_Navigation();
 	Run_MiniMonth();
+	Run_MonthLayout();
 	Run_Undo();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
