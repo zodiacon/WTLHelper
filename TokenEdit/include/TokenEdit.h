@@ -157,6 +157,8 @@ public:
 	CTokenEditCtrl();
 	~CTokenEditCtrl();
 	friend class TkeSuggestList;
+	friend class TkeBoxAccessible;
+	friend class TkeListAccessible;
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
@@ -197,6 +199,8 @@ public:
 		MESSAGE_HANDLER(WM_CUT, OnCut)
 		MESSAGE_HANDLER(WM_PASTE, OnPaste)
 		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_TKE_ACCACTION, OnAccAction)
 	ALT_MSG_MAP(1)   // the typing area
 		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
 		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnEditSysKeyDown)
@@ -289,8 +293,13 @@ public:
 	TKECOLORS GetColors() const;
 	void    SetLineLimits(int minLines, int maxLines);            // the box's height in lines; maxLines 0: no limit. Default 1, 4
 	int     GetIdealHeight() const;                               // for the lines the tokens take now at the window's width
+	// High contrast: the system's colors (over the app's and the tokens' own too), tokens framed, the hot one in the
+	// highlight color.
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
+	bool    IsHighContrast() const;
 
 private:
+	enum : UINT { WM_TKE_ACCACTION = WM_USER + 100 };   // an accessibility client's action, done later (wParam: TKEACC_*)
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
@@ -328,6 +337,8 @@ private:
 	LRESULT OnCut(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaste(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -384,6 +395,13 @@ private:
 	void    CancelDrag();
 	void    Drop();
 	void    UpdateTip();
+
+	// accessibility (TokenEditAccessible.cpp)
+	void    NotifyAccessible(DWORD event, long child);            // the box's object, once a client has asked
+	void    NotifyFocusToken();                                   // the keys' token, while the control has the focus
+	void    DisconnectAccessible();
+	void    NameEdit();                                           // the typing area named as the box (needs COM on the thread)
+	std::wstring AccDescription(int index) const;
 	std::wstring SelectedText() const;
 
 	// painting (TokenEditPaint.cpp)
@@ -404,6 +422,8 @@ private:
 	HFONT   m_hBold = nullptr;                                    // the suggestions' matched text
 	HWND    m_hTip = nullptr;
 	std::wstring m_TipText;
+	int     m_ForceHighContrast = -1;
+	mutable bool m_PaintHighContrast = false;                     // PaintColors'
 	bool    m_OwnFont = true;
 	UINT    m_Dpi = 96;
 	int     m_TextHeight = 16;

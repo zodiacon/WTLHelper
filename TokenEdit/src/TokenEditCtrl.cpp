@@ -76,11 +76,13 @@ LRESULT CTokenEditCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	UpdateMetrics();
 	EnsureLayout();
 	m_LastHeight = GetIdealHeight();
+	NameEdit();
 	return 0;
 }
 
 LRESULT CTokenEditCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
+	DisconnectAccessible();
 	if (d.list) {
 		if (d.list->IsWindow())
 			d.list->DestroyWindow();
@@ -149,6 +151,7 @@ void CTokenEditCtrl::NotifySelection() {
 		return;
 	d.lastSelection = std::move(ids);
 	if (IsWindow()) {
+		NotifyAccessible(EVENT_OBJECT_SELECTIONWITHIN, CHILDID_SELF);
 		NMHDR nm{};
 		FireNotify(&nm, TKEN_SELCHANGED);
 	}
@@ -295,7 +298,35 @@ void CTokenEditCtrl::SetColors(const TKECOLORS* colors) {
 		m_Edit.Invalidate();
 }
 
+bool CTokenEditCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+void CTokenEditCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow())
+		Invalidate();
+	if (m_Edit.IsWindow())
+		m_Edit.Invalidate();
+	if (m_Data->list)
+		m_Data->list->Invalidate();
+}
+
 TKECOLORS CTokenEditCtrl::GetColors() const {
+	if (IsHighContrast()) {
+		// the user's colors, over the app's too; tokens are framed and the hot one framed in the highlight color
+		// (PaintToken), as there are no shades between them
+		TKECOLORS c;
+		c.crBack = c.crTokenBack = c.crTokenHot = c.crInvalidBack = ::GetSysColor(COLOR_WINDOW);
+		c.crBorder = c.crText = c.crTokenText = c.crInvalid = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crCue = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crAccent = c.crSelectedBack = ::GetSysColor(COLOR_HIGHLIGHT);
+		c.crSelectedText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
@@ -592,6 +623,8 @@ void CTokenEditCtrl::Changed(bool measure) {
 	// at once rather than at the next paint: the height notification shouldn't come from WM_PAINT
 	EnsureLayout();
 	Invalidate(FALSE);
+	if (measure)
+		NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);   // the tokens changed
 	NotifyHeight();
 }
 
@@ -873,6 +906,8 @@ LRESULT CTokenEditCtrl::OnSetFocus(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	// with no token selected the focus belongs in the typing area (tabbing into the control)
 	if (!m_Data->tokens.SelectedCount() && !ReadOnly() && m_Edit.IsWindow())
 		m_Edit.SetFocus();
+	else
+		NotifyFocusToken();
 	Invalidate(FALSE);
 	bHandled = FALSE;
 	return 0;

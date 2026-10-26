@@ -40,6 +40,7 @@ void TkeDraw::Cross(WTL::CDCHandle dc, const RECT& rc, int size, COLORREF color,
 // ---- Painting ---------------------------------------------------------------------------
 
 TKECOLORS CTokenEditCtrl::PaintColors() const {
+	m_PaintHighContrast = IsHighContrast();
 	return GetColors();
 }
 
@@ -123,7 +124,15 @@ void CTokenEditCtrl::PaintToken(WTL::CDCHandle dc, int index, const TKECOLORS& c
 		: t.back != CLR_DEFAULT ? (IsDark(t.back) ? RGB(255, 255, 255) : RGB(0, 0, 0))
 		: c.crTokenText;
 	COLORREF border = back;
-	if (t.selected) {
+	if (m_PaintHighContrast) {
+		// no shades: the system's colors only (the token's own too), tokens framed, the hot one (and the selected ones
+		// without the focus) framed in the highlight color
+		const COLORREF highlight = ::GetSysColor(COLOR_HIGHLIGHT);
+		back = t.selected && focused ? c.crSelectedBack : c.crTokenBack;
+		fore = t.selected && focused ? c.crSelectedText : c.crTokenText;
+		border = hot || (t.selected && !focused) ? highlight : fore;
+	}
+	else if (t.selected) {
 		back = focused ? c.crSelectedBack : Blend(back, c.crSelectedBack, 55);
 		if (!t.invalid && t.fore == CLR_DEFAULT)
 			fore = c.crSelectedText;
@@ -148,7 +157,7 @@ void CTokenEditCtrl::PaintToken(WTL::CDCHandle dc, int index, const TKECOLORS& c
 			std::max(1, Scale(1)), std::max(2, Scale(2)));
 		if (points.size() > 1) {
 			WTL::CPen pen;
-			pen.CreatePen(PS_SOLID, 1, t.fore != CLR_DEFAULT ? t.fore : c.crInvalid);
+			pen.CreatePen(PS_SOLID, 1, m_PaintHighContrast ? fore : t.fore != CLR_DEFAULT ? t.fore : c.crInvalid);
 			auto old = dc.SelectPen(pen);
 			dc.Polyline(points.data(), (int)points.size());
 			dc.SelectPen(old);
@@ -158,7 +167,9 @@ void CTokenEditCtrl::PaintToken(WTL::CDCHandle dc, int index, const TKECOLORS& c
 	if (!::IsRectEmpty(&box.close)) {
 		const bool closeHot = enabled && d.hot.part == TkePart::Close && d.hot.index == index;
 		const bool pressed = closeHot && d.pressed.part == TkePart::Close && d.pressed.index == index;
-		if (closeHot) {
+		if (closeHot && m_PaintHighContrast)
+			RoundFill(dc, box.close, back, ::GetSysColor(COLOR_HIGHLIGHT), box.close.right - box.close.left);
+		else if (closeHot) {
 			COLORREF shade = Blend(back, fore, pressed ? 28 : 16);
 			RoundFill(dc, box.close, shade, shade, box.close.right - box.close.left);
 		}

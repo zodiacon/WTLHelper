@@ -21,6 +21,9 @@ struct TkeSuggestRow {
 
 // The matching suggestions, dropped down under the typing area. It doesn't take the activation: the edit keeps the
 // focus and passes it the keys (SuggestKey). One window, shown again as the text changes.
+class TkeListAccessible;
+class TkeBoxAccessible;
+
 class TkeSuggestList : public ATL::CWindowImpl<TkeSuggestList> {
 public:
 	DECLARE_WND_CLASS_EX(L"TkeSuggestList", CS_DROPSHADOW, -1)
@@ -36,7 +39,11 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 	END_MSG_MAP()
+	friend class TkeListAccessible;
+
+	void Disconnect();                           // the accessible object, before the window goes
 
 	// under: the screen rect it drops from (below it, or above if there's no room)
 	void Show(std::vector<TkeSuggestRow> rows, const RECT& under);
@@ -74,8 +81,11 @@ private:
 
 	int  RowAt(POINT pt) const;                  // client coords; -1 none
 	void SetHot(int row);
+	void NotifyHot();                            // selection and focus events for the hot row
 	void ScrollTo(int top);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
 	int  Visible() const;                        // rows shown at once
+	RECT RowRect(int row) const;                 // client coords; empty if scrolled out
 
 	CTokenEditCtrl* m_Owner;
 	std::vector<TkeSuggestRow> m_Rows;
@@ -85,6 +95,7 @@ private:
 	int  m_Hot = -1;
 	bool m_Open = false;
 	POINT m_Mouse{ -1, -1 };                      // screen: a WM_MOUSEMOVE where the mouse already was isn't a move
+	TkeListAccessible* m_Acc = nullptr;           // once a client asked
 };
 
 // ---- The control's state -----------------------------------------------------------------------------
@@ -131,6 +142,7 @@ struct TkeData {
 	int  pendingOnly = -1;                        // a selected token pressed: only it is selected if the press isn't a drag
 
 	std::wstring closeTip;                        // SetCloseTip's; empty: "Remove"
+	TkeBoxAccessible* acc = nullptr;              // the box's, once a client asked
 	RECT tipRect{};
 };
 

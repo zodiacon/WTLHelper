@@ -21,6 +21,7 @@ void CTokenEditCtrl::FocusToken(int index, bool extend) {
 	ScrollToShow(d.layout.tokens[index].rc);
 	Invalidate(FALSE);
 	NotifySelection();
+	NotifyFocusToken();
 }
 
 void CTokenEditCtrl::FocusEditAt(bool start) {

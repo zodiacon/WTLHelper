@@ -33,7 +33,7 @@ CAppModule _Module;
 enum : UINT {
 	IDC_TO = 100, IDC_TAGS, IDC_LOG, IDC_TOLABEL, IDC_TAGSLABEL, IDC_SUBJECT,
 	CMD_EXIT = 1000, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_READONLY, CMD_NOCLOSE, CMD_REFUSESPAM, CMD_MAXTAGS,
-	CMD_ADDLOCKED, CMD_SETTEXT, CMD_REMOVEALL, CMD_SHOWTEXT, CMD_INVALIDATE, CMD_UNDO, CMD_REDO, CMD_NOREORDER,
+	CMD_ADDLOCKED, CMD_SETTEXT, CMD_REMOVEALL, CMD_SHOWTEXT, CMD_INVALIDATE, CMD_UNDO, CMD_REDO, CMD_NOREORDER, CMD_HIGHCONTRAST,
 };
 
 static CTokenEditCtrl g_to, g_tags;
@@ -195,6 +195,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"Dar&k Mode");
 #endif
 	::AppendMenuW(view, MF_STRING, CMD_LARGEFONT, L"&Larger Font");
+	::AppendMenuW(view, MF_STRING, CMD_HIGHCONTRAST, L"Force &High Contrast");
 	::AppendMenuW(view, MF_STRING, CMD_CLEARLOG, L"Clear L&og");
 	HMENU menu = ::CreateMenu();
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)file, L"&File");
@@ -242,6 +243,12 @@ static void OnCommand(UINT id) {
 		case CMD_READONLY: SetStyle(TKES_READONLY, Toggle(id)); break;
 		case CMD_NOCLOSE: SetStyle(TKES_NOCLOSE, Toggle(id)); break;
 		case CMD_REFUSESPAM: Toggle(id); break;
+		case CMD_HIGHCONTRAST: {
+			const int on = Toggle(id) ? 1 : -1;
+			g_to.ForceHighContrast(on);
+			g_tags.ForceHighContrast(on);
+			break;
+		}
 		case CMD_MAXTAGS: g_tags.SetMaxTokens(Toggle(id) ? 5 : 0); break;
 		case CMD_ADDLOCKED: {
 			TKETOKEN t;
@@ -443,6 +450,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow
 	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 	INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES };
 	::InitCommonControlsEx(&icc);
+	::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // the boxes name their typing areas for screen readers
 	_Module.Init(nullptr, hInstance);
 #ifdef DEMO_WTLHELPER
 	WTLHelper::InitDarkMode(DarkModeKind::Classic);
@@ -478,5 +486,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow
 	if (g_images)
 		::ImageList_Destroy(g_images);
 	_Module.Term();
+	::CoUninitialize();
 	return 0;
 }

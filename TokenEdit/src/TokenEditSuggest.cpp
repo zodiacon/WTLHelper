@@ -102,6 +102,8 @@ void TkeSuggestList::Show(std::vector<TkeSuggestRow> rows, const RECT& under) {
 	SetWindowPos(HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 	m_Open = true;
 	Invalidate();
+	::NotifyWinEvent(EVENT_OBJECT_REORDER, m_hWnd, OBJID_CLIENT, CHILDID_SELF);
+	NotifyHot();
 }
 
 void TkeSuggestList::Close() {
@@ -131,6 +133,26 @@ void TkeSuggestList::SetHot(int row) {
 	else if (row >= m_Top + Visible())
 		ScrollTo(row - Visible() + 1);
 	Invalidate();
+	NotifyHot();
+}
+
+void TkeSuggestList::NotifyHot() {
+	// the edit keeps the real focus: screen readers follow the hot row by these (always: they ask for the object
+	// only after an event)
+	if (!m_Open || m_Hot < 0)
+		return;
+	::NotifyWinEvent(EVENT_OBJECT_SELECTION, m_hWnd, OBJID_CLIENT, m_Hot + 1);
+	if (::GetFocus() == m_Owner->m_Edit.m_hWnd)
+		::NotifyWinEvent(EVENT_OBJECT_FOCUS, m_hWnd, OBJID_CLIENT, m_Hot + 1);
+}
+
+RECT TkeSuggestList::RowRect(int row) const {
+	if (row < m_Top || row >= m_Top + Visible())
+		return {};
+	RECT rc;
+	GetClientRect(&rc);
+	const int top = m_Border + m_Owner->Scale(4) + (row - m_Top) * m_RowHeight;
+	return { rc.left + m_Border, top, rc.right - m_Border, top + m_RowHeight };
 }
 
 void TkeSuggestList::MoveHot(UINT vk) {
@@ -198,9 +220,12 @@ LRESULT TkeSuggestList::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 			auto& row = m_Rows[i];
 			auto& s = d.suggestions[row.index];
 			RECT line{ rc.left + m_Border, top + (i - m_Top) * m_RowHeight, rc.right - m_Border, top + (i - m_Top + 1) * m_RowHeight };
+			// high contrast: the hot row in the highlight colors
+			const bool highlight = i == m_Hot && o.m_PaintHighContrast;
 			if (i == m_Hot) {
 				RECT hot{ line.left + o.Scale(4), line.top + 1, line.right - o.Scale(4), line.bottom - 1 };
-				RoundFill(dc, hot, c.crTokenHot, c.crTokenHot, o.Scale(6));
+				COLORREF back = highlight ? c.crSelectedBack : c.crTokenHot;
+				RoundFill(dc, hot, back, back, o.Scale(6));
 			}
 			int x = line.left + pad;
 			if (icon && s.image >= 0) {
@@ -211,11 +236,11 @@ LRESULT TkeSuggestList::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 				x += icon + o.Scale(6);   // the texts in one column
 			const int saved = dc.SaveDC();
 			dc.IntersectClipRect(line.left, line.top, line.right - pad, line.bottom);
-			dc.SetTextColor(c.crText);
+			dc.SetTextColor(highlight ? c.crSelectedText : c.crText);
 			const bool inText = row.match.kind != TkeMatchKind::None && !row.onDetail;
 			x = RunText(dc, s.text, x, line, inText ? row.match.start : 0, inText ? row.match.length : 0, o.m_hFont, o.m_hBold);
 			if (!s.detail.empty()) {
-				dc.SetTextColor(c.crCue);
+				dc.SetTextColor(highlight ? c.crSelectedText : c.crCue);
 				const bool inDetail = row.match.kind != TkeMatchKind::None && row.onDetail;
 				RunText(dc, s.detail, x + o.Scale(12), line, inDetail ? row.match.start : 0, inDetail ? row.match.length : 0,
 					o.m_hFont, o.m_hBold);
