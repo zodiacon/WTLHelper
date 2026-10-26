@@ -95,10 +95,15 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\TokenEdit.h" />
+    <ClInclude Include="src\TokenEditData.h" />
     <ClInclude Include="src\TokenEditModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\TokenEditCtrl.cpp" />
+    <ClCompile Include="src\TokenEditInput.cpp" />
     <ClCompile Include="src\TokenEditModel.cpp" />
+    <ClCompile Include="src\TokenEditPaint.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
