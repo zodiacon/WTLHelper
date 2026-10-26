@@ -8,6 +8,11 @@
 // come here through the control. "Burndown" is a custom item drawn here (CDDS_ITEMPOSTPAINT), and View > Dim Past
 // Items changes the colors of the items that are over (CDDS_ITEMPREPAINT). The log at the bottom shows the
 // notifications.
+//
+// Editing: drag an item to move it (into the strip and out too), its ends to resize it, over slots to select them;
+// double-click the slots (or press Enter) for a new item, named in place. The keys: arrows, Tab, Alt+arrows to move the
+// selected item (Alt+Shift+Up/Down: its end), F2, Delete, Ctrl+Z/Ctrl+Y. Edit > Refuse Weekends vetoes moves onto a
+// Saturday or Sunday; Read Only turns editing off.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -37,7 +42,7 @@ enum : UINT {
 	IDC_CALENDAR = 100, IDC_LOG, IDC_PROGRESS = 200, IDC_JOIN, IDC_AGENDA, IDC_NOTES, IDC_SHORT,
 	CMD_EXIT = 1000, CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK, CMD_PREV, CMD_NEXT, CMD_TODAY, CMD_SLOT15,
 	CMD_SLOT30, CMD_SLOT60, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_NOW, CMD_ADD,
-	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST,
+	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND,
 };
 
 static std::unique_ptr<CCalendarViewCtrl> g_calendar;   // made again for virtual mode: a new control's state
@@ -300,8 +305,8 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_WORKWEEK, L"&Work Week\tCtrl+5");
 	::AppendMenuW(view, MF_STRING, CMD_WEEK, L"W&eek\tCtrl+7");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-	::AppendMenuW(view, MF_STRING, CMD_PREV, L"&Previous\tAlt+Left");
-	::AppendMenuW(view, MF_STRING, CMD_NEXT, L"&Next\tAlt+Right");
+	::AppendMenuW(view, MF_STRING, CMD_PREV, L"&Previous\tCtrl+Left");
+	::AppendMenuW(view, MF_STRING, CMD_NEXT, L"&Next\tCtrl+Right");
 	::AppendMenuW(view, MF_STRING, CMD_TODAY, L"T&oday\tCtrl+T");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(view, MF_STRING, CMD_SLOT15, L"&15 Minute Slots");
@@ -320,11 +325,18 @@ static HMENU BuildMenu() {
 	HMENU items = ::CreatePopupMenu();
 	::AppendMenuW(items, MF_STRING, CMD_ADD, L"&New Item in the Selected Slots\tCtrl+N");
 	::AppendMenuW(items, MF_STRING, CMD_DELETE, L"&Delete the Selected Item");
+	HMENU edit = ::CreatePopupMenu();
+	::AppendMenuW(edit, MF_STRING, CMD_UNDO, L"&Undo\tCtrl+Z");
+	::AppendMenuW(edit, MF_STRING, CMD_REDO, L"&Redo\tCtrl+Y");
+	::AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(edit, MF_STRING, CMD_READONLY, L"Read &Only");
+	::AppendMenuW(edit, MF_STRING, CMD_NOWEEKEND, L"Refuse &Weekends");
 	HMENU data = ::CreatePopupMenu();
 	::AppendMenuW(data, MF_STRING, CMD_VIRTUAL, L"&Virtual Mode");
 	::AppendMenuW(data, MF_STRING, CMD_REFRESH, L"&Refresh (Virtual)");
 	HMENU menu = ::CreateMenu();
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)file, L"&File");
+	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)edit, L"&Edit");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)view, L"&View");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)items, L"&Items");
 	::AppendMenuW(menu, MF_POPUP, (UINT_PTR)data, L"&Data");
@@ -430,6 +442,15 @@ static void OnCommand(UINT id) {
 		case CMD_REFRESH:
 			g_calendar->RefreshItems();
 			break;
+		case CMD_UNDO: Log(g_calendar->Undo() ? L"undone" : L"nothing to undo"); break;
+		case CMD_REDO: Log(g_calendar->Redo() ? L"redone" : L"nothing to redo"); break;
+		case CMD_READONLY:
+			if (Toggle(id))
+				g_calendar->ModifyStyle(0, CLVS_READONLY);
+			else
+				g_calendar->ModifyStyle(CLVS_READONLY, 0);
+			break;
+		case CMD_NOWEEKEND: Toggle(id); break;
 	}
 }
 
@@ -467,6 +488,48 @@ static LRESULT OnNotify(NMHDR* hdr) {
 		case CLVN_RELEASEITEM:
 			g_released++;
 			break;
+		case CLVN_ITEMCHANGING:
+		case CLVN_ITEMCHANGED: {
+			auto c = (NMCLVCHANGE*)hdr;
+			static const wchar_t* const Changes[] = { L"move", L"start", L"end" };
+			ShowDate(c->start, a, _countof(a));
+			ShowDate(c->end, b, _countof(b));
+			Log(L"%s %llu %s: %s to %s%s", hdr->code == CLVN_ITEMCHANGING ? L"CLVN_ITEMCHANGING" : L"CLVN_ITEMCHANGED", c->id,
+				Changes[std::min(c->change, 2u)], a, b, c->allDay ? L" (all day)" : L"");
+			if (hdr->code == CLVN_ITEMCHANGING && (::GetMenuState(g_menu, CMD_NOWEEKEND, MF_BYCOMMAND) & MF_CHECKED)) {
+				// no day of it on a Saturday or a Sunday
+				const LONGLONG first = DayIndex(c->start), last = DayIndex(FromTicks(Ticks(c->end) - (Ticks(c->end) > Ticks(c->start) ? 1 : 0)));
+				for (LONGLONG day = first; day <= last; day++)
+					if (((day % 7) + 7) % 7 >= 5) {
+						Log(L"  refused: a weekend");
+						return 1;
+					}
+			}
+			break;
+		}
+		case CLVN_CREATEITEM: {
+			auto c = (NMCLVCREATE*)hdr;
+			ShowDate(c->start, a, _countof(a));
+			ShowDate(c->end, b, _countof(b));
+			Log(L"CLVN_CREATEITEM %s to %s%s: added %llu", a, b, c->allDay ? L" (all day)" : L"", g_nextId);
+			if (g_calendar->AddItem(g_nextId, L"New item", c->start, c->end, c->allDay ? CLVF_ALLDAY : 0))
+				c->id = g_nextId;
+			g_nextId++;
+			break;
+		}
+		case CLVN_TITLECHANGING:
+		case CLVN_TITLECHANGED: {
+			auto t = (NMCLVTITLE*)hdr;
+			Log(L"%s %llu \"%s\"", hdr->code == CLVN_TITLECHANGING ? L"CLVN_TITLECHANGING" : L"CLVN_TITLECHANGED", t->id, t->pszTitle);
+			if (hdr->code == CLVN_TITLECHANGING && !*t->pszTitle) {
+				Log(L"  refused: empty");
+				return 1;
+			}
+			break;
+		}
+		case CLVN_ITEMDELETING: Log(L"CLVN_ITEMDELETING %llu", ((NMCLVITEM*)hdr)->id); break;
+		case CLVN_ITEMDELETED: Log(L"CLVN_ITEMDELETED %llu (its window kept for undo)", ((NMCLVITEM*)hdr)->id); break;
+		case CLVN_RESTORED: Log(L"CLVN_RESTORED"); break;
 		case CLVN_CUSTOMDRAW: {
 			auto cd = (NMCLVCUSTOMDRAW*)hdr;
 			const bool dim = ::GetMenuState(g_menu, CMD_DIMPAST, MF_BYCOMMAND) & MF_CHECKED;
@@ -568,7 +631,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, int nCmdShow
 
 	ACCEL accels[] = {
 		{ FCONTROL | FVIRTKEY, '1', CMD_DAY }, { FCONTROL | FVIRTKEY, '3', CMD_THREEDAYS }, { FCONTROL | FVIRTKEY, '5', CMD_WORKWEEK },
-		{ FCONTROL | FVIRTKEY, '7', CMD_WEEK }, { FALT | FVIRTKEY, VK_LEFT, CMD_PREV }, { FALT | FVIRTKEY, VK_RIGHT, CMD_NEXT },
+		{ FCONTROL | FVIRTKEY, '7', CMD_WEEK }, { FCONTROL | FVIRTKEY, VK_LEFT, CMD_PREV }, { FCONTROL | FVIRTKEY, VK_RIGHT, CMD_NEXT },
 		{ FCONTROL | FVIRTKEY, 'T', CMD_TODAY }, { FCONTROL | FVIRTKEY, 'N', CMD_ADD },
 	};
 	HACCEL accel = ::CreateAcceleratorTableW(accels, _countof(accels));

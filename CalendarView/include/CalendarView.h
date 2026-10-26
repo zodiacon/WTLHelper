@@ -6,7 +6,11 @@
 // control, by the app (custom draw), or are the app's own windows placed in the days, under a caption the control
 // draws: it makes the window a child of its days' window (GetDaysWindow), places it under the caption, hides it when
 // its item is too short, in the strip or not shown, and passes the window's notifications, commands and colors on to its
-// own parent. Overlapping items go side by side. The items are the control's own (AddItem), or in virtual mode
+// own parent. Overlapping items go side by side. The user drags items to move them (between the days and the strip
+// too) and their ends to resize them, drags over slots to select them and double-clicks (or presses Enter) to ask the
+// app for an item there; each change is the app's to allow, and Ctrl+Z undoes it (the control's own items). The keys:
+// the arrows move the slots selected (Shift: more of them), Tab goes along the items, Alt+arrows move the selected item
+// (Alt+Shift+Up/Down: its end), F2 renames it, Delete removes it. Tooltips tell an item's time. The items are the control's own (AddItem), or in virtual mode
 // (CLVS_VIRTUAL) the app's: the control asks for those of the days it shows (CLVN_GETITEMS) and lets go of the ones
 // that leave them (CLVN_RELEASEITEM). The API follows the common controls: C-style structures and WM_NOTIFY codes
 // (CLVN_*) sent to the parent. Times are local SYSTEMTIMEs (seconds ignored).
@@ -96,11 +100,49 @@ struct CLVCOLORS {
 #define CLVN_RELEASEITEM     (CLVN_FIRST - 4)   // NMCLVITEM; virtual: an item left the days shown (its window is the app's again)
 #define CLVN_SLOTCHANGED     (CLVN_FIRST - 5)   // NMCLVRANGE; the user selected slots (GetSelectedSlots)
 #define CLVN_CUSTOMDRAW      (CLVN_FIRST - 6)   // NMCLVCUSTOMDRAW; see below
+#define CLVN_ITEMCHANGING    (CLVN_FIRST - 7)   // NMCLVCHANGE; the user moved or resized an item: non-zero vetoes (the app may change the values)
+#define CLVN_ITEMCHANGED     (CLVN_FIRST - 8)   // NMCLVCHANGE
+#define CLVN_CREATEITEM      (CLVN_FIRST - 9)   // NMCLVCREATE; the user asks for an item over the slots selected
+#define CLVN_TITLECHANGING   (CLVN_FIRST - 10)  // NMCLVTITLE; the user renamed an item (F2): non-zero vetoes
+#define CLVN_TITLECHANGED    (CLVN_FIRST - 11)  // NMCLVTITLE
+#define CLVN_ITEMDELETING    (CLVN_FIRST - 12)  // NMCLVITEM; the user deletes an item (Delete): non-zero vetoes
+#define CLVN_ITEMDELETED     (CLVN_FIRST - 13)  // NMCLVITEM; removed (a window item's window hidden: undo may bring it back)
+#define CLVN_RESTORED        (CLVN_FIRST - 14)  // NMHDR; undo or redo changed the items: read them again
 
 struct NMCLVITEM {
 	NMHDR   hdr;
 	ULONGLONG id;
 	HWND    hwnd;                     // CLVC_WINDOW's
+	LPARAM  lParam;
+};
+
+// what the user changed
+#define CLVCH_MOVE           0        // the start and the end (into or out of the strip: allDay too)
+#define CLVCH_START          1
+#define CLVCH_END            2
+
+struct NMCLVCHANGE {
+	NMHDR   hdr;
+	ULONGLONG id;
+	UINT    change;                   // CLVCH_*
+	SYSTEMTIME start;                 // the new values
+	SYSTEMTIME end;
+	BOOL    allDay;
+	LPARAM  lParam;
+};
+
+struct NMCLVCREATE {
+	NMHDR   hdr;
+	SYSTEMTIME start;                 // the slots selected, [start, end)
+	SYSTEMTIME end;
+	BOOL    allDay;
+	ULONGLONG id;                     // set by the app to the item it added: selected and renamed in place
+};
+
+struct NMCLVTITLE {
+	NMHDR   hdr;
+	ULONGLONG id;
+	LPCWSTR pszTitle;                 // the new title
 	LPARAM  lParam;
 };
 
@@ -158,6 +200,13 @@ public:
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
@@ -176,6 +225,9 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnDaysLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnDaysLButtonDblClk)
 		MESSAGE_HANDLER(WM_PARENTNOTIFY, OnDaysParentNotify)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnDaysMouseMove)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnDaysLButtonUp)
+		MESSAGE_HANDLER(WM_SETCURSOR, OnDaysSetCursor)
 		// the items' windows': on to the control's parent
 		MESSAGE_HANDLER(WM_HSCROLL, OnForward)
 		MESSAGE_HANDLER(WM_COMMAND, OnForward)
@@ -187,6 +239,11 @@ public:
 		MESSAGE_HANDLER(WM_VKEYTOITEM, OnForward)
 		MESSAGE_HANDLER(WM_CHARTOITEM, OnForward)
 		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnCtlColor)
+	ALT_MSG_MAP(2)   // the title being edited (F2)
+		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnEditChar)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnEditGetDlgCode)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnEditKillFocus)
 	END_MSG_MAP()
 
 	// ---- Items -----------------------------------------------------------------------------------------
@@ -203,6 +260,16 @@ public:
 	int     GetItemCount() const;
 	// Virtual: lets go of every item (CLVN_RELEASEITEM) and asks for the days shown again (CLVN_GETITEMS).
 	void    RefreshItems();
+
+	BOOL    EditTitle(ULONGLONG id);                              // renames it in place, as F2 does
+
+	// The user's changes go back and forth (Ctrl+Z, Ctrl+Y): the control's own items only (not in virtual mode). Undo
+	// goes back to the items as they were, so the API's changes to the items clear what there is to undo.
+	BOOL    Undo();                                               // CLVN_RESTORED follows
+	BOOL    Redo();
+	bool    CanUndo() const;
+	bool    CanRedo() const;
+	void    ClearUndo();
 
 	BOOL    Select(ULONGLONG id);                                 // no notification; 0: none
 	ULONGLONG GetSelected() const;
@@ -250,6 +317,20 @@ private:
 	LRESULT OnDaysLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDaysLButtonDblClk(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDaysParentNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDaysMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDaysLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDaysSetCursor(UINT, WPARAM, LPARAM, BOOL&);
+	LPCWSTR CursorAt(POINT pt) const;                             // what a press at pt would do (control coords); nullptr: the arrow
+	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditKillFocus(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnForward(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
 
@@ -264,7 +345,26 @@ private:
 	ClvHit  HitStrip(POINT pt) const;                             // pt: the control's client coords
 	ClvHit  HitDays(POINT pt) const;                              // pt: the days' window's
 	void    UpdateScrollBarTheme();                               // the days' scroll bar dark on a dark background
-	void    PlaceWindows();                                       // the items' windows under their captions, or hidden
+	void    PlaceWindows();
+	// editing (CalendarViewEdit.cpp)
+	ClvHit  HitAt(POINT pt, bool* strip) const;                   // pt: the control's client coords, over the strip or the days
+	void    Press(POINT pt, bool dbl);                            // the left button, anywhere (control coords)
+	void    DragTo(POINT pt);
+	void    EndDrag(POINT pt);
+	void    CancelDrag();
+	void    DragScroll();                                         // the drag's mouse past the days' top or bottom: scrolled
+	bool    Apply(ULONGLONG id, UINT change);                     // the item changed (before kept): the app may veto, else it's a step
+	void    Step();                                               // before and now: an undo step (the control's own items)
+	void    CreateItem();                                         // CLVN_CREATEITEM over the slots selected
+	void    DeleteSelected();
+	void    Restored();
+	void    SetComposited(bool on);
+	// the keys (CalendarViewKeys.cpp)
+	bool    KeyDown(UINT vk, bool ctrl, bool alt, bool shift);
+	void    MoveSlots(int days, int slots, bool extend);
+	void    Nudge(int days, int slots, bool end);                 // Alt+arrows: the selected item moved (or its end)
+	void    EndRename(bool commit);
+	void    UpdateTip(HWND window, POINT pt);                     // the tool on window (the control or the days'), pt its client's                                       // the items' windows under their captions, or hidden
 	void    RedrawWindowOf(ULONGLONG id);                         // its window's background follows its item's
 	void    SetSelected(ULONGLONG id, bool notify);
 	void    SelectSlots(LONGLONG start, LONGLONG end, bool allDay, bool notify);
@@ -286,6 +386,8 @@ private:
 
 	std::unique_ptr<ClvData> m_Data;
 	std::unique_ptr<ClvDaysWindow> m_Days;
+	ATL::CContainedWindowT<WTL::CEdit> m_Edit;
+	HWND    m_hTip = nullptr;
 	CLVCOLORS m_Colors{};
 	bool    m_SystemColors = true;
 	HFONT   m_hFont = nullptr;

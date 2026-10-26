@@ -21,13 +21,13 @@ namespace {
 		return ClvFromSystemTime(st);
 	}
 
-	constexpr UINT_PTR NowTimer = 1;
+	constexpr UINT_PTR NowTimer = 1, DragTimer = 2;
 	constexpr int MinSlotDips = 10, MaxSlotDips = 120;
 }
 
 // ---- Construction ------------------------------------------------------------------
 
-CCalendarViewCtrl::CCalendarViewCtrl() : m_Data(std::make_unique<ClvData>()), m_Days(std::make_unique<ClvDaysWindow>(this)) {
+CCalendarViewCtrl::CCalendarViewCtrl() : m_Data(std::make_unique<ClvData>()), m_Days(std::make_unique<ClvDaysWindow>(this)), m_Edit(this, 2) {
 	m_Data->range = { ClvDayOf(Now()), 1 };
 }
 
@@ -48,6 +48,21 @@ LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	// a container too: Tab goes into the items' windows
 	m_Days->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT);
 	SetTimer(NowTimer, 30 * 1000);
+	// the title edited in place (F2), hidden until then
+	m_Edit.SubclassWindow(::CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr));
+	// a tool on the strip and one on the days, each moved onto the item under the mouse
+	m_hTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr);
+	if (m_hTip) {
+		for (HWND window : { m_hWnd, m_Days->m_hWnd }) {
+			TTTOOLINFOW ti{ sizeof(ti) };
+			ti.uFlags = TTF_SUBCLASS;
+			ti.hwnd = window;
+			ti.uId = 1;
+			ti.lpszText = LPSTR_TEXTCALLBACKW;
+			::SendMessage(m_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+		}
+		::SendMessage(m_hTip, TTM_SETMAXTIPWIDTH, 0, Scale(400));
+	}
 	UpdateScrollBarTheme();
 	UpdateFonts();
 	RangeChanged(false);
@@ -56,6 +71,9 @@ LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CCalendarViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(NowTimer);
+	if (m_hTip)
+		::DestroyWindow(m_hTip);
+	m_hTip = nullptr;
 	bHandled = FALSE;
 	return 0;
 }
@@ -76,11 +94,11 @@ LRESULT CCalendarViewCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
 	return 0;
 }
 
-LRESULT CCalendarViewCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
-	return DLGC_WANTARROWS;
-}
-
 LRESULT CCalendarViewCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam == DragTimer) {
+		DragScroll();
+		return 0;
+	}
 	if (wParam != NowTimer) {
 		bHandled = FALSE;
 		return 0;
@@ -261,6 +279,7 @@ void CCalendarViewCtrl::UpdateLayout() {
 	d.header = { 0, 0, rc.right, d.m.headerHeight };
 	d.strip = { 0, d.header.bottom, rc.right, d.header.bottom + d.layout.StripView(d.m) };
 	const int top = std::min((int)rc.bottom, (int)d.strip.bottom);
+	d.daysTop = top;
 	m_Days->SetWindowPos(nullptr, 0, top, rc.right, std::max(0, (int)rc.bottom - top), SWP_NOZORDER | SWP_NOACTIVATE);
 
 	if (!d.scrolled && rc.bottom > top) {
@@ -275,6 +294,7 @@ void CCalendarViewCtrl::UpdateLayout() {
 
 void CCalendarViewCtrl::ScrollDays(int y) {
 	auto& d = *m_Data;
+	EndRename(true);   // its place moved
 	RECT rc;
 	m_Days->GetClientRect(&rc);
 	d.scrollY = ClvClampScroll(y, d.axis.Height(), rc.bottom);
@@ -289,6 +309,7 @@ void CCalendarViewCtrl::ScrollDays(int y) {
 
 void CCalendarViewCtrl::ScrollStrip(int y) {
 	auto& d = *m_Data;
+	EndRename(true);
 	const int view = d.layout.StripView(d.m) - 2 * d.m.stripPad;
 	d.stripScroll = ClvClampScroll(y, d.layout.StripHeight(d.m), view);
 	Invalidate(FALSE);
@@ -349,6 +370,8 @@ LRESULT CCalendarViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL
 		return 0;
 	}
 	ScrollDays(d.scrollY - delta * 3 * d.axis.slotHeight / WHEEL_DELTA);
+	if (d.drag != ClvDrag::None)
+		DragTo(d.dragMouse);   // the time under the mouse moved
 	return 0;
 }
 
@@ -356,6 +379,7 @@ LRESULT CCalendarViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL
 
 void CCalendarViewCtrl::RangeChanged(bool notify) {
 	auto& d = *m_Data;
+	CancelDrag();
 	if (d.isVirtual && IsWindow()) {
 		// let go of the items that left the days, and ask for the days not asked for yet
 		for (auto& item : d.store.Keep(d.range.Start(), d.range.End()))
@@ -482,7 +506,7 @@ void CCalendarViewCtrl::SetWorkWeek(BYTE days, int startMinute, int endMinute) {
 
 namespace {
 	// the item's fields in mask from the API's
-	void Apply(ClvItem& t, const CLVITEM& item, UINT mask) {
+	void ApplyFields(ClvItem& t, const CLVITEM& item, UINT mask) {
 		if (mask & CLVIF_TIME) {
 			t.start = ClvFromSystemTime(item.start);
 			t.end = ClvFromSystemTime(item.end);
@@ -517,7 +541,11 @@ BOOL CCalendarViewCtrl::AddItem(const CLVITEM* item) {
 		return FALSE;
 	ClvItem t;
 	t.id = item->id;
-	Apply(t, *item, CLVIF_ALL);
+	ApplyFields(t, *item, CLVIF_ALL);
+	if (!d.creating) {
+		CancelDrag();
+		d.history.Clear();   // an undo would take this back too
+	}
 	if (!d.store.Add(t))
 		return FALSE;
 	if (!d.fetching)
@@ -541,8 +569,10 @@ BOOL CCalendarViewCtrl::SetItem(const CLVITEM* item) {
 	auto p = item ? d.store.Find(item->id) : nullptr;
 	if (!p)
 		return FALSE;
+	CancelDrag();
+	d.history.Clear();   // an undo would take this back too
 	ClvItem t = *p;
-	Apply(t, *item, item->mask);
+	ApplyFields(t, *item, item->mask);
 	if (!d.store.Set(t))
 		return FALSE;
 	Changed();
@@ -571,6 +601,8 @@ BOOL CCalendarViewCtrl::GetItem(ULONGLONG id, CLVITEM* item) const {
 }
 
 BOOL CCalendarViewCtrl::RemoveItem(ULONGLONG id) {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	if (!m_Data->store.Remove(id))
 		return FALSE;
 	Changed();
@@ -578,6 +610,8 @@ BOOL CCalendarViewCtrl::RemoveItem(ULONGLONG id) {
 }
 
 void CCalendarViewCtrl::RemoveAll() {
+	CancelDrag();
+	m_Data->history.Clear();   // an undo would take this back too
 	m_Data->store.Clear();
 	Changed();
 }
@@ -590,6 +624,7 @@ void CCalendarViewCtrl::RefreshItems() {
 	auto& d = *m_Data;
 	if (!d.isVirtual)
 		return;
+	CancelDrag();
 	auto items = d.store.Save();
 	d.store.Clear();
 	for (auto& item : items)
@@ -673,7 +708,7 @@ void CCalendarViewCtrl::EnsureVisible(ULONGLONG id) {
 	}
 	if (ClvInStrip(*item)) {
 		if (auto box = d.layout.FindStrip(id))
-			ScrollStrip(ClvScrollToShow(d.stripScroll, box->rc.top, box->rc.bottom, d.layout.StripView(d.m) - 2 * d.m.stripPad,
+			ScrollStrip(ClvScrollToShow(d.stripScroll, box->row * d.m.stripRow, (box->row + 1) * d.m.stripRow, d.layout.StripView(d.m) - 2 * d.m.stripPad,
 				d.layout.StripHeight(d.m)));
 		return;
 	}
@@ -700,47 +735,24 @@ ClvHit CCalendarViewCtrl::HitDays(POINT pt) const {
 }
 
 LRESULT CCalendarViewCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	auto& d = *m_Data;
-	if (::GetFocus() != m_hWnd)
-		SetFocus();
-	auto hit = HitStrip(PointOf(lParam));
-	if (hit.box >= 0)
-		SetSelected(hit.Id(d.layout, true), true);
-	else if (hit.part == ClvPart::Slot) {
-		auto span = ClvDayRange(d.range.first + hit.day, d.range.first + hit.day);
-		SelectSlots(span.start, span.end, true, true);
-	}
+	Press(PointOf(lParam), false);
 	return 0;
 }
 
 LRESULT CCalendarViewCtrl::OnLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	auto& d = *m_Data;
-	auto hit = HitStrip(PointOf(lParam));
-	if (hit.box >= 0)
-		NotifyItem(CLVN_ITEMACTIVATE, hit.Id(d.layout, true));
+	Press(PointOf(lParam), true);
 	return 0;
 }
 
 LRESULT CCalendarViewCtrl::OnDaysLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	auto& d = *m_Data;
-	if (::GetFocus() != m_hWnd)
-		SetFocus();   // the keys are the control's
-	auto hit = HitDays(PointOf(lParam));
-	if (hit.box >= 0)
-		SetSelected(hit.Id(d.layout, false), true);
-	else if (hit.part == ClvPart::Slot) {
-		const ClvTime t = d.layout.TimeAt(hit.day, hit.minute);
-		auto span = ClvSlotRange(t, t, d.axis.slotMinutes);
-		SelectSlots(span.start, span.end, false, true);
-	}
+	POINT pt = PointOf(lParam);
+	Press({ pt.x, pt.y + m_Data->daysTop }, false);
 	return 0;
 }
 
 LRESULT CCalendarViewCtrl::OnDaysLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	auto& d = *m_Data;
-	auto hit = HitDays(PointOf(lParam));
-	if (hit.box >= 0)
-		NotifyItem(CLVN_ITEMACTIVATE, hit.Id(d.layout, false));
+	POINT pt = PointOf(lParam);
+	Press({ pt.x, pt.y + m_Data->daysTop }, true);
 	return 0;
 }
 
@@ -834,7 +846,9 @@ LRESULT CCalendarViewCtrl::OnDaysParentNotify(UINT, WPARAM wParam, LPARAM lParam
 	return 0;
 }
 
-LRESULT CCalendarViewCtrl::OnForward(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
+LRESULT CCalendarViewCtrl::OnForward(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if (uMsg == WM_NOTIFY && ((NMHDR*)lParam)->hwndFrom == m_hTip)
+		return OnNotify(uMsg, wParam, lParam, bHandled);   // the days' tool's text
 	return ::SendMessage(GetParent(), uMsg, wParam, lParam);
 }
 

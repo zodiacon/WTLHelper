@@ -64,6 +64,17 @@ namespace {
 		return text;
 	}
 
+	// a chevron centered on (cx, cy), up or down
+	void Chevron(WTL::CDCHandle dc, int cx, int cy, int size, bool down, COLORREF color) {
+		const int h = size / 2, q = size / 4;
+		POINT pts[3] = { { cx - h, cy + (down ? -q : q) }, { cx, cy + (down ? q : -q) }, { cx + h + 1, cy + (down ? -q - 1 : q + 1) } };
+		WTL::CPen pen;
+		pen.CreatePen(PS_SOLID, std::max(1, size / 6), color);
+		auto old = dc.SelectPen(pen);
+		dc.Polyline(pts, 3);
+		dc.SelectPen(old);
+	}
+
 	void HLine(WTL::CDCHandle dc, int x1, int x2, int y, COLORREF color) {
 		RECT rc{ x1, y, x2, y + 1 };
 		FillSolid(dc, rc, color);
@@ -212,6 +223,16 @@ void CCalendarViewCtrl::Paint(WTL::CDCHandle dc) {
 		if (selected >= 0)
 			PaintItem(dc, c, selected, true, notify);
 		dc.SelectClipRgn(nullptr);
+
+		// more rows than shown: chevrons in the ruler's corner where they are (the wheel scrolls them)
+		if (d.layout.stripRows > d.m.stripMaxRows) {
+			const int size = Scale(8), cx = cols.left / 2;
+			const int view = d.layout.StripView(d.m) - 2 * d.m.stripPad;
+			if (d.stripScroll > 0)
+				Chevron(dc, cx, rows.top + d.m.stripRow / 2, size, false, c.crHeaderText);
+			if (d.stripScroll + view < d.layout.StripHeight(d.m))
+				Chevron(dc, cx, rows.bottom - d.m.stripRow / 2, size, true, c.crHeaderText);
+		}
 	}
 	dc.SelectFont(oldFont);
 }

@@ -21,6 +21,9 @@ private:
 	CCalendarViewCtrl* m_Owner;
 };
 
+// Pending: pressed, not moved yet; Start, End: a timed item's ends; StripStart, StripEnd: a strip item's; Select: slots
+enum class ClvDrag : uint8_t { None, Pending, Move, Start, End, StripStart, StripEnd, Select };
+
 struct ClvData {
 	ClvItemStore store;
 	ClvRange range;                // the days shown
@@ -46,6 +49,29 @@ struct ClvData {
 	bool isVirtual = false;
 	ClvRange cached{ 0, 0 };
 	bool fetching = false;         // CLVN_GETITEMS is out: AddItem lays out once it's back
+
+	// the layout's top of the days' window (the control's client coords)
+	int  daysTop = 0;
+
+	// a drag: the item changes as it goes, the items as they were kept to go back to
+	ClvDrag drag = ClvDrag::None;
+	ClvDrag pending = ClvDrag::None;   // what a press becomes once the mouse moves
+	ULONGLONG dragId = 0;
+	ClvSpan dragOriginal;
+	POINT dragDown{}, dragMouse{};     // the control's client coords
+	ClvTime grab = 0;                  // the time under the mouse at the press
+	int64_t grabDay = 0;               // and its day
+	ClvTime anchor = 0;                // a slot selection's first slot (a day's start in the strip)
+	bool anchorStrip = false;
+	ClvItemStore::State before;
+	ClvHistory history;
+	bool creating = false;             // CLVN_CREATEITEM is out: its AddItem is an undo step, not an API change
+
+	ClvTime cursor = -1;               // the keys' slot (-1: none yet)
+	ULONGLONG renaming = 0;            // the item whose title is being edited
+	std::wstring tipText;              // the tooltip's, on tipRect of tipWindow
+	RECT tipRect{};
+	HWND tipWindow = nullptr;
 
 	std::wstring titleBuffer, tipBuffer;   // GetItem's
 	std::vector<std::pair<HWND, RECT>> placed;   // the items' windows as last placed (empty: hidden)
