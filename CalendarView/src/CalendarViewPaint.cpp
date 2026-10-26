@@ -4,6 +4,8 @@
 
 using namespace ClvDraw;
 
+bool ClvDraw::HighContrast = false;
+
 // ---- Helpers ----------------------------------------------------------------------------------------
 
 void ClvDraw::RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius) {
@@ -75,6 +77,18 @@ namespace {
 		dc.SelectPen(old);
 	}
 
+	// the time off: shaded, or in high contrast hatched in the gray text color over the background
+	void FillOff(WTL::CDCHandle dc, const RECT& rc, const CLVCOLORS& c) {
+		FillSolid(dc, rc, c.crNonWork);
+		if (!HighContrast || rc.bottom <= rc.top)
+			return;
+		WTL::CBrush hatch;
+		hatch.CreateHatchBrush(HS_BDIAGONAL, ::GetSysColor(COLOR_GRAYTEXT));
+		const int mode = dc.SetBkMode(TRANSPARENT);
+		dc.FillRect(&rc, hatch);
+		dc.SetBkMode(mode);
+	}
+
 	void HLine(WTL::CDCHandle dc, int x1, int x2, int y, COLORREF color) {
 		RECT rc{ x1, y, x2, y + 1 };
 		FillSolid(dc, rc, color);
@@ -89,6 +103,18 @@ namespace {
 // ---- Colors and texts ---------------------------------------------------------------------------------
 
 CLVCOLORS CCalendarViewCtrl::GetColors() const {
+	if (IsHighContrast()) {
+		// the system's colors, over the app's: the theme's pairs, nothing between them
+		CLVCOLORS c;
+		c.crBack = c.crNonWork = c.crItem = ::GetSysColor(COLOR_WINDOW);
+		c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crHeaderBack = ::GetSysColor(COLOR_BTNFACE);
+		c.crHeaderText = ::GetSysColor(COLOR_BTNTEXT);
+		c.crGrid = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crToday = ::GetSysColor(COLOR_HOTLIGHT);
+		c.crSelection = ::GetSysColor(COLOR_HIGHLIGHT);
+		return c;
+	}
 	if (!m_SystemColors)
 		return m_Colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
@@ -106,6 +132,21 @@ CLVCOLORS CCalendarViewCtrl::GetColors() const {
 	c.crItem = accent;
 	c.crSelection = Blend(window, highlight, dark ? 35 : 22);
 	return c;
+}
+
+void CCalendarViewCtrl::ForceHighContrast(int on) {
+	m_ForceHighContrast = on < 0 ? -1 : on ? 1 : 0;
+	if (IsWindow()) {
+		UpdateScrollBarTheme();
+		RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+	}
+}
+
+bool CCalendarViewCtrl::IsHighContrast() const {
+	if (m_ForceHighContrast >= 0)
+		return m_ForceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
 }
 
 std::wstring CCalendarViewCtrl::DayName(LONGLONG day, int width, WTL::CDCHandle dc) const {
@@ -163,6 +204,7 @@ LRESULT CCalendarViewCtrl::OnPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) {
 
 void CCalendarViewCtrl::Paint(WTL::CDCHandle dc) {
 	auto& d = *m_Data;
+	HighContrast = IsHighContrast();
 	const auto c = GetColors();
 	const auto& cols = d.layout.columns;
 	const int64_t today = ClvDayOf(Now());
@@ -254,6 +296,7 @@ LRESULT CCalendarViewCtrl::OnDaysPaint(UINT uMsg, WPARAM wParam, LPARAM, BOOL&) 
 
 void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 	auto& d = *m_Data;
+	HighContrast = IsHighContrast();
 	const auto c = GetColors();
 	const auto& cols = d.layout.columns;
 	const auto& axis = d.axis;
@@ -276,12 +319,12 @@ void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 		const int x1 = cols.Left(i), x2 = cols.Right(i);
 		RECT all{ x1, Y(0), x2, Y((int)ClvDay) };
 		if (!d.work.IsWorkingDay(day))
-			FillSolid(dc, all, c.crNonWork);
+			FillOff(dc, all, c);
 		else {
 			FillSolid(dc, all, c.crBack);
 			RECT before{ x1, Y(0), x2, Y(d.work.start) }, after{ x1, Y(d.work.end), x2, Y((int)ClvDay) };
-			FillSolid(dc, before, c.crNonWork);
-			FillSolid(dc, after, c.crNonWork);
+			FillOff(dc, before, c);
+			FillOff(dc, after, c);
 		}
 		if (d.slots && !d.slot.allDay) {
 			const ClvTime dayStart = ClvTimeOf(day);
@@ -294,7 +337,7 @@ void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 	}
 
 	// the slots' and hours' lines, the hours' labels
-	const COLORREF slotLine = Blend(c.crBack, c.crGrid, 45);
+	const COLORREF slotLine = Shade(c.crBack, c.crGrid, 45);
 	const int first = std::max(0, axis.Minute(top + rcPaint.top) / axis.slotMinutes - 1);
 	const int last = std::min((int)ClvDay / axis.slotMinutes, axis.Minute(top + rcPaint.bottom) / axis.slotMinutes + 1);
 	dc.SetTextColor(c.crHeaderText);
@@ -357,6 +400,13 @@ void CCalendarViewCtrl::PaintDays(WTL::CDCHandle dc, const RECT& rcPaint) {
 // ---- Items --------------------------------------------------------------------------------------------
 
 void CCalendarViewCtrl::ItemColors(const ClvItem& item, const CLVCOLORS& c, COLORREF* fill, COLORREF* text) const {
+	if (IsHighContrast()) {
+		// the items' own colors left out
+		const bool selected = item.id == m_Data->selected;
+		*fill = ::GetSysColor(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW);
+		*text = ::GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT);
+		return;
+	}
 	const COLORREF color = item.color != CLR_INVALID ? item.color : c.crItem;
 	*fill = Blend(c.crBack, color, IsDark(c.crBack) ? 40 : 22);
 	*text = c.crText;
@@ -379,7 +429,7 @@ void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int ind
 		return;
 
 	const bool selected = item.id == d.selected;
-	const COLORREF color = item.color != CLR_INVALID ? item.color : c.crItem;
+	const COLORREF color = HighContrast ? c.crText : item.color != CLR_INVALID ? item.color : c.crItem;
 	COLORREF fill, text;
 	ItemColors(item, c, &fill, &text);
 	const int bar = Scale(4);
@@ -413,11 +463,11 @@ void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int ind
 		post = post || (result & CDRF_NOTIFYPOSTPAINT);
 	}
 
-	RoundFill(dc, rc, fill, Blend(color, c.crBack, selected ? 0 : 25), Scale(6));
+	RoundFill(dc, rc, fill, HighContrast ? text : Blend(color, c.crBack, selected ? 0 : 25), Scale(6));
 	// the color's bar at the left (none on a strip piece going on from before)
 	if (!(strip && box.before)) {
 		RECT side{ rc.left + 1, rc.top + 1, rc.left + 1 + bar, rc.bottom - 1 };
-		FillSolid(dc, side, color);
+		FillSolid(dc, side, HighContrast ? text : color);
 	}
 
 	if (inner.right > inner.left && item.content != ClvContent::Custom) {
@@ -438,7 +488,7 @@ void CCalendarViewCtrl::PaintItem(WTL::CDCHandle dc, const CLVCOLORS& c, int ind
 				auto time = TimeText(item.start, item.end, item.allDay);
 				line.top = line.bottom;
 				line.bottom = line.top + tm.tmHeight;
-				dc.SetTextColor(selected ? text : Blend(c.crText, fill, 30));
+				dc.SetTextColor(selected || HighContrast ? text : Blend(c.crText, fill, 30));
 				dc.DrawText(time.c_str(), (int)time.size(), &line, format);
 			}
 		}

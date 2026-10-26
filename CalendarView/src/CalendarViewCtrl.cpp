@@ -46,7 +46,7 @@ LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	d.isVirtual = (GetStyle() & CLVS_VIRTUAL) != 0;
 	ModifyStyleEx(0, WS_EX_CONTROLPARENT);
 	// a container too: Tab goes into the items' windows
-	m_Days->Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT);
+	m_Days->Create(m_hWnd, rcDefault, L"Days", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT);
 	SetTimer(NowTimer, 30 * 1000);
 	// the title edited in place (F2), hidden until then
 	m_Edit.SubclassWindow(::CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, m_hWnd, nullptr, nullptr, nullptr));
@@ -71,6 +71,7 @@ LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CCalendarViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(NowTimer);
+	DisconnectAccessible();
 	if (m_hTip)
 		::DestroyWindow(m_hTip);
 	m_hTip = nullptr;
@@ -87,10 +88,12 @@ LRESULT CCalendarViewCtrl::OnSize(UINT, WPARAM, LPARAM, BOOL&) {
 	return 0;
 }
 
-LRESULT CCalendarViewCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CCalendarViewCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	Invalidate(FALSE);   // the selection's color
 	if (m_Days->IsWindow())
 		m_Days->Invalidate(FALSE);
+	if (uMsg == WM_SETFOCUS)
+		NotifyAccessible(EVENT_OBJECT_FOCUS, m_Data->selected ? AccChildId(m_Data->selected) : AccSlotsId());
 	return 0;
 }
 
@@ -275,6 +278,8 @@ void CCalendarViewCtrl::UpdateLayout() {
 	const int width = std::max(0, (int)rc.right - ::GetSystemMetricsForDpi(SM_CXVSCROLL, m_Dpi));
 	const ClvColumns columns{ d.m.rulerWidth, std::max(0, width - d.m.rulerWidth), d.range.days };
 	d.layout = ClvLayoutDay(d.store, d.range, columns, d.axis, d.m);
+	d.accOrder = ClvTabOrder(d.layout, d.store);
+	NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);
 
 	d.header = { 0, 0, rc.right, d.m.headerHeight };
 	d.strip = { 0, d.header.bottom, rc.right, d.header.bottom + d.layout.StripView(d.m) };
@@ -658,6 +663,11 @@ void CCalendarViewCtrl::SetSelected(ULONGLONG id, bool notify) {
 	m_Days->Invalidate(FALSE);
 	RedrawWindowOf(old);
 	RedrawWindowOf(id);
+	if (const long child = AccChildId(id); child != CHILDID_SELF) {
+		NotifyAccessible(EVENT_OBJECT_SELECTION, child);
+		if (::GetFocus() == m_hWnd)
+			NotifyAccessible(EVENT_OBJECT_FOCUS, child);
+	}
 	if (notify)
 		NotifyItem(CLVN_SELCHANGED, id);
 }
@@ -665,10 +675,16 @@ void CCalendarViewCtrl::SetSelected(ULONGLONG id, bool notify) {
 void CCalendarViewCtrl::SelectSlots(LONGLONG start, LONGLONG end, bool allDay, bool notify) {
 	auto& d = *m_Data;
 	SetSelected(0, notify);
+	const bool had = d.slots;
 	d.slots = true;
 	d.slot = { start, end, allDay };
 	Invalidate(FALSE);
 	m_Days->Invalidate(FALSE);
+	if (!had)
+		NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);   // the selected time's child came
+	NotifyAccessible(EVENT_OBJECT_NAMECHANGE, AccSlotsId());
+	if (::GetFocus() == m_hWnd)
+		NotifyAccessible(EVENT_OBJECT_FOCUS, AccSlotsId());
 	if (notify)
 		NotifyRange(CLVN_SLOTCHANGED, start, end, allDay);
 }
@@ -678,6 +694,7 @@ void CCalendarViewCtrl::ClearSlots() {
 	if (!d.slots)
 		return;
 	d.slots = false;
+	NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);   // the selected time's child went
 	Invalidate(FALSE);
 	m_Days->Invalidate(FALSE);
 }

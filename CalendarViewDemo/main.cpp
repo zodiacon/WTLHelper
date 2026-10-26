@@ -42,7 +42,7 @@ enum : UINT {
 	IDC_CALENDAR = 100, IDC_LOG, IDC_PROGRESS = 200, IDC_JOIN, IDC_AGENDA, IDC_NOTES, IDC_SHORT,
 	CMD_EXIT = 1000, CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK, CMD_PREV, CMD_NEXT, CMD_TODAY, CMD_SLOT15,
 	CMD_SLOT30, CMD_SLOT60, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_NOW, CMD_ADD,
-	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND,
+	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND, CMD_HIGHCONTRAST,
 };
 
 static std::unique_ptr<CCalendarViewCtrl> g_calendar;   // made again for virtual mode: a new control's state
@@ -321,6 +321,7 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_DARKMODE, L"Dar&k Mode");
 #endif
 	::AppendMenuW(view, MF_STRING, CMD_LARGEFONT, L"&Larger Font");
+	::AppendMenuW(view, MF_STRING, CMD_HIGHCONTRAST, L"Force &High Contrast");
 	::AppendMenuW(view, MF_STRING, CMD_CLEARLOG, L"Clear Lo&g");
 	HMENU items = ::CreatePopupMenu();
 	::AppendMenuW(items, MF_STRING, CMD_ADD, L"&New Item in the Selected Slots\tCtrl+N");
@@ -451,6 +452,7 @@ static void OnCommand(UINT id) {
 				g_calendar->ModifyStyle(CLVS_READONLY, 0);
 			break;
 		case CMD_NOWEEKEND: Toggle(id); break;
+		case CMD_HIGHCONTRAST: g_calendar->ForceHighContrast(Toggle(id) ? 1 : -1); break;
 	}
 }
 

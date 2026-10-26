@@ -24,6 +24,8 @@ private:
 // Pending: pressed, not moved yet; Start, End: a timed item's ends; StripStart, StripEnd: a strip item's; Select: slots
 enum class ClvDrag : uint8_t { None, Pending, Move, Start, End, StripStart, StripEnd, Select };
 
+class ClvAccessible;
+
 struct ClvData {
 	ClvItemStore store;
 	ClvRange range;                // the days shown
@@ -74,8 +76,14 @@ struct ClvData {
 	HWND tipWindow = nullptr;
 
 	std::wstring titleBuffer, tipBuffer;   // GetItem's
+	ClvAccessible* acc = nullptr;      // once a client has asked
+	std::vector<uint64_t> accOrder;    // the items as the accessible list's children, in the tab order
+	ULONGLONG accItem = 0;             // the item a posted action is for
 	std::vector<std::pair<HWND, RECT>> placed;   // the items' windows as last placed (empty: hidden)
 };
+
+// an item's time as a tooltip says it, or spoken (an accessibility client's description: no abbreviations)
+std::wstring ClvWhen(const ClvItem& item, bool spoken);
 
 namespace ClvDraw {
 	inline COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
@@ -90,6 +98,13 @@ namespace ClvDraw {
 	inline void FillSolid(WTL::CDCHandle dc, const RECT& rc, COLORREF color) {
 		dc.SetBkColor(color);
 		dc.ExtTextOut(0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+	}
+
+	extern bool HighContrast;   // set as a paint starts
+
+	// a color between two; in high contrast the second (no shades between the system's colors)
+	inline COLORREF Shade(COLORREF a, COLORREF b, int percentB) {
+		return HighContrast ? b : Blend(a, b, percentB);
 	}
 
 	void RoundFill(WTL::CDCHandle dc, const RECT& rc, COLORREF fill, COLORREF border, int radius);

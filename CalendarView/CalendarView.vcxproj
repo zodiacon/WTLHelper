@@ -100,6 +100,7 @@
     <ClInclude Include="src\CalendarViewModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CalendarViewAccessible.cpp" />
     <ClCompile Include="src\CalendarViewCtrl.cpp" />
     <ClCompile Include="src\CalendarViewEdit.cpp" />
     <ClCompile Include="src\CalendarViewKeys.cpp" />

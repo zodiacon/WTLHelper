@@ -344,6 +344,7 @@ bool CCalendarViewCtrl::Apply(ULONGLONG id, UINT change) {
 	SpanFrom(*item, nm.start, nm.end, nm.allDay);
 	Step();
 	Changed();
+	NotifyAccessible(EVENT_OBJECT_DESCRIPTIONCHANGE, AccChildId(id));
 	nm.start = ClvToSystemTime(item->start);
 	nm.end = ClvToSystemTime(item->end);
 	nm.allDay = item->allDay;

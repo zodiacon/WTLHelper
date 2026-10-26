@@ -25,21 +25,21 @@ namespace {
 			return {};
 		return text;
 	}
+}
 
-	// an item's time as a tooltip says it
-	std::wstring When(const ClvItem& item) {
-		const LPCWSTR day = L"ddd MMM d";
-		if (item.allDay) {
-			const int64_t first = ClvFirstDay(item), last = ClvLastDay(item);
-			auto text = DateText(ClvTimeOf(first), day);
-			if (last > first)
-				text += L" \x2013 " + DateText(ClvTimeOf(last), day);
-			return text;
-		}
-		if (ClvDayOf(item.start) == ClvLastDay(item))
-			return DateText(item.start, day) + L", " + TimeOnly(item.start) + L" \x2013 " + TimeOnly(item.end);
-		return DateText(item.start, day) + L" " + TimeOnly(item.start) + L" \x2013 " + DateText(item.end, day) + L" " + TimeOnly(item.end);
+std::wstring ClvWhen(const ClvItem& item, bool spoken) {
+	const LPCWSTR day = spoken ? L"dddd, MMMM d" : L"ddd MMM d";
+	const LPCWSTR to = spoken ? L" to " : L" \x2013 ";
+	if (item.allDay) {
+		const int64_t first = ClvFirstDay(item), last = ClvLastDay(item);
+		auto text = (spoken ? std::wstring(L"All day, ") : std::wstring()) + DateText(ClvTimeOf(first), day);
+		if (last > first)
+			text += to + DateText(ClvTimeOf(last), day);
+		return text;
 	}
+	if (ClvDayOf(item.start) == ClvLastDay(item))
+		return DateText(item.start, day) + L", " + TimeOnly(item.start) + to + TimeOnly(item.end);
+	return DateText(item.start, day) + L" " + TimeOnly(item.start) + to + DateText(item.end, day) + L" " + TimeOnly(item.end);
 }
 
 LRESULT CCalendarViewCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHandled) {
@@ -272,6 +272,7 @@ void CCalendarViewCtrl::EndRename(bool commit) {
 	Step();
 	Invalidate(FALSE);
 	m_Days->Invalidate(FALSE);
+	NotifyAccessible(EVENT_OBJECT_NAMECHANGE, AccChildId(id));
 	FireNotify(&nm.hdr, CLVN_TITLECHANGED);
 }
 
@@ -315,7 +316,7 @@ void CCalendarViewCtrl::UpdateTip(HWND window, POINT pt) {
 		if (hit.box >= 0) {
 			const auto& box = (strip ? d.layout.strip : d.layout.timed)[hit.box];
 			const auto& item = d.store.Items()[box.item];
-			text = item.tip.empty() ? item.title + L"\n" + When(item) : item.tip;
+			text = item.tip.empty() ? item.title + L"\n" + ClvWhen(item, false) : item.tip;
 			rc = box.rc;
 			::OffsetRect(&rc, 0, strip ? d.strip.top + d.m.stripPad - d.stripScroll : -d.scrollY);
 		}

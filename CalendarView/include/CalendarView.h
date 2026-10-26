@@ -10,7 +10,8 @@
 // too) and their ends to resize them, drags over slots to select them and double-clicks (or presses Enter) to ask the
 // app for an item there; each change is the app's to allow, and Ctrl+Z undoes it (the control's own items). The keys:
 // the arrows move the slots selected (Shift: more of them), Tab goes along the items, Alt+arrows move the selected item
-// (Alt+Shift+Up/Down: its end), F2 renames it, Delete removes it. Tooltips tell an item's time. The items are the control's own (AddItem), or in virtual mode
+// (Alt+Shift+Up/Down: its end), F2 renames it, Delete removes it. Tooltips tell an item's time. In high contrast it
+// draws with the system colors only (over the app's and the items' own). Accessibility: a list of the items (MSAA). The items are the control's own (AddItem), or in virtual mode
 // (CLVS_VIRTUAL) the app's: the control asks for those of the days it shows (CLVN_GETITEMS) and lets go of the ones
 // that leave them (CLVN_RELEASEITEM). The API follows the common controls: C-style structures and WM_NOTIFY codes
 // (CLVN_*) sent to the parent. Times are local SYSTEMTIMEs (seconds ignored).
@@ -178,6 +179,7 @@ class ClvDaysWindow;
 
 class CCalendarViewCtrl : public ATL::CWindowImpl<CCalendarViewCtrl> {
 	friend class ClvDaysWindow;
+	friend class ClvAccessible;
 public:
 	DECLARE_WND_CLASS_EX(L"WC_CalendarView", CS_DBLCLKS, -1)
 
@@ -207,6 +209,8 @@ public:
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
+		MESSAGE_HANDLER(WM_CLV_ACCACTION, OnAccAction)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
@@ -291,11 +295,15 @@ public:
 	int     GetZoom() const;
 	void    SetWorkWeek(BYTE days, int startMinute, int endMinute);   // a bit by weekday, Sunday's the lowest; [start, end)
 	void    SetColors(const CLVCOLORS* colors);                   // nullptr: from the system colors (follows WTLHelper dark mode)
-	CLVCOLORS GetColors() const;
+	CLVCOLORS GetColors() const;                                  // in high contrast: the system's
+	void    ForceHighContrast(int on);                            // for testing: 1 on, 0 off, -1 (the default) as Windows says
+	bool    IsHighContrast() const;
 
 	HWND    GetDaysWindow() const;                                // the child with the days' time (the parent of items' windows)
 
 private:
+	enum : UINT { WM_CLV_ACCACTION = WM_USER + 100 };              // an accessibility client's action, done later
+
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
@@ -327,6 +335,8 @@ private:
 	LPCWSTR CursorAt(POINT pt) const;                             // what a press at pt would do (control coords); nullptr: the arrow
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnAccAction(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditChar(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEditGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
@@ -364,7 +374,14 @@ private:
 	void    MoveSlots(int days, int slots, bool extend);
 	void    Nudge(int days, int slots, bool end);                 // Alt+arrows: the selected item moved (or its end)
 	void    EndRename(bool commit);
-	void    UpdateTip(HWND window, POINT pt);                     // the tool on window (the control or the days'), pt its client's                                       // the items' windows under their captions, or hidden
+	void    UpdateTip(HWND window, POINT pt);
+	// accessibility (CalendarViewAccessible.cpp)
+	long    AccChildId(ULONGLONG id) const;                       // its child's, 1..; CHILDID_SELF if it isn't shown
+	long    AccSlotsId() const;                                   // the selected time's child; CHILDID_SELF if none
+	std::wstring AccDescription(ULONGLONG id) const;
+	std::wstring AccSlots() const;                                // the selected time, said
+	void    NotifyAccessible(DWORD event, long child);            // once a client has asked
+	void    DisconnectAccessible();                     // the tool on window (the control or the days'), pt its client's                                       // the items' windows under their captions, or hidden
 	void    RedrawWindowOf(ULONGLONG id);                         // its window's background follows its item's
 	void    SetSelected(ULONGLONG id, bool notify);
 	void    SelectSlots(LONGLONG start, LONGLONG end, bool allDay, bool notify);
@@ -397,4 +414,5 @@ private:
 	bool    m_OwnFont = true;
 	UINT    m_Dpi = 96;
 	int     m_DarkScrollBars = -1;                                // as last set: 0, 1 (-1: not yet)
+	int     m_ForceHighContrast = -1;
 };
