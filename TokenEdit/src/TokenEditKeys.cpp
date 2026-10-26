@@ -58,8 +58,25 @@ bool CTokenEditCtrl::KeyDown(UINT vk) {
 		Paste();
 		return true;
 	}
+	if (ctrl && (vk == 'Z' || vk == 'Y')) {
+		if (vk == 'Y' || shift)
+			Redo();
+		else
+			Undo();
+		return true;
+	}
+	if (d.drag != TkeData::Drag::None) {
+		if (vk == VK_ESCAPE)
+			CancelDrag();
+		return true;   // the other keys wait for the drop
+	}
 
 	switch (vk) {
+		case VK_F2:
+			if (focus >= 0)
+				StartEdit(focus, true);
+			return true;
+
 		case VK_LEFT:
 			if (focus < 0)
 				return true;
@@ -149,6 +166,26 @@ bool CTokenEditCtrl::EditKey(UINT vk) {
 	const int length = m_Edit.GetWindowTextLength();
 
 	switch (vk) {
+		case VK_ESCAPE:
+			// an edited token back as it was
+			if (d.editing) {
+				EndTokenEdit(true);
+				return true;
+			}
+			return false;
+
+		case 'Z':
+		case 'Y':
+			// with nothing typed, the tokens' undo (else the edit's own)
+			if (ctrl && length == 0 && !d.editing) {
+				if (vk == 'Y' || ::GetKeyState(VK_SHIFT) < 0)
+					Redo();
+				else
+					Undo();
+				return true;
+			}
+			return false;
+
 		case VK_LEFT:
 			// out of the text's start onto the token before
 			if (start == 0 && end == 0 && editPos > 0) {

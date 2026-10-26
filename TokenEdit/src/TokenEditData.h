@@ -117,6 +117,21 @@ struct TkeData {
 	bool suggestingAll = false;                   // the list shows all of them (Alt+Down with nothing typed)
 
 	TkeHistory history;
+
+	// a token put back into text (EditToken): out of the list meanwhile
+	bool editing = false;
+	bool editStale = false;                       // the API changed the tokens meanwhile: no undo step for it
+	TkeToken edited;                              // as it was
+	TkeTokenList::State editBefore;               // the tokens with it, for the undo step
+
+	// dragging tokens: pressed, then past SM_CXDRAG
+	enum class Drag : uint8_t { None, Pending, Dragging } drag = Drag::None;
+	POINT dragFrom{};
+	int  dropIndex = -1;                          // where the selected tokens would go
+	int  pendingOnly = -1;                        // a selected token pressed: only it is selected if the press isn't a drag
+
+	std::wstring closeTip;                        // SetCloseTip's; empty: "Remove"
+	RECT tipRect{};
 };
 
 // ---- Drawing helpers ------------------------------------------------------------------------------

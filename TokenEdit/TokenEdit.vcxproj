@@ -101,6 +101,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\TokenEditCtrl.cpp" />
+    <ClCompile Include="src\TokenEditEditing.cpp" />
     <ClCompile Include="src\TokenEditInput.cpp" />
     <ClCompile Include="src\TokenEditKeys.cpp" />
     <ClCompile Include="src\TokenEditModel.cpp" />

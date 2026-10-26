@@ -62,6 +62,16 @@ LRESULT CTokenEditCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Edit.SetMargins(0, 0);
 	if (ReadOnly())
 		m_Edit.ShowWindow(SW_HIDE);
+	// one tool, moved onto the hot token or close button (UpdateTip)
+	m_hTip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
+		m_hWnd, nullptr, nullptr, nullptr);
+	TTTOOLINFOW ti{ sizeof(ti) };
+	ti.uFlags = TTF_SUBCLASS;
+	ti.hwnd = m_hWnd;
+	ti.uId = 1;
+	ti.lpszText = LPSTR_TEXTCALLBACKW;
+	::SendMessage(m_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+	::SendMessage(m_hTip, TTM_SETMAXTIPWIDTH, 0, Scale(400));
 	UpdateFonts();
 	UpdateMetrics();
 	EnsureLayout();
@@ -75,6 +85,10 @@ LRESULT CTokenEditCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 		if (d.list->IsWindow())
 			d.list->DestroyWindow();
 		d.list.reset();
+	}
+	if (m_hTip) {
+		::DestroyWindow(m_hTip);
+		m_hTip = nullptr;
 	}
 	bHandled = FALSE;
 	return 0;
@@ -313,7 +327,11 @@ bool CTokenEditCtrl::Duplicate(const std::wstring& text, int except) const {
 }
 
 void CTokenEditCtrl::ClearHistory() {
-	m_Data->history.Clear();
+	// the API changed the tokens: snapshots from before would undo that too
+	auto& d = *m_Data;
+	d.history.Clear();
+	d.editStale = d.editing;
+	CancelDrag();
 }
 
 UINT CTokenEditCtrl::InsertToken(const TKETOKEN* token, int index) {
@@ -650,6 +668,7 @@ void CTokenEditCtrl::SetHot(const TkeHit& hit) {
 	if (!(hit == d.hot)) {
 		d.hot = hit;
 		Invalidate(FALSE);
+		UpdateTip();
 	}
 }
 
@@ -673,7 +692,30 @@ LRESULT CTokenEditCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };
 		d.tracking = ::TrackMouseEvent(&tme) != FALSE;
 	}
-	SetHot(HitTest(PointOf(lParam)));
+	const POINT pt = PointOf(lParam);
+	if (d.drag == TkeData::Drag::Pending && (abs(pt.x - d.dragFrom.x) > ::GetSystemMetrics(SM_CXDRAG) ||
+		abs(pt.y - d.dragFrom.y) > ::GetSystemMetrics(SM_CYDRAG))) {
+		d.drag = TkeData::Drag::Dragging;
+		d.pendingOnly = -1;   // the selection is what's dragged
+		SetHot({});
+	}
+	if (d.drag == TkeData::Drag::Dragging) {
+		// past the top or the bottom, the tokens scroll
+		RECT rc;
+		GetClientRect(&rc);
+		const int step = d.m.tokenHeight / 2;
+		if (pt.y < 0)
+			ScrollTo(d.scroll - step);
+		else if (pt.y >= rc.bottom)
+			ScrollTo(d.scroll + step);
+		int drop = TkeDropIndex(d.layout, { pt.x, pt.y + d.scroll });
+		if (drop != d.dropIndex) {
+			d.dropIndex = drop;
+			Invalidate(FALSE);
+		}
+		return 0;
+	}
+	SetHot(HitTest(pt));
 	return 0;
 }
 
@@ -683,10 +725,15 @@ LRESULT CTokenEditCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	return 0;
 }
 
-LRESULT CTokenEditCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
+LRESULT CTokenEditCtrl::OnLButtonDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	const POINT pt = PointOf(lParam);
 	auto hit = HitTest(pt);
+	// a double click on a token edits it
+	if (uMsg == WM_LBUTTONDBLCLK && hit.part == TkePart::Token && !(wParam & (MK_CONTROL | MK_SHIFT))) {
+		StartEdit(hit.index, true);
+		return 0;
+	}
 	switch (hit.part) {
 		case TkePart::Close:
 			d.pressed = hit;
@@ -696,13 +743,27 @@ LRESULT CTokenEditCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&)
 
 		case TkePart::Token: {
 			const bool ctrl = (wParam & MK_CONTROL) != 0, shift = (wParam & MK_SHIFT) != 0;
-			d.tokens.Select(hit.index, ctrl && shift ? TkeSelect::ExtendAdd : shift ? TkeSelect::Extend : ctrl ? TkeSelect::Toggle
-				: TkeSelect::Only);
+			// pressing a selected token keeps the selection, which may be dragged; released without a drag, only it
+			// stays selected
+			d.pendingOnly = -1;
+			if (!ctrl && !shift && d.tokens[hit.index].selected) {
+				d.pendingOnly = hit.index;
+				d.tokens.SetAnchor(hit.index);
+			}
+			else
+				d.tokens.Select(hit.index, ctrl && shift ? TkeSelect::ExtendAdd : shift ? TkeSelect::Extend : ctrl ? TkeSelect::Toggle
+					: TkeSelect::Only);
 			d.focus = hit.index;
 			SetFocus();
 			ScrollToShow(d.layout.tokens[hit.index].rc);
 			Invalidate(FALSE);
 			NotifySelection();
+			if (!ReadOnly() && !(GetStyle() & TKES_NOREORDER) && d.tokens[hit.index].selected) {
+				d.drag = TkeData::Drag::Pending;
+				d.dragFrom = pt;
+				d.dropIndex = -1;
+				SetCapture();
+			}
 			break;
 		}
 
@@ -729,6 +790,24 @@ LRESULT CTokenEditCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&)
 
 LRESULT CTokenEditCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
+	if (d.drag != TkeData::Drag::None) {
+		const bool dragged = d.drag == TkeData::Drag::Dragging;
+		const int only = d.pendingOnly;
+		d.drag = TkeData::Drag::None;   // before the capture goes: it isn't a cancel
+		d.pendingOnly = -1;
+		if (GetCapture() == m_hWnd)
+			ReleaseCapture();
+		if (dragged)
+			Drop();
+		else if (only >= 0 && only < (int)d.tokens.Size()) {
+			d.tokens.Select(only, TkeSelect::Only);
+			Invalidate(FALSE);
+			NotifySelection();
+		}
+		d.dropIndex = -1;
+		Invalidate(FALSE);
+		return 0;
+	}
 	if (d.pressed.part != TkePart::Close)
 		return 0;
 	auto pressed = d.pressed;
@@ -745,6 +824,7 @@ LRESULT CTokenEditCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 
 LRESULT CTokenEditCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
+	CancelDrag();
 	if (d.pressed.part != TkePart::None) {
 		d.pressed = {};
 		Invalidate(FALSE);

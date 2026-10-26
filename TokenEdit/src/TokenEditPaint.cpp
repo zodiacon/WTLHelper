@@ -83,6 +83,14 @@ void CTokenEditCtrl::Paint(WTL::CDCHandle dc) {
 		RECT r{ rc.right - 1 - width - 1, top, rc.right - 2, top + thumb };
 		FillSolid(dc, r, c.crBorder);
 	}
+
+	// where dragged tokens would go
+	if (d.drag == TkeData::Drag::Dragging && d.dropIndex >= 0) {
+		RECT mark = TkeDropMark(d.layout, d.dropIndex, d.m);
+		const int x = (mark.left + mark.right) / 2, half = std::max(1, Scale(1));
+		mark = { x - half, mark.top - Scale(1) - d.scroll, x + half, mark.bottom + Scale(1) - d.scroll };
+		FillSolid(dc, mark, c.crAccent);
+	}
 	dc.RestoreDC(saved);
 
 	// the frame, and the focus line along its bottom as Windows 11's edit boxes

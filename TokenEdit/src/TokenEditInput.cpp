@@ -137,7 +137,8 @@ void CTokenEditCtrl::SetEditAt(int index) {
 std::vector<std::wstring> CTokenEditCtrl::AddTyped(std::vector<TkeToken> tokens, UINT source) {
 	auto& d = *m_Data;
 	std::vector<std::wstring> refused;
-	auto before = d.tokens.Save();
+	// an edited token's undo step starts from before it was taken out
+	auto before = d.editing && !d.editStale ? d.editBefore : d.tokens.Save();
 	bool added = false;
 	for (auto& preset : tokens) {
 		const std::wstring& piece = preset.text;
@@ -223,12 +224,24 @@ void CTokenEditCtrl::Tokenize(UINT source, bool final) {
 	std::vector<TkeToken> tokens(pieces.size());
 	for (size_t i = 0; i < pieces.size(); i++)
 		tokens[i].text = std::move(pieces[i]);
+	if (d.editing) {
+		// an edited token: the first piece is it again
+		auto& t = tokens[0];
+		t.image = d.edited.image;
+		t.back = d.edited.back;
+		t.fore = d.edited.fore;
+		t.tip = d.edited.tip;
+		t.lParam = d.edited.lParam;
+		source = TKEA_EDITED;
+	}
 	CloseSuggestions();
 	d.tokenizing = true;
 	auto refused = AddTyped(std::move(tokens), source);
 	d.tokenizing = false;
 	if (!IsWindow())
 		return;
+	if (refused.empty())
+		d.editing = false;   // (refused, its text goes back and the edit goes on)
 	if (refused.empty()) {
 		SetTyped(TrimLeft(rest), false);
 	}
@@ -295,6 +308,10 @@ LRESULT CTokenEditCtrl::OnEditKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandle
 				Tokenize(TKEA_TYPED, true);
 				return 0;
 			}
+			if (d.editing) {
+				EndTokenEdit(false);   // an edited token emptied: it goes
+				return 0;
+			}
 			break;
 
 		case VK_BACK: {
@@ -316,8 +333,8 @@ LRESULT CTokenEditCtrl::OnEditKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandle
 LRESULT CTokenEditCtrl::OnEditChar(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	if (wParam == L'\r' || wParam == L'\n' || wParam == L'\t' || wParam == 27)
 		return 0;   // Enter made a token, Tab picked a suggestion, Escape closed them (or they aren't the edit's): no beep
-	if (wParam == 1 && EditText().empty())
-		return 0;   // Ctrl+A selected the tokens
+	if ((wParam == 1 || wParam == 0x1A || wParam == 0x19) && EditText().empty())
+		return 0;   // Ctrl+A selected the tokens, Ctrl+Z or Ctrl+Y undid or redid them
 	bHandled = FALSE;
 	return 0;
 }
@@ -331,6 +348,9 @@ LRESULT CTokenEditCtrl::OnEditGetDlgCode(UINT uMsg, WPARAM wParam, LPARAM lParam
 		if (msg->wParam == VK_RETURN && !EditText().empty())
 			code |= DLGC_WANTALLKEYS;
 		if ((msg->wParam == VK_TAB || msg->wParam == VK_ESCAPE || msg->wParam == VK_RETURN) && IsSuggesting())
+			code |= DLGC_WANTALLKEYS;
+		// and editing a token, Escape puts it back and Enter ends it
+		if ((msg->wParam == VK_ESCAPE || msg->wParam == VK_RETURN) && m_Data->editing)
 			code |= DLGC_WANTALLKEYS;
 	}
 	return code;
@@ -361,7 +381,11 @@ void CTokenEditCtrl::LeaveTyping() {
 	auto& d = *m_Data;
 	if (!d.tokenizing && !EditText().empty())
 		Tokenize(TKEA_FOCUS, true);
-	if (IsWindow() && EditText().empty())
+	if (!IsWindow())
+		return;
+	if (d.editing && EditText().empty())
+		EndTokenEdit(false);   // an edited token emptied: it goes
+	if (EditText().empty())
 		SetEditAt(-1);   // the caret's place among the tokens is forgotten
 }
 

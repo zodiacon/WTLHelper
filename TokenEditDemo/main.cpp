@@ -33,7 +33,7 @@ CAppModule _Module;
 enum : UINT {
 	IDC_TO = 100, IDC_TAGS, IDC_LOG, IDC_TOLABEL, IDC_TAGSLABEL, IDC_SUBJECT,
 	CMD_EXIT = 1000, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_READONLY, CMD_NOCLOSE, CMD_REFUSESPAM, CMD_MAXTAGS,
-	CMD_ADDLOCKED, CMD_SETTEXT, CMD_REMOVEALL, CMD_SHOWTEXT, CMD_INVALIDATE,
+	CMD_ADDLOCKED, CMD_SETTEXT, CMD_REMOVEALL, CMD_SHOWTEXT, CMD_INVALIDATE, CMD_UNDO, CMD_REDO, CMD_NOREORDER,
 };
 
 static CTokenEditCtrl g_to, g_tags;
@@ -176,7 +176,11 @@ static HMENU BuildMenu() {
 	HMENU file = ::CreatePopupMenu();
 	::AppendMenuW(file, MF_STRING, CMD_EXIT, L"E&xit");
 	HMENU edit = ::CreatePopupMenu();
+	::AppendMenuW(edit, MF_STRING, CMD_UNDO, L"&Undo Tokens");
+	::AppendMenuW(edit, MF_STRING, CMD_REDO, L"&Redo Tokens");
+	::AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(edit, MF_STRING, CMD_READONLY, L"Read &Only");
+	::AppendMenuW(edit, MF_STRING, CMD_NOREORDER, L"No &Dragging or Editing");
 	::AppendMenuW(edit, MF_STRING, CMD_NOCLOSE, L"No &Close Buttons");
 	::AppendMenuW(edit, MF_STRING, CMD_REFUSESPAM, L"Refuse the Tag \"&spam\"");
 	::AppendMenuW(edit, MF_STRING, CMD_MAXTAGS, L"At Most &5 Tags");
@@ -270,6 +274,9 @@ static void OnCommand(UINT id) {
 				Log(L"%s: %s", Name(*box), text.c_str());
 			}
 			break;
+		case CMD_UNDO: Log(g_to.Undo() ? L"to: undone" : L"to: nothing to undo"); break;
+		case CMD_REDO: Log(g_to.Redo() ? L"to: redone" : L"to: nothing to redo"); break;
+		case CMD_NOREORDER: SetStyle(TKES_NOREORDER | TKES_NOEDITING, Toggle(id)); break;
 		case CMD_REMOVEALL:
 			g_to.RemoveAll();
 			g_tags.RemoveAll();
@@ -323,11 +330,11 @@ static LRESULT OnNotify(NMHDR* hdr) {
 	if (hdr->hwndFrom != g_to.m_hWnd && hdr->hwndFrom != g_tags.m_hWnd)
 		return 0;
 	auto nm = (NMTKETOKEN*)hdr;
-	static const wchar_t* const Sources[] = { L"typed", L"focus", L"pasted", L"commit", L"suggestion" };
+	static const wchar_t* const Sources[] = { L"typed", L"focus", L"pasted", L"commit", L"suggestion", L"edited" };
 	const wchar_t* box = Name(hdr->hwndFrom);
 	switch (hdr->code) {
 		case TKEN_TOKENADDING:
-			Log(L"%s: TKEN_TOKENADDING \"%s\" at %d (%s)", box, nm->pszText, nm->index, Sources[std::min(nm->source, 4u)]);
+			Log(L"%s: TKEN_TOKENADDING \"%s\" at %d (%s)", box, nm->pszText, nm->index, Sources[std::min(nm->source, 5u)]);
 			return hdr->hwndFrom == g_to.m_hWnd ? ToAdding(nm) : TagsAdding(nm);
 		case TKEN_TOKENADDED: Log(L"%s: TKEN_TOKENADDED %u \"%s\"", box, nm->id, nm->pszText); break;
 		case TKEN_TOKENREMOVING: Log(L"%s: TKEN_TOKENREMOVING %u \"%s\"", box, nm->id, nm->pszText); break;
@@ -342,6 +349,8 @@ static LRESULT OnNotify(NMHDR* hdr) {
 			Log(L"%s: TKEN_HEIGHTCHANGED %d", box, (hdr->hwndFrom == g_to.m_hWnd ? g_to : g_tags).GetIdealHeight());
 			Layout();
 			break;
+		case TKEN_TOKENEDITING: Log(L"%s: TKEN_TOKENEDITING %u \"%s\"", box, nm->id, nm->pszText); break;
+		case TKEN_TOKENSMOVED: Log(L"%s: TKEN_TOKENSMOVED", box); break;
 		case TKEN_GETSUGGESTIONS:
 			Log(L"%s: TKEN_GETSUGGESTIONS \"%s\"", box, ((NMTKESUGGEST*)hdr)->pszText);
 			break;

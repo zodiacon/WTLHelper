@@ -10,8 +10,10 @@
 // button; clicking tokens selects them (Ctrl, Shift), and Delete or Backspace removes the selected ones. While the
 // user types, the app's suggestions that match drop down (AddSuggestion, TKEN_GETSUGGESTIONS); Up and Down go through
 // them, Enter or Tab picks one. The arrow keys go from the typed text into the tokens and along them (Shift extends
-// the selection); Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste tokens as text. The API follows the common controls:
-// C-style structures and WM_NOTIFY codes (TKEN_*) sent to the parent; the API's own changes notify nothing.
+// the selection); Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste tokens as text. A double click or F2 puts a token back
+// into text to edit (Escape puts it back as it was), dragging tokens reorders them, and Ctrl+Z / Ctrl+Y undo and redo
+// the user's changes to the tokens. The API follows the common controls: C-style structures and WM_NOTIFY codes
+// (TKEN_*) sent to the parent; the API's own changes notify nothing (and clear the undo).
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -34,6 +36,8 @@ constexpr wchar_t WC_TOKENEDIT[] = L"WC_TokenEdit";
 #define TKES_NODUPLICATES    0x0002   // a token whose text is there already (ignoring case) isn't added again
 #define TKES_READONLY        0x0004   // no typing, nothing removed; the tokens can still be selected and copied
 #define TKES_SUGGESTINSIDE   0x0008   // suggestions match the typed text anywhere, not only at a word's start
+#define TKES_NOREORDER       0x0010   // tokens can't be dragged
+#define TKES_NOEDITING       0x0020   // tokens can't be put back into text (double click, F2)
 
 // ---- Tokens ----------------------------------------------------------------------
 
@@ -103,6 +107,8 @@ struct TKECOLORS {
 #define TKEN_SELCHANGED      (TKEN_FIRST - 5)   // NMHDR; the selected tokens changed
 #define TKEN_HEIGHTCHANGED   (TKEN_FIRST - 6)   // NMHDR; GetIdealHeight changed (lines, DPI, font): lay the window out again
 #define TKEN_GETSUGGESTIONS  (TKEN_FIRST - 7)   // NMTKESUGGEST; the typed text changed: the app may change the list
+#define TKEN_TOKENEDITING    (TKEN_FIRST - 8)   // NMTKETOKEN; the user puts a token back into text: non-zero refuses
+#define TKEN_TOKENSMOVED     (TKEN_FIRST - 9)   // NMHDR; the user dragged tokens to another place (then TKEN_CHANGED)
 
 // where a TKEN_TOKENADDING's text comes from
 #define TKEA_TYPED           0        // a separator typed, or Enter
@@ -110,6 +116,8 @@ struct TKECOLORS {
 #define TKEA_PASTED          2
 #define TKEA_COMMIT          3        // CommitText
 #define TKEA_SUGGESTION      4        // a suggestion picked (its image and lParam already set)
+#define TKEA_EDITED          5        // an edited token (the first piece has the old token's image, colors, tip and
+                                      // lParam; the edit left empty removes it: TKEN_TOKENREMOVED)
 
 // TKEN_TOKENADDING: the app may change pszText (to a string of its own that lives until the notification returns),
 // the image, the colors, the flags (TKEF_INVALID, TKEF_LOCKED), the tip and lParam. A refused text goes back into the
@@ -188,6 +196,7 @@ public:
 		MESSAGE_HANDLER(WM_COPY, OnCopy)
 		MESSAGE_HANDLER(WM_CUT, OnCut)
 		MESSAGE_HANDLER(WM_PASTE, OnPaste)
+		MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
 	ALT_MSG_MAP(1)   // the typing area
 		MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
 		MESSAGE_HANDLER(WM_SYSKEYDOWN, OnEditSysKeyDown)
@@ -257,6 +266,19 @@ public:
 	BOOL    Cut();                                                // the user's: TKEN_TOKENREMOVING for each
 	BOOL    Paste();
 
+	// ---- Editing and undo ----------------------------------------------------------------------------
+
+	// The token's text into the typing area at its place, selected, as a double click does (without TKEN_TOKENEDITING);
+	// the token is out of the list meanwhile.
+	BOOL    EditToken(UINT id);
+	bool    IsEditingToken() const;
+	BOOL    Undo();
+	BOOL    Redo();
+	bool    CanUndo() const;
+	bool    CanRedo() const;
+	void    ClearUndo();
+	void    SetCloseTip(LPCWSTR text);                            // the close buttons' tooltip; nullptr: "Remove"
+
 	// ---- Appearance and size -------------------------------------------------------------------------
 	//
 	// The image list holds small icons (16x16 at 96 DPI); its size sets the icons' (the app gives one for the DPI on
@@ -305,6 +327,7 @@ private:
 	LRESULT OnCopy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCut(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaste(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnNotify(UINT, WPARAM, LPARAM, BOOL&);
 
 	int     Scale(int dips) const;
 	void    UpdateFonts();
@@ -353,6 +376,14 @@ private:
 	void    FocusToken(int index, bool extend);                   // selects it (extend: from the anchor) and gives it the keys
 	void    FocusEditAt(bool start);                              // the typing area, the caret at its start or end
 	bool    SetClipboardText(const std::wstring& text);
+
+	// editing, dragging, undo, tooltips (TokenEditEditing.cpp)
+	bool    StartEdit(int index, bool user);                      // user: TKEN_TOKENEDITING first
+	void    EndTokenEdit(bool cancel);                            // cancel: back as it was; else the edit left empty removes it
+	void    AfterRestore();                                       // undone or redone
+	void    CancelDrag();
+	void    Drop();
+	void    UpdateTip();
 	std::wstring SelectedText() const;
 
 	// painting (TokenEditPaint.cpp)
@@ -371,6 +402,8 @@ private:
 
 	HFONT   m_hFont = nullptr;
 	HFONT   m_hBold = nullptr;                                    // the suggestions' matched text
+	HWND    m_hTip = nullptr;
+	std::wstring m_TipText;
 	bool    m_OwnFont = true;
 	UINT    m_Dpi = 96;
 	int     m_TextHeight = 16;

@@ -366,8 +366,10 @@ void CTokenEditCtrl::PickSuggestion(int index) {
 	d.tokenizing = false;
 	if (!IsWindow())
 		return;
-	if (refused.empty())
+	if (refused.empty()) {
 		SetTyped({}, false);   // what was typed is the token now
+		d.editing = false;     // (an edited token too)
+	}
 	if (::GetFocus() != m_Edit.m_hWnd)
 		FocusEditAt(false);
 	ScrollToShow(d.layout.edit);
