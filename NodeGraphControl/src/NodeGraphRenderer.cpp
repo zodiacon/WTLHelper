@@ -226,6 +226,8 @@ bool NodeGraphRenderer::RenderNodePicture(const NodeGraphModel& model, const Nod
         }
         ok = SUCCEEDED(hr);
     }
+    if (ok)
+        m_RenderTarget->SetDpi(96.0f, 96.0f);   // (scale pixels per graph unit, whatever the screen's DPI)
     if (ok) {
         ViewTransform vt;
         vt.Scale = scale;
@@ -268,23 +270,42 @@ void NodeGraphRenderer::PruneBitmaps(const NodeGraphModel& model) {
     std::erase_if(m_Bitmaps, [&](const auto& entry) { return !keys.contains(entry.first); });
 }
 
-void NodeGraphRenderer::Render(HDC hdc, const RECT& clientRect,
-                           const NodeGraphModel& model, const ViewTransform& vt,
+//
+// What the control gives is in pixels (the view, the client area, the mouse); the target is at the window's DPI (an image
+// at 96 DPI), so the chrome (the minimap, handles, labels that keep their size, line widths) is in DIPs and scales with it.
+// The pixels are made DIPs here: the graph lands on the same pixels the control hit-tests.
+//
+void NodeGraphRenderer::Render(HDC hdc, const RECT& clientPixels,
+                           const NodeGraphModel& model, const ViewTransform& viewPixels,
                            const std::vector<NodeId>& selectedNodes, EdgeId selectedEdge,
-                           bool drawGrid, const EdgePreview& preview,
-                           const RubberBand& rubberBand, const MinimapConfig& minimap,
+                           bool drawGrid, const EdgePreview& previewPixels,
+                           const RubberBand& rubberBandPixels, const MinimapConfig& minimapPixels,
                            const ResizeOverlay& resizeOverlay) {
-    if (FAILED(EnsureDeviceResources(hdc, clientRect))) return;
+    if (FAILED(EnsureDeviceResources(hdc, clientPixels))) return;
 
-    HRESULT hr = m_RenderTarget->BindDC(hdc, &clientRect);
+    HRESULT hr = m_RenderTarget->BindDC(hdc, &clientPixels);
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardDeviceResources();
-        if (FAILED(EnsureDeviceResources(hdc, clientRect))) return;
-        m_RenderTarget->BindDC(hdc, &clientRect);
+        if (FAILED(EnsureDeviceResources(hdc, clientPixels))) return;
+        m_RenderTarget->BindDC(hdc, &clientPixels);
     }
 
+    const float f = m_Exporting ? 1.0f : m_DpiScale;
+    m_RenderTarget->SetDpi(96.0f * f, 96.0f * f);
+    const ViewTransform vt{ viewPixels.OffsetX / f, viewPixels.OffsetY / f, viewPixels.Scale / f };
+    const RECT clientRect{ (LONG)std::floor(clientPixels.left / f), (LONG)std::floor(clientPixels.top / f),
+        (LONG)std::ceil(clientPixels.right / f), (LONG)std::ceil(clientPixels.bottom / f) };
+    EdgePreview preview = previewPixels;
+    preview.ScreenX /= f;
+    preview.ScreenY /= f;
+    RubberBand rubberBand = rubberBandPixels;
+    rubberBand.X0 /= f; rubberBand.Y0 /= f; rubberBand.X1 /= f; rubberBand.Y1 /= f;
+    MinimapConfig minimap = minimapPixels;
+    minimap.X /= f; minimap.Y /= f; minimap.Width /= f; minimap.Height /= f;
+
     PruneBitmaps(model);
-    m_Plain = !m_Exporting && vt.Scale < m_DetailThreshold;
+    // (the threshold is of pixels per graph unit, as the control's zoom)
+    m_Plain = !m_Exporting && viewPixels.Scale < m_DetailThreshold;
 
     m_RenderTarget->BeginDraw();
     m_RenderTarget->Clear(ColorrefToD2D(m_Background));
@@ -1249,8 +1270,8 @@ bool NodeGraphRenderer::HitTestPort(const NodeGraphModel& model, const ViewTrans
     port = InvalidPort;
     if (vt.Scale < m_DetailThreshold)
         return false;
-    // as drawn (DrawPorts), with a few pixels more to aim
-    const float radius = std::max(k_PortRadius * vt.Scale, 3.0f) + 3.0f;
+    // as drawn (DrawPorts, in DIPs), with a few pixels more to aim; vt and the point are in pixels
+    const float radius = std::max(k_PortRadius * vt.Scale, 3.0f * m_DpiScale) + 3.0f * m_DpiScale;
     for (auto it = model.Nodes().rbegin(); it != model.Nodes().rend(); ++it) {
         if (it->Ports.empty() || model.IsHidden(it->Id)) continue;
         for (const auto& p : it->Ports) {
@@ -1404,7 +1425,7 @@ ResizeHandle NodeGraphRenderer::HitTestResizeHandle(const Node& n, const ViewTra
                                                 float sx, float sy) const {
     D2D1_POINT_2F pts[8];
     BuildHandlePositions(n, vt, pts);
-    const float hs = 6.0f;
+    const float hs = 6.0f * m_DpiScale;     // (as drawn, in DIPs; vt and the point are in pixels)
     for (int i = 0; i < 8; ++i) {
         if (sx >= pts[i].x - hs && sx <= pts[i].x + hs &&
             sy >= pts[i].y - hs && sy <= pts[i].y + hs)

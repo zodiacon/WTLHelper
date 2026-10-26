@@ -268,6 +268,10 @@ namespace NodeGraphCtrl {
 		m_Model->SetResetCallback([this] { OnModelReset(); });
 
 		if (FAILED(m_Renderer.Init(pcs->hInstance))) return -1;
+		// 100%: a graph unit is a DIP
+		m_Dpi = DpiOf(m_hWnd);
+		m_Renderer.SetDpi(m_Dpi);
+		m_Vt.Scale = DpiScale();
 
 		HWND tip = ::CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASS, nullptr,
 			WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
@@ -553,14 +557,53 @@ namespace NodeGraphCtrl {
 
 	// ---- Minimap helpers -----------------------------------------------------
 
+	// in pixels (its size and margin are in DIPs)
 	MinimapConfig CNodeGraphControl::MakeMinimapConfig(int cw, int ch) const {
+		const float f = DpiScale();
 		MinimapConfig cfg;
 		cfg.Visible = m_Minimap.Visible;
-		cfg.Width = m_Minimap.Width;
-		cfg.Height = m_Minimap.Height;
-		cfg.X = (m_Minimap.X >= 0.0f) ? m_Minimap.X : (float)cw - m_Minimap.Width - 12.0f;
-		cfg.Y = (m_Minimap.Y >= 0.0f) ? m_Minimap.Y : (float)ch - m_Minimap.Height - 12.0f;
+		cfg.Width = m_Minimap.Width * f;
+		cfg.Height = m_Minimap.Height * f;
+		cfg.X = (m_Minimap.X >= 0.0f) ? m_Minimap.X : (float)cw - cfg.Width - 12.0f * f;
+		cfg.Y = (m_Minimap.Y >= 0.0f) ? m_Minimap.Y : (float)ch - cfg.Height - 12.0f * f;
 		return cfg;
+	}
+
+	UINT CNodeGraphControl::DpiOf(HWND hWnd) {
+		UINT dpi = hWnd ? ::GetDpiForWindow(hWnd) : 0;
+		return dpi ? dpi : ::GetDpiForSystem();
+	}
+
+	float CNodeGraphControl::DpiScale() const {
+		return m_Dpi / 96.0f;
+	}
+
+	// the zoom's limits (5% to 5000%), in pixels per graph unit
+	float CNodeGraphControl::ClampScale(float scale) const {
+		const float f = DpiScale();
+		return std::clamp(scale, 0.05f * f, 50.0f * f);
+	}
+
+	//
+	// The control moved to a monitor of another DPI (or its monitor's DPI changed): the view keeps its zoom (in DIPs), so
+	// the graph is as large as before on the screen; a minimap the user placed stays where it was in DIPs too
+	//
+	LRESULT CNodeGraphControl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& handled) {
+		handled = FALSE;
+		const UINT dpi = DpiOf(m_hWnd);
+		if (dpi == m_Dpi)
+			return 0;
+		CancelLabelEdit();
+		const float ratio = (float)dpi / m_Dpi;
+		m_Dpi = dpi;
+		m_Renderer.SetDpi(dpi);
+		m_Vt.Scale *= ratio;
+		m_Vt.OffsetX *= ratio;
+		m_Vt.OffsetY *= ratio;
+		if (m_Minimap.X >= 0.0f) m_Minimap.X *= ratio;
+		if (m_Minimap.Y >= 0.0f) m_Minimap.Y *= ratio;
+		RequestInvalidate();
+		return 0;
 	}
 
 	bool CNodeGraphControl::MinimapScreenToGraph(const MinimapConfig& cfg, const NodeGraphModel& model,
@@ -676,9 +719,10 @@ namespace NodeGraphCtrl {
 			x, y, w, h, m_hWnd, nullptr, nullptr, nullptr);
 		if (!m_LabelEdit) return;
 
-		// Segoe UI at the size the D2D renderer uses (13 DIPs), times the zoom if the label scales with it.
-		const float scale = n->Style.ScaleLabel && !n->Style.Code ? m_Vt.Scale : 1.0f;
-		int fontPx = std::max(8, (int)(13.0f * ::GetDpiForWindow(m_hWnd) / 96.0f * scale + 0.5f));
+		// Segoe UI at the size the D2D renderer uses: 13 graph units at the zoom if the label scales with it (the view is in
+		// pixels), else 13 DIPs.
+		const float scale = n->Style.ScaleLabel && !n->Style.Code ? m_Vt.Scale : DpiScale();
+		int fontPx = std::max(8, (int)(13.0f * scale + 0.5f));
 		m_LabelEditFont.CreateFont(
 			-fontPx, 0, 0, 0, FW_NORMAL,
 			FALSE, FALSE, FALSE,
@@ -1063,6 +1107,11 @@ namespace NodeGraphCtrl {
 	// ---- Message handlers ----------------------------------------------------
 
 	void CNodeGraphControl::OnPaint(HDC /*unused*/) {
+		// (moved under a window of another DPI without WM_DPICHANGED_AFTERPARENT: SetParent)
+		if (DpiOf(m_hWnd) != m_Dpi) {
+			BOOL handled;
+			OnDpiChanged(WM_DPICHANGED_AFTERPARENT, 0, 0, handled);
+		}
 		// a graph that was replaced is fitted once it has nodes
 		if (m_AutoZoom && m_Model && !m_Model->Nodes().empty() &&
 			(m_Model.get() != m_FittedModel || m_Model->GetResetCount() != m_FittedResets)) {
@@ -1182,7 +1231,7 @@ namespace NodeGraphCtrl {
 		m_Vt.OffsetX = pt.x - (pt.x - m_Vt.OffsetX) * delta;
 		m_Vt.OffsetY = pt.y - (pt.y - m_Vt.OffsetY) * delta;
 		m_Vt.Scale *= delta;
-		m_Vt.Scale = std::clamp(m_Vt.Scale, 0.05f, 50.0f);
+		m_Vt.Scale = ClampScale(m_Vt.Scale);
 		Invalidate(FALSE);
 		return TRUE;
 	}
@@ -1674,8 +1723,9 @@ namespace NodeGraphCtrl {
 				RECT rc; GetClientRect(&rc);
 				float newX = m_Minimap.StartX + dx;
 				float newY = m_Minimap.StartY + dy;
-				newX = std::clamp(newX, 20.0f - m_Minimap.Width, (float)rc.right - 20.0f);
-				newY = std::clamp(newY, 20.0f - m_Minimap.Height, (float)rc.bottom - 20.0f);
+				const float f = DpiScale(), keep = 20.0f * f;	// (of it in view)
+				newX = std::clamp(newX, keep - m_Minimap.Width * f, (float)rc.right - keep);
+				newY = std::clamp(newY, keep - m_Minimap.Height * f, (float)rc.bottom - keep);
 				m_Minimap.X = newX;
 				m_Minimap.Y = newY;
 				Invalidate(FALSE);
@@ -1911,7 +1961,7 @@ namespace NodeGraphCtrl {
 				return 0;
 			case '0': case VK_NUMPAD0:
 				if (!ctrl) break;
-				ZoomAroundCenter(1.0f / m_Vt.Scale);
+				ZoomAroundCenter(DpiScale() / m_Vt.Scale);	// 100%
 				return 0;
 			case 'A':
 				if (!ctrl) break;
@@ -2055,10 +2105,10 @@ namespace NodeGraphCtrl {
 			if (GetStyle() & WS_VSCROLL) rc.right += ::GetSystemMetricsForDpi(SM_CXVSCROLL, ::GetDpiForWindow(m_hWnd));
 			if (GetStyle() & WS_HSCROLL) rc.bottom += ::GetSystemMetricsForDpi(SM_CYHSCROLL, ::GetDpiForWindow(m_hWnd));
 		}
-		const float margin = k_ViewMargin;
+		const float margin = k_ViewMargin * DpiScale();
 		float sx = (rc.right - margin * 2) / (maxX - minX);
 		float sy = (rc.bottom - margin * 2) / (maxY - minY);
-		m_Vt.Scale = std::clamp(std::min(sx, sy), 0.05f, 50.0f);
+		m_Vt.Scale = ClampScale(std::min(sx, sy));
 		// centered: the direction that doesn't fill the view gets the space on both sides
 		m_Vt.OffsetX = (rc.right - (maxX - minX) * m_Vt.Scale) / 2 - minX * m_Vt.Scale;
 		m_Vt.OffsetY = (rc.bottom - (maxY - minY) * m_Vt.Scale) / 2 - minY * m_Vt.Scale;
@@ -2080,23 +2130,24 @@ namespace NodeGraphCtrl {
 		if (minX == FLT_MAX) return;
 
 		RECT rc; GetClientRect(&rc);
-		float margin = 40.0f;
+		float margin = 40.0f * DpiScale();
 		float sx = (rc.right - margin * 2) / std::max(maxX - minX, 1.0f);
 		float sy = (rc.bottom - margin * 2) / std::max(maxY - minY, 1.0f);
-		m_Vt.Scale = std::clamp(std::min(sx, sy), 0.05f, 50.0f);
+		m_Vt.Scale = ClampScale(std::min(sx, sy));
 		m_Vt.OffsetX = (rc.right - (maxX - minX) * m_Vt.Scale) / 2 - minX * m_Vt.Scale;
 		m_Vt.OffsetY = (rc.bottom - (maxY - minY) * m_Vt.Scale) / 2 - minY * m_Vt.Scale;
 		RequestInvalidate();
 	}
 
+	// (the zoom is of DIPs per graph unit; the view's scale is of pixels)
 	void CNodeGraphControl::SetZoom(float factor) {
-		m_Vt.Scale = std::clamp(factor, 0.05f, 50.0f);
+		m_Vt.Scale = ClampScale(factor * DpiScale());
 		RequestInvalidate();
 	}
 
 	void CNodeGraphControl::CenterOn(float graphX, float graphY, float zoom) {
 		if (zoom > 0.0f)
-			m_Vt.Scale = std::clamp(zoom, 0.05f, 50.0f);
+			m_Vt.Scale = ClampScale(zoom * DpiScale());
 		RECT rc; GetClientRect(&rc);
 		m_Vt.OffsetX = rc.right * 0.5f - graphX * m_Vt.Scale;
 		m_Vt.OffsetY = rc.bottom * 0.5f - graphY * m_Vt.Scale;
@@ -2104,7 +2155,7 @@ namespace NodeGraphCtrl {
 	}
 
 	float CNodeGraphControl::GetZoom() const {
-		return m_Vt.Scale;
+		return m_Vt.Scale / DpiScale();
 	}
 
 	// ---- Scrolling ------------------------------------------------------------------
@@ -2182,7 +2233,7 @@ namespace NodeGraphCtrl {
 		if ((!m_SnapToGrid && !m_Guides) || ::GetKeyState(VK_MENU) < 0)
 			return snap;
 		const std::unordered_set<NodeId> moving(skip.begin(), skip.end());
-		const float tolerance = 6.0f / m_Vt.Scale, grid = m_Renderer.GetGridSize();
+		const float tolerance = 6.0f * DpiScale() / m_Vt.Scale, grid = m_Renderer.GetGridSize();
 
 		// one axis: lo..hi on it, otherLo..otherHi on the other (for the guide's length)
 		auto axis = [&](bool x, float lo, float hi, bool moveLo, bool moveHi, float otherLo, float otherHi, float& shift) {
@@ -2684,7 +2735,7 @@ namespace NodeGraphCtrl {
 		RECT rc;
 		GetClientRect(&rc);
 		const float cx = rc.right * 0.5f, cy = rc.bottom * 0.5f;
-		const float scale = std::clamp(m_Vt.Scale * factor, 0.05f, 50.0f);
+		const float scale = ClampScale(m_Vt.Scale * factor);
 		m_Vt.OffsetX = cx - (cx - m_Vt.OffsetX) * scale / m_Vt.Scale;
 		m_Vt.OffsetY = cy - (cy - m_Vt.OffsetY) * scale / m_Vt.Scale;
 		m_Vt.Scale = scale;

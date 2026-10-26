@@ -106,7 +106,7 @@ struct NodeDrawContext {
     D2D1_ROUNDED_RECT     Shape;          // the node's outline, in its units (an ellipse's too; a diamond's box)
     ID2D1Geometry*        Outline;        // the node's outline of any shape (NodeStyle::Shape), in its units
     D2D1_RECT_F           ScreenRect;     // the node on the target, without the transform
-    float                 Scale;          // the zoom: target pixels (DIPs) per graph unit
+    float                 Scale;          // the zoom: target DIPs per graph unit (pixels at 96 DPI and in images)
     bool                  Selected;
     bool                  Hovered;
     bool                  Exporting;      // drawn into an image file (CNodeGraphControl::SaveImage), not on the screen
@@ -128,7 +128,12 @@ public:
     HRESULT Init(HINSTANCE hInstance);
     void    Shutdown();
 
-    // Called on WM_PAINT: binds render target to dc, draws everything.
+    // The DPI of the window drawn on (the control sets it): the target is at it, so the chrome is in DIPs; the screen
+    // coordinates given to Render and the hit tests are pixels.
+    void  SetDpi(UINT dpi) { m_DpiScale = dpi ? dpi / 96.0f : 1.0f; }
+
+    // Called on WM_PAINT: binds render target to dc, draws everything. The client area, the view, the preview, the
+    // rubber band and the minimap are in pixels.
     void Render(HDC hdc, const RECT& clientRect,
                 const NodeGraphModel& model, const ViewTransform& vt,
                 const std::vector<NodeId>& selectedNodes, EdgeId selectedEdge,
@@ -263,6 +268,7 @@ private:
     void DrawGraphText(const std::wstring& text, const Rect& area, IDWriteTextFormat* format, COLORREF color, const ViewTransform& vt);
     void DrawEdgePlain(const Edge& e, const Node& from, const Node& to, const ViewTransform& vt, EdgeEmphasis emphasis);
     bool     m_Exporting = false;
+    float    m_DpiScale = 1.0f;     // the window's DPI / 96 (images are drawn at 96)
     uint32_t m_DeviceGeneration = 0;    // of the current render target, unique in the process
     uint32_t CallOwnerDraw(const NodeGraphModel& model, const Node& n, const NodeLayout& layout,
                            const D2D1_ROUNDED_RECT& rr, const ViewTransform& vt, bool selected, bool post);

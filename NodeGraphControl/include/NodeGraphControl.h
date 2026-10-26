@@ -207,6 +207,7 @@ public:
         MSG_WM_CONTEXTMENU(OnContextMenu)
         MSG_WM_ERASEBKGND(OnEraseBkgnd)
         MESSAGE_HANDLER(WM_NODEGRAPHEDIT, OnNodeGraphEdit)
+        MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
     END_MSG_MAP()
 
     // Creation convenience overload; dwStyle is a normal window style, ctrlStyle
@@ -221,7 +222,7 @@ public:
     // Programmatic viewport control.
     void FitInView();
     void FitSelected();           // fit view around the currently selected nodes
-    void SetZoom(float factor);   // 1.0 = 100%
+    void SetZoom(float factor);   // 1.0 = 100%: a graph unit is a DIP (a pixel at 96 DPI)
     void CenterOn(float graphX, float graphY, float zoom = 0.0f);  // put a point of the graph in the middle of the view (zoom 0: keep the zoom)
     float GetZoom() const;
 
@@ -381,6 +382,12 @@ private:
     // ---- Message handlers ----
     int  OnCreate(LPCREATESTRUCT pcs);
     void OnDestroy();
+    LRESULT OnDpiChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    // the view (m_Vt) is in pixels; sizes of the chrome and the zoom (GetZoom, 100%) are in DIPs
+    static UINT DpiOf(HWND hWnd);
+    float DpiScale() const;
+    float ClampScale(float scale) const;
+    UINT  m_Dpi = 96;
     void OnPaint(HDC dc);
     void OnSize(UINT nType, CSize size);
     BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
