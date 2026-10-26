@@ -95,10 +95,14 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\CalendarView.h" />
+    <ClInclude Include="src\CalendarViewData.h" />
     <ClInclude Include="src\CalendarViewModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\CalendarViewCtrl.cpp" />
     <ClCompile Include="src\CalendarViewModel.cpp" />
+    <ClCompile Include="src\CalendarViewPaint.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
