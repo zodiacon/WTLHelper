@@ -130,7 +130,7 @@ void CBreadcrumbCtrl::SetText(const std::wstring& text, bool selectAll) {
 	if (selectAll)
 		m_Edit.SetSel(0, -1);
 	else
-		m_Edit.SetSel(-1, -1);   // the caret at the end
+		m_Edit.SetSel((int)text.size(), (int)text.size());   // the caret at the end (-1 would only deselect)
 }
 
 // ---- Suggestions and history ----------------------------------------------------------------

@@ -789,7 +789,13 @@ void CCommandPaletteCtrl::SetSearchText(LPCWSTR text) {
 	m_SettingText = true;
 	m_Box.SetWindowText(text ? text : L"");   // EN_CHANGE filters
 	m_SettingText = false;
-	m_Box.SetSel(-1, -1);
+	CaretToEnd();
+}
+
+void CCommandPaletteCtrl::CaretToEnd() {
+	// (EM_SETSEL with -1 only takes the selection away: the caret stays where SetWindowText put it, at the start)
+	const int length = m_Box.GetWindowTextLength();
+	m_Box.SetSel(length, length);
 }
 
 ATL::CString CCommandPaletteCtrl::GetSearchText() const {
@@ -873,7 +879,7 @@ void CCommandPaletteCtrl::Execute(int row) {
 		auto p = FindProvider((int)item.lParam);
 		ATL::CString text = p ? p->prefix.c_str() : L"";
 		m_Box.SetWindowText(text);
-		m_Box.SetSel(-1, -1);
+		CaretToEnd();
 		return;
 	}
 	if (m_Mode > 0) {

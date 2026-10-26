@@ -288,6 +288,7 @@ private:
 	void    Layout();
 	RECT    GetBoxRect() const;                       // the search box's frame, client coords
 	void    Filter();                                 // the results for the search text, the first selected
+	void    CaretToEnd();                             // the search box's caret after its text
 	void    Search(DWORD ms);                         // goes on through the list for up to ms; then the order and the view
 	const CmpItem* ItemOf(size_t index);              // the active list's (a provider's is asked for if it's needed)
 	const CmpItem& RowItem(int row) const;            // the item a result row shows (asked for already)
