@@ -58,6 +58,8 @@ void CCalendarViewCtrl::Press(POINT pt, bool dbl) {
 	EndRename(true);
 	if (::GetFocus() != m_hWnd)
 		SetFocus();   // the keys are the control's
+	if (NavPress(pt))
+		return;
 	bool strip;
 	auto hit = HitAt(pt, &strip);
 	if (hit.box >= 0) {
@@ -262,8 +264,10 @@ LRESULT CCalendarViewCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	const POINT pt{ (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
 	if (m_Data->drag != ClvDrag::None)
 		DragTo(pt);
-	else
+	else {
+		NavHot(pt);
 		UpdateTip(m_hWnd, pt);
+	}
 	return 0;
 }
 
@@ -275,6 +279,10 @@ LRESULT CCalendarViewCtrl::OnDaysMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 }
 
 LRESULT CCalendarViewCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	if (m_Data->navPressed >= 0) {
+		NavRelease({ (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) });
+		return 0;
+	}
 	if (m_Data->drag != ClvDrag::None)
 		EndDrag({ (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) });
 	return 0;
@@ -288,6 +296,10 @@ LRESULT CCalendarViewCtrl::OnDaysLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 }
 
 LRESULT CCalendarViewCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_Data->navPressed >= 0) {
+		m_Data->navPressed = -1;
+		InvalidateRect(&m_Data->navbar, FALSE);
+	}
 	if (m_Data->drag != ClvDrag::None)
 		CancelDrag();   // the capture taken from us
 	return 0;

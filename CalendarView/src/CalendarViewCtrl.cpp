@@ -72,6 +72,7 @@ LRESULT CCalendarViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CCalendarViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(NowTimer);
 	DisconnectAccessible();
+	m_Picker.reset();
 	if (m_hTip)
 		::DestroyWindow(m_hTip);
 	m_hTip = nullptr;
@@ -92,6 +93,8 @@ LRESULT CCalendarViewCtrl::OnFocus(UINT uMsg, WPARAM, LPARAM, BOOL&) {
 	Invalidate(FALSE);   // the selection's color
 	if (m_Days->IsWindow())
 		m_Days->Invalidate(FALSE);
+	if (uMsg == WM_KILLFOCUS)
+		ClosePicker();
 	if (uMsg == WM_SETFOCUS)
 		NotifyAccessible(EVENT_OBJECT_FOCUS, m_Data->selected ? AccChildId(m_Data->selected) : AccSlotsId());
 	return 0;
@@ -281,7 +284,8 @@ void CCalendarViewCtrl::UpdateLayout() {
 	d.accOrder = ClvTabOrder(d.layout, d.store);
 	NotifyAccessible(EVENT_OBJECT_REORDER, CHILDID_SELF);
 
-	d.header = { 0, 0, rc.right, d.m.headerHeight };
+	LayoutNavBar(rc.right);
+	d.header = { 0, d.navbar.bottom, rc.right, d.navbar.bottom + d.m.headerHeight };
 	d.strip = { 0, d.header.bottom, rc.right, d.header.bottom + d.layout.StripView(d.m) };
 	const int top = std::min((int)rc.bottom, (int)d.strip.bottom);
 	d.daysTop = top;
@@ -355,6 +359,10 @@ LRESULT CCalendarViewCtrl::OnDaysVScroll(UINT uMsg, WPARAM wParam, LPARAM lParam
 LRESULT CCalendarViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	if (PickerOpen()) {
+		m_Picker->Wheel(delta);   // its months
+		return 0;
+	}
 	POINT pt = PointOf(lParam);   // screen coords, whichever window has it
 	POINT client = pt;
 	ScreenToClient(&client);
@@ -442,18 +450,8 @@ void CCalendarViewCtrl::GoToday() {
 	const ClvTime now = Now();
 	const int64_t today = ClvDayOf(now);
 	if (!d.range.Contains(today)) {
-		int64_t first = today;
-		if (d.range.days == 7 || d.range.days == 5) {
-			// a week shown: the week holding today (a work week from Monday)
-			int firstWeekday = 1;
-			if (d.range.days == 7) {
-				DWORD value = 0;
-				if (::GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_IFIRSTDAYOFWEEK | LOCALE_RETURN_NUMBER, (LPWSTR)&value, 2))
-					firstWeekday = (int)(value + 1) % 7;   // 0 Monday there
-			}
-			first = ClvWeekStart(today, firstWeekday);
-		}
-		d.range.first = first;
+		// a week shown: the week holding today (a work week from its Monday)
+		d.range.first = ClvFirstShown(today, d.range.days, GetFirstDayOfWeek());
 		RangeChanged(true);
 	}
 	ScrollToTime(std::max(0, ClvMinuteOf(now) - 60));

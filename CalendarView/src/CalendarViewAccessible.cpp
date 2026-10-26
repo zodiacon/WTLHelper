@@ -98,6 +98,8 @@ public:
 			return E_INVALIDARG;
 		if (id == CHILDID_SELF)
 			return m_Proxy->get_accName(child, name);   // the window's text, or the label before it in a dialog
+		if (IsNav(id))
+			return Text(name, m_Ctrl->NavName(id - 1).c_str());
 		if (IsSlots(id))
 			return Text(name, m_Ctrl->AccSlots().c_str());
 		return Text(name, Item(id).title.c_str());
@@ -119,6 +121,8 @@ public:
 			return E_INVALIDARG;
 		if (id == CHILDID_SELF)
 			return S_FALSE;
+		if (IsNav(id))
+			return id - 1 == ClvNavTitle ? Text(text, L"Choose a date") : S_FALSE;
 		if (IsSlots(id))
 			return Text(text, L"Selected time");
 		return Text(text, m_Ctrl->AccDescription(Item(id).id).c_str());
@@ -132,7 +136,7 @@ public:
 		long id = Id(child);
 		if (id == Invalid)
 			return E_INVALIDARG;
-		return Long(role, id == CHILDID_SELF ? ROLE_SYSTEM_LIST : ROLE_SYSTEM_LISTITEM);
+		return Long(role, id == CHILDID_SELF ? ROLE_SYSTEM_LIST : IsNav(id) ? ROLE_SYSTEM_PUSHBUTTON : ROLE_SYSTEM_LISTITEM);
 	}
 
 	STDMETHODIMP get_accState(VARIANT child, VARIANT* state) override {
@@ -148,6 +152,8 @@ public:
 		const bool readOnly = (m_Ctrl->GetStyle() & CLVS_READONLY) != 0;
 		if (id == CHILDID_SELF)
 			return Long(state, STATE_SYSTEM_FOCUSABLE | (focused ? STATE_SYSTEM_FOCUSED : 0) | (readOnly ? STATE_SYSTEM_READONLY : 0));
+		if (IsNav(id))
+			return Long(state, id - 1 == ClvNavTitle && m_Ctrl->PickerOpen() ? STATE_SYSTEM_EXPANDED : 0);
 		long s = STATE_SYSTEM_SELECTABLE | STATE_SYSTEM_FOCUSABLE;
 		if (IsSlots(id))
 			return Long(state, s | STATE_SYSTEM_SELECTED | (focused && !d.selected ? STATE_SYSTEM_FOCUSED : 0));
@@ -171,7 +177,7 @@ public:
 			return E_INVALIDARG;
 		if (id == CHILDID_SELF)
 			return S_FALSE;
-		return Text(action, IsSlots(id) ? L"New Item" : L"Open");
+		return Text(action, IsNav(id) ? L"Press" : IsSlots(id) ? L"New Item" : L"Open");
 	}
 
 	STDMETHODIMP accDoDefaultAction(VARIANT child) override {
@@ -181,7 +187,9 @@ public:
 		if (id == Invalid || id == CHILDID_SELF)
 			return E_INVALIDARG;
 		// later, as the user's: the app's handlers mustn't run inside the client's call
-		if (IsSlots(id))
+		if (IsNav(id))
+			::PostMessage(m_Ctrl->m_hWnd, CCalendarViewCtrl::WM_CLV_ACCACTION, 3 + (id - 1), 0);
+		else if (IsSlots(id))
 			::PostMessage(m_Ctrl->m_hWnd, CCalendarViewCtrl::WM_CLV_ACCACTION, 2, 0);
 		else {
 			m_Ctrl->m_Data->accItem = Item(id).id;
@@ -219,6 +227,8 @@ public:
 			return E_INVALIDARG;   // one item is selected at a time
 		if (flags & SELFLAG_TAKEFOCUS)
 			::SetFocus(m_Ctrl->m_hWnd);
+		if (IsNav(id))
+			return E_INVALIDARG;
 		if ((flags & SELFLAG_TAKESELECTION) && !IsSlots(id)) {
 			m_Ctrl->m_Data->accItem = Item(id).id;
 			::PostMessage(m_Ctrl->m_hWnd, CCalendarViewCtrl::WM_CLV_ACCACTION, 1, 0);
@@ -309,6 +319,8 @@ public:
 				}
 			}
 		}
+		if (const int part = m_Ctrl->NavPartAt(pt); part >= 0)
+			return Long(child, part + 1);
 		bool strip;
 		auto hit = m_Ctrl->HitAt(pt, &strip);
 		if (hit.box >= 0)
@@ -337,17 +349,25 @@ public:
 private:
 	static constexpr long Invalid = -2;
 
+	long Nav() const {
+		return m_Ctrl->AccNavCount();
+	}
+
 	long Items() const {
 		return (long)m_Ctrl->m_Data->accOrder.size();
 	}
 
-	// the items, the selected time (while there is one), the days' window
+	// the bar's buttons, the items, the selected time (while there is one), the days' window
 	long Count() const {
-		return Items() + (m_Ctrl->m_Data->slots ? 1 : 0) + 1;
+		return Nav() + Items() + (m_Ctrl->m_Data->slots ? 1 : 0) + 1;
+	}
+
+	bool IsNav(long id) const {
+		return id >= 1 && id <= Nav();
 	}
 
 	bool IsSlots(long id) const {
-		return m_Ctrl->m_Data->slots && id == Items() + 1;
+		return m_Ctrl->m_Data->slots && id == Nav() + Items() + 1;
 	}
 
 	// a simple element's child id (an item's, the selected time's), CHILDID_SELF, or Invalid
@@ -361,7 +381,7 @@ private:
 
 	const ClvItem& Item(long id) const {
 		auto& d = *m_Ctrl->m_Data;
-		return d.store.Items()[d.store.Index(d.accOrder[id - 1])];
+		return d.store.Items()[d.store.Index(d.accOrder[id - Nav() - 1])];
 	}
 
 	// the days' window's object, when child is its id (a client asking it as a simple element)
@@ -387,6 +407,12 @@ private:
 	bool Location(long id, RECT* out) const {
 		auto& d = *m_Ctrl->m_Data;
 		HWND days = m_Ctrl->m_Days->m_hWnd;
+		if (IsNav(id)) {
+			RECT r = d.nav[id - 1];
+			::MapWindowPoints(m_Ctrl->m_hWnd, nullptr, (POINT*)&r, 2);
+			*out = r;
+			return true;
+		}
 		RECT view{}, rc{};
 		HWND window = m_Ctrl->m_hWnd;
 		if (IsSlots(id)) {
@@ -471,11 +497,15 @@ std::wstring CCalendarViewCtrl::AccSlots() const {
 long CCalendarViewCtrl::AccChildId(ULONGLONG id) const {
 	auto& order = m_Data->accOrder;
 	auto it = id ? std::find(order.begin(), order.end(), id) : order.end();
-	return it == order.end() ? CHILDID_SELF : (long)(it - order.begin()) + 1;
+	return it == order.end() ? CHILDID_SELF : AccNavCount() + (long)(it - order.begin()) + 1;
+}
+
+long CCalendarViewCtrl::AccNavCount() const {
+	return ::IsRectEmpty(&m_Data->navbar) ? 0 : ClvNavCount;
 }
 
 long CCalendarViewCtrl::AccSlotsId() const {
-	return m_Data->slots ? (long)m_Data->accOrder.size() + 1 : CHILDID_SELF;
+	return m_Data->slots ? AccNavCount() + (long)m_Data->accOrder.size() + 1 : CHILDID_SELF;
 }
 
 // ---- The object --------------------------------------------------------------------------------------
@@ -512,6 +542,10 @@ void CCalendarViewCtrl::DisconnectAccessible() {
 
 LRESULT CCalendarViewCtrl::OnAccAction(UINT, WPARAM wParam, LPARAM, BOOL&) {
 	auto& d = *m_Data;
+	if (wParam >= 3) {
+		NavAction((int)wParam - 3);   // the bar's buttons
+		return 0;
+	}
 	if (wParam == 2) {
 		CreateItem();
 		return 0;

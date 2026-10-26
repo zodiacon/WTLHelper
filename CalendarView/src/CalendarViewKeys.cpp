@@ -50,6 +50,8 @@ LRESULT CCalendarViewCtrl::OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM, BOOL& bHa
 		bHandled = FALSE;   // Alt with anything else: the menu's
 		return 0;
 	}
+	if (uMsg == WM_KEYDOWN && PickerOpen() && m_Picker->Key((UINT)wParam))
+		return 0;   // the date chooser's
 	if (wParam == VK_ESCAPE && d.drag != ClvDrag::None) {
 		CancelDrag();
 		return 0;
@@ -66,7 +68,13 @@ bool CCalendarViewCtrl::KeyDown(UINT vk, bool ctrl, bool alt, bool shift) {
 	const bool arrow = vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN;
 	const int days = vk == VK_LEFT ? -1 : vk == VK_RIGHT ? 1 : 0, slots = vk == VK_UP ? -1 : vk == VK_DOWN ? 1 : 0;
 	if (ctrl) {
-		if (vk == 'Z' && !shift && editable)
+		if (vk == VK_PRIOR || vk == VK_NEXT)
+			Navigate(vk == VK_NEXT ? 1 : -1);
+		else if (vk == VK_HOME)
+			GoToday();
+		else if (vk == 'G')
+			ShowDatePicker();
+		else if (vk == 'Z' && !shift && editable)
 			Undo();
 		else if ((vk == 'Y' || (vk == 'Z' && shift)) && editable)
 			Redo();
@@ -104,6 +112,9 @@ bool CCalendarViewCtrl::KeyDown(UINT vk, bool ctrl, bool alt, bool shift) {
 			if (d.selected)
 				EditTitle(d.selected);
 			return true;
+		case VK_F4:
+			ShowDatePicker();
+			return true;
 		case VK_DELETE:
 			DeleteSelected();
 			return true;
@@ -121,7 +132,7 @@ bool CCalendarViewCtrl::KeyDown(UINT vk, bool ctrl, bool alt, bool shift) {
 LRESULT CCalendarViewCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
 	LRESULT code = DLGC_WANTARROWS;
-	if (d.drag != ClvDrag::None)
+	if (d.drag != ClvDrag::None || PickerOpen())
 		code |= DLGC_WANTALLKEYS;
 	// Tab while there's an item to go to, else the dialog's
 	if (ClvNextItem(ClvTabOrder(d.layout, d.store), d.selected, ::GetKeyState(VK_SHIFT) >= 0))
@@ -310,7 +321,12 @@ void CCalendarViewCtrl::UpdateTip(HWND window, POINT pt) {
 		return;
 	std::wstring text;
 	RECT rc{};
-	if (d.drag == ClvDrag::None && !d.renaming) {
+	const int nav = window == m_hWnd && d.drag == ClvDrag::None && d.navPressed < 0 ? NavPartAt(pt) : -1;
+	if (nav >= 0) {
+		text = NavTip(nav);
+		rc = d.nav[nav];
+	}
+	else if (d.drag == ClvDrag::None && !d.renaming) {
 		const bool strip = window == m_hWnd;
 		auto hit = strip ? HitStrip(pt) : HitDays(pt);
 		if (hit.box >= 0) {

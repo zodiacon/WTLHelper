@@ -11,7 +11,10 @@
 // app for an item there; each change is the app's to allow, and Ctrl+Z undoes it (the control's own items). The keys:
 // the arrows move the slots selected (Shift: more of them), Tab goes along the items, Alt+arrows move the selected item
 // (Alt+Shift+Up/Down: its end), F2 renames it, Delete removes it. Tooltips tell an item's time. In high contrast it
-// draws with the system colors only (over the app's and the items' own). Accessibility: a list of the items (MSAA). The items are the control's own (AddItem), or in virtual mode
+// draws with the system colors only (over the app's and the items' own). Accessibility: a list of the items (MSAA).
+// Ctrl+Page Up and Ctrl+Page Down go to the days before and after (a week in a week's view), Ctrl+Home to today, and
+// Ctrl+G or F4 opens a month to pick a date from; CLVS_NAVBAR adds a bar above the days with Today, back and forward,
+// and the days shown, which opens it too. The items are the control's own (AddItem), or in virtual mode
 // (CLVS_VIRTUAL) the app's: the control asks for those of the days it shows (CLVN_GETITEMS) and lets go of the ones
 // that leave them (CLVN_RELEASEITEM). The API follows the common controls: C-style structures and WM_NOTIFY codes
 // (CLVN_*) sent to the parent. Times are local SYSTEMTIMEs (seconds ignored).
@@ -35,6 +38,7 @@ constexpr wchar_t WC_CALENDARVIEW[] = L"WC_CalendarView";
 #define CLVS_NONOW           0x0001   // no line at the time now
 #define CLVS_READONLY        0x0002   // the user changes no items
 #define CLVS_VIRTUAL         0x0004   // the app has the items: CLVN_GETITEMS asks for those of the days shown (set at creation)
+#define CLVS_NAVBAR          0x0008   // a bar above the days' names: Today, back, forward, and the days shown (a click picks a date)
 
 // ---- Views ----------------------------------------------------------------------
 
@@ -180,6 +184,8 @@ class ClvDaysWindow;
 class CCalendarViewCtrl : public ATL::CWindowImpl<CCalendarViewCtrl> {
 	friend class ClvDaysWindow;
 	friend class ClvAccessible;
+	friend class ClvPicker;
+	friend class ClvPickerAccessible;
 public:
 	DECLARE_WND_CLASS_EX(L"WC_CalendarView", CS_DBLCLKS, -1)
 
@@ -204,6 +210,8 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_STYLECHANGED, OnStyleChanged)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
@@ -288,6 +296,10 @@ public:
 	void    SetDayCount(int days);                                // 1 to 14
 	void    GetRange(SYSTEMTIME* first, int* days) const;
 	void    GoToday();                                            // today shown (the first day, or in the week shown) and now in view
+	void    Navigate(int steps);                                  // the days after (or before): a week in a week's view, else the days shown
+	void    ShowDatePicker();                                     // a month to pick the date to show (as Ctrl+G does)
+	void    SetFirstDayOfWeek(int day);                           // 0 Sunday to 6 Saturday; -1 (the default): the user's locale's
+	int     GetFirstDayOfWeek() const;
 	void    ScrollToTime(int minute);                             // at the top
 	void    SetSlotMinutes(int minutes);                          // 5, 6, 10, 15, 20, 30 or 60
 	int     GetSlotMinutes() const;
@@ -327,6 +339,8 @@ private:
 	LRESULT OnDaysParentNotify(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnStyleChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDaysMouseMove(UINT, WPARAM, LPARAM, BOOL&);
@@ -375,9 +389,24 @@ private:
 	void    Nudge(int days, int slots, bool end);                 // Alt+arrows: the selected item moved (or its end)
 	void    EndRename(bool commit);
 	void    UpdateTip(HWND window, POINT pt);
+	// the navigation bar and the date chooser (CalendarViewNav.cpp)
+	void    LayoutNavBar(int width);                              // its parts, from the top
+	int     NavPartAt(POINT pt) const;                            // ClvNav*; -1 if none
+	bool    NavPress(POINT pt);                                   // the button down on the bar: true if it was
+	void    NavRelease(POINT pt);
+	void    NavHot(POINT pt);
+	void    NavAction(int part);
+	std::wstring NavName(int part) const;                         // as an accessibility client hears it
+	std::wstring NavTip(int part) const;
+	std::wstring RangeTitle() const;                              // the days shown, as the bar says them
+	void    PaintNavBar(WTL::CDCHandle dc, const CLVCOLORS& c);
+	void    PickDate(LONGLONG day);                               // the date chooser's pick: its view shown
+	void    ClosePicker();
+	bool    PickerOpen() const;
 	// accessibility (CalendarViewAccessible.cpp)
 	long    AccChildId(ULONGLONG id) const;                       // its child's, 1..; CHILDID_SELF if it isn't shown
 	long    AccSlotsId() const;                                   // the selected time's child; CHILDID_SELF if none
+	long    AccNavCount() const;                                  // the bar's buttons, first among the children (0: no bar)
 	std::wstring AccDescription(ULONGLONG id) const;
 	std::wstring AccSlots() const;                                // the selected time, said
 	void    NotifyAccessible(DWORD event, long child);            // once a client has asked
@@ -404,6 +433,7 @@ private:
 	std::unique_ptr<ClvData> m_Data;
 	std::unique_ptr<ClvDaysWindow> m_Days;
 	ATL::CContainedWindowT<WTL::CEdit> m_Edit;
+	std::unique_ptr<class ClvPicker> m_Picker;
 	HWND    m_hTip = nullptr;
 	CLVCOLORS m_Colors{};
 	bool    m_SystemColors = true;

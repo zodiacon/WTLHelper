@@ -211,6 +211,7 @@ void CCalendarViewCtrl::Paint(WTL::CDCHandle dc) {
 	RECT rc;
 	GetClientRect(&rc);
 	FillSolid(dc, rc, c.crHeaderBack);
+	PaintNavBar(dc, c);
 	auto oldFont = dc.SelectFont(m_hFont);
 	dc.SetBkMode(TRANSPARENT);
 

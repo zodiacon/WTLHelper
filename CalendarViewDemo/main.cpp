@@ -42,7 +42,7 @@ enum : UINT {
 	IDC_CALENDAR = 100, IDC_LOG, IDC_PROGRESS = 200, IDC_JOIN, IDC_AGENDA, IDC_NOTES, IDC_SHORT,
 	CMD_EXIT = 1000, CMD_DAY, CMD_THREEDAYS, CMD_WORKWEEK, CMD_WEEK, CMD_PREV, CMD_NEXT, CMD_TODAY, CMD_SLOT15,
 	CMD_SLOT30, CMD_SLOT60, CMD_ZOOMIN, CMD_ZOOMOUT, CMD_DARKMODE, CMD_LARGEFONT, CMD_CLEARLOG, CMD_NOW, CMD_ADD,
-	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND, CMD_HIGHCONTRAST,
+	CMD_DELETE, CMD_VIRTUAL, CMD_REFRESH, CMD_DIMPAST, CMD_UNDO, CMD_REDO, CMD_READONLY, CMD_NOWEEKEND, CMD_HIGHCONTRAST, CMD_NAVBAR, CMD_PICKDATE,
 };
 
 static std::unique_ptr<CCalendarViewCtrl> g_calendar;   // made again for virtual mode: a new control's state
@@ -284,7 +284,7 @@ static void CreateCalendar() {
 	g_fetched = g_released = 0;
 	g_progress = nullptr;
 	g_calendar->Create(g_main, nullptr, L"Calendar", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP |
-		(g_virtual ? CLVS_VIRTUAL : 0), 0, IDC_CALENDAR);
+		(g_virtual ? CLVS_VIRTUAL : 0) | ((::GetMenuState(g_menu, CMD_NAVBAR, MF_BYCOMMAND) & MF_CHECKED) ? CLVS_NAVBAR : 0), 0, IDC_CALENDAR);
 	::SetWindowPos(*g_calendar, g_log, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	if (g_largeFont)
 		g_calendar->SetFont(g_largeFont);
@@ -308,6 +308,8 @@ static HMENU BuildMenu() {
 	::AppendMenuW(view, MF_STRING, CMD_PREV, L"&Previous\tCtrl+Left");
 	::AppendMenuW(view, MF_STRING, CMD_NEXT, L"&Next\tCtrl+Right");
 	::AppendMenuW(view, MF_STRING, CMD_TODAY, L"T&oday\tCtrl+T");
+	::AppendMenuW(view, MF_STRING, CMD_PICKDATE, L"&Go to Date...");
+	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_NAVBAR, L"Navigation &Bar");
 	::AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(view, MF_STRING, CMD_SLOT15, L"&15 Minute Slots");
 	::AppendMenuW(view, MF_STRING | MF_CHECKED, CMD_SLOT30, L"&30 Minute Slots");
@@ -452,6 +454,13 @@ static void OnCommand(UINT id) {
 				g_calendar->ModifyStyle(CLVS_READONLY, 0);
 			break;
 		case CMD_NOWEEKEND: Toggle(id); break;
+		case CMD_NAVBAR:
+			if (Toggle(id))
+				g_calendar->ModifyStyle(0, CLVS_NAVBAR);
+			else
+				g_calendar->ModifyStyle(CLVS_NAVBAR, 0);
+			break;
+		case CMD_PICKDATE: g_calendar->SetFocus(); g_calendar->ShowDatePicker(); break;
 		case CMD_HIGHCONTRAST: g_calendar->ForceHighContrast(Toggle(id) ? 1 : -1); break;
 	}
 }

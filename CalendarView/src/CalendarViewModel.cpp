@@ -625,6 +625,78 @@ ClvTime ClvMoveSlot(ClvTime t, int days, int slots, int slot) {
 	return ClvTimeOf(day, minute);
 }
 
+// ---- Going between days -----------------------------------------------------------------------------
+
+int ClvViewStep(int days) {
+	return days == 5 ? 7 : std::max(1, days);
+}
+
+int64_t ClvFirstShown(int64_t day, int days, int firstWeekday) {
+	if (days == 5)
+		return ClvWeekStart(day, 1);
+	if (days == 7)
+		return ClvWeekStart(day, firstWeekday);
+	return day;
+}
+
+ClvMiniMetrics ClvMiniMetrics::Scaled(int dpi) const {
+	auto s = [dpi](int v) {
+		return ::MulDiv(v, dpi, 96);
+	};
+	ClvMiniMetrics m;
+	m.cell = s(cell);
+	m.title = s(title);
+	m.weekdays = s(weekdays);
+	m.pad = s(pad);
+	return m;
+}
+
+ClvMiniLayout ClvLayoutMini(int64_t day, int firstWeekday, const ClvMiniMetrics& m) {
+	ClvMiniLayout l;
+	l.month = ClvMonthStart(day);
+	l.first = ClvWeekStart(l.month, firstWeekday);
+	l.cell = m.cell;
+	const int width = 7 * m.cell;
+	l.size = { 2 * m.pad + width, 2 * m.pad + m.title + m.weekdays + 6 * m.cell };
+	int y = m.pad;
+	l.prev = { m.pad, y, m.pad + m.cell, y + m.title };
+	l.next = { m.pad + width - m.cell, y, m.pad + width, y + m.title };
+	l.title = { l.prev.right, y, l.next.left, y + m.title };
+	y += m.title;
+	l.weekdays = { m.pad, y, m.pad + width, y + m.weekdays };
+	y += m.weekdays;
+	l.days = { m.pad, y, m.pad + width, y + 6 * m.cell };
+	return l;
+}
+
+RECT ClvMiniLayout::DayRect(int index) const {
+	const int x = days.left + index % 7 * cell, y = days.top + index / 7 * cell;
+	return { x, y, x + cell, y + cell };
+}
+
+int ClvMiniLayout::Weekday(int column) const {
+	return ClvWeekday(first + column);
+}
+
+ClvMiniPart ClvMiniLayout::Hit(POINT pt, int64_t* day) const {
+	auto in = [&](const RECT& rc) {
+		return pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom;
+	};
+	if (in(prev))
+		return ClvMiniPart::Prev;
+	if (in(next))
+		return ClvMiniPart::Next;
+	if (in(title))
+		return ClvMiniPart::Title;
+	if (in(days)) {
+		const int index = (pt.y - days.top) / cell * 7 + (pt.x - days.left) / cell;
+		if (day)
+			*day = first + index;
+		return ClvMiniPart::Day;
+	}
+	return ClvMiniPart::None;
+}
+
 // ---- Scrolling, zoom and the tab order -------------------------------------------------------------
 
 int ClvClampScroll(int scroll, int content, int view) {

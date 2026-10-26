@@ -554,6 +554,59 @@ TEST(TabOrder) {
 	CHECK_INT(ClvNextItem({}, 1, true), 0);
 }
 
+TEST(Navigation) {
+	CHECK_INT(ClvViewStep(5), 7);
+	CHECK_INT(ClvViewStep(7), 7);
+	CHECK_INT(ClvViewStep(3), 3);
+	CHECK_INT(ClvViewStep(1), 1);
+	CHECK_INT(ClvViewStep(0), 1);
+	// D0 is a Monday: Thursday's work week is from it, its week from the Sunday before or from it
+	CHECK_INT(ClvFirstShown(D0 + 3, 5, 0), D0);
+	CHECK_INT(ClvFirstShown(D0 + 6, 5, 0), D0);       // a Sunday: the work week it ends
+	CHECK_INT(ClvFirstShown(D0 + 3, 7, 0), D0 - 1);
+	CHECK_INT(ClvFirstShown(D0 + 3, 7, 1), D0);
+	CHECK_INT(ClvFirstShown(D0 + 3, 3, 1), D0 + 3);
+	CHECK_INT(ClvFirstShown(D0 + 3, 1, 1), D0 + 3);
+}
+
+TEST(MiniMonth) {
+	ClvMiniMetrics m;
+	// October 2026 starts on a Thursday: from Sunday, September 27
+	auto l = ClvLayoutMini(D0, 0, m);
+	CHECK_INT(l.month, ClvDayFromDate(2026, 10, 1));
+	CHECK_INT(l.first, ClvDayFromDate(2026, 9, 27));
+	CHECK(l.size.cx == 2 * 8 + 7 * 30 && l.size.cy == 2 * 8 + 32 + 22 + 6 * 30);
+	CHECK(Same(l.prev, 8, 8, 38, 40));
+	CHECK(Same(l.next, 188, 8, 218, 40));
+	CHECK(Same(l.title, 38, 8, 188, 40));
+	CHECK(Same(l.weekdays, 8, 40, 218, 62));
+	CHECK(Same(l.days, 8, 62, 218, 242));
+	CHECK(Same(l.DayRect(0), 8, 62, 38, 92));
+	CHECK(Same(l.DayRect(8), 38, 92, 68, 122));
+	CHECK(Same(l.DayRect(41), 188, 212, 218, 242));
+	CHECK_INT(l.Weekday(0), 0);
+	CHECK_INT(l.Weekday(6), 6);
+	CHECK_INT(ClvLayoutMini(D0, 1, m).Weekday(0), 1);
+	CHECK_INT(ClvLayoutMini(D0, 1, m).first, ClvDayFromDate(2026, 9, 28));
+
+	int64_t day = 0;
+	CHECK(l.Hit({ 10, 10 }, nullptr) == ClvMiniPart::Prev);
+	CHECK(l.Hit({ 200, 30 }, nullptr) == ClvMiniPart::Next);
+	CHECK(l.Hit({ 100, 20 }, nullptr) == ClvMiniPart::Title);
+	CHECK(l.Hit({ 100, 50 }, nullptr) == ClvMiniPart::None);   // the initials
+	CHECK(l.Hit({ 2, 100 }, nullptr) == ClvMiniPart::None);
+	CHECK(l.Hit({ 9, 63 }, &day) == ClvMiniPart::Day);
+	CHECK_INT(day, ClvDayFromDate(2026, 9, 27));
+	CHECK(l.Hit({ 217, 241 }, &day) == ClvMiniPart::Day);
+	CHECK_INT(day, ClvDayFromDate(2026, 9, 27) + 41);
+	// October 26 (D0): the 30th day from September 27, row 4, column 1
+	CHECK(l.Hit({ 8 + 30 + 5, 62 + 4 * 30 + 5 }, &day) == ClvMiniPart::Day);
+	CHECK_INT(day, D0);
+
+	auto big = ClvMiniMetrics{}.Scaled(144);
+	CHECK(big.cell == 45 && big.title == 48 && big.pad == 12);
+}
+
 TEST(Undo) {
 	ClvItemStore s;
 	ClvHistory h;
@@ -613,6 +666,8 @@ int wmain() {
 	Run_Dragging();
 	Run_Scrolling();
 	Run_TabOrder();
+	Run_Navigation();
+	Run_MiniMonth();
 	Run_Undo();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);

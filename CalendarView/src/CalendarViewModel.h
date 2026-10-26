@@ -5,7 +5,7 @@
 // items into the pieces a range of day columns shows (timed pieces per day, all-day and long ones in the strip), placing
 // overlapping pieces side by side, packing the strip's rows, the day view's boxes and their parts under the mouse,
 // dragging (moving, resizing, between the strip and the days, selecting slots), scrolling, zooming, the items' tab
-// order, and undo. Everything is in days and minutes, so a month view is another layout over the same pieces. Sizes are
+// order, undo, going from one range of days to the next, and the date chooser's month. Everything is in days and minutes, so a month view is another layout over the same pieces. Sizes are
 // in pixels; the control scales the metrics for its DPI. Covered by CalendarViewTests.
 
 #include <windows.h>
@@ -308,6 +308,42 @@ ClvSpan ClvSlotRange(ClvTime anchor, ClvTime at, int slot);
 ClvSpan ClvDayRange(int64_t anchor, int64_t day);
 // A slot moved by days and slots, kept in its day (0 to the day's last slot).
 ClvTime ClvMoveSlot(ClvTime t, int days, int slots, int slot);
+
+// ---- Going between days -----------------------------------------------------------------------------
+
+// How far Previous and Next go: a week for a work week (5 days shown), else the days shown.
+int ClvViewStep(int days);
+// The first day to show for a day: its week's first day when 7 days are shown (a work week's: its Monday), else the day.
+int64_t ClvFirstShown(int64_t day, int days, int firstWeekday);
+
+// The date chooser: a title (the month) between the previous and next buttons, the weekdays' initials, and 6 weeks of
+// days from the week holding the month's first day.
+struct ClvMiniMetrics {
+	int cell = 30;                 // a day's square
+	int title = 32;                // the month's row
+	int weekdays = 22;             // the initials' row
+	int pad = 8;                   // around it all
+
+	ClvMiniMetrics Scaled(int dpi) const;
+};
+
+enum class ClvMiniPart : uint8_t { None, Prev, Next, Title, Day };
+
+struct ClvMiniLayout {
+	int64_t month = 0;             // the month's first day
+	int64_t first = 0;             // the first day shown
+	SIZE size{};                   // the whole popup's
+	RECT title{}, prev{}, next{};
+	RECT weekdays{};               // the initials' row
+	RECT days{};                   // the 7 x 6 days
+	int cell = 30;
+
+	RECT DayRect(int index) const;                            // 0 to 41
+	int Weekday(int column) const;                            // the column's weekday (0 Sunday)
+	ClvMiniPart Hit(POINT pt, int64_t* day) const;            // a Day's in *day
+};
+
+ClvMiniLayout ClvLayoutMini(int64_t day, int firstWeekday, const ClvMiniMetrics& m);   // the month day is in
 
 // ---- Scrolling, zoom and the tab order -------------------------------------------------------------
 
