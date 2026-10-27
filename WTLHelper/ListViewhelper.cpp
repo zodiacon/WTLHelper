@@ -186,33 +186,32 @@ int ListViewHelper::FindItem(CListViewCtrl const& lv, PCWSTR text, bool partial)
 }
 
 int ListViewHelper::SearchItem(CListViewCtrl const& lv, PCWSTR textToFind, bool searchDown, bool caseSenstive) {
-	int start = lv.GetNextItem(-1, LVIS_SELECTED);
+	auto count = lv.GetItemCount();
+	if (count == 0)
+		return -1;
+
 	CString find(textToFind);
 	auto ignoreCase = !caseSenstive;
 	if (ignoreCase)
 		find.MakeLower();
 
-	auto columns = lv.GetHeader().GetItemCount();
-	auto count = lv.GetItemCount();
-	int from = searchDown ? start + 1 : start - 1 + count;
-	int to = searchDown ? count + start : start + 1;
-	int step = searchDown ? 1 : -1;
+	// with no selection, start just before the first row (down) or after the last (up),
+	// so every row is searched; otherwise the selected row itself is checked last
+	int start = lv.GetNextItem(-1, LVNI_SELECTED);
+	if (start < 0)
+		start = searchDown ? count - 1 : 0;
 
-	int findIndex = -1;
+	auto columns = lv.GetHeader().GetItemCount();
 	CString text;
-	for (int i = from; i != to; i += step) {
-		int index = i % count;
+	for (int n = 1; n <= count; n++) {
+		int index = ((searchDown ? start + n : start - n) % count + count) % count;
 		for (int c = 0; c < columns; c++) {
 			lv.GetItemText(index, c, text);
 			if (ignoreCase)
 				text.MakeLower();
-			if (text.Find(find) >= 0) {
-				findIndex = index;
-				break;
-			}
+			if (text.Find(find) >= 0)
+				return index;
 		}
-		if (findIndex >= 0)
-			return findIndex;
 	}
 
 	return -1;
