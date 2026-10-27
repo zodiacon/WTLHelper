@@ -4,7 +4,7 @@
 // of failed checks. Only the pure parts are covered: the block tree md4c's callbacks build, inline styles, links and
 // images, the map back to the source, GitHub's extras (alerts, footnotes, emoji, anchors, front matter, raw HTML's
 // subset), plain text and HTML export, source ranges, the tables' column widths, and the flow of boxes the view lays
-// out (indents, margins, markers, bars, placement), the built-in syntax highlighting and the images' sources. Anything that needs an HWND or a render target is checked by
+// out (indents, margins, markers, bars, placement), the built-in syntax highlighting, the images' sources, finding and words. Anything that needs an HWND or a render target is checked by
 // hand with MarkdownViewDemo.
 
 #include "MarkdownViewLayout.h"
@@ -1042,6 +1042,71 @@ TEST(SvgTexts) {
 	CHECK_INT(MdvSvgTexts("<svg><rect/></svg>").size(), 0);
 }
 
+// ---- Finding ------------------------------------------------------------------------------
+
+TEST(FindAll) {
+	auto doc = Parse(L"# The Cat\n\nA cat, a CAT and concatenate.\n\n```\ncat file\n```\n\n| cat |\n|---|\n| dog |\n");
+	auto all = MdvFindAll(doc, L"cat", 0);
+	CHECK_INT(all.size(), 6);
+	CHECK_INT(all[0].block, IndexAt(doc, { 0 }));
+	CHECK_INT(all[0].start, 4);
+	CHECK_INT(all[1].start, 2);
+	CHECK_INT(all[3].start, 20);          // in "concatenate"
+	CHECK_INT(all[4].block, IndexAt(doc, { 2 }));
+	CHECK_INT(all[5].block, IndexAt(doc, { 3, 0, 0 }));
+	CHECK_INT(MdvFindAll(doc, L"cat", MdvMatchCase).size(), 4);
+	CHECK_INT(MdvFindAll(doc, L"cat", MdvWholeWord).size(), 5);
+	CHECK_INT(MdvFindAll(doc, L"CAT", MdvMatchCase | MdvWholeWord).size(), 1);
+	CHECK_INT(MdvFindAll(doc, L"", 0).size(), 0);
+	CHECK_INT(MdvFindAll(doc, L"cat", 0, 2).size(), 2);
+	CHECK_INT(MdvFindAll(doc, L"a cat", 0).size(), 2);
+	// not across leaves
+	CHECK_INT(MdvFindAll(doc, L"The Cat A cat", 0).size(), 0);
+}
+
+TEST(FindNext) {
+	auto doc = Parse(L"one two one\n\nthree one\n");
+	const int a = IndexAt(doc, { 0 }), b = IndexAt(doc, { 1 });
+	MdvMatch m;
+	CHECK(MdvFindNext(doc, L"one", 0, { a, 0 }, false, m));
+	CHECK(m.block == a && m.start == 0);
+	CHECK(MdvFindNext(doc, L"one", 0, { a, 3 }, false, m));
+	CHECK(m.block == a && m.start == 8);
+	CHECK(MdvFindNext(doc, L"one", 0, { a, 11 }, false, m));
+	CHECK(m.block == b && m.start == 6);
+	CHECK(MdvFindNext(doc, L"one", 0, { b, 9 }, false, m));       // round the end
+	CHECK(m.block == a && m.start == 0);
+	CHECK(MdvFindNext(doc, L"one", 0, { b, 6 }, true, m));
+	CHECK(m.block == a && m.start == 8);
+	CHECK(MdvFindNext(doc, L"one", 0, { a, 0 }, true, m));        // round the start
+	CHECK(m.block == b && m.start == 6);
+	CHECK(!MdvFindNext(doc, L"four", 0, { a, 0 }, false, m));
+}
+
+TEST(Words) {
+	size_t a, b;
+	MdvWordAt(L"hello big_world, ok", 8, a, b);
+	CHECK_INT(a, 6);
+	CHECK_INT(b, 15);
+	MdvWordAt(L"hello big_world, ok", 15, a, b);
+	CHECK_INT(a, 15);
+	CHECK_INT(b, 16);
+	MdvWordAt(L"a   b", 2, a, b);
+	CHECK_INT(a, 1);
+	CHECK_INT(b, 4);
+	MdvWordAt(L"end", 3, a, b);           // past the end: the last word
+	CHECK_INT(a, 0);
+	CHECK_INT(b, 3);
+	MdvWordAt(L"x\ny", 1, a, b);
+	CHECK_INT(a, 1);
+	CHECK_INT(b, 2);
+	MdvWordAt(L"", 0, a, b);
+	CHECK_INT(a, 0);
+	CHECK_INT(b, 0);
+	auto doc = Parse(L"para\n\n---\n\n| c |\n|---|\n| d |\n");
+	CHECK_INT(doc.TextLeaves().size(), 3);   // no rule
+}
+
 int wmain() {
 	Run_Blocks();
 	Run_InlineStyles();
@@ -1083,6 +1148,9 @@ int wmain() {
 	Run_ImagePaths();
 	Run_SvgSizes();
 	Run_SvgTexts();
+	Run_FindAll();
+	Run_FindNext();
+	Run_Words();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

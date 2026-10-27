@@ -21,6 +21,9 @@ constexpr wchar_t WC_MARKDOWNVIEW[] = L"WC_MarkdownView";
 // ---- Styles (the window's low word) ------------------------------------------
 
 #define MDVS_CENTERED      0x0001   // the text column at most MDVSTYLE::maxWidth wide, centered
+#define MDVS_TASKCLICK     0x0002   // task list boxes can be clicked (MDVN_TASKTOGGLE)
+#define MDVS_NOLINKTIPS    0x0004   // no tooltip with a link's address
+#define MDVS_NOSELECTION   0x0008   // the text can't be selected
 
 // ---- Parse flags ---------------------------------------------------------------
 
@@ -88,9 +91,10 @@ struct MDVCOLORS {
 	COLORREF crTableBorder;
 	COLORREF crTableHeaderBack;
 	COLORREF crTableStripeBack;
-	COLORREF crSelBack;
-	COLORREF crSelText;
+	COLORREF crSelBack;            // behind selected text (which keeps its colors)
+	COLORREF crSelBackInactive;    // the same while the control doesn't have the focus
 	COLORREF crSyntax[MDVSYN_COUNT];
+	COLORREF crFindBack;           // HighlightAll's matches
 };
 
 // ---- Code highlighting -------------------------------------------------------------
@@ -120,16 +124,63 @@ struct MDVHEADING {
 	size_t  sourceOffset;
 };
 
+// ---- Finding and hit testing -------------------------------------------------------
+
+#define MDVFF_MATCHCASE    0x0001
+#define MDVFF_WHOLEWORD    0x0002
+#define MDVFF_UP           0x0004   // Find: backwards
+
+#define MDVHT_NOWHERE      0
+#define MDVHT_TEXT         1
+#define MDVHT_LINK         2        // pszUrl, pszTitle
+#define MDVHT_IMAGE        3        // pszUrl (the image's source), pszTitle (its alternative text)
+#define MDVHT_TASK         4        // a task list's box
+#define MDVHT_CODECOPY     5        // a code block's copy button
+#define MDVHT_SUMMARY      6        // a <details>' summary
+
+struct MDVHITTEST {
+	POINT   pt;                    // in: client coordinates
+	UINT    part;                  // out: MDVHT_*
+	size_t  sourceOffset;          // the source offset of the character there (MDVHT_TEXT, MDVHT_LINK, MDVHT_TASK: its mark)
+	LPCWSTR pszUrl;                // valid until the text changes
+	LPCWSTR pszTitle;
+};
+
 // ---- Notifications -------------------------------------------------------------
 
 #define MDVN_FIRST          (0U - 3400U)   // outside the common controls ranges
 #define MDVN_SCROLLED       (MDVN_FIRST - 0)   // NMMDVSCROLL; the view scrolled
 #define MDVN_GETIMAGE       (MDVN_FIRST - 1)   // NMMDVIMAGE; an image that isn't a local file or a data: URL
+#define MDVN_LINKCLICK      (MDVN_FIRST - 2)   // NMMDVLINK; non-zero: the app handled it (else a #link scrolls; nothing else is opened)
+#define MDVN_LINKHOT        (MDVN_FIRST - 3)   // NMMDVLINK; the link under the mouse changed (pszUrl null: none)
+#define MDVN_SELCHANGED     (MDVN_FIRST - 4)   // NMHDR; the user changed the selection
+#define MDVN_CONTEXTMENU    (MDVN_FIRST - 5)   // NMMDVCONTEXTMENU
+#define MDVN_TASKTOGGLE     (MDVN_FIRST - 6)   // NMMDVTASK; MDVS_TASKCLICK: a box clicked; non-zero stops it, else the text changes
 
 struct NMMDVSCROLL {
 	NMHDR  hdr;
 	int    heading;                // the heading at or above the top of the view (GetHeading), -1 if none
 	size_t topOffset;              // GetTopOffset
+};
+
+struct NMMDVLINK {
+	NMHDR   hdr;
+	LPCWSTR pszUrl;
+	LPCWSTR pszTitle;
+	size_t  sourceOffset;          // the link's text in the source
+};
+
+struct NMMDVCONTEXTMENU {
+	NMHDR       hdr;
+	POINT       pt;                // screen coordinates; from the keyboard, the selection's or the view's corner
+	MDVHITTEST  hit;               // what's there
+	BOOL        hasSelection;
+};
+
+struct NMMDVTASK {
+	NMHDR  hdr;
+	size_t sourceOffset;           // the character between [ and ], which becomes 'x' or ' '
+	BOOL   checked;                // the state it's going to
 };
 
 // The app gives the image now (pStream: the control releases it; hBitmap: the control copies it, the app keeps
@@ -144,6 +195,7 @@ struct NMMDVIMAGE {
 // ---- Control class --------------------------------------------------------------------------
 
 struct MdvState;
+struct MdvText;
 
 class CMarkdownViewCtrl : public ATL::CWindowImpl<CMarkdownViewCtrl> {
 public:
@@ -155,7 +207,7 @@ public:
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
 	enum : UINT { WM_MDV_IMAGES = WM_USER + 100 };   // posted by the worker thread: images are decoded
-	enum : UINT_PTR { CopiedTimer = 1 };
+	enum : UINT_PTR { CopiedTimer = 1, ScrollTimer = 2 };
 
 	BEGIN_MSG_MAP(CMarkdownViewCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -165,6 +217,10 @@ public:
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
+		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
+		MESSAGE_HANDLER(WM_COPY, OnCopy)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
@@ -213,6 +269,22 @@ public:
 	size_t GetTopOffset() const;               // the source offset of the block at the top, to come back to it
 	int GetTopHeading() const;                 // the heading at or above the top of the view, -1 if none
 
+	// ---- Selection ----
+	BOOL HasSelection() const;
+	void SelectAll();
+	void ClearSelection();
+	void GetSelection(size_t& anchorOffset, size_t& caretOffset) const;   // source offsets; equal: none
+	void SetSelection(size_t anchorOffset, size_t caretOffset);         // the texts at the source offsets
+	CString GetSelectedText() const;           // plain text: list markers, tabs between cells
+	CString GetSelectedHtml() const;
+	CString GetSelectedMarkdown() const;       // the source, from the start of the selection's first line
+	BOOL Copy();                               // plain text and HTML (CF_HTML); Ctrl+C
+
+	// ---- Finding ----
+	BOOL Find(LPCWSTR pszText, UINT flags);    // MDVFF_*: selects the next match from the selection (going round) and shows it
+	int HighlightAll(LPCWSTR pszText, UINT flags);   // shades every match (their number; at most 100,000); null: none
+	BOOL HitTest(MDVHITTEST& ht) const;
+
 private:
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
@@ -221,6 +293,9 @@ private:
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFocus(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnContextMenu(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCopy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
@@ -257,6 +332,23 @@ private:
 	bool CopyButton(size_t box, float rc[4]) const;
 	void CopyCode(int block);
 	void ImagesChanged(const std::vector<uint64_t>& keys);
+
+	// selection, links and finding (MarkdownViewSelection.cpp)
+	void UpdateLeaves();
+	// the text nearest a client point: the place between characters, whether the point is on the text, the character
+	bool PositionAt(POINT pt, int& leaf, size_t& pos, bool* inside = nullptr, size_t* hit = nullptr) const;
+	const MdvText* LeafText(int leaf, float& x, float& y) const;   // a text leaf's layout and where it's drawn (client DIPs)
+	bool PressText(POINT pt, bool shift, bool doubleClick);
+	void DragSelection(POINT pt);
+	void EndSelection(POINT pt);
+	void AutoScroll();
+	void UpdateHotLink(POINT pt);
+	bool LinkAt(POINT pt, int& leaf, int& link, float rc[4]) const;
+	bool TaskAt(POINT pt, int& item) const;
+	void ClickLink(int leaf, int link);
+	void ToggleTask(int item);
+	void ShowPosition(int leaf, size_t pos);
+	void SelectionChanged(bool notify);
 
 	// painting (MarkdownViewPaint.cpp)
 	void Paint();

@@ -262,6 +262,14 @@ std::vector<int> MdvDocument::Leaves() const {
 	return out;
 }
 
+std::vector<int> MdvDocument::TextLeaves() const {
+	std::vector<int> out;
+	for (int b : Leaves())
+		if (blocks[b].HasContent())
+			out.push_back(b);
+	return out;
+}
+
 int MdvDocument::LeafAtSource(size_t offset) const {
 	int last = -1;
 	for (int b : Leaves()) {

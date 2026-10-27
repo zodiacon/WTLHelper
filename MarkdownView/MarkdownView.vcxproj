@@ -110,6 +110,7 @@
     <ClCompile Include="src\MarkdownViewLayout.cpp" />
     <ClCompile Include="src\MarkdownViewModel.cpp" />
     <ClCompile Include="src\MarkdownViewPaint.cpp" />
+    <ClCompile Include="src\MarkdownViewSelection.cpp" />
     <ClCompile Include="src\MarkdownViewSyntax.cpp" />
     <ClCompile Include="src\MarkdownViewText.cpp" />
     <ClCompile Include="src\md4c\entity.c">

@@ -35,6 +35,7 @@ CAppModule _Module;
 enum {
 	IDC_VIEW = 101,
 	IDC_TOC,
+	IDC_STATUS,
 
 	ID_DEMO_OPEN = 201,
 	ID_DEMO_SAMPLE,
@@ -54,18 +55,36 @@ enum {
 	ID_DEMO_HARDBREAKS,
 	ID_DEMO_NOEMOJI,
 	ID_DEMO_HIGHLIGHTER,
+
+	ID_DEMO_COPY = 401,
+	ID_DEMO_COPYMARKDOWN,
+	ID_DEMO_COPYLINK,
+	ID_DEMO_SELECTALL,
+	ID_DEMO_FIND,
+	ID_DEMO_FINDNEXT,
+	ID_DEMO_FINDPREV,
+	ID_DEMO_HIGHLIGHTALL,
 };
 
 // ---- State --------------------------------------------------------------------
 
 static CMarkdownViewCtrl g_view;
 static CListBox g_toc;
+static CStatusBarCtrl g_status;
 static HWND g_main;
 static CString g_path;
 static bool g_showToc = true;
 static bool g_customColors;
 static bool g_serif;
 static bool g_appHighlighter;
+static bool g_highlightAll;
+static CString g_contextLink;         // the link the context menu was asked on
+
+// the system's Find dialog: modeless, so the message loop passes it its messages
+static const UINT g_findMessage = ::RegisterWindowMessageW(FINDMSGSTRINGW);
+static FINDREPLACEW g_findInfo;
+static wchar_t g_findText[256];
+static HWND g_find;
 static HFONT g_tocFont;
 static bool g_syncing;     // the list follows the view: not the other way round
 
@@ -115,6 +134,8 @@ Math is shown as its source: $e^{i\pi} + 1 = 0$.
    1. Two point one
    2. Two point two
 3. Three
+
+Click the boxes: they change the text (the demo's status bar says so).
 
 - [x] Write the model
 - [x] Draw the text
@@ -370,6 +391,10 @@ static void OpenFile() {
 static void Layout() {
 	RECT rc;
 	::GetClientRect(g_main, &rc);
+	g_status.SendMessage(WM_SIZE);
+	RECT status;
+	g_status.GetWindowRect(&status);
+	rc.bottom -= status.bottom - status.top;
 	const int toc = g_showToc ? ::MulDiv(240, ::GetDpiForWindow(g_main), 96) : 0;
 	g_toc.ShowWindow(g_showToc ? SW_SHOW : SW_HIDE);
 	if (g_showToc)
@@ -391,6 +416,83 @@ static MDVCOLORS SepiaColors() {
 
 // ---- Commands ----------------------------------------------------------------------
 
+static void ShowSelection();
+
+static UINT FindFlags(bool up) {
+	UINT flags = up ? MDVFF_UP : 0;
+	if (g_findInfo.Flags & FR_MATCHCASE)
+		flags |= MDVFF_MATCHCASE;
+	if (g_findInfo.Flags & FR_WHOLEWORD)
+		flags |= MDVFF_WHOLEWORD;
+	return flags;
+}
+
+static void FindNext(bool up) {
+	if (!g_findText[0])
+		return;
+	if (!g_view.Find(g_findText, FindFlags(up)))
+		::MessageBeep(MB_ICONASTERISK);
+	ShowSelection();      // Find changes the selection without MDVN_SELCHANGED: that's for the user's changes
+	if (g_highlightAll)
+		g_view.HighlightAll(g_findText, FindFlags(false));
+}
+
+static void ShowFind() {
+	if (g_find) {
+		::SetActiveWindow(g_find);
+		return;
+	}
+	g_findInfo = { sizeof(g_findInfo) };
+	g_findInfo.hwndOwner = g_main;
+	g_findInfo.Flags = FR_DOWN;
+	g_findInfo.lpstrFindWhat = g_findText;
+	g_findInfo.wFindWhatLen = (WORD)std::size(g_findText);
+	g_find = ::FindTextW(&g_findInfo);
+}
+
+static void CopyString(const CString& text) {
+	if (text.IsEmpty() || !::OpenClipboard(g_main))
+		return;
+	::EmptyClipboard();
+	const size_t bytes = (text.GetLength() + 1) * sizeof(wchar_t);
+	if (HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+		memcpy(::GlobalLock(mem), (LPCWSTR)text, bytes);
+		::GlobalUnlock(mem);
+		if (!::SetClipboardData(CF_UNICODETEXT, mem))
+			::GlobalFree(mem);
+	}
+	::CloseClipboard();
+}
+
+static void ShowSelection() {
+	CString text;
+	if (g_view.HasSelection())
+		text.Format(L"%d characters selected", g_view.GetSelectedText().GetLength());
+	g_status.SetText(0, text);
+}
+
+// a link's click: #links the view scrolls to by itself; another document in the same folder opens here; web
+// links open in the browser (the view never opens anything)
+static bool OpenLink(LPCWSTR url) {
+	if (url[0] == L'#')
+		return false;
+	if (wcsncmp(url, L"http://", 7) == 0 || wcsncmp(url, L"https://", 8) == 0 || wcsncmp(url, L"mailto:", 7) == 0) {
+		::ShellExecuteW(g_main, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+		return true;
+	}
+	const CString base = g_view.GetBasePath();
+	if (base.IsEmpty() || wcschr(url, L':'))
+		return true;
+	CString path = base + L"\\" + url;
+	const int hash = path.Find(L'#');
+	if (hash >= 0)
+		path = path.Left(hash);
+	path.Replace(L'/', L'\\');
+	if (::PathFileExistsW(path))
+		LoadPath(path);
+	return true;
+}
+
 static void UpdateChecks(HMENU menu) {
 	auto check = [&](UINT id, bool on) { ::CheckMenuItem(menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED)); };
 	check(ID_DEMO_CENTERED, (g_view.GetStyle() & MDVS_CENTERED) != 0);
@@ -398,6 +500,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_DEMO_COLORS, g_customColors);
 	check(ID_DEMO_SERIF, g_serif);
 	check(ID_DEMO_HIGHLIGHTER, g_appHighlighter);
+	check(ID_DEMO_HIGHLIGHTALL, g_highlightAll);
 	const UINT flags = g_view.GetParseFlags();
 	check(ID_DEMO_NOHTML, (flags & MDVF_NOHTML) != 0);
 	check(ID_DEMO_HARDBREAKS, (flags & MDVF_HARDBREAKS) != 0);
@@ -462,6 +565,17 @@ static void OnCommand(HWND hwnd, UINT id) {
 			g_appHighlighter = !g_appHighlighter;
 			g_view.SetHighlighter(g_appHighlighter ? CapitalsHighlighter : nullptr, 0);
 			break;
+		case ID_DEMO_COPY: g_view.Copy(); break;
+		case ID_DEMO_COPYMARKDOWN: CopyString(g_view.GetSelectedMarkdown()); break;
+		case ID_DEMO_COPYLINK: CopyString(g_contextLink); break;
+		case ID_DEMO_SELECTALL: g_view.SelectAll(); ShowSelection(); break;
+		case ID_DEMO_FIND: ShowFind(); break;
+		case ID_DEMO_FINDNEXT: FindNext(false); break;
+		case ID_DEMO_FINDPREV: FindNext(true); break;
+		case ID_DEMO_HIGHLIGHTALL:
+			g_highlightAll = !g_highlightAll;
+			g_view.HighlightAll(g_highlightAll ? g_findText : nullptr, FindFlags(false));
+			break;
 		case ID_DEMO_NOHTML: g_view.SetParseFlags(g_view.GetParseFlags() ^ MDVF_NOHTML); FillToc(); break;
 		case ID_DEMO_HARDBREAKS: g_view.SetParseFlags(g_view.GetParseFlags() ^ MDVF_HARDBREAKS); break;
 		case ID_DEMO_NOEMOJI: g_view.SetParseFlags(g_view.GetParseFlags() ^ MDVF_NOEMOJI); FillToc(); break;
@@ -488,7 +602,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				g_tocFont = ::CreateFontIndirectW(&ncm.lfMessageFont);
 				g_toc.SetFont(g_tocFont);
 			}
-			g_view.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | MDVS_CENTERED, 0, IDC_VIEW);
+			g_status.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, IDC_STATUS);
+			g_view.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | MDVS_CENTERED | MDVS_TASKCLICK, 0, IDC_VIEW);
 			g_view.SetText(g_sample);
 			Loaded();
 			::DragAcceptFiles(hwnd, TRUE);
@@ -520,6 +635,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 					g_view.SetImage(nm->pszUrl, nullptr);   // there's none: its alternative text shows
 				return 0;
 			}
+			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_LINKCLICK)
+				return OpenLink(((NMMDVLINK*)lParam)->pszUrl);
+			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_LINKHOT) {
+				auto nm = (NMMDVLINK*)lParam;
+				if (nm->pszUrl)
+					g_status.SetText(0, nm->pszUrl);
+				else
+					ShowSelection();
+				return 0;
+			}
+			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_SELCHANGED) {
+				ShowSelection();
+				return 0;
+			}
+			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_TASKTOGGLE) {
+				auto nm = (NMMDVTASK*)lParam;
+				g_status.SetText(0, nm->checked ? L"Task checked" : L"Task unchecked");
+				return 0;          // the view changes its text
+			}
+			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_CONTEXTMENU) {
+				auto nm = (NMMDVCONTEXTMENU*)lParam;
+				g_contextLink = nm->hit.part == MDVHT_LINK ? nm->hit.pszUrl : L"";
+				HMENU menu = ::CreatePopupMenu();
+				::AppendMenuW(menu, MF_STRING | (nm->hasSelection ? 0 : MF_GRAYED), ID_DEMO_COPY, L"&Copy");
+				::AppendMenuW(menu, MF_STRING | (nm->hasSelection ? 0 : MF_GRAYED), ID_DEMO_COPYMARKDOWN, L"Copy as &Markdown");
+				if (!g_contextLink.IsEmpty())
+					::AppendMenuW(menu, MF_STRING, ID_DEMO_COPYLINK, L"Copy &Link Address");
+				::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+				::AppendMenuW(menu, MF_STRING, ID_DEMO_SELECTALL, L"Select &All");
+				::AppendMenuW(menu, MF_STRING, ID_DEMO_FIND, L"&Find...");
+				::TrackPopupMenu(menu, TPM_RIGHTBUTTON, nm->pt.x, nm->pt.y, 0, hwnd, nullptr);
+				::DestroyMenu(menu);
+				return 0;
+			}
 			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_SCROLLED) {
 				// the contents follow the view
 				auto nm = (NMMDVSCROLL*)lParam;
@@ -531,6 +680,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			}
 			return 0;
 		}
+
+		default:
+			if (msg == g_findMessage) {
+				auto fr = (FINDREPLACEW*)lParam;
+				if (fr->Flags & FR_DIALOGTERM)
+					g_find = nullptr;
+				else if (fr->Flags & FR_FINDNEXT)
+					FindNext(!(fr->Flags & FR_DOWN));
+				return 0;
+			}
+			break;
 
 		case WM_DROPFILES: {
 			HDROP drop = (HDROP)wParam;
@@ -580,6 +740,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXIT, L"E&xit");
 
+	HMENU hEdit = ::CreatePopupMenu();
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COPY, L"&Copy\tCtrl+C");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COPYMARKDOWN, L"Copy as &Markdown");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_SELECTALL, L"Select &All\tCtrl+A");
+	::AppendMenuW(hEdit, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_FIND, L"&Find...\tCtrl+F");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_FINDNEXT, L"Find &Next\tF3");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_FINDPREV, L"Find &Previous\tShift+F3");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_HIGHLIGHTALL, L"&Highlight All Matches");
+
 	HMENU hView = ::CreatePopupMenu();
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ZOOMIN, L"Zoom &In\tCtrl++");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ZOOMOUT, L"Zoom &Out\tCtrl+-");
@@ -600,11 +770,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	HMENU hMenu = ::CreateMenu();
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
+	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
 
 	ACCEL accels[] = {
 		{ FVIRTKEY | FCONTROL, 'O', ID_DEMO_OPEN },
 		{ FVIRTKEY, VK_F5, ID_DEMO_RELOAD },
+		{ FVIRTKEY | FCONTROL, 'F', ID_DEMO_FIND },
+		{ FVIRTKEY, VK_F3, ID_DEMO_FINDNEXT },
+		{ FVIRTKEY | FSHIFT, VK_F3, ID_DEMO_FINDPREV },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));
 
@@ -622,6 +796,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	MSG msg;
 	while (::GetMessage(&msg, nullptr, 0, 0)) {
+		if (g_find && ::IsDialogMessageW(g_find, &msg))
+			continue;
 		if (!::TranslateAccelerator(hwnd, hAccel, &msg)) {
 			::TranslateMessage(&msg);
 			::DispatchMessage(&msg);

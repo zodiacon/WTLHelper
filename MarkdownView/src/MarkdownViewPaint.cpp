@@ -73,10 +73,6 @@ MdvFontMetrics FamilyMetrics(const std::wstring& name) {
 	return m;
 }
 
-// a table's cells' padding (GitHub's 6px 13px at 16px) and borders
-constexpr float CellPadX = 0.8125f, CellPadY = 0.375f, Border = 1;
-constexpr float TableBar = 10;          // room under a table that scrolls sideways, for its bar
-
 }  // namespace
 
 // ---- Resources -------------------------------------------------------------------------
@@ -310,6 +306,30 @@ static void ApplyEffects(MdvState& s, MdvText& t, const MdvInline* content, cons
 	t.effects = true;
 }
 
+static void FillRange(MdvState& s, MdvText& t, size_t a, size_t b, float x, float y, ID2D1Brush* brush) {
+	UINT32 count = 0;
+	t.layout->HitTestTextRange((UINT32)a, (UINT32)(b - a), 0, 0, nullptr, 0, &count);
+	if (count == 0)
+		return;
+	std::vector<DWRITE_HIT_TEST_METRICS> hits(count);
+	if (FAILED(t.layout->HitTestTextRange((UINT32)a, (UINT32)(b - a), 0, 0, hits.data(), count, &count)))
+		return;
+	for (auto& h : hits)
+		s.target->FillRectangle(D2D1::RectF(x + h.left, y + h.top, x + h.left + std::max(h.width, 3.0f), y + h.top + h.height), brush);
+}
+
+// HighlightAll's matches and the selection, behind a leaf's text
+static void PaintHighlights(MdvState& s, MdvText& t, int leaf, float x, float y, const MDVCOLORS& c, bool focused) {
+	const size_t length = s.doc.blocks[leaf].content.text.size();
+	auto it = s.highlights.find(leaf);
+	if (it != s.highlights.end())
+		for (auto& [start, count] : it->second)
+			FillRange(s, t, start, start + count, x, y, s.Brush(c.crFindBack));
+	size_t a, b;
+	if (s.Selected(leaf, length, a, b))
+		FillRange(s, t, a, b, x, y, s.Brush(focused ? c.crSelBack : c.crSelBackInactive));
+}
+
 static void DrawTextAt(MdvState& s, MdvText& t, float x, float y, COLORREF color, const MDVCOLORS& c, float em) {
 	auto* rt = s.target.Get();
 	for (auto& back : t.backs) {
@@ -418,7 +438,7 @@ bool CMarkdownViewCtrl::MeasureTable(size_t index) {
 	const float width = std::max(1.0f, box.TextWidth(ColumnWidth()));
 	const uint64_t key = MdvState::Key(box.block, box.kind);
 	const size_t columns = std::max<size_t>(table.columns, 1);
-	const float padX = CellPadX * em, padY = CellPadY * em;
+	const float padX = MdvCellPadX * em, padY = MdvCellPadY * em;
 
 	MdvLayoutCache cache;
 	cache.width = width;
@@ -440,8 +460,8 @@ bool CMarkdownViewCtrl::MeasureTable(size_t index) {
 			measures[c].maxWidth = std::max(measures[c].maxWidth, std::ceil(tm.widthIncludingTrailingWhitespace));
 		}
 	}
-	cache.columns = MdvColumnWidths(measures, width - (columns + 1) * Border, 2 * padX, 25 * em);
-	float y = Border;
+	cache.columns = MdvColumnWidths(measures, width - (columns + 1) * MdvTableBorder, 2 * padX, 25 * em);
+	float y = MdvTableBorder;
 	for (size_t r = 0; r < table.children.size(); r++) {
 		float rowHeight = m.lineHeight * em;
 		for (size_t c = 0; c < columns; c++) {
@@ -459,13 +479,13 @@ bool CMarkdownViewCtrl::MeasureTable(size_t index) {
 		rowHeight += 2 * padY;
 		cache.rowTops.push_back(y);
 		cache.rowHeights.push_back(rowHeight);
-		y += rowHeight + Border;
+		y += rowHeight + MdvTableBorder;
 	}
-	float tableWidth = Border;
+	float tableWidth = MdvTableBorder;
 	for (float w : cache.columns)
-		tableWidth += w + 2 * padX + Border;
+		tableWidth += w + 2 * padX + MdvTableBorder;
 	cache.contentWidth = tableWidth;
-	cache.height = y + (tableWidth > width + 0.5f ? TableBar : 0);
+	cache.height = y + (tableWidth > width + 0.5f ? MdvTableBar : 0);
 	box.height = cache.height;
 	box.measured = true;
 	s.layouts[key] = std::move(cache);
@@ -559,12 +579,13 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 	}
 	auto& cache = it->second;
 	const float sideways = SidewaysRoom(index) > 0 ? s.sideways[box.block] : 0;
+	const bool focused = ::GetFocus() == m_hWnd;
 
 	if (box.kind == MdvBoxKind::Table) {
 		const size_t columns = std::max<size_t>(block.columns, 1);
-		const float padX = CellPadX * em, padY = CellPadY * em;
+		const float padX = MdvCellPadX * em, padY = MdvCellPadY * em;
 		const float ox = x - sideways;
-		const float tableBottom = y + (cache.rowTops.empty() ? 0 : cache.rowTops.back() + cache.rowHeights.back() + Border);
+		const float tableBottom = y + (cache.rowTops.empty() ? 0 : cache.rowTops.back() + cache.rowHeights.back() + MdvTableBorder);
 		rt->PushAxisAlignedClip(D2D1::RectF(x, y, x + w, bottom), D2D1_ANTIALIAS_MODE_ALIASED);
 		size_t body = 0;
 		for (size_t r = 0; r < cache.rowTops.size(); r++) {
@@ -574,29 +595,30 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 				rt->FillRectangle(D2D1::RectF(ox, ry, ox + cache.contentWidth, ry + rh), s.Brush(c.crTableHeaderBack));
 			else if (body++ % 2 == 1)
 				rt->FillRectangle(D2D1::RectF(ox, ry, ox + cache.contentWidth, ry + rh), s.Brush(c.crTableStripeBack));
-			float cx = ox + Border;
+			float cx = ox + MdvTableBorder;
 			for (size_t col = 0; col < columns && col < cache.columns.size(); col++) {
 				auto& t = cache.cells[r * columns + col];
 				if (t.layout && col < row.children.size()) {
 					auto& content = s.doc.blocks[row.children[col]].content;
 					ApplyEffects(s, t, &content, c);
+					PaintHighlights(s, t, row.children[col], cx + padX, ry + padY, c, focused);
 					DrawTextAt(s, t, cx + padX, ry + padY, c.crText, c, em);
 				}
-				cx += cache.columns[col] + 2 * padX + Border;
+				cx += cache.columns[col] + 2 * padX + MdvTableBorder;
 			}
 		}
 		// the borders
 		auto border = s.Brush(c.crTableBorder);
-		rt->FillRectangle(D2D1::RectF(ox, y, ox + cache.contentWidth, y + Border), border);
+		rt->FillRectangle(D2D1::RectF(ox, y, ox + cache.contentWidth, y + MdvTableBorder), border);
 		for (size_t r = 0; r < cache.rowTops.size(); r++) {
 			const float ly = y + cache.rowTops[r] + cache.rowHeights[r];
-			rt->FillRectangle(D2D1::RectF(ox, ly, ox + cache.contentWidth, ly + Border), border);
+			rt->FillRectangle(D2D1::RectF(ox, ly, ox + cache.contentWidth, ly + MdvTableBorder), border);
 		}
 		float vx = ox;
-		rt->FillRectangle(D2D1::RectF(vx, y, vx + Border, tableBottom), border);
+		rt->FillRectangle(D2D1::RectF(vx, y, vx + MdvTableBorder, tableBottom), border);
 		for (float colWidth : cache.columns) {
-			vx += colWidth + 2 * padX + Border;
-			rt->FillRectangle(D2D1::RectF(vx - Border, y, vx, tableBottom), border);
+			vx += colWidth + 2 * padX + MdvTableBorder;
+			rt->FillRectangle(D2D1::RectF(vx - MdvTableBorder, y, vx, tableBottom), border);
 		}
 		rt->PopAxisAlignedClip();
 	}
@@ -605,6 +627,7 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 		rt->FillRoundedRectangle(D2D1::RoundedRect(rc, 6, 6), s.Brush(c.crCodeBack));
 		ApplyEffects(s, cache.text, nullptr, c);
 		rt->PushAxisAlignedClip(rc, D2D1_ANTIALIAS_MODE_ALIASED);
+		PaintHighlights(s, cache.text, box.block, x + box.padLeft - sideways, y + box.padTop, c, focused);
 		DrawTextAt(s, cache.text, x + box.padLeft - sideways, y + box.padTop, c.crCodeText, c, em);
 		rt->PopAxisAlignedClip();
 		// the copy button, while the mouse is over the block
@@ -647,6 +670,8 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 			}
 		}
 		ApplyEffects(s, cache.text, &block.content, c);
+		if (block.HasContent())
+			PaintHighlights(s, cache.text, box.block, tx, ty, c, focused);
 		DrawTextAt(s, cache.text, tx, ty, textColor, c, em);
 		if (block.kind == MdvKind::Heading && block.level <= 2)
 			rt->FillRectangle(D2D1::RectF(x, bottom - 1, x + w, bottom), s.Brush(c.crBorder));

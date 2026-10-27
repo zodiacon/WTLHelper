@@ -1,5 +1,5 @@
 // The markdown view's export: a document, or a range of it, as plain text, as HTML (and the CF_HTML clipboard
-// format), and the range's source text.
+// format), and the range's source text; and finding text in it.
 
 #include "MarkdownViewModel.h"
 
@@ -477,4 +477,101 @@ void MdvSourceRange(const MdvDocument& doc, const MdvRange& range, size_t& start
 	if (!last.HasContent() || b.pos >= last.content.text.size())
 		while (end < source.size() && source[end] != L'\n' && source[end] != L'\r')
 			end++;
+}
+
+// ---- Finding ---------------------------------------------------------------------------
+
+namespace {
+
+bool IsWordChar(wchar_t ch) {
+	return iswalnum(ch) || ch == L'_';
+}
+
+std::wstring Fold(std::wstring_view s) {
+	std::wstring out(s);
+	if (!s.empty())
+		::LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, s.data(), (int)s.size(), out.data(), (int)out.size(), nullptr, nullptr, 0);
+	return out;
+}
+
+}  // namespace
+
+std::vector<MdvMatch> MdvFindAll(const MdvDocument& doc, std::wstring_view text, unsigned flags, size_t limit) {
+	std::vector<MdvMatch> out;
+	if (text.empty() || doc.blocks.empty())
+		return out;
+	const bool caseless = !(flags & MdvMatchCase);
+	const std::wstring needle = caseless ? Fold(text) : std::wstring(text);
+	for (int b : doc.TextLeaves()) {
+		const std::wstring& raw = doc.blocks[b].content.text;
+		if (raw.size() < needle.size())
+			continue;
+		const std::wstring folded = caseless ? Fold(raw) : std::wstring();
+		const std::wstring& hay = caseless ? folded : raw;
+		for (size_t at = hay.find(needle); at != std::wstring::npos; at = hay.find(needle, at + 1)) {
+			if (flags & MdvWholeWord) {
+				const bool before = at > 0 && IsWordChar(raw[at - 1]);
+				const bool after = at + needle.size() < raw.size() && IsWordChar(raw[at + needle.size()]);
+				if (before || after)
+					continue;
+			}
+			out.push_back({ b, at, needle.size() });
+			if (out.size() >= limit)
+				return out;
+		}
+	}
+	return out;
+}
+
+bool MdvFindNext(const MdvDocument& doc, std::wstring_view text, unsigned flags, const MdvTextPos& from, bool backwards, MdvMatch& match) {
+	const auto all = MdvFindAll(doc, text, flags);
+	if (all.empty())
+		return false;
+	// the leaves' order
+	std::vector<int> order(doc.blocks.size(), -1);
+	const auto leaves = doc.TextLeaves();
+	for (size_t i = 0; i < leaves.size(); i++)
+		order[leaves[i]] = (int)i;
+	const int o = from.block >= 0 && from.block < (int)order.size() ? order[from.block] : -1;
+	auto before = [&](const MdvMatch& m) {        // the match starts before from
+		const int mo = order[m.block];
+		return mo < o || (mo == o && m.start < from.pos);
+	};
+	if (!backwards) {
+		for (auto& m : all)
+			if (!before(m)) {
+				match = m;
+				return true;
+			}
+		match = all.front();
+		return true;
+	}
+	for (size_t i = all.size(); i-- > 0;)
+		if (before(all[i])) {
+			match = all[i];
+			return true;
+		}
+	match = all.back();
+	return true;
+}
+
+void MdvWordAt(std::wstring_view text, size_t pos, size_t& start, size_t& end) {
+	start = end = std::min(pos, text.size());
+	if (text.empty())
+		return;
+	if (pos >= text.size())
+		pos = text.size() - 1;
+	auto kind = [](wchar_t ch) { return IsWordChar(ch) ? 0 : (ch == L' ' || ch == L'\t') ? 1 : ch == L'\n' ? 3 : 2; };
+	const int k = kind(text[pos]);
+	if (k == 3) {
+		start = pos;
+		end = pos + 1;
+		return;
+	}
+	start = pos;
+	while (start > 0 && kind(text[start - 1]) == k)
+		start--;
+	end = pos + 1;
+	while (end < text.size() && kind(text[end]) == k)
+		end++;
 }

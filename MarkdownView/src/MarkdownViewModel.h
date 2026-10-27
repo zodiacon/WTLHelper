@@ -170,6 +170,7 @@ struct MdvDocument {
 	const MdvBlock& Root() const { return blocks[0]; }
 	int FindAnchor(std::wstring_view name) const;   // a #fragment (leading '#' and %XX allowed), or -1 (index in anchors)
 	std::vector<int> Leaves() const;                // the blocks with content (and rules), in document order
+	std::vector<int> TextLeaves() const;            // the blocks with content, in document order: where a selection goes
 	int LeafAtSource(size_t offset) const;          // the leaf holding or after a source offset, or -1
 };
 
@@ -250,3 +251,21 @@ struct MdvColumnMeasure {
 // When even the minimums don't fit, the table scrolls: each column is then as wide as its text unwrapped up to
 // overflowCap (0: its minimum), as GitHub's tables are.
 std::vector<float> MdvColumnWidths(const std::vector<MdvColumnMeasure>& columns, float available, float padding, float overflowCap = 0);
+
+// ---- Finding ---------------------------------------------------------------------------
+
+constexpr unsigned MdvMatchCase = 0x0001;
+constexpr unsigned MdvWholeWord = 0x0002;
+
+struct MdvMatch {
+	int block = -1;               // a text leaf
+	size_t start = 0;
+	size_t length = 0;
+};
+
+// every match in the text leaves in document order (not across them), at most limit
+std::vector<MdvMatch> MdvFindAll(const MdvDocument& doc, std::wstring_view text, unsigned flags, size_t limit = 100000);
+// the first match at or after from (backwards: the last one before it), going round the document's end; false if none
+bool MdvFindNext(const MdvDocument& doc, std::wstring_view text, unsigned flags, const MdvTextPos& from, bool backwards, MdvMatch& match);
+// the word at pos (letters, digits, '_'), or the run of spaces or of other characters there
+void MdvWordAt(std::wstring_view text, size_t pos, size_t& start, size_t& end);

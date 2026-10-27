@@ -59,6 +59,11 @@ LRESULT CMarkdownViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CMarkdownViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	MdvStopLoader(*m_State);
 	KillTimer(CopiedTimer);
+	KillTimer(ScrollTimer);
+	if (m_State->tip) {
+		::DestroyWindow(m_State->tip);
+		m_State->tip = nullptr;
+	}
 	DiscardTarget();
 	bHandled = FALSE;
 	return 0;
@@ -127,6 +132,7 @@ void CMarkdownViewCtrl::SetText(LPCWSTR pszMarkdown, size_t cch) {
 		text.assign(pszMarkdown, cch == (size_t)-1 ? wcslen(pszMarkdown) : cch);
 	auto& s = *m_State;
 	MdvParse(std::move(text), s.parseFlags, s.doc);
+	UpdateLeaves();
 	s.layouts.clear();
 	s.images.clear();
 	s.sideways.clear();
@@ -140,6 +146,7 @@ void CMarkdownViewCtrl::Reparse() {
 	const size_t top = GetTopOffset();
 	std::wstring text = std::move(s.doc.source);
 	MdvParse(std::move(text), s.parseFlags, s.doc);
+	UpdateLeaves();
 	s.layouts.clear();
 	s.scrollY = 0;
 	Relayout();
@@ -288,8 +295,10 @@ MDVCOLORS CMarkdownViewCtrl::GetColors() const {
 	c.crTableBorder = c.crBorder;
 	c.crTableHeaderBack = Blend(c.crBack, c.crText, 4);
 	c.crTableStripeBack = Blend(c.crBack, c.crText, 3);
-	c.crSelBack = ::GetSysColor(COLOR_HIGHLIGHT);
-	c.crSelText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+	// a light shade of the highlight, as a browser's: the text keeps its colors
+	c.crSelBack = Blend(c.crBack, ::GetSysColor(COLOR_HIGHLIGHT), dark ? 45 : 30);
+	c.crSelBackInactive = Blend(c.crBack, c.crText, dark ? 22 : 14);
+	c.crFindBack = dark ? RGB(0x7A, 0x5C, 0x00) : RGB(0xFF, 0xE5, 0x8A);
 	// GitHub's
 	const COLORREF syntaxLight[MDVSYN_COUNT] = { RGB(0xCF, 0x22, 0x2E), RGB(0x82, 0x50, 0xDF), RGB(0x0A, 0x30, 0x69), RGB(0x6E, 0x77, 0x81),
 		RGB(0x05, 0x50, 0xAE), RGB(0x95, 0x38, 0x00), RGB(0x11, 0x63, 0x29), RGB(0x05, 0x50, 0xAE) };
@@ -599,6 +608,34 @@ LRESULT CMarkdownViewCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 		case VK_SPACE: ScrollTo(s.scrollY + (shift ? -page : page)); break;
 		case VK_HOME: ScrollTo(0); break;
 		case VK_END: ScrollTo(s.flow.height); break;
+		case 'A':
+			if (!ctrl || (GetStyle() & MDVS_NOSELECTION)) {
+				bHandled = FALSE;
+				return 0;
+			}
+			SelectAll();
+			SelectionChanged(true);
+			break;
+		case 'C':
+		case VK_INSERT:
+			if (!ctrl) {
+				bHandled = FALSE;
+				return 0;
+			}
+			Copy();
+			break;
+		case VK_F3:
+			if (!s.findText.empty())
+				Find(s.findText.c_str(), shift ? (s.findFlags | MDVFF_UP) : (s.findFlags & ~MDVFF_UP));
+			break;
+		case VK_ESCAPE:
+			if (!s.HasSelection()) {
+				bHandled = FALSE;
+				return 0;
+			}
+			ClearSelection();
+			SelectionChanged(true);
+			break;
 		case VK_OEM_PLUS:
 		case VK_ADD:
 			if (!ctrl)
@@ -821,6 +858,10 @@ LRESULT CMarkdownViewCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& s = *m_State;
 	const POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	const float x = pt.x / s.Scale(), y = pt.y / s.Scale();
+	if (s.selecting) {
+		DragSelection(pt);
+		return 0;
+	}
 	if (s.dragBox >= 0) {
 		float track[4], thumb[4];
 		if (SidewaysBar(s.dragBox, track, thumb)) {
@@ -851,6 +892,7 @@ LRESULT CMarkdownViewCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		s.hotCopy = hotCopy;
 		Invalidate();
 	}
+	UpdateHotLink(pt);
 	return 0;
 }
 
@@ -862,16 +904,24 @@ LRESULT CMarkdownViewCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 		s.hotCopy = false;
 		Invalidate();
 	}
+	if (!s.selecting)
+		UpdateHotLink({ -10000, -10000 });
 	return 0;
 }
 
-LRESULT CMarkdownViewCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
-	if (m_State->dragBox >= 0)
+LRESULT CMarkdownViewCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	if (m_State->selecting)
+		EndSelection({ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
+	else if (m_State->dragBox >= 0)
 		::ReleaseCapture();
 	return 0;
 }
 
 LRESULT CMarkdownViewCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_State->selecting) {
+		m_State->selecting = false;
+		KillTimer(ScrollTimer);
+	}
 	if (m_State->dragBox >= 0) {
 		m_State->dragBox = -1;
 		Invalidate();
@@ -880,6 +930,10 @@ LRESULT CMarkdownViewCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CMarkdownViewCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam == ScrollTimer) {
+		AutoScroll();
+		return 0;
+	}
 	if (wParam != CopiedTimer) {
 		bHandled = FALSE;
 		return 0;
@@ -890,14 +944,21 @@ LRESULT CMarkdownViewCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) 
 	return 0;
 }
 
-LRESULT CMarkdownViewCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+LRESULT CMarkdownViewCtrl::OnLButtonDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& s = *m_State;
 	SetFocus();
 	const POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	const float x = pt.x / s.Scale(), y = pt.y / s.Scale();
-	const int box = BoxAtPoint(pt);
-	if (box < 0)
+	int item;
+	if (TaskAt(pt, item)) {
+		ToggleTask(item);
 		return 0;
+	}
+	const int box = BoxAtPoint(pt);
+	if (box < 0) {
+		PressText(pt, (wParam & MK_SHIFT) != 0, uMsg == WM_LBUTTONDBLCLK);
+		return 0;
+	}
 	// a sideways bar: drag its thumb, or page along its track
 	float track[4], thumb[4];
 	if (SidewaysBar(box, track, thumb) && x >= track[0] && x < track[2] && y >= track[1] - 4 && y < track[3] + 2) {
@@ -918,8 +979,11 @@ LRESULT CMarkdownViewCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		CopyCode(s.flow.boxes[box].block);
 		return 0;
 	}
-	if (s.flow.boxes[box].kind == MdvBoxKind::Summary)
+	if (s.flow.boxes[box].kind == MdvBoxKind::Summary) {
 		ToggleDetails(s.flow.boxes[box].block);
+		return 0;
+	}
+	PressText(pt, (wParam & MK_SHIFT) != 0, uMsg == WM_LBUTTONDBLCLK);
 	return 0;
 }
 
@@ -928,11 +992,14 @@ LRESULT CMarkdownViewCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 		POINT pt;
 		::GetCursorPos(&pt);
 		ScreenToClient(&pt);
-		const int box = BoxAtPoint(pt);
-		float b[4];
-		if (box >= 0 && (m_State->flow.boxes[box].kind == MdvBoxKind::Summary ||
-			(CopyButton(box, b) && Inside(b, pt.x / m_State->Scale(), pt.y / m_State->Scale())))) {
+		MDVHITTEST ht{ pt };
+		HitTest(ht);
+		if (ht.part == MDVHT_LINK || ht.part == MDVHT_TASK || ht.part == MDVHT_CODECOPY || ht.part == MDVHT_SUMMARY) {
 			::SetCursor(::LoadCursor(nullptr, IDC_HAND));
+			return TRUE;
+		}
+		if ((ht.part == MDVHT_TEXT || ht.part == MDVHT_IMAGE) && !(GetStyle() & MDVS_NOSELECTION)) {
+			::SetCursor(::LoadCursor(nullptr, IDC_IBEAM));
 			return TRUE;
 		}
 	}

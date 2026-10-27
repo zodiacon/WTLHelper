@@ -110,6 +110,10 @@ struct MdvLoader {
 	bool running = false;
 };
 
+// a table's cells' padding (GitHub's 6px 13px at 16px, in ems) and borders, and the room under a table that
+// scrolls sideways, for its bar
+constexpr float MdvCellPadX = 0.8125f, MdvCellPadY = 0.375f, MdvTableBorder = 1, MdvTableBar = 10;
+
 constexpr int MdvAlignMiddle = 1;        // a format's paragraphs centered vertically
 constexpr int MdvAlignCenter = 2;        // and its lines horizontally
 
@@ -142,6 +146,28 @@ struct MdvState {
 	int dragBox = -1;                   // a sideways bar being dragged
 	float dragGrab = 0;                 // where on the thumb
 	bool tracking = false;
+
+	// the selection (anchor: where it started; caret: where the mouse took it) and the finds
+	std::vector<int> leaves;            // the text leaves in document order
+	std::vector<int> leafOrder;         // block -> its place in leaves, -1
+	MdvTextPos anchor, caret;           // block -1: no selection
+	bool selecting = false;             // a press in the text, until the button goes up
+	bool dragged = false;
+	POINT pressPoint{};
+	int pressLeaf = -1, pressLink = -1; // a press on a link: a click unless it becomes a drag
+	int clicks = 0;                     // 2: words, 3: blocks
+	DWORD lastClick = 0;
+	POINT lastClickPoint{};
+	POINT mouse{};                      // while selecting, for scrolling at the edges
+	int hotLeaf = -1, hotLink = -1;     // the link under the mouse
+	HWND tip = nullptr;
+	std::wstring findText;              // the last Find's, for F3
+	UINT findFlags = 0;
+	std::unordered_map<int, std::vector<std::pair<size_t, size_t>>> highlights;   // leaf -> HighlightAll's matches
+
+	bool Before(const MdvTextPos& a, const MdvTextPos& b) const;
+	bool HasSelection() const { return anchor.block >= 0 && caret.block >= 0 && !(anchor == caret); }
+	bool Selected(int leaf, size_t length, size_t& start, size_t& end) const;   // the part of a leaf selected
 
 	ComPtr<ID2D1HwndRenderTarget> target;
 	std::unordered_map<COLORREF, ComPtr<ID2D1SolidColorBrush>> brushes;
