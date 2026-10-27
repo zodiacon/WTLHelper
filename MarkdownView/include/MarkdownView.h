@@ -10,7 +10,9 @@
 #include <atlwin.h>
 #include <atlstr.h>
 
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 // ---- Window class name -------------------------------------------------------
 
@@ -60,6 +62,18 @@ enum MDVALERT {
 	MDVA_COUNT
 };
 
+enum MDVSYNTAX {               // the built-in highlighting's colors
+	MDVSYN_KEYWORD,
+	MDVSYN_TYPE,               // also a shell variable
+	MDVSYN_STRING,
+	MDVSYN_COMMENT,
+	MDVSYN_NUMBER,
+	MDVSYN_PREPROCESSOR,
+	MDVSYN_TAG,
+	MDVSYN_ATTRIBUTE,
+	MDVSYN_COUNT
+};
+
 struct MDVCOLORS {
 	COLORREF crBack;
 	COLORREF crText;
@@ -76,7 +90,26 @@ struct MDVCOLORS {
 	COLORREF crTableStripeBack;
 	COLORREF crSelBack;
 	COLORREF crSelText;
+	COLORREF crSyntax[MDVSYN_COUNT];
 };
+
+// ---- Code highlighting -------------------------------------------------------------
+//
+// An app's highlighter colors a code block: it fills up to maxSpans spans and returns how many it has (more than
+// maxSpans: it's called again with room for them all), or -1 for the built-in highlighting (C, C++, C#, Java,
+// JavaScript, TypeScript, JSON, Python, PowerShell, shell, Rust, Go, SQL, CSS, XML/HTML, YAML).
+
+#define MDVSPF_BOLD     0x0001
+#define MDVSPF_ITALIC   0x0002
+
+struct MDVSPAN {
+	UINT     start;            // in the code's characters
+	UINT     length;
+	COLORREF color;
+	UINT     flags;            // MDVSPF_*
+};
+
+typedef int (CALLBACK* MDVHIGHLIGHTPROC)(LPCWSTR pszLang, LPCWSTR pszCode, UINT cch, MDVSPAN* spans, int maxSpans, LPARAM lParam);
 
 // ---- Headings (a table of contents) --------------------------------------------
 
@@ -91,11 +124,21 @@ struct MDVHEADING {
 
 #define MDVN_FIRST          (0U - 3400U)   // outside the common controls ranges
 #define MDVN_SCROLLED       (MDVN_FIRST - 0)   // NMMDVSCROLL; the view scrolled
+#define MDVN_GETIMAGE       (MDVN_FIRST - 1)   // NMMDVIMAGE; an image that isn't a local file or a data: URL
 
 struct NMMDVSCROLL {
 	NMHDR  hdr;
 	int    heading;                // the heading at or above the top of the view (GetHeading), -1 if none
 	size_t topOffset;              // GetTopOffset
+};
+
+// The app gives the image now (pStream: the control releases it; hBitmap: the control copies it, the app keeps
+// it), or later with SetImage, or never (it stays a frame). Asked once per source while the text is the same.
+struct NMMDVIMAGE {
+	NMHDR    hdr;
+	LPCWSTR  pszUrl;
+	IStream* pStream;          // out: PNG, JPEG, GIF, BMP, TIFF, ICO, WebP (with its codec) or SVG
+	HBITMAP  hBitmap;          // out
 };
 
 // ---- Control class --------------------------------------------------------------------------
@@ -111,6 +154,8 @@ public:
 
 	// sent to every window by WTLHelper when its dark mode is switched (registered by name: no dependency)
 	inline static const UINT ThemeChangedMessage = ::RegisterWindowMessageW(L"ThemeChanged");
+	enum : UINT { WM_MDV_IMAGES = WM_USER + 100 };   // posted by the worker thread: images are decoded
+	enum : UINT_PTR { CopiedTimer = 1 };
 
 	BEGIN_MSG_MAP(CMarkdownViewCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
@@ -122,8 +167,16 @@ public:
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_MDV_IMAGES, OnImages)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
+		MESSAGE_HANDLER(WM_MOUSEHWHEEL, OnMouseHWheel)
 		MESSAGE_HANDLER(WM_VSCROLL, OnVScroll)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
@@ -140,6 +193,8 @@ public:
 	UINT GetParseFlags() const;
 	void SetBasePath(LPCWSTR pszDir);          // for relative images and links
 	CString GetBasePath() const;
+	void SetImage(LPCWSTR pszUrl, IStream* pStream);   // an image MDVN_GETIMAGE didn't give (null: it failed)
+	void SetHighlighter(MDVHIGHLIGHTPROC proc, LPARAM lParam);   // null: the built-in highlighting
 
 	// ---- Look ----
 	void SetTextStyle(const MDVSTYLE& style);
@@ -168,6 +223,13 @@ private:
 	LRESULT OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnImages(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnMouseHWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSetCursor(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseWheel(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnVScroll(UINT, WPARAM, LPARAM, BOOL&);
@@ -188,6 +250,13 @@ private:
 	void UpdateScrollBar();
 	int BoxAtPoint(POINT pt) const;            // client pixels
 	void ToggleDetails(int block);
+	bool BoxRect(size_t box, float rc[4]) const;   // client DIPs: left, top, right, bottom
+	float SidewaysRoom(size_t box) const;      // how far the box's content scrolls sideways (0: it fits)
+	bool SidewaysBar(size_t box, float track[4], float thumb[4]) const;
+	void ScrollSideways(size_t box, float offset);
+	bool CopyButton(size_t box, float rc[4]) const;
+	void CopyCode(int block);
+	void ImagesChanged(const std::vector<uint64_t>& keys);
 
 	// painting (MarkdownViewPaint.cpp)
 	void Paint();
@@ -196,6 +265,7 @@ private:
 	void DiscardLayouts();
 	void UpdateFormats();
 	bool Measure(size_t box);                  // makes the box's text layout; false if it has none
+	bool MeasureTable(size_t box);
 	void PaintBox(size_t box, float x, float y);
 	void PaintMarker(size_t box, float x, float y);
 	void UpdateScrollBarTheme();

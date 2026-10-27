@@ -1,8 +1,16 @@
-// The markdown view's text helpers: raw HTML's tokens, entities, emoji shortcodes, URLs.
+// The markdown view's text helpers: raw HTML's tokens, entities, emoji shortcodes, URLs, images' sources.
 
 #include "MarkdownViewModel.h"
 
 #include <windows.h>
+#include <pathcch.h>
+#include <shlwapi.h>
+
+#include <algorithm>
+#include <iterator>
+
+#pragma comment(lib, "pathcch.lib")
+#pragma comment(lib, "shlwapi.lib")
 
 extern "C" {
 #include "md4c/entity.h"
@@ -375,4 +383,393 @@ MdvUrlKind MdvClassifyUrl(std::wstring_view url) {
 	if (scheme == L"file")
 		return MdvUrlKind::File;
 	return MdvUrlKind::Web;
+}
+
+// ---- Images' sources ---------------------------------------------------------------------
+
+bool MdvDecodeDataUrl(std::wstring_view url, std::string& bytes, std::wstring& mime) {
+	bytes.clear();
+	mime.clear();
+	if (url.size() < 5 || _wcsnicmp(url.data(), L"data:", 5) != 0)
+		return false;
+	const size_t comma = url.find(L',');
+	if (comma == std::wstring_view::npos)
+		return false;
+	std::wstring_view header = url.substr(5, comma - 5);
+	bool base64 = false;
+	if (header.size() >= 7 && _wcsnicmp(header.data() + header.size() - 7, L";base64", 7) == 0) {
+		base64 = true;
+		header.remove_suffix(7);
+	}
+	const size_t semi = header.find(L';');
+	mime = Lower(semi == std::wstring_view::npos ? header : header.substr(0, semi));
+	const std::wstring_view payload = url.substr(comma + 1);
+	if (!base64) {
+		const std::wstring text = MdvPercentDecode(payload);
+		const int n = ::WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+		bytes.resize(n);
+		::WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), bytes.data(), n, nullptr, nullptr);
+		return true;
+	}
+	unsigned acc = 0;
+	int bits = 0;
+	for (wchar_t ch : payload) {
+		int v;
+		if (ch >= L'A' && ch <= L'Z')
+			v = ch - L'A';
+		else if (ch >= L'a' && ch <= L'z')
+			v = ch - L'a' + 26;
+		else if (ch >= L'0' && ch <= L'9')
+			v = ch - L'0' + 52;
+		else if (ch == L'+' || ch == L'-')
+			v = 62;
+		else if (ch == L'/' || ch == L'_')
+			v = 63;
+		else if (ch == L'=')
+			break;
+		else if (IsSpace(ch) || ch == L'%')
+			continue;               // line breaks, %0A
+		else
+			return false;
+		acc = (acc << 6) | (unsigned)v;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			bytes += (char)((acc >> bits) & 0xFF);
+		}
+	}
+	return true;
+}
+
+std::wstring MdvResolvePath(std::wstring_view base, std::wstring_view url) {
+	const MdvUrlKind kind = MdvClassifyUrl(url);
+	if (kind != MdvUrlKind::File)
+		return {};
+	std::wstring path;
+	if (url.size() >= 5 && _wcsnicmp(url.data(), L"file:", 5) == 0) {
+		wchar_t buf[MAX_PATH * 2];
+		DWORD n = (DWORD)std::size(buf);
+		const std::wstring u(url);
+		if (FAILED(::PathCreateFromUrlW(u.c_str(), buf, &n, 0)))
+			return {};
+		path = buf;
+	}
+	else {
+		// no query or fragment; %20 and the like
+		const size_t cut = url.find_first_of(L"?#");
+		path = MdvPercentDecode(url.substr(0, cut));
+		for (auto& ch : path)
+			if (ch == L'/')
+				ch = L'\\';
+		const bool absolute = (path.size() >= 2 && path[1] == L':') || (!path.empty() && path[0] == L'\\');
+		if (!absolute) {
+			if (base.empty())
+				return {};
+			std::wstring joined(base);
+			if (!joined.empty() && joined.back() != L'\\' && joined.back() != L'/')
+				joined += L'\\';
+			path = joined + path;
+		}
+	}
+	if (path.empty())
+		return {};
+	wchar_t* canonical = nullptr;
+	if (FAILED(::PathAllocCanonicalize(path.c_str(), PATHCCH_ALLOW_LONG_PATHS, &canonical)))
+		return path;
+	std::wstring result = canonical;
+	::LocalFree(canonical);
+	return result;
+}
+
+bool MdvIsSvg(std::string_view bytes) {
+	// after a BOM, whitespace, <?xml ...?> and comments: <svg
+	size_t i = bytes.size() >= 3 && (BYTE)bytes[0] == 0xEF && (BYTE)bytes[1] == 0xBB && (BYTE)bytes[2] == 0xBF ? 3 : 0;
+	const size_t limit = std::min<size_t>(bytes.size(), 4096);
+	while (i < limit) {
+		const char ch = bytes[i];
+		if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+			i++;
+			continue;
+		}
+		if (ch != '<')
+			return false;
+		if (bytes.substr(i, 4) == "<svg")
+			return true;
+		if (bytes.substr(i, 2) == "<?" || bytes.substr(i, 2) == "<!") {
+			const size_t e = bytes.find('>', i);
+			if (e == std::string_view::npos)
+				return false;
+			i = e + 1;
+			continue;
+		}
+		return false;
+	}
+	return false;
+}
+
+static float CssLength(const std::wstring* value, bool& percent) {
+	percent = false;
+	if (!value || value->empty())
+		return 0;
+	if (value->find(L'%') != std::wstring::npos) {
+		percent = true;
+		return 0;
+	}
+	float v = (float)_wtof(value->c_str());
+	if (value->find(L"pt") != std::wstring::npos)
+		v *= 96.0f / 72.0f;
+	else if (value->find(L"em") != std::wstring::npos)
+		v *= 16;
+	return v > 0 ? v : 0;
+}
+
+bool MdvSvgSize(std::string_view svg, float& width, float& height) {
+	width = height = 0;
+	// the root element's start is enough: as text
+	const size_t start = svg.find("<svg");
+	if (start == std::string_view::npos)
+		return false;
+	const size_t end = svg.find('>', start);
+	const std::string_view tag = svg.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start + 1);
+	std::wstring wide(tag.size(), L'\0');
+	const int n = ::MultiByteToWideChar(CP_UTF8, 0, tag.data(), (int)tag.size(), wide.data(), (int)wide.size());
+	wide.resize(n > 0 ? n : 0);
+	for (auto& t : MdvTokenizeHtml(wide)) {
+		if (t.type != MdvHtmlToken::Start || t.name != L"svg")
+			continue;
+		bool wp, hp;
+		width = CssLength(t.Attribute(L"width"), wp);
+		height = CssLength(t.Attribute(L"height"), hp);
+		float vw = 0, vh = 0;
+		if (auto box = t.Attribute(L"viewbox")) {
+			float x, y;
+			std::wstring b = *box;
+			for (auto& ch : b)
+				if (ch == L',')
+					ch = L' ';
+			if (swscanf_s(b.c_str(), L"%f %f %f %f", &x, &y, &vw, &vh) != 4)
+				vw = vh = 0;
+		}
+		if (width <= 0 && height <= 0) {
+			width = vw;
+			height = vh;
+		}
+		else if (width <= 0)
+			width = vh > 0 ? height * vw / vh : height;
+		else if (height <= 0)
+			height = vw > 0 ? width * vh / vw : width;
+		return width > 0 && height > 0;
+	}
+	return false;
+}
+
+namespace {
+
+struct SvgStyle {
+	std::wstring family;
+	float size = 16;
+	bool bold = false;
+	int anchor = 0;
+	bool hasColor = true;
+	uint32_t color = 0;
+	float opacity = 1;
+	float sx = 1, sy = 1, tx = 0, ty = 0;   // to the root's units
+	bool visible = true;
+};
+
+bool SvgColor(const std::wstring& v, uint32_t& color) {
+	static const struct { const wchar_t* name; uint32_t color; } names[] = {
+		{ L"black", RGB(0, 0, 0) }, { L"white", RGB(255, 255, 255) }, { L"red", RGB(255, 0, 0) }, { L"green", RGB(0, 128, 0) },
+		{ L"blue", RGB(0, 0, 255) }, { L"gray", RGB(128, 128, 128) }, { L"grey", RGB(128, 128, 128) }, { L"yellow", RGB(255, 255, 0) },
+		{ L"orange", RGB(255, 165, 0) }, { L"purple", RGB(128, 0, 128) }, { L"silver", RGB(192, 192, 192) },
+	};
+	if (v.size() == 4 && v[0] == L'#') {
+		auto hex = [&](wchar_t c) { const int h = HexValue(c); return h < 0 ? 0 : h * 17; };
+		color = RGB(hex(v[1]), hex(v[2]), hex(v[3]));
+		return true;
+	}
+	if (v.size() == 7 && v[0] == L'#') {
+		const unsigned n = wcstoul(v.c_str() + 1, nullptr, 16);
+		color = RGB((n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF);
+		return true;
+	}
+	for (auto& n : names)
+		if (_wcsicmp(v.c_str(), n.name) == 0) {
+			color = n.color;
+			return true;
+		}
+	return false;
+}
+
+float FirstNumber(const std::wstring* v) {
+	return v ? (float)_wtof(v->c_str()) : 0;
+}
+
+void Apply(const MdvHtmlToken& t, SvgStyle& st) {
+	if (auto v = t.Attribute(L"font-family")) {
+		std::wstring f = *v;
+		const size_t comma = f.find(L',');
+		if (comma != std::wstring::npos)
+			f.resize(comma);
+		while (!f.empty() && (f.back() == L' ' || f.back() == L'\'' || f.back() == L'"'))
+			f.pop_back();
+		while (!f.empty() && (f[0] == L' ' || f[0] == L'\'' || f[0] == L'"'))
+			f.erase(0, 1);
+		st.family = f;
+	}
+	if (auto v = t.Attribute(L"font-size"))
+		st.size = (float)_wtof(v->c_str());
+	if (auto v = t.Attribute(L"font-weight"))
+		st.bold = *v == L"bold" || _wtoi(v->c_str()) >= 600;
+	if (auto v = t.Attribute(L"text-anchor"))
+		st.anchor = *v == L"middle" ? 1 : *v == L"end" ? 2 : 0;
+	if (auto v = t.Attribute(L"fill")) {
+		if (*v == L"none")
+			st.hasColor = false;
+		else if (SvgColor(*v, st.color))
+			st.hasColor = true;
+	}
+	if (auto v = t.Attribute(L"fill-opacity"))
+		st.opacity *= (float)_wtof(v->c_str());
+	if (auto v = t.Attribute(L"opacity"))
+		st.opacity *= (float)_wtof(v->c_str());
+	if (auto v = t.Attribute(L"display"); v && *v == L"none")
+		st.visible = false;
+	if (auto v = t.Attribute(L"transform")) {
+		// scale(a[ b]) and translate(x[ y]), in order
+		std::wstring tr = *v;
+		for (auto& ch : tr)
+			if (ch == L',')
+				ch = L' ';
+		for (size_t i = 0; i < tr.size();) {
+			const size_t open = tr.find(L'(', i);
+			const size_t close = tr.find(L')', open);
+			if (open == std::wstring::npos || close == std::wstring::npos)
+				break;
+			std::wstring name = tr.substr(i, open - i);
+			name.erase(0, name.find_first_not_of(L' '));
+			float a = 0, b = 0;
+			const int n = swscanf_s(tr.substr(open + 1, close - open - 1).c_str(), L"%f %f", &a, &b);
+			if (name == L"scale" && n >= 1) {
+				st.sx *= a;
+				st.sy *= n >= 2 ? b : a;
+			}
+			else if (name == L"translate" && n >= 1) {
+				st.tx += a * st.sx;
+				st.ty += (n >= 2 ? b : 0) * st.sy;
+			}
+			i = close + 1;
+		}
+	}
+}
+
+}  // namespace
+
+std::vector<MdvSvgText> MdvSvgTexts(std::string_view svg) {
+	std::vector<MdvSvgText> out;
+	if (svg.find("<text") == std::string_view::npos)
+		return out;
+	std::wstring wide(svg.size(), L'\0');
+	const int n = ::MultiByteToWideChar(CP_UTF8, 0, svg.data(), (int)svg.size(), wide.data(), (int)wide.size());
+	wide.resize(n > 0 ? n : 0);
+	std::vector<SvgStyle> stack(1);
+	int inText = 0;          // depth inside a <text>
+	bool skip = false;       // <defs>, <title>, <desc>: not shown
+	int skipDepth = 0;
+	MdvSvgText current;
+	for (auto& t : MdvTokenizeHtml(wide)) {
+		if (t.type == MdvHtmlToken::Start) {
+			if (skip) {
+				if (!t.selfClosing)
+					skipDepth++;
+				continue;
+			}
+			if (t.name == L"defs" || t.name == L"title" || t.name == L"desc" || t.name == L"clippath" || t.name == L"mask" ||
+				t.name == L"symbol" || t.name == L"lineargradient" || t.name == L"radialgradient" || t.name == L"style") {
+				if (!t.selfClosing) {
+					skip = true;
+					skipDepth = 1;
+				}
+				continue;
+			}
+			if (t.selfClosing)
+				continue;
+			SvgStyle st = stack.back();
+			Apply(t, st);
+			if (t.name == L"svg" && stack.size() == 1) {
+				// the root's viewBox, mapped to its size
+				float w = 0, h = 0, vx = 0, vy = 0, vw = 0, vh = 0;
+				if (auto v = t.Attribute(L"width"); v && v->find(L'%') == std::wstring::npos)
+					w = (float)_wtof(v->c_str());
+				if (auto v = t.Attribute(L"height"); v && v->find(L'%') == std::wstring::npos)
+					h = (float)_wtof(v->c_str());
+				if (auto v = t.Attribute(L"viewbox")) {
+					std::wstring b = *v;
+					for (auto& ch : b)
+						if (ch == L',')
+							ch = L' ';
+					if (swscanf_s(b.c_str(), L"%f %f %f %f", &vx, &vy, &vw, &vh) != 4)
+						vw = vh = 0;
+				}
+				if (vw > 0 && vh > 0) {
+					if (w <= 0 && h <= 0) {
+						w = vw;
+						h = vh;
+					}
+					else if (w <= 0)
+						w = h * vw / vh;
+					else if (h <= 0)
+						h = w * vh / vw;
+					st.sx = w / vw;
+					st.sy = h / vh;
+					st.tx = -vx * st.sx;
+					st.ty = -vy * st.sy;
+				}
+			}
+			stack.push_back(st);
+			if (t.name == L"text") {
+				inText = 1;
+				current = {};
+				current.family = st.family;
+				current.size = st.size * st.sy;
+				current.bold = st.bold;
+				current.anchor = st.anchor;
+				current.color = st.color;
+				current.opacity = st.opacity;
+				current.x = FirstNumber(t.Attribute(L"x")) * st.sx + st.tx;
+				current.y = FirstNumber(t.Attribute(L"y")) * st.sy + st.ty;
+				if (!st.visible || !st.hasColor)
+					current.opacity = 0;
+			}
+			else if (inText)
+				inText++;
+			continue;
+		}
+		if (t.type == MdvHtmlToken::End) {
+			if (skip) {
+				if (--skipDepth == 0)
+					skip = false;
+				continue;
+			}
+			if (stack.size() > 1)
+				stack.pop_back();
+			if (inText && --inText == 0) {
+				while (!current.text.empty() && current.text.back() == L' ')
+					current.text.pop_back();
+				if (!current.text.empty() && current.opacity > 0)
+					out.push_back(std::move(current));
+				current = {};
+			}
+			continue;
+		}
+		if (t.type == MdvHtmlToken::Text && inText && !skip) {
+			for (wchar_t ch : MdvDecodeEntities(std::wstring_view(wide).substr(t.pos, t.length))) {
+				const bool space = ch == L' ' || ch == L'\n' || ch == L'\t' || ch == L'\r';
+				if (space && (current.text.empty() || current.text.back() == L' '))
+					continue;
+				current.text += space ? L' ' : ch;
+			}
+		}
+	}
+	return out;
 }

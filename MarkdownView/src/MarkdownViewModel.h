@@ -186,6 +186,26 @@ std::wstring MdvPercentDecode(std::wstring_view s); // %XX as UTF-8
 enum class MdvUrlKind : uint8_t { Anchor, Web, Mail, File, Unsafe };
 MdvUrlKind MdvClassifyUrl(std::wstring_view url);  // javascript:, vbscript:, data: are Unsafe for links
 
+// images
+bool MdvDecodeDataUrl(std::wstring_view url, std::string& bytes, std::wstring& mime);   // data:[mime][;base64],...
+std::wstring MdvResolvePath(std::wstring_view base, std::wstring_view url);  // a local file's path, or empty
+bool MdvSvgSize(std::string_view svg, float& width, float& height);        // the root's size in CSS pixels
+bool MdvIsSvg(std::string_view bytes);
+
+// An SVG's <text> elements, which Direct2D's SVG support doesn't draw: drawn over it with DirectWrite. Attributes
+// come from the <g> elements around them; transforms are only scale() and translate().
+struct MdvSvgText {
+	std::wstring text;
+	std::wstring family;          // the first of font-family's
+	float x = 0, y = 0;           // the baseline's start (or middle, or end), in the SVG's user units
+	float size = 16;
+	bool bold = false;
+	int anchor = 0;               // 0 start, 1 middle, 2 end
+	uint32_t color = 0;           // a COLORREF
+	float opacity = 1;
+};
+std::vector<MdvSvgText> MdvSvgTexts(std::string_view svg);
+
 // ---- Raw HTML ------------------------------------------------------------------------
 
 struct MdvHtmlToken {
@@ -226,6 +246,7 @@ struct MdvColumnMeasure {
 };
 
 // The columns' content widths in an available width (padding is added to every cell): their unwrapped widths
-// when those fit, else the room past the minimums shared in proportion to (max - min), as HTML's auto table layout;
-// never under the minimums (the table then scrolls).
-std::vector<float> MdvColumnWidths(const std::vector<MdvColumnMeasure>& columns, float available, float padding);
+// when those fit, else the room past the minimums shared in proportion to (max - min), as HTML's auto table layout.
+// When even the minimums don't fit, the table scrolls: each column is then as wide as its text unwrapped up to
+// overflowCap (0: its minimum), as GitHub's tables are.
+std::vector<float> MdvColumnWidths(const std::vector<MdvColumnMeasure>& columns, float available, float padding, float overflowCap = 0);

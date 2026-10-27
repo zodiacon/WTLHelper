@@ -311,7 +311,7 @@ std::wstring MdvSlug(std::wstring_view text) {
 
 // ---- Tables ----------------------------------------------------------------------------
 
-std::vector<float> MdvColumnWidths(const std::vector<MdvColumnMeasure>& columns, float available, float padding) {
+std::vector<float> MdvColumnWidths(const std::vector<MdvColumnMeasure>& columns, float available, float padding, float overflowCap) {
 	std::vector<float> widths;
 	widths.reserve(columns.size());
 	float sumMin = 0, sumMax = 0;
@@ -325,7 +325,7 @@ std::vector<float> MdvColumnWidths(const std::vector<MdvColumnMeasure>& columns,
 		if (sumMax <= room)
 			widths.push_back(mx);
 		else if (sumMin >= room || sumMax <= sumMin)
-			widths.push_back(c.minWidth);
+			widths.push_back(std::max(c.minWidth, std::min(mx, overflowCap)));
 		else
 			widths.push_back(c.minWidth + (mx - c.minWidth) * (room - sumMin) / (sumMax - sumMin));
 	}

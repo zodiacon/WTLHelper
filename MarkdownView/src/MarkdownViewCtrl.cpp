@@ -57,6 +57,8 @@ LRESULT CMarkdownViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CMarkdownViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	MdvStopLoader(*m_State);
+	KillTimer(CopiedTimer);
 	DiscardTarget();
 	bHandled = FALSE;
 	return 0;
@@ -104,8 +106,7 @@ LRESULT CMarkdownViewCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 
 LRESULT CMarkdownViewCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	// the links' brushes are in the layouts
-	for (auto& [key, cache] : m_State->layouts)
-		cache.effects = false;
+	m_State->ResetEffects();
 	m_State->brushes.clear();
 	UpdateScrollBarTheme();
 	Invalidate();
@@ -127,8 +128,10 @@ void CMarkdownViewCtrl::SetText(LPCWSTR pszMarkdown, size_t cch) {
 	auto& s = *m_State;
 	MdvParse(std::move(text), s.parseFlags, s.doc);
 	s.layouts.clear();
+	s.images.clear();
+	s.sideways.clear();
+	s.copiedBlock = -1;
 	s.scrollY = 0;
-	s.lastTopHeading = -2;
 	Relayout();
 }
 
@@ -202,6 +205,21 @@ UINT CMarkdownViewCtrl::GetParseFlags() const {
 	return m_State->parseFlags;
 }
 
+void CMarkdownViewCtrl::SetHighlighter(MDVHIGHLIGHTPROC proc, LPARAM lParam) {
+	auto& s = *m_State;
+	s.highlighter = proc;
+	s.highlighterParam = lParam;
+	// the code blocks are laid out again
+	for (auto& box : s.flow.boxes)
+		if (box.kind == MdvBoxKind::Code) {
+			s.layouts.erase(MdvState::Key(box.block, box.kind));
+			box.measured = false;
+		}
+	MeasureVisible();
+	ScrollTo(s.scrollY, false);
+	Invalidate();
+}
+
 void CMarkdownViewCtrl::SetBasePath(LPCWSTR pszDir) {
 	m_State->basePath = pszDir ? pszDir : L"";
 }
@@ -272,6 +290,13 @@ MDVCOLORS CMarkdownViewCtrl::GetColors() const {
 	c.crTableStripeBack = Blend(c.crBack, c.crText, 3);
 	c.crSelBack = ::GetSysColor(COLOR_HIGHLIGHT);
 	c.crSelText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+	// GitHub's
+	const COLORREF syntaxLight[MDVSYN_COUNT] = { RGB(0xCF, 0x22, 0x2E), RGB(0x82, 0x50, 0xDF), RGB(0x0A, 0x30, 0x69), RGB(0x6E, 0x77, 0x81),
+		RGB(0x05, 0x50, 0xAE), RGB(0x95, 0x38, 0x00), RGB(0x11, 0x63, 0x29), RGB(0x05, 0x50, 0xAE) };
+	const COLORREF syntaxDark[MDVSYN_COUNT] = { RGB(0xFF, 0x7B, 0x72), RGB(0xD2, 0xA8, 0xFF), RGB(0xA5, 0xD6, 0xFF), RGB(0x8B, 0x94, 0x9E),
+		RGB(0x79, 0xC0, 0xFF), RGB(0xFF, 0xA6, 0x57), RGB(0x7E, 0xE7, 0x87), RGB(0x79, 0xC0, 0xFF) };
+	for (int i = 0; i < MDVSYN_COUNT; i++)
+		c.crSyntax[i] = dark ? syntaxDark[i] : syntaxLight[i];
 	return c;
 }
 
@@ -355,6 +380,8 @@ void CMarkdownViewCtrl::Relayout() {
 	}
 
 	UpdateMetrics();
+	s.hotBox = -1;
+	s.dragBox = -1;
 	flow.Build(s.doc, s.metrics);
 	const float column = ColumnWidth();
 	// the boxes laid out before at this width keep their heights
@@ -597,7 +624,7 @@ LRESULT CMarkdownViewCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 	return 0;
 }
 
-LRESULT CMarkdownViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
+LRESULT CMarkdownViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& s = *m_State;
 	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 	if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) {
@@ -608,12 +635,29 @@ LRESULT CMarkdownViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
 			SetZoom(GetZoom() + steps * 10);
 		return 0;
 	}
+	if (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) {
+		BOOL handled;
+		return OnMouseHWheel(WM_MOUSEHWHEEL, MAKEWPARAM(0, -delta), lParam, handled);
+	}
 	UINT lines = 3;
 	::SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
 	const float line = s.metrics.fontSize * s.metrics.lineHeight;
 	const float amount = lines == WHEEL_PAGESCROLL ? ViewHeight() : lines * line;
 	ScrollTo(s.scrollY - amount * delta / WHEEL_DELTA);
 	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnMouseHWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
+	// the block under the mouse (the message's point is in screen coordinates)
+	POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	ScreenToClient(&pt);
+	const int box = BoxAtPoint(pt);
+	if (box < 0 || SidewaysRoom(box) <= 0)
+		return 0;
+	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	const float step = 4 * m_State->metrics.fontSize;
+	ScrollSideways(box, m_State->sideways[m_State->flow.boxes[box].block] + step * delta / WHEEL_DELTA);
+	return 1;
 }
 
 LRESULT CMarkdownViewCtrl::OnVScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
@@ -656,11 +700,226 @@ void CMarkdownViewCtrl::ToggleDetails(int block) {
 	Relayout();
 }
 
+// ---- Code blocks and tables: sideways scrolling, the copy button ---------------------------
+
+bool CMarkdownViewCtrl::BoxRect(size_t index, float rc[4]) const {
+	auto& s = *m_State;
+	if (index >= s.flow.boxes.size())
+		return false;
+	auto& box = s.flow.boxes[index];
+	rc[0] = ColumnLeft() + box.indent;
+	rc[1] = box.top - s.scrollY;
+	rc[2] = ColumnLeft() + ColumnWidth();
+	rc[3] = box.Bottom() - s.scrollY;
+	return true;
+}
+
+float CMarkdownViewCtrl::SidewaysRoom(size_t index) const {
+	auto& s = *m_State;
+	if (index >= s.flow.boxes.size())
+		return 0;
+	auto& box = s.flow.boxes[index];
+	if (box.kind != MdvBoxKind::Code && box.kind != MdvBoxKind::Table)
+		return 0;
+	auto it = s.layouts.find(MdvState::Key(box.block, box.kind));
+	if (it == s.layouts.end())
+		return 0;
+	const float room = it->second.contentWidth - (ColumnWidth() - box.indent);
+	return room > 0.5f ? room : 0;
+}
+
+bool CMarkdownViewCtrl::SidewaysBar(size_t index, float track[4], float thumb[4]) const {
+	auto& s = *m_State;
+	const float room = SidewaysRoom(index);
+	float rc[4];
+	if (room <= 0 || !BoxRect(index, rc))
+		return false;
+	auto& box = s.flow.boxes[index];
+	if (box.kind == MdvBoxKind::Code) {
+		track[0] = rc[0] + 8;
+		track[2] = rc[2] - 8;
+		track[1] = rc[3] - 10;
+		track[3] = rc[3] - 4;
+	}
+	else {
+		track[0] = rc[0];
+		track[2] = rc[2];
+		track[1] = rc[3] - 7;
+		track[3] = rc[3] - 1;
+	}
+	const float width = rc[2] - rc[0], trackWidth = track[2] - track[0];
+	const float thumbWidth = std::max(24.0f, trackWidth * width / (width + room));
+	auto it = s.sideways.find(box.block);
+	const float offset = it == s.sideways.end() ? 0 : it->second;
+	thumb[0] = track[0] + (trackWidth - thumbWidth) * std::clamp(offset / room, 0.0f, 1.0f);
+	thumb[2] = thumb[0] + thumbWidth;
+	thumb[1] = track[1];
+	thumb[3] = track[3];
+	return true;
+}
+
+void CMarkdownViewCtrl::ScrollSideways(size_t index, float offset) {
+	auto& s = *m_State;
+	const float room = SidewaysRoom(index);
+	auto& value = s.sideways[s.flow.boxes[index].block];
+	offset = std::clamp(offset, 0.0f, room);
+	if (offset == value)
+		return;
+	value = offset;
+	float rc[4];
+	BoxRect(index, rc);
+	const float scale = s.Scale();
+	RECT r{ (LONG)std::floor(rc[0] * scale), (LONG)std::floor(rc[1] * scale), (LONG)std::ceil(rc[2] * scale), (LONG)std::ceil(rc[3] * scale) };
+	InvalidateRect(&r);
+}
+
+bool CMarkdownViewCtrl::CopyButton(size_t index, float b[4]) const {
+	auto& s = *m_State;
+	if ((int)index != s.hotBox || index >= s.flow.boxes.size() || s.flow.boxes[index].kind != MdvBoxKind::Code)
+		return false;
+	float rc[4];
+	BoxRect(index, rc);
+	const float em = s.metrics.fontSize, size = 1.9f * em, margin = 0.4f * em;
+	b[0] = rc[2] - margin - size;
+	b[1] = rc[1] + margin;
+	b[2] = rc[2] - margin;
+	b[3] = rc[1] + margin + size;
+	return true;
+}
+
+void CMarkdownViewCtrl::CopyCode(int block) {
+	auto& text = m_State->doc.blocks[block].content.text;
+	if (!::OpenClipboard(m_hWnd))
+		return;
+	::EmptyClipboard();
+	// line breaks as Windows writes them
+	std::wstring crlf;
+	crlf.reserve(text.size() + text.size() / 16);
+	for (wchar_t ch : text) {
+		if (ch == L'\n')
+			crlf += L'\r';
+		crlf += ch;
+	}
+	const size_t bytes = (crlf.size() + 1) * sizeof(wchar_t);
+	if (HGLOBAL mem = ::GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+		memcpy(::GlobalLock(mem), crlf.c_str(), bytes);
+		::GlobalUnlock(mem);
+		if (!::SetClipboardData(CF_UNICODETEXT, mem))
+			::GlobalFree(mem);
+	}
+	::CloseClipboard();
+	m_State->copiedBlock = block;
+	SetTimer(CopiedTimer, 1500);
+	Invalidate();
+}
+
+static bool Inside(const float rc[4], float x, float y) {
+	return x >= rc[0] && x < rc[2] && y >= rc[1] && y < rc[3];
+}
+
+LRESULT CMarkdownViewCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
+	const POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	const float x = pt.x / s.Scale(), y = pt.y / s.Scale();
+	if (s.dragBox >= 0) {
+		float track[4], thumb[4];
+		if (SidewaysBar(s.dragBox, track, thumb)) {
+			const float room = SidewaysRoom(s.dragBox);
+			const float span = (track[2] - track[0]) - (thumb[2] - thumb[0]);
+			if (span > 0)
+				ScrollSideways(s.dragBox, (x - s.dragGrab - track[0]) / span * room);
+		}
+		return 0;
+	}
+	if (!s.tracking) {
+		TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };
+		s.tracking = ::TrackMouseEvent(&tme) != 0;
+	}
+	// the code block under the mouse shows its copy button
+	const int box = BoxAtPoint(pt);
+	const int hot = box >= 0 && s.flow.boxes[box].kind == MdvBoxKind::Code ? box : -1;
+	bool hotCopy = false;
+	if (hot >= 0) {
+		const int old = s.hotBox;
+		s.hotBox = hot;
+		float b[4];
+		hotCopy = CopyButton(hot, b) && Inside(b, x, y);
+		s.hotBox = old;
+	}
+	if (hot != s.hotBox || hotCopy != s.hotCopy) {
+		s.hotBox = hot;
+		s.hotCopy = hotCopy;
+		Invalidate();
+	}
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	s.tracking = false;
+	if (s.hotBox >= 0 && s.dragBox < 0) {
+		s.hotBox = -1;
+		s.hotCopy = false;
+		Invalidate();
+	}
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_State->dragBox >= 0)
+		::ReleaseCapture();
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_State->dragBox >= 0) {
+		m_State->dragBox = -1;
+		Invalidate();
+	}
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam != CopiedTimer) {
+		bHandled = FALSE;
+		return 0;
+	}
+	KillTimer(CopiedTimer);
+	m_State->copiedBlock = -1;
+	Invalidate();
+	return 0;
+}
+
 LRESULT CMarkdownViewCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
 	SetFocus();
-	const int box = BoxAtPoint({ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
-	if (box >= 0 && m_State->flow.boxes[box].kind == MdvBoxKind::Summary)
-		ToggleDetails(m_State->flow.boxes[box].block);
+	const POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	const float x = pt.x / s.Scale(), y = pt.y / s.Scale();
+	const int box = BoxAtPoint(pt);
+	if (box < 0)
+		return 0;
+	// a sideways bar: drag its thumb, or page along its track
+	float track[4], thumb[4];
+	if (SidewaysBar(box, track, thumb) && x >= track[0] && x < track[2] && y >= track[1] - 4 && y < track[3] + 2) {
+		if (x >= thumb[0] && x < thumb[2]) {
+			s.dragBox = box;
+			s.dragGrab = x - thumb[0];
+			SetCapture();
+			Invalidate();
+		}
+		else {
+			const float page = (ColumnWidth() - s.flow.boxes[box].indent) * 0.8f;
+			ScrollSideways(box, s.sideways[s.flow.boxes[box].block] + (x < thumb[0] ? -page : page));
+		}
+		return 0;
+	}
+	float b[4];
+	if (CopyButton(box, b) && Inside(b, x, y)) {
+		CopyCode(s.flow.boxes[box].block);
+		return 0;
+	}
+	if (s.flow.boxes[box].kind == MdvBoxKind::Summary)
+		ToggleDetails(s.flow.boxes[box].block);
 	return 0;
 }
 
@@ -670,7 +929,9 @@ LRESULT CMarkdownViewCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 		::GetCursorPos(&pt);
 		ScreenToClient(&pt);
 		const int box = BoxAtPoint(pt);
-		if (box >= 0 && m_State->flow.boxes[box].kind == MdvBoxKind::Summary) {
+		float b[4];
+		if (box >= 0 && (m_State->flow.boxes[box].kind == MdvBoxKind::Summary ||
+			(CopyButton(box, b) && Inside(b, pt.x / m_State->Scale(), pt.y / m_State->Scale())))) {
 			::SetCursor(::LoadCursor(nullptr, IDC_HAND));
 			return TRUE;
 		}

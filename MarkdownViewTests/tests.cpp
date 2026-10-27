@@ -4,10 +4,13 @@
 // of failed checks. Only the pure parts are covered: the block tree md4c's callbacks build, inline styles, links and
 // images, the map back to the source, GitHub's extras (alerts, footnotes, emoji, anchors, front matter, raw HTML's
 // subset), plain text and HTML export, source ranges, the tables' column widths, and the flow of boxes the view lays
-// out (indents, margins, markers, bars, placement). Anything that needs an HWND or a render target is checked by
+// out (indents, margins, markers, bars, placement), the built-in syntax highlighting and the images' sources. Anything that needs an HWND or a render target is checked by
 // hand with MarkdownViewDemo.
 
 #include "MarkdownViewLayout.h"
+#include "MarkdownViewSyntax.h"
+
+#include <windows.h>
 
 #include <cmath>
 #include <cstdio>
@@ -734,6 +737,11 @@ TEST(ColumnWidths) {
 	CHECK_INT(MdvColumnWidths({}, 100, 10).size(), 0);
 	auto equal = MdvColumnWidths({ { 40, 40 } }, 20, 4);
 	CHECK_INT(equal[0], 40);
+	// overflowing: unwrapped up to the cap, never under the minimum
+	auto capped = MdvColumnWidths({ { 10, 50 }, { 20, 300 }, { 150, 200 } }, 100, 10, 100);
+	CHECK_INT(capped[0], 50);
+	CHECK_INT(capped[1], 100);
+	CHECK_INT(capped[2], 150);
 }
 
 TEST(Urls) {
@@ -908,6 +916,132 @@ TEST(FlowEstimate) {
 	CHECK_INT(std::lround(flow.boxes[2].height * 100), std::lround(3 * 1.45f * 16 * 0.875f * 100));
 }
 
+// ---- Syntax highlighting ----------------------------------------------------------------
+
+static std::wstring Tokens(const wchar_t* lang, const std::wstring& code) {
+	// "kind:text" for each token: K keyword, T type, S string, C comment, N number, P preprocessor, G tag, A attribute
+	std::wstring out;
+	for (auto& t : MdvHighlight(lang, code)) {
+		if (!out.empty())
+			out += L' ';
+		out += L"KTSCNPGA"[(int)t.kind];
+		out += L':';
+		out += code.substr(t.start, t.length);
+	}
+	return out;
+}
+
+TEST(Syntax) {
+	CHECK(MdvKnownLanguage(L"cpp"));
+	CHECK(MdvKnownLanguage(L"C#"));
+	CHECK(MdvKnownLanguage(L"PowerShell"));
+	CHECK(!MdvKnownLanguage(L"brainfuck"));
+	CHECK(!MdvKnownLanguage(L""));
+	CHECK_STR(Tokens(L"cpp", L"#include <x>\nint main() { return 0x1F; } // done"),
+		L"P:#include <x> T:int K:return N:0x1F C:// done");
+	CHECK_STR(Tokens(L"c++", L"auto s = \"a\\\"b\"; /* c\nd */ x1 = 2;"),
+		L"K:auto S:\"a\\\"b\" C:/* c\nd */ N:2");
+	CHECK_STR(Tokens(L"cpp", L"#define A(x) \\\n  x // c"), L"P:#define A(x) \\\n  x  C:// c");
+	CHECK_STR(Tokens(L"py", L"def f():\n    \"\"\"doc\nstring\"\"\"\n    return None # no"),
+		L"K:def S:\"\"\"doc\nstring\"\"\" K:return K:None C:# no");
+	CHECK_STR(Tokens(L"ps1", L"$x = Get-Item -Path 'a' # c\nIF ($x -eq 1) {}"),
+		L"T:$x S:'a' C:# c K:IF T:$x K:-eq N:1");
+	CHECK_STR(Tokens(L"json", L"{\"a\": [1, true, null]}"), L"S:\"a\" N:1 K:true K:null");
+	CHECK_STR(Tokens(L"html", L"<!-- c --><a href=\"x\">t</a>"), L"C:<!-- c --> G:a A:href S:\"x\" G:a");
+	CHECK_STR(Tokens(L"sql", L"SELECT name FROM t -- all"), L"K:SELECT K:FROM C:-- all");
+	CHECK_STR(Tokens(L"js", L"const s = `a\nb`;"), L"K:const S:`a\nb`");
+	CHECK_STR(Tokens(L"nope", L"int x"), L"");
+	// an unclosed string or comment ends with its line or the code
+	CHECK_STR(Tokens(L"cs", L"var s = \"open\nnext"), L"K:var S:\"open");
+	CHECK_STR(Tokens(L"cs", L"/* open"), L"C:/* open");
+}
+
+// ---- Images' sources ---------------------------------------------------------------------
+
+TEST(DataUrls) {
+	std::string bytes;
+	std::wstring mime;
+	CHECK(MdvDecodeDataUrl(L"data:image/png;base64,iVBORw0KGgo=", bytes, mime));
+	CHECK_STR(mime, L"image/png");
+	CHECK(bytes == std::string("\x89PNG\r\n\x1A\n", 8));
+	CHECK(MdvDecodeDataUrl(L"data:image/svg+xml,%3Csvg%3E%3C/svg%3E", bytes, mime));
+	CHECK_STR(mime, L"image/svg+xml");
+	CHECK(bytes == "<svg></svg>");
+	CHECK(MdvDecodeDataUrl(L"DATA:,plain", bytes, mime));
+	CHECK(bytes == "plain");
+	CHECK(MdvDecodeDataUrl(L"data:image/gif;base64,R0lG\nODlh", bytes, mime));
+	CHECK(bytes == "GIF89a");
+	CHECK(!MdvDecodeDataUrl(L"data:image/png;base64", bytes, mime));
+	CHECK(!MdvDecodeDataUrl(L"http://x/a.png", bytes, mime));
+	CHECK(!MdvDecodeDataUrl(L"data:image/png;base64,!!!", bytes, mime));
+}
+
+TEST(ImagePaths) {
+	CHECK_STR(MdvResolvePath(L"C:\\docs", L"img/logo.png"), L"C:\\docs\\img\\logo.png");
+	CHECK_STR(MdvResolvePath(L"C:\\docs\\", L"./a%20b.png?raw=true"), L"C:\\docs\\a b.png");
+	CHECK_STR(MdvResolvePath(L"C:\\docs\\sub", L"../up.png#x"), L"C:\\docs\\up.png");
+	CHECK_STR(MdvResolvePath(L"C:\\docs", L"D:/abs/x.png"), L"D:\\abs\\x.png");
+	CHECK_STR(MdvResolvePath(L"C:\\docs", L"file:///C:/f/x.png"), L"C:\\f\\x.png");
+	CHECK_STR(MdvResolvePath(L"", L"relative.png"), L"");
+	CHECK_STR(MdvResolvePath(L"C:\\docs", L"https://x/y.png"), L"");
+	CHECK_STR(MdvResolvePath(L"C:\\docs", L"javascript:x"), L"");
+}
+
+TEST(SvgSizes) {
+	float w, h;
+	CHECK(MdvSvgSize("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"90\" height=\"20\">", w, h));
+	CHECK_INT(w, 90);
+	CHECK_INT(h, 20);
+	CHECK(MdvSvgSize("<?xml version=\"1.0\"?>\n<svg viewBox=\"0 0 200 100\">", w, h));
+	CHECK_INT(w, 200);
+	CHECK_INT(h, 100);
+	CHECK(MdvSvgSize("<svg width=\"50px\" viewBox=\"0,0,200,100\">", w, h));
+	CHECK_INT(w, 50);
+	CHECK_INT(h, 25);
+	CHECK(MdvSvgSize("<svg width='12pt' height='12pt'>", w, h));
+	CHECK_INT(w, 16);
+	CHECK(!MdvSvgSize("<svg width=\"100%\">", w, h));
+	CHECK(!MdvSvgSize("<png>", w, h));
+	CHECK(MdvIsSvg("\xEF\xBB\xBF<?xml version=\"1.0\"?><!-- c --><svg>"));
+	CHECK(MdvIsSvg("  <svg width=\"1\">"));
+	CHECK(!MdvIsSvg("\x89PNG\r\n"));
+	CHECK(!MdvIsSvg("<html>"));
+}
+
+TEST(SvgTexts) {
+	// as shields.io writes its badges
+	auto badge = MdvSvgTexts("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"90\" height=\"20\"><title>build: passing</title>"
+		"<g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,sans-serif\" font-size=\"110\">"
+		"<text x=\"245\" y=\"150\" fill=\"#010101\" fill-opacity=\".3\" transform=\"scale(.1)\">build</text>"
+		"<text x=\"245\" y=\"140\" transform=\"scale(.1)\">build &amp; test</text></g></svg>");
+	CHECK_INT(badge.size(), 2);
+	CHECK_STR(badge[0].text, L"build");
+	CHECK_INT(badge[0].color, RGB(1, 1, 1));
+	CHECK_INT(std::lround(badge[0].opacity * 10), 3);
+	CHECK_STR(badge[1].text, L"build & test");
+	CHECK_STR(badge[1].family, L"Verdana");
+	CHECK_INT(std::lround(badge[1].x * 10), 245);
+	CHECK_INT(std::lround(badge[1].y), 14);
+	CHECK_INT(std::lround(badge[1].size), 11);
+	CHECK_INT(badge[1].anchor, 1);
+	CHECK_INT(badge[1].color, RGB(255, 255, 255));
+
+	// the root's viewBox maps to its size; <defs> and fill="none" aren't shown
+	auto view = MdvSvgTexts("<svg viewBox=\"0 0 200 100\" width=\"100\"><defs><text>no</text></defs>"
+		"<text x=\"20\" y=\"50\" font-weight=\"bold\">A <tspan>B</tspan></text><text fill=\"none\">hidden</text>"
+		"<g transform=\"translate(10 20)\"><text x=\"0\" y=\"0\" fill=\"#123\">C</text></g></svg>");
+	CHECK_INT(view.size(), 2);
+	CHECK_STR(view[0].text, L"A B");
+	CHECK(view[0].bold);
+	CHECK_INT(view[0].x, 10);
+	CHECK_INT(view[0].y, 25);
+	CHECK_INT(view[0].size, 8);
+	CHECK_INT(view[1].x, 5);
+	CHECK_INT(view[1].y, 10);
+	CHECK_INT(view[1].color, RGB(0x11, 0x22, 0x33));
+	CHECK_INT(MdvSvgTexts("<svg><rect/></svg>").size(), 0);
+}
+
 int wmain() {
 	Run_Blocks();
 	Run_InlineStyles();
@@ -944,6 +1078,11 @@ int wmain() {
 	Run_FlowContainers();
 	Run_FlowPlace();
 	Run_FlowEstimate();
+	Run_Syntax();
+	Run_DataUrls();
+	Run_ImagePaths();
+	Run_SvgSizes();
+	Run_SvgTexts();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

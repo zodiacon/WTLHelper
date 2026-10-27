@@ -18,6 +18,7 @@
 #include <WTLHelper.h>
 #endif
 
+#include <cwctype>
 #include <iterator>
 #include <string>
 
@@ -52,6 +53,7 @@ enum {
 	ID_DEMO_NOHTML,
 	ID_DEMO_HARDBREAKS,
 	ID_DEMO_NOEMOJI,
+	ID_DEMO_HIGHLIGHTER,
 };
 
 // ---- State --------------------------------------------------------------------
@@ -63,6 +65,7 @@ static CString g_path;
 static bool g_showToc = true;
 static bool g_customColors;
 static bool g_serif;
+static bool g_appHighlighter;
 static HFONT g_tocFont;
 static bool g_syncing;     // the list follows the view: not the other way round
 
@@ -147,13 +150,42 @@ A loose list:
 
 ## Code
 
+Code blocks are colored by their language, keep their lines and scroll sideways when they're wide
+(Shift+wheel, or drag the bar). The mouse over one shows a copy button.
+
 ```cpp
-// a code block keeps its lines: long ones are cut at the edge (they scroll in phase 3)
+#include "MarkdownView.h"
+
+// a long line scrolls: int main() { CMarkdownViewCtrl view; view.Create(hWndParent, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP); }
 int main() {
     CMarkdownViewCtrl view;
-    view.Create(hWndParent, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP);
-    view.LoadFile(L"README.md");
+    view.Create(hWndParent, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP);
+    view.LoadFile(L"README.md");   // UTF-8 or UTF-16
+    return 0x2A;
 }
+```
+
+```python
+def fib(n: int) -> list:
+    """The first n Fibonacci numbers."""
+    a, b = 0, 1
+    for _ in range(n):
+        yield a
+        a, b = b, a + b   # tuples
+```
+
+```powershell
+$files = Get-ChildItem -Path $env:TEMP -Filter '*.md'
+if ($files.Count -gt 0) { Write-Host "Found $($files.Count)" }
+```
+
+```json
+{ "name": "MarkdownView", "phase": 3, "done": false, "tags": ["tables", "images"] }
+```
+
+```html
+<!-- markup -->
+<p align="center"><img src="logo.png" width="96"></p>
 ```
 
     an indented code block
@@ -177,7 +209,23 @@ Hidden content: a paragraph, and a list.
 |-----------|:------:|------:|
 | Model     | done   | 1     |
 | Text      | done   | 2     |
-| Tables    | soon   | 3     |
+| Tables    | **done** | 3     |
+| Selection | soon   | 4     |
+
+Columns share the width as HTML's tables do; a table too wide for the window scrolls sideways.
+
+| Control | Window class | Prefix | What it is | Phase notes and other remarks that make this column long |
+|---|---|---|---|---|
+| `CLogViewCtrl` | `WC_LogView` | `LGV` | a log viewer for millions of lines | filtering and searching in slices on a timer |
+| `CDiffViewCtrl` | `WC_DiffView` | `DFV` | two texts compared | Myers in linear space, merges, a background diff |
+| `CMarkdownViewCtrl` | `WC_MarkdownView` | `MDV` | this one | Direct2D and DirectWrite, md4c |
+
+## Images
+
+Images come from local files (relative to the document), `data:` URLs, or the app, which this demo is
+for the logo and the badges above. ![a dot](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAACsElEQVR42hXSEd+2MBzH0dsfz/M8z/N5nvcC8jyfz/Muns/newF7TnBon//vK/v7+/v9/WNgZGJmYSWw/f36zsHJxU30lnh4yRQqjc7f3z8BBkYmZpZ/v74S2Ng5OLm4iSQeXjeZQqXR/32BQYCBkYl5+PWFlcDGzsHJxU0k8fCS3RYqjT58gVGAgZFp/PWZhZXAxs7BycVNJPHwkik2Ko0+foFJgIFx+vWJmYWVwMbOwcnFTSTx8JIpVFuNPn2BWYBh/vWRiZmFlcDGzsHJxU0k8fCSKVSazT5/gUVg+fWBkYmZhZXAxs7BycVNJPHwkilUGn35AqvAKsDIxMzCSmBj5+Dk4iaSeHjJFCqNvn6BIBAEGJmYWVgJbOwcnFzcRBIPL5lCpdHDF9h+/R8DIxMzCyuBjZ2Dk4ubSOLhJVOoNDp/f7sAAyMTMwsrgY2dg5OLm0ji4SVTqDT6/gUOAQZGJmYWVgIbOwcnFzeRxMNLplBp9OMLnAIMjEzMLKwENnYOTi5uIomHl0yh0ujnF7gEGBiZmFlYCWzsHJxc3EQSDy+ZQqXRry9wCzAwMjGzsBLY2Dk4ubiJJB5eMoVKo99fIPqmUYCRiZmFlcDGzsHJxU0k8fCSKVQaPX7fNAkkAUYmZhZWAhs7BycXN5HEw0umUGn09AUegUeAkYmZhZXAxs7BycVNJPHwkilUGv35Aq8AwyvAxMzCSmBj5+Dk4iaSeHjJFCrNZn+/QBZgYMwCzCysBDZ2Dk4ubiKJh5dModpq9PwFigADI1MRYGElsLFzcHJxE0k8vGSKjUqjly9QBRgYmZirACuBjZ2Dk4ubSOLhJbstVBq9foEmwMDIxMzSBAhs7BycXNxEEg+vm0yh0ujtC3QBBkYmZhZWAlsX4ODk4iZ6Szy8ZAqVRu+/v/++ybw8PddBGQAAAABJRU5ErkJggg==) is a `data:` PNG in the text, and
+![docs](https://img.shields.io/badge/docs-latest-blue) a badge the app draws. One that can't be had
+shows its alternative text: ![a missing image](missing.png).
 
 ---
 
@@ -207,6 +255,63 @@ static std::wstring LargeSample() {
 			text += L"> A quote in section " + std::to_wstring(i) + L".\n\n";
 	}
 	return text;
+}
+
+// ---- Images ---------------------------------------------------------------------------
+//
+// The sample's images aren't files: the demo gives them as SVGs when the view asks (MDVN_GETIMAGE).
+
+static std::string Badge(const char* label, const char* value, const char* color) {
+	const int lw = 6 * (int)strlen(label) + 12, vw = 6 * (int)strlen(value) + 12;
+	char svg[1024];
+	sprintf_s(svg, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"20\">"
+		"<rect width=\"%d\" height=\"20\" rx=\"3\" fill=\"#555\"/><rect x=\"%d\" width=\"%d\" height=\"20\" rx=\"3\" fill=\"%s\"/>"
+		"<rect x=\"%d\" width=\"4\" height=\"20\" fill=\"%s\"/>"
+		"<g fill=\"#fff\" font-family=\"Segoe UI,Verdana,sans-serif\" font-size=\"11\">"
+		"<text x=\"6\" y=\"14\">%s</text><text x=\"%d\" y=\"14\">%s</text></g></svg>",
+		lw + vw, lw + vw, lw, vw, color, lw, color, label, lw + 6, value);
+	return svg;
+}
+
+static const char g_logo[] =
+	"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 96 96\">"
+	"<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#4493f8\"/>"
+	"<stop offset=\"1\" stop-color=\"#8250df\"/></linearGradient></defs>"
+	"<rect x=\"4\" y=\"4\" width=\"88\" height=\"88\" rx=\"20\" fill=\"url(#g)\"/>"
+	"<path d=\"M22 66V30h8l10 14 10-14h8v36h-8V44L40 58 30 44v22z\" fill=\"#fff\"/>"
+	"<path d=\"M64 50h8V30h6v20h8L75 66z\" fill=\"#fff\"/></svg>";
+
+static IStream* ImageFor(LPCWSTR url) {
+	std::string svg;
+	if (wcscmp(url, L"logo.png") == 0)
+		svg = g_logo;
+	else if (wcscmp(url, L"build.svg") == 0)
+		svg = Badge("build", "passing", "#3fb950");
+	else if (wcscmp(url, L"license.svg") == 0)
+		svg = Badge("license", "MIT", "#0969da");
+	else if (wcsncmp(url, L"https://img.shields.io/badge/", 29) == 0)
+		svg = Badge("docs", "latest", "#8250df");
+	else
+		return nullptr;
+	return ::SHCreateMemStream((const BYTE*)svg.data(), (UINT)svg.size());
+}
+
+// an app's highlighter: words in capitals, bold, in a color of their own (it replaces the built-in one; returning -1
+// would keep it)
+static int CALLBACK CapitalsHighlighter(LPCWSTR, LPCWSTR code, UINT cch, MDVSPAN* spans, int maxSpans, LPARAM) {
+	int count = 0;
+	for (UINT i = 0; i < cch;) {
+		UINT e = i;
+		while (e < cch && iswupper(code[e]))
+			e++;
+		if (e - i >= 2 && (e == cch || !iswalnum(code[e])) && (i == 0 || !iswalnum(code[i - 1]))) {
+			if (count < maxSpans)
+				spans[count] = { i, e - i, RGB(0xC0, 0x20, 0xA0), MDVSPF_BOLD };
+			count++;
+		}
+		i = e > i ? e : i + 1;
+	}
+	return count;
 }
 
 // ---- Helpers ---------------------------------------------------------------------
@@ -292,6 +397,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_DEMO_CONTENTS, g_showToc);
 	check(ID_DEMO_COLORS, g_customColors);
 	check(ID_DEMO_SERIF, g_serif);
+	check(ID_DEMO_HIGHLIGHTER, g_appHighlighter);
 	const UINT flags = g_view.GetParseFlags();
 	check(ID_DEMO_NOHTML, (flags & MDVF_NOHTML) != 0);
 	check(ID_DEMO_HARDBREAKS, (flags & MDVF_HARDBREAKS) != 0);
@@ -352,6 +458,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 			g_view.SetTextStyle(style);
 			break;
 		}
+		case ID_DEMO_HIGHLIGHTER:
+			g_appHighlighter = !g_appHighlighter;
+			g_view.SetHighlighter(g_appHighlighter ? CapitalsHighlighter : nullptr, 0);
+			break;
 		case ID_DEMO_NOHTML: g_view.SetParseFlags(g_view.GetParseFlags() ^ MDVF_NOHTML); FillToc(); break;
 		case ID_DEMO_HARDBREAKS: g_view.SetParseFlags(g_view.GetParseFlags() ^ MDVF_HARDBREAKS); break;
 		case ID_DEMO_NOEMOJI: g_view.SetParseFlags(g_view.GetParseFlags() ^ MDVF_NOEMOJI); FillToc(); break;
@@ -403,6 +513,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 		case WM_NOTIFY: {
 			auto hdr = (NMHDR*)lParam;
+			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_GETIMAGE) {
+				auto nm = (NMMDVIMAGE*)lParam;
+				nm->pStream = ImageFor(nm->pszUrl);
+				if (!nm->pStream && wcscmp(nm->pszUrl, L"missing.png") == 0)
+					g_view.SetImage(nm->pszUrl, nullptr);   // there's none: its alternative text shows
+				return 0;
+			}
 			if (hdr->idFrom == IDC_VIEW && hdr->code == MDVN_SCROLLED) {
 				// the contents follow the view
 				auto nm = (NMMDVSCROLL*)lParam;
@@ -479,6 +596,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_NOHTML, L"Raw HTML as &Text");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_HARDBREAKS, L"&Hard Line Breaks");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_NOEMOJI, L"&No Emoji Shortcodes");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_HIGHLIGHTER, L"&App's Highlighter (Capitals)");
 
 	HMENU hMenu = ::CreateMenu();
 	::AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");

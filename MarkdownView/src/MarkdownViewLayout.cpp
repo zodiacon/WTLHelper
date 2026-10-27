@@ -122,7 +122,6 @@ struct Builder {
 			}
 			case MdvKind::Table: {
 				auto& box = Add(b, MdvBoxKind::Table, c);
-				box.padLeft = box.padRight = box.padTop = box.padBottom = 0.5f * em;
 				box.marginBottom = spacing;
 				break;
 			}
