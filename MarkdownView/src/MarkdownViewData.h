@@ -129,6 +129,8 @@ struct MdvState {
 	bool customColors = false;
 	MDVCOLORS colors{};
 	int zoom = 100;
+	int forceHighContrast = -1;
+	bool highContrast = false;          // while painting
 	MDVHIGHLIGHTPROC highlighter = nullptr;
 	LPARAM highlighterParam = 0;
 
@@ -202,5 +204,7 @@ struct MdvPaintContext {
 	ID2D1Brush* frame = nullptr;
 	ID2D1Brush* altText = nullptr;
 	IDWriteTextFormat* altFormat = nullptr;
+	ID2D1Brush* text = nullptr;         // for superscripts and subscripts
+	ID2D1Brush* link = nullptr;
 };
 extern MdvPaintContext g_mdvPaint;

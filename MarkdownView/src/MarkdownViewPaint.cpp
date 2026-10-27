@@ -226,8 +226,8 @@ void ImageSize(MdvState& s, const MdvImage& img, const MdvImageEntry& e, float e
 			w = e.width * zoom;
 			h = e.height * zoom;
 		}
-		else if (e.state == MdvImageEntry::Failed && !img.alt.empty()) {
-			// as wide as its alternative text
+		else if ((e.state == MdvImageEntry::Failed || e.state == MdvImageEntry::Waiting) && !img.alt.empty()) {
+			// as wide as its alternative text (an image the app hasn't given yet too: it's laid out again if it does)
 			w = 1.25f * em;
 			if (auto format = s.Format(0, em * 0.875f, DWRITE_FONT_WEIGHT_NORMAL, s.metrics.lineHeight)) {
 				ComPtr<IDWriteTextLayout> layout;
@@ -258,6 +258,95 @@ void ImageSize(MdvState& s, const MdvImage& img, const MdvImageEntry& e, float e
 
 }  // namespace
 
+namespace {
+
+// a superscript's or a subscript's text, drawn above or below the line's baseline: DirectWrite has no baseline
+// shift, so the run is an inline object holding its own small layout
+class ShiftedText : public IDWriteInlineObject {
+public:
+	ShiftedText(ComPtr<IDWriteTextLayout> layout, float width, float height, float baseline, float shift, bool linked)
+		: m_Layout(std::move(layout)), m_Width(width), m_Height(height), m_Baseline(baseline), m_Shift(shift), m_Linked(linked) {}
+
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+		if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteInlineObject)) {
+			*ppv = static_cast<IDWriteInlineObject*>(this);
+			AddRef();
+			return S_OK;
+		}
+		*ppv = nullptr;
+		return E_NOINTERFACE;
+	}
+	ULONG STDMETHODCALLTYPE AddRef() override { return ++m_Refs; }
+	ULONG STDMETHODCALLTYPE Release() override {
+		const ULONG refs = --m_Refs;
+		if (refs == 0)
+			delete this;
+		return refs;
+	}
+	HRESULT STDMETHODCALLTYPE Draw(void*, IDWriteTextRenderer*, FLOAT x, FLOAT y, BOOL, BOOL, IUnknown*) override {
+		auto brush = m_Linked ? g_mdvPaint.link : g_mdvPaint.text;
+		if (g_mdvPaint.target && brush)
+			g_mdvPaint.target->DrawTextLayout(D2D1::Point2F(x, y + (m_Shift < 0 ? -m_Shift : 0)), m_Layout.Get(), brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetMetrics(DWRITE_INLINE_OBJECT_METRICS* metrics) override {
+		// raised: the object's baseline is below its text's; lowered: above it
+		if (m_Shift >= 0)
+			*metrics = { m_Width, m_Height + m_Shift, m_Baseline + m_Shift, FALSE };
+		else
+			*metrics = { m_Width, m_Height - m_Shift, m_Baseline, FALSE };
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetOverhangMetrics(DWRITE_OVERHANG_METRICS* overhangs) override {
+		*overhangs = {};
+		return S_OK;
+	}
+	HRESULT STDMETHODCALLTYPE GetBreakConditions(DWRITE_BREAK_CONDITION* before, DWRITE_BREAK_CONDITION* after) override {
+		*before = DWRITE_BREAK_CONDITION_MAY_NOT_BREAK;   // "x" and its "2" stay together
+		*after = DWRITE_BREAK_CONDITION_NEUTRAL;
+		return S_OK;
+	}
+
+private:
+	ULONG m_Refs = 1;
+	ComPtr<IDWriteTextLayout> m_Layout;
+	float m_Width, m_Height, m_Baseline, m_Shift;
+	bool m_Linked;
+};
+
+void ShiftRuns(MdvState& s, MdvText& t, const MdvInline& content, float em) {
+	for (auto& run : content.runs) {
+		if (!(run.style & (MdvSup | MdvSub)) || run.length == 0)
+			continue;
+		const std::wstring text = content.text.substr(run.start, run.length);
+		if (text.find(MdvObjectChar) != std::wstring::npos)
+			continue;               // an image in it: left as it is
+		const bool code = (run.style & (MdvCode | MdvKbd | MdvMath)) != 0;
+		ComPtr<IDWriteTextFormat> format;
+		if (FAILED(MdvDWriteFactory()->CreateTextFormat((code ? s.codeFamily : s.bodyFamily).c_str(), nullptr,
+			run.style & MdvBold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+			run.style & MdvItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+			em * 0.75f, L"en-us", format.GetAddressOf())))
+			continue;
+		ComPtr<IDWriteTextLayout> layout;
+		if (FAILED(MdvDWriteFactory()->CreateTextLayout(text.c_str(), (UINT32)text.size(), format.Get(), 100000.0f, em * 4, layout.GetAddressOf())))
+			continue;
+		layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+		DWRITE_TEXT_METRICS tm{};
+		layout->GetMetrics(&tm);
+		DWRITE_LINE_METRICS lm{};
+		UINT32 lines = 0;
+		layout->GetLineMetrics(&lm, 1, &lines);
+		const float shift = run.style & MdvSup ? 0.35f * em : -0.2f * em;
+		ComPtr<IDWriteInlineObject> obj;
+		obj.Attach(new ShiftedText(layout, tm.widthIncludingTrailingWhitespace, tm.height, lm.baseline, shift, run.link >= 0));
+		t.layout->SetInlineObject(obj.Get(), { (UINT32)run.start, (UINT32)run.length });
+		t.images.push_back(obj);
+	}
+}
+
+}  // namespace
+
 // a paragraph's, a heading's, a summary's or a cell's text
 static bool MakeText(MdvState& s, HWND hwnd, MdvText& t, const MdvInline& content, uint64_t user, float em,
 	DWRITE_FONT_WEIGHT weight, float lineHeight, float width, MdvAlign align) {
@@ -282,6 +371,7 @@ static bool MakeText(MdvState& s, HWND hwnd, MdvText& t, const MdvInline& conten
 		t.layout->SetInlineObject(obj.Get(), { (UINT32)img.pos, 1 });
 		t.images.push_back(obj);
 	}
+	ShiftRuns(s, t, content, em);
 	// proportional spacing would add a share of a tall image's height above it: the font's own spacing instead
 	if (tall)
 		t.layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_DEFAULT, 0, 0);
@@ -314,8 +404,13 @@ static void FillRange(MdvState& s, MdvText& t, size_t a, size_t b, float x, floa
 	std::vector<DWRITE_HIT_TEST_METRICS> hits(count);
 	if (FAILED(t.layout->HitTestTextRange((UINT32)a, (UINT32)(b - a), 0, 0, hits.data(), count, &count)))
 		return;
-	for (auto& h : hits)
-		s.target->FillRectangle(D2D1::RectF(x + h.left, y + h.top, x + h.left + std::max(h.width, 3.0f), y + h.top + h.height), brush);
+	for (auto& h : hits) {
+		const D2D1_RECT_F rc = D2D1::RectF(x + h.left, y + h.top, x + h.left + std::max(h.width, 3.0f), y + h.top + h.height);
+		if (s.highContrast)
+			s.target->DrawRectangle(D2D1::RectF(rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1), brush, 2);
+		else
+			s.target->FillRectangle(rc, brush);
+	}
 }
 
 // HighlightAll's matches and the selection, behind a leaf's text
@@ -335,7 +430,12 @@ static void DrawTextAt(MdvState& s, MdvText& t, float x, float y, COLORREF color
 	for (auto& back : t.backs) {
 		const D2D1_RECT_F rc = D2D1::RectF(x + back.rect.left, y + back.rect.top, x + back.rect.right, y + back.rect.bottom);
 		const float r = 0.2f * em;
-		if (back.kind == MdvBackRect::Mark)
+		if (s.highContrast) {
+			// framed, not shaded
+			const D2D1_RECT_F in = D2D1::RectF(rc.left + 0.5f, rc.top + 0.5f, rc.right - 0.5f, rc.bottom - 0.5f);
+			rt->DrawRoundedRectangle(D2D1::RoundedRect(in, r, r), s.Brush(back.kind == MdvBackRect::Mark ? c.crMarkBack : c.crBorder));
+		}
+		else if (back.kind == MdvBackRect::Mark)
 			rt->FillRectangle(rc, s.Brush(c.crMarkBack));
 		else {
 			rt->FillRoundedRectangle(D2D1::RoundedRect(rc, r, r), s.Brush(c.crCodeBack));
@@ -347,6 +447,8 @@ static void DrawTextAt(MdvState& s, MdvText& t, float x, float y, COLORREF color
 	g_mdvPaint.frame = s.Brush(c.crBorder);
 	g_mdvPaint.altText = s.Brush(c.crMuted);
 	g_mdvPaint.altFormat = s.Format(0, em * 0.875f, DWRITE_FONT_WEIGHT_NORMAL, s.metrics.lineHeight, MdvAlignMiddle);
+	g_mdvPaint.text = s.Brush(color);
+	g_mdvPaint.link = s.Brush(c.crLink);
 	rt->DrawTextLayout(D2D1::Point2F(x, y), t.layout.Get(), s.Brush(color), D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 	g_mdvPaint = {};
 }
@@ -508,6 +610,7 @@ void CMarkdownViewCtrl::Paint() {
 		return;
 	auto& flow = s.flow;
 	const MDVCOLORS c = GetColors();
+	s.highContrast = IsHighContrast();
 	s.target->BeginDraw();
 	s.target->SetTransform(D2D1::Matrix3x2F::Identity());
 	s.target->Clear(Color(c.crBack));
@@ -591,10 +694,10 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 		for (size_t r = 0; r < cache.rowTops.size(); r++) {
 			auto& row = s.doc.blocks[block.children[r]];
 			const float ry = y + cache.rowTops[r], rh = cache.rowHeights[r];
-			if (row.header)
-				rt->FillRectangle(D2D1::RectF(ox, ry, ox + cache.contentWidth, ry + rh), s.Brush(c.crTableHeaderBack));
-			else if (body++ % 2 == 1)
-				rt->FillRectangle(D2D1::RectF(ox, ry, ox + cache.contentWidth, ry + rh), s.Brush(c.crTableStripeBack));
+			// the header's and every other row's shade (none in high contrast)
+			const bool shaded = row.header || body++ % 2 == 1;
+			if (shaded && !s.highContrast)
+				rt->FillRectangle(D2D1::RectF(ox, ry, ox + cache.contentWidth, ry + rh), s.Brush(row.header ? c.crTableHeaderBack : c.crTableStripeBack));
 			float cx = ox + MdvTableBorder;
 			for (size_t col = 0; col < columns && col < cache.columns.size(); col++) {
 				auto& t = cache.cells[r * columns + col];
@@ -624,7 +727,10 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 	}
 	else if (box.kind == MdvBoxKind::Code) {
 		const D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, bottom);
-		rt->FillRoundedRectangle(D2D1::RoundedRect(rc, 6, 6), s.Brush(c.crCodeBack));
+		if (s.highContrast)
+			rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rc.left + 0.5f, rc.top + 0.5f, rc.right - 0.5f, rc.bottom - 0.5f), 6, 6), s.Brush(c.crBorder));
+		else
+			rt->FillRoundedRectangle(D2D1::RoundedRect(rc, 6, 6), s.Brush(c.crCodeBack));
 		ApplyEffects(s, cache.text, nullptr, c);
 		rt->PushAxisAlignedClip(rc, D2D1_ANTIALIAS_MODE_ALIASED);
 		PaintHighlights(s, cache.text, box.block, x + box.padLeft - sideways, y + box.padTop, c, focused);
@@ -635,7 +741,8 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 		if (CopyButton(index, b)) {
 			const D2D1_RECT_F brc = D2D1::RectF(b[0], b[1], b[2], b[3]);
 			const float r = 0.25f * m.fontSize;
-			rt->FillRoundedRectangle(D2D1::RoundedRect(brc, r, r), s.Brush(Blend(c.crCodeBack, c.crText, s.hotCopy ? 14 : 6)));
+			if (!s.highContrast)
+				rt->FillRoundedRectangle(D2D1::RoundedRect(brc, r, r), s.Brush(Blend(c.crCodeBack, c.crText, s.hotCopy ? 14 : 6)));
 			rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(brc.left + 0.5f, brc.top + 0.5f, brc.right - 0.5f, brc.bottom - 0.5f), r, r), s.Brush(c.crBorder));
 			const bool copied = s.copiedBlock == box.block;
 			const wchar_t glyph = copied ? 0xE73E : 0xE8C8;
@@ -682,7 +789,7 @@ void CMarkdownViewCtrl::PaintBox(size_t index, float x, float y) {
 	if (SidewaysBar(index, track, thumb)) {
 		const float r = (thumb[3] - thumb[1]) / 2;
 		rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(thumb[0], thumb[1], thumb[2], thumb[3]), r, r),
-			s.Brush(Blend(c.crBack, c.crText, s.dragBox == (int)index ? 55 : 35)));
+			s.Brush(s.highContrast ? c.crText : Blend(c.crBack, c.crText, s.dragBox == (int)index ? 55 : 35)));
 	}
 }
 

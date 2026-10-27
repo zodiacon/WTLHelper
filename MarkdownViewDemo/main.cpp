@@ -55,6 +55,7 @@ enum {
 	ID_DEMO_HARDBREAKS,
 	ID_DEMO_NOEMOJI,
 	ID_DEMO_HIGHLIGHTER,
+	ID_DEMO_HIGHCONTRAST,
 
 	ID_DEMO_COPY = 401,
 	ID_DEMO_COPYMARKDOWN,
@@ -78,6 +79,7 @@ static bool g_customColors;
 static bool g_serif;
 static bool g_appHighlighter;
 static bool g_highlightAll;
+static bool g_highContrast;
 static CString g_contextLink;         // the link the context menu was asked on
 
 // the system's Find dialog: modeless, so the message loop passes it its messages
@@ -501,6 +503,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_DEMO_SERIF, g_serif);
 	check(ID_DEMO_HIGHLIGHTER, g_appHighlighter);
 	check(ID_DEMO_HIGHLIGHTALL, g_highlightAll);
+	check(ID_DEMO_HIGHCONTRAST, g_highContrast);
 	const UINT flags = g_view.GetParseFlags();
 	check(ID_DEMO_NOHTML, (flags & MDVF_NOHTML) != 0);
 	check(ID_DEMO_HARDBREAKS, (flags & MDVF_HARDBREAKS) != 0);
@@ -564,6 +567,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_HIGHLIGHTER:
 			g_appHighlighter = !g_appHighlighter;
 			g_view.SetHighlighter(g_appHighlighter ? CapitalsHighlighter : nullptr, 0);
+			break;
+		case ID_DEMO_HIGHCONTRAST:
+			g_highContrast = !g_highContrast;
+			g_view.ForceHighContrast(g_highContrast ? 1 : -1);
 			break;
 		case ID_DEMO_COPY: g_view.Copy(); break;
 		case ID_DEMO_COPYMARKDOWN: CopyString(g_view.GetSelectedMarkdown()); break;
@@ -759,6 +766,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_CONTENTS, L"C&ontents");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_COLORS, L"&Sepia Colors");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_SERIF, L"Se&rif Font");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_HIGHCONTRAST, L"&High Contrast Drawing");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_DARKMODE, L"&Dark Mode");
 #endif

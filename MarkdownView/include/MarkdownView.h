@@ -259,6 +259,9 @@ public:
 	MDVCOLORS GetColors() const;
 	void SetZoom(int percent);                 // 25..400; Ctrl+wheel too
 	int GetZoom() const;
+	// high contrast: the system's colors only, over the app's; frames for what's shaded otherwise
+	void ForceHighContrast(int value);         // testing: -1 the system's setting, 0 off, 1 on
+	bool IsHighContrast() const;
 
 	// ---- Navigation ----
 	int GetHeadingCount() const;

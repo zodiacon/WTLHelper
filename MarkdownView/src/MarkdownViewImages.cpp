@@ -417,10 +417,10 @@ public:
 				}
 			}
 		}
-		// not there (yet): a frame, and a failed one's alternative text
+		// not there (yet): a frame, and the alternative text of one that failed or the app hasn't given
 		if (g_mdvPaint.frame)
 			rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rc.left + 0.5f, rc.top + 0.5f, rc.right - 0.5f, rc.bottom - 0.5f), 2, 2), g_mdvPaint.frame);
-		if (e.state == MdvImageEntry::Failed && !m_Alt.empty() && g_mdvPaint.altFormat && g_mdvPaint.altText) {
+		if ((e.state == MdvImageEntry::Failed || e.state == MdvImageEntry::Waiting) && !m_Alt.empty() && g_mdvPaint.altFormat && g_mdvPaint.altText) {
 			rt->PushAxisAlignedClip(rc, D2D1_ANTIALIAS_MODE_ALIASED);
 			rt->DrawText(m_Alt.c_str(), (UINT32)m_Alt.size(), g_mdvPaint.altFormat, D2D1::RectF(rc.left + 4, rc.top, rc.right, rc.bottom), g_mdvPaint.altText);
 			rt->PopAxisAlignedClip();

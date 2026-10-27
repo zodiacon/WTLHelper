@@ -4,6 +4,7 @@
 #include "MarkdownViewData.h"
 
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -558,6 +559,9 @@ void CMarkdownViewCtrl::UpdateHotLink(POINT pt) {
 		ti.lpszText = const_cast<LPWSTR>(L"");
 		::SendMessageW(s.tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 		::SendMessageW(s.tip, TTM_SETMAXTIPWIDTH, 0, ::MulDiv(600, s.dpi, 96));
+		// dark with the view (made now, after the mode was set; UpdateScrollBarTheme keeps it in step)
+		if (s.darkScrollBars == 1)
+			::SetWindowTheme(s.tip, L"DarkMode_Explorer", nullptr);
 	}
 	if (!s.tip)
 		return;

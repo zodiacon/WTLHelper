@@ -119,9 +119,26 @@ LRESULT CMarkdownViewCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled)
 	return 0;
 }
 
-LRESULT CMarkdownViewCtrl::OnSettingChange(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+LRESULT CMarkdownViewCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam == SPI_SETHIGHCONTRAST) {
+		BOOL handled;
+		OnColorsChanged(0, 0, 0, handled);
+	}
 	bHandled = FALSE;
 	return 0;
+}
+
+void CMarkdownViewCtrl::ForceHighContrast(int value) {
+	m_State->forceHighContrast = value;
+	BOOL handled;
+	OnColorsChanged(0, 0, 0, handled);
+}
+
+bool CMarkdownViewCtrl::IsHighContrast() const {
+	if (m_State->forceHighContrast >= 0)
+		return m_State->forceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
 }
 
 // ---- Content -----------------------------------------------------------------------
@@ -274,6 +291,20 @@ void CMarkdownViewCtrl::SetColors(const MDVCOLORS* colors) {
 
 MDVCOLORS CMarkdownViewCtrl::GetColors() const {
 	auto& s = *m_State;
+	if (IsHighContrast()) {
+		// the system's colors only, over the app's: no tints (painting frames what's shaded otherwise)
+		MDVCOLORS c{};
+		c.crBack = c.crCodeBack = c.crTableHeaderBack = c.crTableStripeBack = ::GetSysColor(COLOR_WINDOW);
+		c.crText = c.crMuted = c.crHeading = c.crCodeText = c.crBorder = c.crTableBorder = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crLink = ::GetSysColor(COLOR_HOTLIGHT);
+		c.crMarkBack = c.crFindBack = c.crSelBack = ::GetSysColor(COLOR_HIGHLIGHT);
+		c.crSelBackInactive = ::GetSysColor(COLOR_GRAYTEXT);
+		for (auto& a : c.crAlert)
+			a = c.crText;
+		for (auto& syn : c.crSyntax)
+			syn = c.crText;
+		return c;
+	}
 	if (s.customColors)
 		return s.colors;
 	// read each time: WTLHelper's dark mode hooks GetSysColor
@@ -327,14 +358,17 @@ int CMarkdownViewCtrl::GetZoom() const {
 }
 
 void CMarkdownViewCtrl::UpdateScrollBarTheme() {
-	// the dark Explorer theme makes the scroll bar dark. Set only when it changes: SetWindowTheme sends
-	// WM_THEMECHANGED, which comes back here.
+	// the dark Explorer theme makes the scroll bar dark, and the link tooltip: a popup, which WTLHelper's dark mode
+	// doesn't reach (it themes child windows). Set only when it changes: SetWindowTheme sends WM_THEMECHANGED, which
+	// comes back here.
 	if (!IsWindow())
 		return;
-	const int dark = IsDark() ? 1 : 0;
+	const int dark = IsDark() && !IsHighContrast() ? 1 : 0;
 	if (dark == m_State->darkScrollBars)
 		return;
 	m_State->darkScrollBars = dark;
+	if (m_State->tip)
+		::SetWindowTheme(m_State->tip, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
 	::SetWindowTheme(m_hWnd, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
 	SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
