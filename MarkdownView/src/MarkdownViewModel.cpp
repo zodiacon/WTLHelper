@@ -149,6 +149,46 @@ void MdvInline::TrimEnd() {
 		Replace(n, text.size() - n, L"");
 }
 
+MdvInline MdvInline::Slice(size_t from, size_t to) const {
+	MdvInline out;
+	to = std::min(to, text.size());
+	from = std::min(from, to);
+	out.text = text.substr(from, to - from);
+	std::vector<int> linkMap(links.size(), -1);
+	for (auto& r : runs) {
+		const size_t a = std::max(r.start, from), b = std::min(r.start + r.length, to);
+		if (a >= b)
+			continue;
+		int link = -1;
+		if (r.link >= 0) {
+			if (linkMap[r.link] < 0) {
+				MdvLink l = links[r.link];
+				const size_t la = std::max(l.start, from), lb = std::min(l.start + l.length, to);
+				l.start = la - from;
+				l.length = lb > la ? lb - la : 0;
+				out.links.push_back(std::move(l));
+				linkMap[r.link] = (int)out.links.size() - 1;
+			}
+			link = linkMap[r.link];
+		}
+		out.runs.push_back({ a - from, b - a, r.style, link });
+	}
+	for (auto& seg : map) {
+		const size_t a = std::max(seg.text, from), b = std::min(seg.text + seg.length, to);
+		if (a >= b)
+			continue;
+		const bool exact = seg.length == seg.sourceLength;
+		out.map.push_back({ a - from, b - a, exact ? seg.source + (a - seg.text) : seg.source, exact ? b - a : seg.sourceLength });
+	}
+	for (auto& img : images)
+		if (img.pos >= from && img.pos < to) {
+			MdvImage copy = img;
+			copy.pos -= from;
+			out.images.push_back(std::move(copy));
+		}
+	return out;
+}
+
 uint16_t MdvInline::StyleAt(size_t pos) const {
 	auto it = std::upper_bound(runs.begin(), runs.end(), pos, [](size_t p, const MdvRun& r) { return p < r.start; });
 	if (it == runs.begin())
@@ -1146,6 +1186,49 @@ struct Builder {
 			doc.blocks[para].parent = index;
 			defs.push_back({ std::move(label), index });
 		};
+		// definitions on the lines right after another's are in its paragraph: each [^label]: at a line's start
+		// starts a paragraph of its own
+		for (int b : doc.Leaves()) {
+			if (doc.blocks[b].kind != MdvKind::Paragraph || doc.blocks[b].parent < 0)
+				continue;
+			int current = b;
+			for (;;) {
+				auto& content = doc.blocks[current].content;
+				size_t at = MDV_NOPOS;
+				for (size_t p = 1; p + 4 < content.text.size(); p++) {
+					if (content.text[p] != L'[' || content.text[p + 1] != L'^' || content.text[p - 1] != L' ' || (content.StyleAt(p) & MdvCode))
+						continue;
+					size_t close = p + 2;
+					while (close < content.text.size() && content.text[close] != L']' && content.text[close] != L' ' && content.text[close] != L'[')
+						close++;
+					if (close == p + 2 || close + 1 >= content.text.size() || content.text[close] != L']' || content.text[close + 1] != L':')
+						continue;
+					// at a line's start in the source (after its indentation)
+					size_t src = content.SourceOf(p);
+					if (src == MDV_NOPOS || src == 0)
+						continue;
+					while (src > 0 && (doc.source[src - 1] == L' ' || doc.source[src - 1] == L'\t'))
+						src--;
+					if (src > 0 && doc.source[src - 1] != L'\n')
+						continue;
+					at = p;
+					break;
+				}
+				if (at == MDV_NOPOS)
+					break;
+				MdvBlock next;
+				next.kind = MdvKind::Paragraph;
+				next.parent = doc.blocks[current].parent;
+				next.content = content.Slice(at, content.text.size());
+				content.Replace(at, content.text.size() - at, L"");
+				content.TrimEnd();
+				doc.blocks.push_back(std::move(next));
+				const int index = (int)doc.blocks.size() - 1;
+				auto& siblings = doc.blocks[doc.blocks[index].parent].children;
+				siblings.insert(std::find(siblings.begin(), siblings.end(), current) + 1, index);
+				current = index;
+			}
+		}
 		// definitions md4c made paragraphs of: paragraphs starting with [^label]:
 		for (int b : doc.Leaves()) {
 			auto& p = doc.blocks[b];

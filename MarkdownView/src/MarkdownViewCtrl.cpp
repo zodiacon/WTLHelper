@@ -1,0 +1,680 @@
+// The markdown view: the API, the flow's layout and scrolling, and the input. Painting is in MarkdownViewPaint.cpp.
+
+#include "MarkdownViewData.h"
+
+#include <uxtheme.h>
+#include <windowsx.h>
+
+#include <algorithm>
+#include <cmath>
+
+#pragma comment(lib, "uxtheme.lib")
+
+namespace {
+
+COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
+	auto mix = [=](int x, int y) { return (BYTE)((x * (100 - percentB) + y * percentB) / 100); };
+	return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
+}
+
+bool IsDarkColor(COLORREF color) {
+	return GetRValue(color) * 299 + GetGValue(color) * 587 + GetBValue(color) * 114 < 128 * 1000;
+}
+
+void DefaultStyle(MDVSTYLE& s) {
+	s = {};
+	s.mask = MDVSM_ALL;
+	s.fontSize = 16;
+	const float scales[6] = { 2.0f, 1.5f, 1.25f, 1.0f, 0.875f, 0.85f };
+	std::copy(std::begin(scales), std::end(scales), s.headingScale);
+	s.spacing = 1;
+	s.maxWidth = 980;
+	s.padding = 24;
+}
+
+}  // namespace
+
+// ---- Construction ------------------------------------------------------------------
+
+CMarkdownViewCtrl::CMarkdownViewCtrl() : m_State(std::make_unique<MdvState>()) {
+	DefaultStyle(m_State->style);
+	MdvParse(L"", 0, m_State->doc);
+}
+
+CMarkdownViewCtrl::~CMarkdownViewCtrl() = default;
+
+LRESULT CMarkdownViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	s.dpi = ::GetDpiForWindow(m_hWnd);
+	ModifyStyle(0, WS_VSCROLL, SWP_FRAMECHANGED);
+	RECT rc;
+	GetClientRect(&rc);
+	s.client = { rc.right, rc.bottom };
+	UpdateFormats();
+	UpdateScrollBarTheme();
+	Relayout();
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	DiscardTarget();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
+	return 1;
+}
+
+LRESULT CMarkdownViewCtrl::OnSize(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
+	const SIZE old = s.client;
+	s.client = { LOWORD(lParam), HIWORD(lParam) };
+	if (s.target)
+		s.target->Resize(D2D1::SizeU(s.client.cx, s.client.cy));
+	if (old.cx != s.client.cx)
+		Relayout();         // a new column width: every box is laid out again
+	else {
+		MeasureVisible();
+		ScrollTo(s.scrollY, false);
+	}
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnStyleChanged(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	// MDVS_CENTERED changes the column
+	auto ss = (const STYLESTRUCT*)lParam;
+	if (wParam == (WPARAM)GWL_STYLE && ((ss->styleOld ^ ss->styleNew) & MDVS_CENTERED))
+		Relayout();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	// the layout is in DIPs: only the target's DPI and the scroll bar change (WM_SIZE follows)
+	auto& s = *m_State;
+	s.dpi = ::GetDpiForWindow(m_hWnd);
+	if (s.target)
+		s.target->SetDpi((float)s.dpi, (float)s.dpi);
+	UpdateScrollBar();
+	Invalidate();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	// the links' brushes are in the layouts
+	for (auto& [key, cache] : m_State->layouts)
+		cache.effects = false;
+	m_State->brushes.clear();
+	UpdateScrollBarTheme();
+	Invalidate();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnSettingChange(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	bHandled = FALSE;
+	return 0;
+}
+
+// ---- Content -----------------------------------------------------------------------
+
+void CMarkdownViewCtrl::SetText(LPCWSTR pszMarkdown, size_t cch) {
+	std::wstring text;
+	if (pszMarkdown)
+		text.assign(pszMarkdown, cch == (size_t)-1 ? wcslen(pszMarkdown) : cch);
+	auto& s = *m_State;
+	MdvParse(std::move(text), s.parseFlags, s.doc);
+	s.layouts.clear();
+	s.scrollY = 0;
+	s.lastTopHeading = -2;
+	Relayout();
+}
+
+void CMarkdownViewCtrl::Reparse() {
+	auto& s = *m_State;
+	const size_t top = GetTopOffset();
+	std::wstring text = std::move(s.doc.source);
+	MdvParse(std::move(text), s.parseFlags, s.doc);
+	s.layouts.clear();
+	s.scrollY = 0;
+	Relayout();
+	ScrollToOffset(top);
+}
+
+BOOL CMarkdownViewCtrl::LoadFile(LPCWSTR pszPath) {
+	HANDLE file = ::CreateFileW(pszPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (file == INVALID_HANDLE_VALUE)
+		return FALSE;
+	LARGE_INTEGER size{};
+	::GetFileSizeEx(file, &size);
+	if (size.QuadPart > 256 * 1024 * 1024) {
+		::CloseHandle(file);
+		return FALSE;
+	}
+	std::string bytes((size_t)size.QuadPart, '\0');
+	DWORD read = 0;
+	const BOOL ok = ::ReadFile(file, bytes.data(), (DWORD)bytes.size(), &read, nullptr);
+	::CloseHandle(file);
+	if (!ok)
+		return FALSE;
+	bytes.resize(read);
+
+	std::wstring text;
+	if (bytes.size() >= 2 && (BYTE)bytes[0] == 0xFF && (BYTE)bytes[1] == 0xFE) {
+		text.assign((const wchar_t*)(bytes.data() + 2), (bytes.size() - 2) / 2);
+	}
+	else {
+		size_t skip = bytes.size() >= 3 && (BYTE)bytes[0] == 0xEF && (BYTE)bytes[1] == 0xBB && (BYTE)bytes[2] == 0xBF ? 3 : 0;
+		const char* p = bytes.data() + skip;
+		const int n = (int)(bytes.size() - skip);
+		UINT cp = CP_UTF8;
+		int chars = ::MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, p, n, nullptr, 0);
+		if (chars == 0 && n > 0) {
+			cp = CP_ACP;
+			chars = ::MultiByteToWideChar(cp, 0, p, n, nullptr, 0);
+		}
+		text.resize(chars);
+		::MultiByteToWideChar(cp, 0, p, n, text.data(), chars);
+	}
+
+	std::wstring dir = pszPath;
+	const size_t slash = dir.find_last_of(L"\\/");
+	dir = slash == std::wstring::npos ? L"" : dir.substr(0, slash);
+	m_State->basePath = dir;
+	SetText(text.c_str(), text.size());
+	return TRUE;
+}
+
+CString CMarkdownViewCtrl::GetText() const {
+	return CString(m_State->doc.source.c_str(), (int)m_State->doc.source.size());
+}
+
+void CMarkdownViewCtrl::SetParseFlags(UINT mdvf) {
+	if (mdvf == m_State->parseFlags)
+		return;
+	m_State->parseFlags = mdvf;
+	Reparse();
+}
+
+UINT CMarkdownViewCtrl::GetParseFlags() const {
+	return m_State->parseFlags;
+}
+
+void CMarkdownViewCtrl::SetBasePath(LPCWSTR pszDir) {
+	m_State->basePath = pszDir ? pszDir : L"";
+}
+
+CString CMarkdownViewCtrl::GetBasePath() const {
+	return m_State->basePath.c_str();
+}
+
+// ---- Look ---------------------------------------------------------------------------
+
+void CMarkdownViewCtrl::SetTextStyle(const MDVSTYLE& style) {
+	auto& s = m_State->style;
+	if (style.mask & MDVSM_FONT)
+		wcscpy_s(s.szFont, style.szFont);
+	if (style.mask & MDVSM_CODEFONT)
+		wcscpy_s(s.szCodeFont, style.szCodeFont);
+	if (style.mask & MDVSM_FONTSIZE)
+		s.fontSize = std::clamp(style.fontSize, 6.0f, 96.0f);
+	if (style.mask & MDVSM_HEADINGSCALE)
+		std::copy(std::begin(style.headingScale), std::end(style.headingScale), s.headingScale);
+	if (style.mask & MDVSM_SPACING)
+		s.spacing = std::clamp(style.spacing, 0.0f, 4.0f);
+	if (style.mask & MDVSM_MAXWIDTH)
+		s.maxWidth = std::max(style.maxWidth, 100);
+	if (style.mask & MDVSM_PADDING)
+		s.padding = std::clamp(style.padding, 0, 400);
+	m_State->layouts.clear();
+	UpdateFormats();
+	Relayout();
+}
+
+void CMarkdownViewCtrl::GetTextStyle(MDVSTYLE& style) const {
+	style = m_State->style;
+	style.mask = MDVSM_ALL;
+}
+
+void CMarkdownViewCtrl::SetColors(const MDVCOLORS* colors) {
+	auto& s = *m_State;
+	s.customColors = colors != nullptr;
+	if (colors)
+		s.colors = *colors;
+	BOOL handled;
+	OnColorsChanged(0, 0, 0, handled);
+}
+
+MDVCOLORS CMarkdownViewCtrl::GetColors() const {
+	auto& s = *m_State;
+	if (s.customColors)
+		return s.colors;
+	// read each time: WTLHelper's dark mode hooks GetSysColor
+	MDVCOLORS c{};
+	c.crBack = ::GetSysColor(COLOR_WINDOW);
+	c.crText = ::GetSysColor(COLOR_WINDOWTEXT);
+	const bool dark = IsDarkColor(c.crBack);
+	c.crMuted = Blend(c.crBack, c.crText, 62);
+	c.crHeading = c.crText;
+	c.crLink = dark ? RGB(0x44, 0x93, 0xF8) : RGB(0x09, 0x69, 0xDA);
+	c.crBorder = Blend(c.crBack, c.crText, dark ? 22 : 16);
+	c.crCodeBack = Blend(c.crBack, c.crText, dark ? 9 : 6);
+	c.crCodeText = c.crText;
+	c.crMarkBack = dark ? RGB(0x6B, 0x5A, 0x14) : RGB(0xFF, 0xF1, 0x8C);
+	const COLORREF light[MDVA_COUNT] = { RGB(0x09, 0x69, 0xDA), RGB(0x1A, 0x7F, 0x37), RGB(0x82, 0x50, 0xDF), RGB(0x9A, 0x67, 0x00), RGB(0xD1, 0x24, 0x2F) };
+	const COLORREF night[MDVA_COUNT] = { RGB(0x44, 0x93, 0xF8), RGB(0x3F, 0xB9, 0x50), RGB(0xAB, 0x7D, 0xF8), RGB(0xD2, 0x99, 0x22), RGB(0xF8, 0x51, 0x49) };
+	for (int i = 0; i < MDVA_COUNT; i++)
+		c.crAlert[i] = dark ? night[i] : light[i];
+	c.crTableBorder = c.crBorder;
+	c.crTableHeaderBack = Blend(c.crBack, c.crText, 4);
+	c.crTableStripeBack = Blend(c.crBack, c.crText, 3);
+	c.crSelBack = ::GetSysColor(COLOR_HIGHLIGHT);
+	c.crSelText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
+	return c;
+}
+
+bool CMarkdownViewCtrl::IsDark() const {
+	return IsDarkColor(GetColors().crBack);
+}
+
+void CMarkdownViewCtrl::SetZoom(int percent) {
+	percent = std::clamp(percent, 25, 400);
+	if (percent == m_State->zoom)
+		return;
+	m_State->zoom = percent;
+	m_State->layouts.clear();
+	Relayout();
+}
+
+int CMarkdownViewCtrl::GetZoom() const {
+	return m_State->zoom;
+}
+
+void CMarkdownViewCtrl::UpdateScrollBarTheme() {
+	// the dark Explorer theme makes the scroll bar dark. Set only when it changes: SetWindowTheme sends
+	// WM_THEMECHANGED, which comes back here.
+	if (!IsWindow())
+		return;
+	const int dark = IsDark() ? 1 : 0;
+	if (dark == m_State->darkScrollBars)
+		return;
+	m_State->darkScrollBars = dark;
+	::SetWindowTheme(m_hWnd, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+// ---- Layout ----------------------------------------------------------------------------
+
+void CMarkdownViewCtrl::UpdateMetrics() {
+	auto& s = *m_State;
+	auto& m = s.metrics;
+	const float zoom = s.zoom / 100.0f;
+	m = MdvMetrics{};
+	m.fontSize = s.style.fontSize * zoom;
+	std::copy(std::begin(s.style.headingScale), std::end(s.style.headingScale), m.headingScale);
+	m.spacing = s.style.spacing;
+	m.padding = s.style.padding * zoom;
+}
+
+float CMarkdownViewCtrl::ColumnWidth() const {
+	auto& s = *m_State;
+	const float width = s.client.cx / s.Scale() - 2 * s.metrics.padding;
+	float column = std::max(width, 4 * s.metrics.fontSize);
+	if (GetStyle() & MDVS_CENTERED)
+		column = std::min(column, s.style.maxWidth * s.zoom / 100.0f);
+	return column;
+}
+
+float CMarkdownViewCtrl::ColumnLeft() const {
+	auto& s = *m_State;
+	const float width = s.client.cx / s.Scale();
+	const float column = ColumnWidth();
+	return std::max(s.metrics.padding, (width - column) / 2);
+}
+
+float CMarkdownViewCtrl::ViewHeight() const {
+	return m_State->client.cy / m_State->Scale();
+}
+
+void CMarkdownViewCtrl::Relayout() {
+	auto& s = *m_State;
+	auto& flow = s.flow;
+	// keep the block at the top where it is
+	int anchorBlock = -1;
+	float anchorFraction = 0;
+	if (!flow.boxes.empty()) {
+		const size_t top = flow.BoxAt(s.scrollY);
+		if (top < flow.boxes.size()) {
+			auto& box = flow.boxes[top];
+			anchorBlock = box.block;
+			const float h = box.Bottom() - box.top;
+			anchorFraction = h > 0 ? std::clamp((s.scrollY - box.top) / h, 0.0f, 1.0f) : 0;
+		}
+	}
+
+	UpdateMetrics();
+	flow.Build(s.doc, s.metrics);
+	const float column = ColumnWidth();
+	// the boxes laid out before at this width keep their heights
+	for (auto& box : flow.boxes) {
+		auto it = s.layouts.find(MdvState::Key(box.block, box.kind));
+		if (it != s.layouts.end() && std::fabs(it->second.width - box.TextWidth(column)) < 0.01f) {
+			box.height = it->second.height;
+			box.measured = true;
+		}
+	}
+	flow.Estimate(s.doc, s.metrics, column);
+	flow.Place();
+	s.blockBox.assign(s.doc.blocks.size(), -1);
+	for (size_t i = flow.boxes.size(); i-- > 0;) {
+		s.blockBox[flow.boxes[i].block] = (int)i;
+		if (flow.boxes[i].markerBlock >= 0)
+			s.blockBox[flow.boxes[i].markerBlock] = (int)i;
+	}
+
+	if (anchorBlock >= 0 && s.blockBox[anchorBlock] >= 0) {
+		auto& box = flow.boxes[s.blockBox[anchorBlock]];
+		s.scrollY = box.top + anchorFraction * (box.Bottom() - box.top);
+	}
+	if (IsWindow()) {
+		MeasureVisible();
+		ScrollTo(s.scrollY, false);
+		Invalidate();
+	}
+}
+
+// Lays out the boxes in view (and a little around it), keeping the first box shown where it is as the heights
+// above it change from estimates to measured ones.
+void CMarkdownViewCtrl::MeasureVisible() {
+	auto& s = *m_State;
+	auto& flow = s.flow;
+	if (!IsWindow() || flow.boxes.empty())
+		return;
+	const float view = ViewHeight();
+	for (int pass = 0; pass < 4; pass++) {
+		const size_t anchor = std::min(flow.BoxAt(s.scrollY), flow.boxes.size() - 1);
+		const float offset = s.scrollY - flow.boxes[anchor].top;
+		bool changed = false;
+		for (size_t i = flow.BoxAt(std::max(0.0f, s.scrollY - view / 4)); i < flow.boxes.size(); i++) {
+			if (flow.boxes[i].top > s.scrollY + view * 1.25f)
+				break;
+			if (flow.boxes[i].measured)
+				continue;
+			Measure(i);
+			flow.Place(i);
+			changed = true;
+		}
+		if (!changed)
+			break;
+		s.scrollY = std::max(0.0f, flow.boxes[anchor].top + offset);
+	}
+}
+
+void CMarkdownViewCtrl::ScrollTo(float y, bool notify) {
+	auto& s = *m_State;
+	const float old = s.scrollY;
+	for (int pass = 0; pass < 3; pass++) {
+		const float limit = std::max(0.0f, s.flow.height - ViewHeight());
+		s.scrollY = std::clamp(y, 0.0f, limit);
+		MeasureVisible();
+		// measuring may have changed the height: near the end, go on until it settles
+		const float newLimit = std::max(0.0f, s.flow.height - ViewHeight());
+		if (y <= newLimit || std::fabs(newLimit - limit) < 0.5f)
+			break;
+		y = std::min(y, newLimit);
+	}
+	s.scrollY = std::clamp(s.scrollY, 0.0f, std::max(0.0f, s.flow.height - ViewHeight()));
+	UpdateScrollBar();
+	if (s.scrollY != old) {
+		Invalidate();
+		if (notify) {
+			NMMDVSCROLL nm{};
+			nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), MDVN_SCROLLED };
+			nm.heading = GetTopHeading();
+			nm.topOffset = GetTopOffset();
+			::SendMessage(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+		}
+	}
+}
+
+void CMarkdownViewCtrl::UpdateScrollBar() {
+	auto& s = *m_State;
+	if (!IsWindow())
+		return;
+	SCROLLINFO si{ sizeof(si), SIF_ALL | SIF_DISABLENOSCROLL };
+	si.nMin = 0;
+	si.nMax = std::max(0, (int)std::ceil(s.flow.height * s.Scale()) - 1);
+	si.nPage = s.client.cy;
+	si.nPos = (int)std::lround(s.scrollY * s.Scale());
+	SetScrollInfo(SB_VERT, &si, TRUE);
+}
+
+void CMarkdownViewCtrl::ScrollToBox(int box) {
+	auto& s = *m_State;
+	if (box < 0 || box >= (int)s.flow.boxes.size())
+		return;
+	// a little above the box, so a heading's space shows
+	float y = s.flow.boxes[box].top - 0.5f * s.metrics.fontSize;
+	ScrollTo(y);
+	// measuring above may have moved it
+	y = s.flow.boxes[box].top - 0.5f * s.metrics.fontSize;
+	ScrollTo(y);
+}
+
+// ---- Navigation -------------------------------------------------------------------------
+
+int CMarkdownViewCtrl::GetHeadingCount() const {
+	return (int)m_State->doc.headings.size();
+}
+
+BOOL CMarkdownViewCtrl::GetHeading(int index, MDVHEADING& heading) const {
+	auto& doc = m_State->doc;
+	if (index < 0 || index >= (int)doc.headings.size())
+		return FALSE;
+	auto& block = doc.blocks[doc.headings[index]];
+	heading.level = block.level;
+	heading.pszText = block.content.text.c_str();
+	heading.pszAnchor = block.anchor.c_str();
+	heading.sourceOffset = block.sourceStart;
+	return TRUE;
+}
+
+// opens the <details> a block is in, so it has a box
+static bool OpenDetailsAround(MdvDocument& doc, int block) {
+	bool changed = false;
+	for (int b = doc.blocks[block].parent; b > 0; b = doc.blocks[b].parent)
+		if (doc.blocks[b].kind == MdvKind::Details && !doc.blocks[b].open) {
+			doc.blocks[b].open = true;
+			changed = true;
+		}
+	return changed;
+}
+
+BOOL CMarkdownViewCtrl::ScrollToAnchor(LPCWSTR pszAnchor) {
+	auto& s = *m_State;
+	const int a = s.doc.FindAnchor(pszAnchor ? pszAnchor : L"");
+	if (a < 0)
+		return FALSE;
+	const int block = s.doc.anchors[a].block;
+	if (OpenDetailsAround(s.doc, block))
+		Relayout();
+	ScrollToBox(s.blockBox[block]);
+	return TRUE;
+}
+
+BOOL CMarkdownViewCtrl::ScrollToHeading(int index) {
+	auto& doc = m_State->doc;
+	if (index < 0 || index >= (int)doc.headings.size())
+		return FALSE;
+	const int block = doc.headings[index];
+	if (OpenDetailsAround(doc, block))
+		Relayout();
+	ScrollToBox(m_State->blockBox[block]);
+	return TRUE;
+}
+
+void CMarkdownViewCtrl::ScrollToOffset(size_t sourceOffset) {
+	auto& s = *m_State;
+	const int leaf = s.doc.LeafAtSource(sourceOffset);
+	if (leaf < 0)
+		return;
+	if (OpenDetailsAround(s.doc, leaf))
+		Relayout();
+	const int box = s.blockBox[leaf];
+	if (box >= 0)
+		ScrollTo(s.flow.boxes[box].top);
+}
+
+size_t CMarkdownViewCtrl::GetTopOffset() const {
+	auto& s = *m_State;
+	const size_t box = s.flow.BoxAt(s.scrollY);
+	if (box >= s.flow.boxes.size())
+		return s.doc.source.size();
+	return s.doc.blocks[s.flow.boxes[box].block].sourceStart;
+}
+
+int CMarkdownViewCtrl::GetTopHeading() const {
+	auto& s = *m_State;
+	if (s.flow.boxes.empty())
+		return -1;
+	// the last heading whose box starts above the view's first tenth
+	const float y = s.scrollY + ViewHeight() / 10;
+	int found = -1;
+	for (size_t h = 0; h < s.doc.headings.size(); h++) {
+		const int box = s.blockBox[s.doc.headings[h]];
+		if (box < 0)
+			continue;
+		if (s.flow.boxes[box].top > y)
+			break;
+		found = (int)h;
+	}
+	return found;
+}
+
+// ---- Input ---------------------------------------------------------------------------
+
+LRESULT CMarkdownViewCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
+	return DLGC_WANTARROWS;
+}
+
+LRESULT CMarkdownViewCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	auto& s = *m_State;
+	const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
+	const float line = s.metrics.fontSize * s.metrics.lineHeight;
+	const float page = std::max(line, ViewHeight() - 2 * line);
+	switch (wParam) {
+		case VK_UP: ScrollTo(s.scrollY - line); break;
+		case VK_DOWN: ScrollTo(s.scrollY + line); break;
+		case VK_PRIOR: ScrollTo(s.scrollY - page); break;
+		case VK_NEXT: ScrollTo(s.scrollY + page); break;
+		case VK_SPACE: ScrollTo(s.scrollY + (shift ? -page : page)); break;
+		case VK_HOME: ScrollTo(0); break;
+		case VK_END: ScrollTo(s.flow.height); break;
+		case VK_OEM_PLUS:
+		case VK_ADD:
+			if (!ctrl)
+				return 0;
+			SetZoom(GetZoom() + 10);
+			break;
+		case VK_OEM_MINUS:
+		case VK_SUBTRACT:
+			if (!ctrl)
+				return 0;
+			SetZoom(GetZoom() - 10);
+			break;
+		case '0':
+		case VK_NUMPAD0:
+			if (!ctrl)
+				return 0;
+			SetZoom(100);
+			break;
+		default:
+			bHandled = FALSE;
+			break;
+	}
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) {
+		s.wheelDelta += delta;
+		const int steps = s.wheelDelta / WHEEL_DELTA;
+		s.wheelDelta -= steps * WHEEL_DELTA;
+		if (steps)
+			SetZoom(GetZoom() + steps * 10);
+		return 0;
+	}
+	UINT lines = 3;
+	::SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+	const float line = s.metrics.fontSize * s.metrics.lineHeight;
+	const float amount = lines == WHEEL_PAGESCROLL ? ViewHeight() : lines * line;
+	ScrollTo(s.scrollY - amount * delta / WHEEL_DELTA);
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnVScroll(UINT, WPARAM wParam, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	const float line = s.metrics.fontSize * s.metrics.lineHeight;
+	const float page = std::max(line, ViewHeight() - 2 * line);
+	switch (LOWORD(wParam)) {
+		case SB_LINEUP: ScrollTo(s.scrollY - line); break;
+		case SB_LINEDOWN: ScrollTo(s.scrollY + line); break;
+		case SB_PAGEUP: ScrollTo(s.scrollY - page); break;
+		case SB_PAGEDOWN: ScrollTo(s.scrollY + page); break;
+		case SB_TOP: ScrollTo(0); break;
+		case SB_BOTTOM: ScrollTo(s.flow.height); break;
+		case SB_THUMBTRACK:
+		case SB_THUMBPOSITION: {
+			SCROLLINFO si{ sizeof(si), SIF_TRACKPOS };
+			GetScrollInfo(SB_VERT, &si);
+			ScrollTo(si.nTrackPos / s.Scale());
+			break;
+		}
+	}
+	return 0;
+}
+
+int CMarkdownViewCtrl::BoxAtPoint(POINT pt) const {
+	auto& s = *m_State;
+	const float x = pt.x / s.Scale() - ColumnLeft(), y = pt.y / s.Scale() + s.scrollY;
+	const size_t i = s.flow.BoxAt(y);
+	if (i >= s.flow.boxes.size())
+		return -1;
+	auto& box = s.flow.boxes[i];
+	if (y < box.top || x < box.indent || x > ColumnWidth())
+		return -1;
+	return (int)i;
+}
+
+void CMarkdownViewCtrl::ToggleDetails(int block) {
+	auto& b = m_State->doc.blocks[block];
+	b.open = !b.open;
+	Relayout();
+}
+
+LRESULT CMarkdownViewCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	SetFocus();
+	const int box = BoxAtPoint({ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
+	if (box >= 0 && m_State->flow.boxes[box].kind == MdvBoxKind::Summary)
+		ToggleDetails(m_State->flow.boxes[box].block);
+	return 0;
+}
+
+LRESULT CMarkdownViewCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if ((HWND)wParam == m_hWnd && LOWORD(lParam) == HTCLIENT) {
+		POINT pt;
+		::GetCursorPos(&pt);
+		ScreenToClient(&pt);
+		const int box = BoxAtPoint(pt);
+		if (box >= 0 && m_State->flow.boxes[box].kind == MdvBoxKind::Summary) {
+			::SetCursor(::LoadCursor(nullptr, IDC_HAND));
+			return TRUE;
+		}
+	}
+	bHandled = FALSE;
+	return 0;
+}

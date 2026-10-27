@@ -3,11 +3,13 @@
 // Deliberately dependency-free (same approach as GraphControlTests): a console exe that returns the number
 // of failed checks. Only the pure parts are covered: the block tree md4c's callbacks build, inline styles, links and
 // images, the map back to the source, GitHub's extras (alerts, footnotes, emoji, anchors, front matter, raw HTML's
-// subset), plain text and HTML export, source ranges and the tables' column widths. Anything that needs an HWND
-// or a render target is checked by hand with MarkdownViewDemo.
+// subset), plain text and HTML export, source ranges, the tables' column widths, and the flow of boxes the view lays
+// out (indents, margins, markers, bars, placement). Anything that needs an HWND or a render target is checked by
+// hand with MarkdownViewDemo.
 
-#include "MarkdownViewModel.h"
+#include "MarkdownViewLayout.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -764,6 +766,148 @@ TEST(Robustness) {
 	MdvHtml(stars);
 }
 
+TEST(FootnoteLines) {
+	// definitions on consecutive lines are one paragraph to md4c
+	auto doc = Parse(L"x[^a] y[^b]\n\n[^a]: First note.\n[^b]: Second *note*.\n");
+	CHECK_STR(Shape(doc), L"doc(p,footnotes(fn(p),fn(p)))");
+	CHECK_STR(At(doc, { 1, 0, 0 }).content.text, L"First note. \u21A9");
+	CHECK_STR(At(doc, { 1, 1, 0 }).content.text, L"Second note. \u21A9");
+	CHECK_INT(At(doc, { 1, 1, 0 }).content.StyleAt(7), MdvItalic);
+	CHECK_INT(At(doc, { 1, 1, 0 }).content.SourceOf(0), 37);
+	// a [^x]: inside a line isn't one
+	auto inside = Parse(L"see [^a]: no\n");
+	CHECK_STR(Shape(inside), L"doc(p)");
+}
+
+TEST(InlineSlice) {
+	auto doc = Parse(L"one **two** [three](u) &amp; four");
+	auto& c = At(doc, { 0 }).content;
+	CHECK_STR(c.text, L"one two three & four");
+	auto s = c.Slice(4, 15);
+	CHECK_STR(s.text, L"two three &");
+	CHECK_INT(s.StyleAt(0), MdvBold);
+	CHECK_INT(s.LinkAt(4), 0);
+	CHECK_STR(s.links[0].url, L"u");
+	CHECK_INT(s.links[0].start, 4);
+	CHECK_INT(s.links[0].length, 5);
+	CHECK_INT(s.SourceOf(0), 6);
+	CHECK_INT(s.SourceOf(10), 23);     // the entity maps whole
+	CHECK_STR(c.Slice(10, 3).text, L"");
+}
+
+// ---- The flow ------------------------------------------------------------------------------
+
+static MdvFlow Flow(const MdvDocument& doc, const MdvMetrics& m = {}) {
+	MdvFlow flow;
+	flow.Build(doc, m);
+	return flow;
+}
+
+TEST(FlowBoxes) {
+	auto doc = Parse(L"# T\n\npara\n\n- a\n- b\n  1. c\n\n> q\n\n```\nc\n```\n\n---\n\n| a |\n|---|\n| 1 |\n");
+	auto flow = Flow(doc);
+	CHECK_INT(flow.boxes.size(), 9);
+	CHECK(flow.boxes[8].kind == MdvBoxKind::Table);
+	auto& h = flow.boxes[0];
+	CHECK(h.kind == MdvBoxKind::Text);
+	CHECK_INT(std::lround(h.scale * 100), 200);
+	CHECK(h.padBottom > 0);                       // the line under h1
+	CHECK_INT(flow.boxes[1].indent, 0);
+	CHECK_INT(flow.boxes[1].marginBottom, 16);
+	auto& a = flow.boxes[2];
+	CHECK_INT(a.indent, 32);
+	CHECK(a.marker == MdvMarker::Disc);
+	CHECK_INT(a.marginBottom, 0);                 // tight
+	auto& b = flow.boxes[3];
+	CHECK_INT(b.marginTop, 4);
+	auto& c = flow.boxes[4];
+	CHECK_INT(c.indent, 64);
+	CHECK(c.marker == MdvMarker::Number);
+	CHECK_INT(c.markerBlock, IndexAt(doc, { 2, 1, 1, 0 }));
+	CHECK_INT(c.marginBottom, 16);                // the outer list's space, on its last box
+	CHECK_INT(flow.boxes[5].indent, 20);          // in the quote
+	CHECK(flow.boxes[5].muted);
+	CHECK_INT(flow.spans.size(), 1);
+	CHECK_INT(flow.spans[0].first, 5);
+	CHECK_INT(flow.spans[0].last, 5);
+	CHECK(flow.boxes[6].kind == MdvBoxKind::Code);
+	CHECK_INT(flow.boxes[6].padLeft, 16);
+	CHECK(flow.boxes[7].kind == MdvBoxKind::Rule);
+	CHECK(flow.boxes[7].measured);
+
+	auto tasks = Flow(Parse(L"- [x] done\n- [ ] todo\n-\n"));
+	CHECK(tasks.boxes[0].marker == MdvMarker::Checked);
+	CHECK(tasks.boxes[1].marker == MdvMarker::Unchecked);
+	CHECK_INT(tasks.boxes.size(), 3);             // an empty item still has a line for its marker
+
+	auto nested = Flow(Parse(L"- a\n  - b\n    - c\n"));
+	CHECK(nested.boxes[1].marker == MdvMarker::Circle);
+	CHECK(nested.boxes[2].marker == MdvMarker::Square);
+}
+
+TEST(FlowContainers) {
+	auto alert = Parse(L"> [!TIP]\n> one\n>\n> two\n\nafter\n");
+	auto flow = Flow(alert);
+	CHECK_INT(flow.boxes.size(), 4);
+	CHECK(flow.boxes[0].kind == MdvBoxKind::AlertTitle);
+	CHECK(!flow.boxes[1].muted);                  // an alert's text isn't muted
+	CHECK_INT(flow.spans[0].first, 0);
+	CHECK_INT(flow.spans[0].last, 2);
+
+	auto details = Parse(L"<details>\n<summary>S</summary>\n\ninside\n\n</details>\n\nafter\n");
+	auto closed = Flow(details);
+	CHECK_INT(closed.boxes.size(), 2);
+	CHECK(closed.boxes[0].kind == MdvBoxKind::Summary);
+	CHECK(closed.boxes[0].padLeft > 0);
+	details.blocks[IndexAt(details, { 0 })].open = true;
+	auto open = Flow(details);
+	CHECK_INT(open.boxes.size(), 3);
+	CHECK_INT(open.boxes[1].block, IndexAt(details, { 0, 0 }));
+
+	auto notes = Flow(Parse(L"x[^1]\n\n[^1]: note\n"));
+	CHECK_INT(notes.boxes.size(), 3);
+	CHECK(notes.boxes[1].kind == MdvBoxKind::Rule);
+	CHECK(notes.boxes[2].marker == MdvMarker::Number);
+	CHECK_INT(std::lround(notes.boxes[2].scale * 100), 85);
+}
+
+TEST(FlowPlace) {
+	auto doc = Parse(L"# T\n\none\n\ntwo\n");
+	MdvMetrics m;
+	auto flow = Flow(doc, m);
+	for (auto& box : flow.boxes)
+		box.height = 20;
+	flow.Place();
+	CHECK_INT(flow.boxes[0].top, 16);             // the padding
+	const float hBottom = flow.boxes[0].Bottom();
+	CHECK_INT(flow.boxes[1].top, hBottom + 16);   // max(heading's 16, paragraph's 0)
+	CHECK_INT(flow.boxes[2].top, flow.boxes[1].Bottom() + 16);
+	CHECK_INT(flow.height, flow.boxes[2].Bottom() + 16);        // the padding
+	CHECK_INT(flow.BoxAt(0), 0);
+	CHECK_INT(flow.BoxAt(20), 0);
+	CHECK_INT(flow.BoxAt(hBottom + 1), 1);        // in the gap: the next one
+	CHECK_INT(flow.BoxAt(flow.boxes[2].top + 5), 2);
+	CHECK_INT(flow.BoxAt(10000), 3);
+	CHECK_INT(flow.BoxOfBlock(IndexAt(doc, { 1 })), 1);
+
+	// placing from a box keeps the ones above
+	flow.boxes[1].height = 50;
+	flow.Place(1);
+	CHECK_INT(flow.boxes[0].top, 16);
+	CHECK_INT(flow.boxes[2].top, flow.boxes[1].Bottom() + 16);
+}
+
+TEST(FlowEstimate) {
+	auto doc = Parse(L"short\n\n" + std::wstring(400, L'x') + L"\n\n```\na\nb\nc\n```\n");
+	MdvMetrics m;
+	auto flow = Flow(doc, m);
+	flow.Estimate(doc, m, 400);
+	CHECK_INT(flow.boxes[0].height, 24);          // a line of 1.5em
+	// 400 characters at 8 DIPs in 400: 8 lines
+	CHECK_INT(flow.boxes[1].height, 8 * 24);
+	CHECK_INT(std::lround(flow.boxes[2].height * 100), std::lround(3 * 1.45f * 16 * 0.875f * 100));
+}
+
 int wmain() {
 	Run_Blocks();
 	Run_InlineStyles();
@@ -794,6 +938,12 @@ int wmain() {
 	Run_ColumnWidths();
 	Run_Urls();
 	Run_Robustness();
+	Run_FootnoteLines();
+	Run_InlineSlice();
+	Run_FlowBoxes();
+	Run_FlowContainers();
+	Run_FlowPlace();
+	Run_FlowEstimate();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

@@ -83,6 +83,7 @@ struct MdvInline {
 	// addStyle, the link given (or the old one's if -1) and maps to the old text's whole source
 	void Replace(size_t pos, size_t count, std::wstring_view s, uint16_t addStyle = 0, int link = -1);
 	void TrimEnd();                                // drops trailing spaces and line breaks
+	MdvInline Slice(size_t from, size_t to) const; // a copy of text[from, to) with its runs, links, images and map
 
 	uint16_t StyleAt(size_t pos) const;
 	int LinkAt(size_t pos) const;

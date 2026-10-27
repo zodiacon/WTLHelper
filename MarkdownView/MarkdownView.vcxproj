@@ -95,13 +95,19 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\MarkdownView.h" />
+    <ClInclude Include="src\MarkdownViewData.h" />
+    <ClInclude Include="src\MarkdownViewLayout.h" />
     <ClInclude Include="src\MarkdownViewModel.h" />
     <ClInclude Include="src\md4c\entity.h" />
     <ClInclude Include="src\md4c\md4c.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\MarkdownViewCtrl.cpp" />
     <ClCompile Include="src\MarkdownViewExport.cpp" />
+    <ClCompile Include="src\MarkdownViewLayout.cpp" />
     <ClCompile Include="src\MarkdownViewModel.cpp" />
+    <ClCompile Include="src\MarkdownViewPaint.cpp" />
     <ClCompile Include="src\MarkdownViewText.cpp" />
     <ClCompile Include="src\md4c\entity.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
