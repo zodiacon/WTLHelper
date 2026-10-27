@@ -29,6 +29,13 @@ SuspendResumeHook::~SuspendResumeHook() {
 	WTLHelper::ResumeHook();
 }
 
+// A tooltip is a popup: ApplyMode's child windows don't include it, so the tooltips the controls make (theirs, not a
+// list view's or a toolbar's, which darkmodelib reaches through their owners) stayed light in dark mode. They get the
+// mode's theme when they're made and on every switch.
+static void ThemeTooltip(HWND hwnd) {
+	DarkMode::setDarkTooltips(hwnd, static_cast<int>(DarkMode::ToolTipsType::tooltip));
+}
+
 static LRESULT CALLBACK OnHook(int code, WPARAM wp, LPARAM lp) {
 	if (g_SuspendCount <= 0 && code >= HC_ACTION) {
 		auto msg = (CWPRETSTRUCT*)lp;
@@ -67,6 +74,8 @@ static LRESULT CALLBACK OnHook(int code, WPARAM wp, LPARAM lp) {
 				}
 				DarkMode::setDarkWndNotifySafe(hwnd);
 			}
+			else if (name.CompareNoCase(TOOLTIPS_CLASS) == 0)
+				ThemeTooltip(hwnd);
 			else {
 				// top-level window
 				DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -231,6 +240,14 @@ void WTLHelper::ApplyMode(HWND hWnd) {
 			::SetWindowTheme(hChild, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
 		return TRUE;
 		}, g_DarkModeType == DarkModeKind::Dark);
+
+	// the thread's tooltips (popups, so not among the children)
+	::EnumThreadWindows(::GetCurrentThreadId(), [](HWND hTip, LPARAM) -> BOOL {
+		WCHAR className[32];
+		if (::GetClassName(hTip, className, _countof(className)) && ::_wcsicmp(className, TOOLTIPS_CLASS) == 0)
+			ThemeTooltip(hTip);
+		return TRUE;
+		}, 0);
 
 	CWindow(hWnd).SendMessageToDescendants(ThemeChangedMessage, 0, static_cast<LPARAM>(g_DarkModeType));
 	::RedrawWindow(hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME);
