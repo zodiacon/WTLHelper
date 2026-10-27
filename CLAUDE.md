@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A set of Win32/C++20 UI libraries built on WTL. Native Windows only: MSVC, Unicode, Visual Studio solution `WTLHelper.sln`. This directory is a git submodule of the parent `WinSysLive` repo (`../`), and the parent `WinSysLive.sln` builds `WTLHelper` and `GraphControl` directly. Changes to those two projects affect the parent app.
+A set of Win32/C++20 UI libraries built on WTL. Native Windows only: MSVC, Unicode, Visual Studio solution `WTLHelper.sln`. This repo is used as a git submodule by several apps (e.g. `WinSysLive`, `NetworkExplorer`), whose solutions build `WTLHelper` (and in `WinSysLive`'s case `GraphControl`) directly from source. Changes to those projects affect every app that uses them.
 
 ## Build
 
