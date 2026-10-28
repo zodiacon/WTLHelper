@@ -59,13 +59,14 @@ struct CVirtualListView {
 		if (si == nullptr)
 			return false;
 
+		// the arrow is on the header item (RealSortColumn); SortColumn is the column manager's index
 		auto header = CListViewCtrl(si->hWnd).GetHeader();
 		HDITEM h;
 		h.mask = HDI_FORMAT;
-		header.GetItem(si->SortColumn, &h);
+		header.GetItem(si->RealSortColumn, &h);
 		h.fmt = (h.fmt & HDF_JUSTIFYMASK) | HDF_STRING;
-		header.SetItem(si->SortColumn, &h);
-		si->SortColumn = -1;
+		header.SetItem(si->RealSortColumn, &h);
+		si->SortColumn = si->RealSortColumn = -1;
 		return true;
 	}
 
@@ -80,7 +81,7 @@ struct CVirtualListView {
 		header.GetItem(si->RealSortColumn, &h);
 		h.fmt = (h.fmt & HDF_JUSTIFYMASK) | HDF_STRING;
 		header.SetItem(si->RealSortColumn, &h);
-		si->SortColumn = -1;
+		si->SortColumn = si->RealSortColumn = -1;
 		return true;
 	}
 
@@ -468,9 +469,10 @@ protected:
 		}
 	}
 
-	int GetSortColumn(HWND hWnd, UINT_PTR id = 0) const {
+	// the column manager's index (as GetColumnText gets): SortColumn already is one
+	int GetSortColumn(HWND /*hWnd*/, UINT_PTR id = 0) const {
 		auto si = FindById(id);
-		return si ? GetRealColumn(hWnd, si->SortColumn) : -1;
+		return si ? si->SortColumn : -1;
 	}
 	int IsSortAscending(UINT_PTR id) const {
 		auto si = FindById(id);

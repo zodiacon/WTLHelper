@@ -2818,6 +2818,14 @@ static void paintStatusBar(HWND hWnd, HDC hdc, dmlib_subclass::StatusBarData& st
 		rcPart.left += borders.between;
 		rcPart.right -= borders.vertical;
 
+		// a part's icon (SB_SETICON) goes before its text, as the native control draws it
+		if (const auto hIcon = reinterpret_cast<HICON>(::SendMessage(hWnd, SB_GETICON, static_cast<WPARAM>(i), 0)); hIcon != nullptr)
+		{
+			const int cxIcon = dmlib_dpi::scale(16, hWnd);
+			::DrawIconEx(hdc, rcPart.left, rcPart.top + ((rcPart.bottom - rcPart.top - cxIcon) / 2), hIcon, cxIcon, cxIcon, 0, nullptr, DI_NORMAL);
+			rcPart.left += cxIcon + borders.between;
+		}
+
 		const LRESULT retValLen = ::SendMessage(hWnd, SB_GETTEXTLENGTH, static_cast<WPARAM>(i), 0);
 		const DWORD cchText = LOWORD(retValLen);
 
