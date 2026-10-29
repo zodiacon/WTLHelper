@@ -31,7 +31,7 @@ namespace StructuredStorage {
 		void Write(const std::vector<T>& vec) {
 			auto count = static_cast<uint32_t>(vec.size());
 			Write(count);
-			if (std::is_pod<T>::value) {
+			if (std::is_trivially_copyable_v<T>) {
 				m_File.Write(vec.data(), count * sizeof(T));
 			}
 			else {
@@ -90,7 +90,7 @@ namespace StructuredStorage {
 			}
 
 			vec.resize(count);
-			if (std::is_pod<T>::value) {
+			if (std::is_trivially_copyable_v<T>) {
 				m_File.Read(vec.data(), count * sizeof(T));
 			}
 			else {
