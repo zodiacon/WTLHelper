@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,10 @@ public:
     DWORD GetChildStyle() const { return m_ChildStyle; }
     void SetValueFormatter(ValueFormatFn formatter);
     void SetSeriesStyle(const SeriesStyle& style);
+    // One tile's style instead of the shared one (a per-core view telling core kinds apart);
+    // ClearTileSeriesStyle gives it back the shared style. Kept across SetGraphCount.
+    void SetTileSeriesStyle(size_t index, const SeriesStyle& style);
+    void ClearTileSeriesStyle(size_t index);
     void SetTimeSpanText(std::wstring text);
     void SetFont(const wchar_t* family, float labelSize = 11.0f,
                  float titleSize = 12.5f, float valueSize = 22.0f);
@@ -95,10 +100,12 @@ private:
     void CreateChildWindow(size_t index);
     void ConfigureChild(size_t index);
     void Layout();
+    const SeriesStyle& StyleOf(size_t index) const;
 
 private:
     std::vector<std::unique_ptr<CGraphControl>> m_Graphs;
     std::vector<SeriesId>                       m_SeriesIds;
+    std::vector<std::optional<SeriesStyle>>     m_TileStyles;   // per tile, overriding m_SeriesStyle
 
     DWORD m_ChildStyle  = GCS_GRID | GCS_FILL;
     UINT  m_ChildIdBase = 0;

@@ -152,13 +152,13 @@ void CGraphGrid::ConfigureChild(size_t index) {
     else                   g.SetRange(m_Range.Min, m_Range.Max);
 
     if (index >= m_SeriesIds.size() || m_SeriesIds[index] == InvalidSeries) {
-        const SeriesId id = g.AddSeries(title, m_SeriesStyle);
+        const SeriesId id = g.AddSeries(title, StyleOf(index));
         if (index >= m_SeriesIds.size())
             m_SeriesIds.resize(index + 1, InvalidSeries);
         m_SeriesIds[index] = id;
     }
     else {
-        g.SetSeriesStyle(m_SeriesIds[index], m_SeriesStyle);
+        g.SetSeriesStyle(m_SeriesIds[index], StyleOf(index));
     }
     g.EndUpdate();
 }
@@ -283,8 +283,28 @@ void CGraphGrid::SetSeriesStyle(const SeriesStyle& style) {
     m_SeriesStyle = style;
     for (size_t i = 0; i < m_Graphs.size(); i++) {
         if (m_Graphs[i]->m_hWnd && i < m_SeriesIds.size() && m_SeriesIds[i] != InvalidSeries)
-            m_Graphs[i]->SetSeriesStyle(m_SeriesIds[i], style);
+            m_Graphs[i]->SetSeriesStyle(m_SeriesIds[i], StyleOf(i));
     }
+}
+
+const SeriesStyle& CGraphGrid::StyleOf(size_t index) const {
+    return index < m_TileStyles.size() && m_TileStyles[index] ? *m_TileStyles[index] : m_SeriesStyle;
+}
+
+void CGraphGrid::SetTileSeriesStyle(size_t index, const SeriesStyle& style) {
+    if (index >= m_TileStyles.size())
+        m_TileStyles.resize(index + 1);
+    m_TileStyles[index] = style;
+    if (index < m_Graphs.size() && m_Graphs[index]->m_hWnd && index < m_SeriesIds.size() && m_SeriesIds[index] != InvalidSeries)
+        m_Graphs[index]->SetSeriesStyle(m_SeriesIds[index], style);
+}
+
+void CGraphGrid::ClearTileSeriesStyle(size_t index) {
+    if (index >= m_TileStyles.size() || !m_TileStyles[index])
+        return;
+    m_TileStyles[index].reset();
+    if (index < m_Graphs.size() && m_Graphs[index]->m_hWnd && index < m_SeriesIds.size() && m_SeriesIds[index] != InvalidSeries)
+        m_Graphs[index]->SetSeriesStyle(m_SeriesIds[index], m_SeriesStyle);
 }
 
 void CGraphGrid::SetFont(const wchar_t* family, float labelSize,
