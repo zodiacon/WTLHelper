@@ -567,6 +567,36 @@ static void TestWindowPosition(Monitor const& a, Monitor const& b) {
 	Pump();
 }
 
+// IconId: the app's icons by ID, the system's stock ones (IDI_WARNING) by their MAKEINTRESOURCE values, through
+// IconHelper::Load and the tool bar's buttons
+static void TestIconId() {
+	printf("IconId\n");
+	Check(!IconId(0), "IconId(0) is no icon");
+	Check(IconId(IDI_TEST) && !IconId(IDI_TEST).Stock, "an app ID isn't a stock icon");
+	Check(IconId(IDI_WARNING).Stock && IconId(IDI_WARNING).Id == 32515, "IDI_WARNING is a stock icon");
+	Check(IconId(L"NoSuchIcon").Name != nullptr && !IconId(L"NoSuchIcon").Stock, "a name is the app's, by name");
+	for (int size : { 16, 24, 32, 48 }) {
+		CIcon hIcon(IconHelper::Load(IDI_WARNING, size));
+		Check(hIcon && IconWidth(hIcon) == size, "IDI_WARNING loads at the size asked for");
+	}
+	CIcon hMissing(IconHelper::Load(L"NoSuchIcon", 16));
+	Check(!hMissing, "a missing named icon loads nothing");
+	Check(IconHelper::LoadCached(IDI_ERROR, 16) == IconHelper::LoadCached(IDI_ERROR, 16), "LoadCached keeps a stock icon");
+	Check(IconHelper::LoadCached(IDI_ERROR, 16) != IconHelper::LoadCached(IDI_WARNING, 16), "LoadCached tells stock icons apart");
+
+	// a tool bar mixing the app's icons, a stock one and a separator: an image for each button with one
+	CTestFrame frame;
+	CRect rc(0, 0, 400, 200);
+	frame.Create(nullptr, rc, L"IconId test", WS_OVERLAPPEDWINDOW);
+	ToolBarButtonInfo buttons[] = { { 100, IDI_TEST }, { 0, 0 }, { 101, IDI_WARNING, BTNS_BUTTON, L"Warnings" }, { 102, 0, BTNS_BUTTON, L"No icon" } };
+	CToolBarCtrl tb(ToolbarHelper::CreateAndInitToolBar(frame, buttons, _countof(buttons)));
+	Check(ImageList_GetImageCount(tb.GetImageList()) == 2, "the tool bar has an image for the app's icon and the stock one");
+	TBBUTTONINFO info{ sizeof(info), TBIF_IMAGE };
+	tb.GetButtonInfo(102, &info);
+	Check(info.iImage == I_IMAGENONE, "a button without an icon has no image");
+	frame.DestroyWindow();
+}
+
 static void TestStockIcons() {
 	printf("Stock icons\n");
 	for (UINT dpi : { 96u, 120u, 144u, 192u }) {
@@ -652,6 +682,7 @@ int wmain(int argc, wchar_t** argv) {
 		printf("monitor (%d,%d)-(%d,%d) DPI %u\n", m.Work.left, m.Work.top, m.Work.right, m.Work.bottom, m.Dpi);
 
 	TestStockIcons();
+	TestIconId();
 
 	int ia = -1, ib = -1;
 	for (int i = 0; i < (int)monitors.size() && ib < 0; i++)

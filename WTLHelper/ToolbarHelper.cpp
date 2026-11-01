@@ -17,7 +17,7 @@ HWND ToolbarHelper::CreateAndInitToolBar(HWND hWnd, const ToolBarButtonInfo* but
 		if (b.id == 0)
 			tb.AddSeparator(0);
 		else
-			tb.AddButton(b.id, b.style | (b.text ? BTNS_SHOWTEXT : 0), TBSTATE_ENABLED, b.image == 0 ? I_IMAGENONE : image++, b.text, 0);
+			tb.AddButton(b.id, b.style | (b.text ? BTNS_SHOWTEXT : 0), TBSTATE_ENABLED, !b.image ? I_IMAGENONE : image++, b.text, 0);
 	}
 	return hWndToolBar;
 }
@@ -28,7 +28,7 @@ HIMAGELIST ToolbarHelper::CreateImageList(const ToolBarButtonInfo* buttons, int 
 	// one image for each button with an image, in order
 	for (int i = 0; i < count; i++) {
 		auto& b = buttons[i];
-		if (b.id != 0 && b.image != 0) {
+		if (b.id != 0 && b.image) {
 			CIcon icon(IconHelper::Load(b.image, size));
 			ATLASSERT(icon);	// the buttons refer to the images by index
 			images.AddIcon(icon);

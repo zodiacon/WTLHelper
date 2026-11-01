@@ -2,6 +2,9 @@
 #include "IconHelper.h"
 #include "DpiHelper.h"
 #include <shlobj_core.h>
+#include <tuple>
+
+#pragma comment(lib, "comctl32")	// LoadIconWithScaleDown
 
 HICON IconHelper::GetShieldIcon(UINT dpi) {
 	return GetStockIcon(SIID_SHIELD, false, dpi);
@@ -14,16 +17,24 @@ CComPtr<IImageList2> IconHelper::CreateImageList() {
 	return spImages;
 }
 
-HICON IconHelper::Load(ATL::_U_STRINGorID id, int size) {
-	return AtlLoadIconImage(id, 0, size, size);
+HICON IconHelper::Load(IconId id, int size) {
+	if (id.Stock) {
+		HICON hIcon = nullptr;
+		::LoadIconWithScaleDown(nullptr, MAKEINTRESOURCEW(id.Id), size, size, &hIcon);
+		return hIcon;
+	}
+	if (id.Name)
+		return AtlLoadIconImage(id.Name, 0, size, size);
+	return AtlLoadIconImage(id.Id, 0, size, size);
 }
 
-HICON IconHelper::LoadCached(UINT id, int size) {
+HICON IconHelper::LoadCached(IconId id, int size) {
 	static SRWLOCK lock = SRWLOCK_INIT;
-	static std::map<std::pair<UINT, int>, HICON> icons;
+	// by ID, kind and size; a name by its pointer (resource names are literals)
+	static std::map<std::tuple<int, bool, PCWSTR, int>, HICON> icons;
 
 	::AcquireSRWLockExclusive(&lock);
-	auto& hIcon = icons[{ id, size }];
+	auto& hIcon = icons[{ id.Id, id.Stock, id.Name, size }];
 	if (!hIcon)
 		hIcon = Load(id, size);
 	auto result = hIcon;

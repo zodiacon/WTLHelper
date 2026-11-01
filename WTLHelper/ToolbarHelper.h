@@ -1,8 +1,12 @@
 #pragma once
 
+#include "IconHelper.h"
+
+// a button: its command (0: a separator), its icon (the app's by ID, or a stock icon such as IDI_WARNING; none: 0),
+// style and text (shown beside the icon: TBSTYLE_LIST)
 struct ToolBarButtonInfo {
 	UINT id;
-	int image;
+	IconId image;
 	BYTE style = BTNS_BUTTON;
 	PCWSTR text = nullptr;
 };
