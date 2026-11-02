@@ -19,7 +19,7 @@ msbuild WTLHelper\WTLHelper.vcxproj /p:Configuration=Debug /p:Platform=x64
 
 Every project uses the static C runtime (`/MT`, `/MTd`) in every configuration; a library on the DLL runtime fails to link (LNK2038) with the others.
 
-NuGet dependencies (`packages.config`): Detours (`ThemeHelper.cpp` includes `<detours/detours.h>`), WIL and the `wtl` package. Restore them before building (`nuget restore WTLHelper.sln`). The WTL headers are also vendored in `WTL/`, which `WTLHelper` and `HexControl` add to their include path.
+Dependencies come from vcpkg with user-wide integration (`vcpkg integrate install`; no manifest in the repo): Detours (`ThemeHelper.cpp` includes `<detours/detours.h>`), WIL and WTL. `WTLHelper`, `HexControl` and the demo apps link the static CRT and set `VcpkgUseStatic`, so they take the static triplet (`x64-windows-static`); install the packages for both triplets, as the WinSysLive app's CI does: `vcpkg install detours:x64-windows-static wil:x64-windows-static wtl:x64-windows-static detours:x64-windows wil:x64-windows wtl:x64-windows`. These were NuGet packages once; nothing references NuGet anymore (the stale `packages.config` was removed). The WTL headers are also vendored in `WTL/`, which `WTLHelper` and `HexControl` add to their include path.
 
 ## Tests
 
