@@ -99,6 +99,7 @@
     <ClInclude Include="include\GraphControl.h" />
     <ClInclude Include="include\GraphData.h" />
     <ClInclude Include="include\GraphGrid.h" />
+    <ClInclude Include="include\GraphGridLayout.h" />
     <ClInclude Include="include\GraphRenderer.h" />
     <ClInclude Include="src\CellGraphsModel.h" />
   </ItemGroup>
@@ -110,6 +111,7 @@
     <ClCompile Include="src\GraphControl.cpp" />
     <ClCompile Include="src\GraphData.cpp" />
     <ClCompile Include="src\GraphGrid.cpp" />
+    <ClCompile Include="src\GraphGridLayout.cpp" />
     <ClCompile Include="src\GraphRenderer.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

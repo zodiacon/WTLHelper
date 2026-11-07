@@ -14,6 +14,7 @@
 #include "GraphData.h"
 #include "CellGraphs.h"
 #include "CellGraphsModel.h"
+#include "GraphGridLayout.h"
 
 #include <vector>
 #include <algorithm>
@@ -1121,6 +1122,83 @@ TEST(Cells_HighContrast) {
     ForceHighContrast(-1);
 }
 
+// ---- Grid layout: groups of tiles (a core's logical processors) --------------
+
+static GridLayoutInput GridInput(int count, int columns, int width, int height, std::vector<uint32_t> groups = {}) {
+    GridLayoutInput in;
+    in.count = count;
+    in.columns = columns;
+    in.width = width;
+    in.height = height;
+    in.spacing = 4;
+    in.groups = std::move(groups);
+    in.groupSpacing = 1;
+    return in;
+}
+
+TEST(Grid_UngroupedSpacing) {
+    auto rects = LayoutGridTiles(GridInput(4, 2, 100, 100));
+    CHECK(rects.size() == 4);
+    // (100 - 3 * 4) / 2 = 44 a side, 4 apart
+    CHECK(rects[0].left == 4 && rects[0].top == 4 && rects[0].right == 48 && rects[0].bottom == 48);
+    CHECK(rects[1].left == 52 && rects[1].top == 4);
+    CHECK(rects[2].left == 4 && rects[2].top == 52);
+    CHECK(rects[3].right == 96 && rects[3].bottom == 96);
+}
+
+TEST(Grid_PairsCloserTogether) {
+    // 4 columns of 20 in 100: the pairs 1 apart, the 18 left over shared by the edges and the gap between pairs
+    auto rects = LayoutGridTiles(GridInput(8, 4, 100, 100, { 0, 0, 1, 1, 2, 2, 3, 3 }));
+    CHECK(rects[0].left == 6 && rects[0].right == 26);
+    CHECK(rects[1].left - rects[0].right == 1);
+    CHECK(rects[2].left - rects[1].right == 6);
+    CHECK(rects[3].left - rects[2].right == 1);
+    CHECK(rects[3].right == 94);
+    // the second row as the first
+    CHECK(rects[4].left == rects[0].left && rects[4].top > rects[0].bottom);
+    CHECK(rects[7].right == rects[3].right);
+}
+
+TEST(Grid_PartialRowLinesUp) {
+    // 3 pairs in 4 columns: the second row's pair sits where the first row's first pair does
+    auto rects = LayoutGridTiles(GridInput(6, 4, 100, 100, { 0, 0, 1, 1, 2, 2 }));
+    CHECK(rects[4].left == rects[0].left && rects[5].left == rects[1].left);
+    // singles: spaced as without groups
+    rects = LayoutGridTiles(GridInput(6, 4, 100, 100, { 0, 0, 1, 1, 2, 3 }));
+    CHECK(rects[4].left == 4 && rects[5].left == 28);
+}
+
+TEST(Grid_GroupsWrapWhole) {
+    // 3 columns: a pair never straddles two rows, so each row holds one pair
+    auto rects = LayoutGridTiles(GridInput(6, 3, 100, 100, { 0, 0, 1, 1, 2, 2 }));
+    CHECK(rects[0].top == rects[1].top);
+    CHECK(rects[2].top > rects[1].top && rects[2].top == rects[3].top);
+    CHECK(rects[4].top > rects[3].top && rects[4].top == rects[5].top);
+    CHECK(rects[2].left == rects[0].left);
+    CHECK(rects[1].left - rects[0].right == 1);
+    // three rows were made room for
+    CHECK(rects[5].bottom <= 100 && rects[5].bottom > 90);
+}
+
+TEST(Grid_HybridSinglesUngrouped) {
+    // P-cores with two threads, then E-cores with one: the E-cores' row is spaced as without groups
+    auto rects = LayoutGridTiles(GridInput(8, 4, 100, 100, { 0, 0, 1, 1, 2, 3, 4, 5 }));
+    CHECK(rects[1].left - rects[0].right == 1);
+    CHECK(rects[4].left == 4 && rects[5].left == 28 && rects[6].left == 52 && rects[7].left == 76);
+}
+
+TEST(Grid_TilesThatDontFitAreEmpty) {
+    // the rows asked for are fewer than the groups need: the rest get empty rectangles
+    auto in = GridInput(6, 3, 100, 100, { 0, 0, 1, 1, 2, 2 });
+    in.rows = 2;
+    auto rects = LayoutGridTiles(in);
+    CHECK(rects[3].right > rects[3].left);
+    CHECK(rects[4].right == rects[4].left && rects[5].right == rects[5].left);
+    // too small for any tile
+    rects = LayoutGridTiles(GridInput(4, 2, 10, 10));
+    CHECK(std::all_of(rects.begin(), rects.end(), [](const RECT& r) { return r.right == r.left; }));
+}
+
 int wmain() {
     wprintf(L"GraphControl data model tests\n\n");
 
@@ -1182,6 +1260,13 @@ int wmain() {
     Run_Cells_MeterText();
     Run_Cells_VisibleColors();
     Run_Cells_HighContrast();
+
+    Run_Grid_UngroupedSpacing();
+    Run_Grid_PairsCloserTogether();
+    Run_Grid_PartialRowLinesUp();
+    Run_Grid_GroupsWrapWhole();
+    Run_Grid_HybridSinglesUngrouped();
+    Run_Grid_TilesThatDontFitAreEmpty();
 
     wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures;

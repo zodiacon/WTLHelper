@@ -51,6 +51,29 @@ void CGraphGrid::OnPaint(HDC) {
     CBrush brush;
     brush.CreateSolidBrush(m_Theme.Background);
     dc.FillRect(&rc, brush);
+
+    // a frame around each group of tiles, in the gaps around it
+    if (m_Groups.size() >= m_Graphs.size() && m_TileRects.size() == m_Graphs.size()) {
+        CPen pen;
+        pen.CreatePen(PS_SOLID, 1, m_Theme.BorderColor);
+        auto oldPen = dc.SelectPen(pen);
+        auto oldBrush = dc.SelectStockBrush(NULL_BRUSH);
+        const int inset = std::max(1, m_Spacing / 3);   // leaving a gap between two groups' frames
+        for (size_t first = 0; first < m_TileRects.size(); ) {
+            CRect group(m_TileRects[first]);
+            size_t last = first;
+            while (last + 1 < m_TileRects.size() && m_Groups[last + 1] == m_Groups[first]
+                && m_TileRects[last + 1].top == m_TileRects[first].top)
+                group.UnionRect(group, &m_TileRects[++last]);
+            if (last > first && !group.IsRectEmpty()) {
+                group.InflateRect(inset, inset);
+                dc.RoundRect(group, CPoint(inset * 2, inset * 2));
+            }
+            first = last + 1;
+        }
+        dc.SelectBrush(oldBrush);
+        dc.SelectPen(oldPen);
+    }
 }
 
 void CGraphGrid::OnSize(UINT, CSize) {
@@ -195,6 +218,12 @@ void CGraphGrid::SetLayout(int columns, int rows) {
     Layout();
 }
 
+void CGraphGrid::SetTileGroups(std::vector<uint32_t> groups, int groupSpacing) {
+    m_Groups = std::move(groups);
+    m_GroupSpacing = std::max(groupSpacing, 0);
+    Layout();
+}
+
 void CGraphGrid::SetSpacing(int pixels) {
     m_Spacing = std::max(pixels, 0);
     Layout();
@@ -207,32 +236,38 @@ void CGraphGrid::Layout() {
     GetClientRect(&rc);
     if (rc.IsRectEmpty()) return;
 
-    const int n    = static_cast<int>(m_Graphs.size());
-    int       cols = m_Cols > 0 ? m_Cols
-                                : static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
-    cols = std::max(cols, 1);
-    int rows = m_Rows > 0 ? m_Rows : (n + cols - 1) / cols;
-    rows = std::max(rows, 1);
+    GridLayoutInput in;
+    in.width = rc.Width();
+    in.height = rc.Height();
+    in.count = static_cast<int>(m_Graphs.size());
+    in.columns = m_Cols;
+    in.rows = m_Rows;
+    in.spacing = m_Spacing;
+    if (m_Groups.size() >= m_Graphs.size()) {
+        in.groups = m_Groups;
+        in.groupSpacing = m_GroupSpacing;
+    }
+    const auto rects = LayoutGridTiles(in);
+    if (!in.groups.empty()) {
+        m_TileRects = rects;
+        Invalidate();   // the groups' frames, in the gaps
+    }
+    else {
+        m_TileRects.clear();
+    }
 
-    const int cellW = (rc.Width()  - m_Spacing * (cols + 1)) / cols;
-    const int cellH = (rc.Height() - m_Spacing * (rows + 1)) / rows;
-
-    for (int i = 0; i < n; i++) {
+    for (size_t i = 0; i < m_Graphs.size(); i++) {
         HWND child = m_Graphs[i]->m_hWnd;
         if (!child) continue;
 
-        const int r = i / cols;
         // Tiles that do not fit the requested layout are hidden rather than
         // squeezed into a cell someone else owns.
-        if (r >= rows || cellW <= 0 || cellH <= 0) {
+        const RECT& r = rects[i];
+        if (r.right <= r.left || r.bottom <= r.top) {
             ::ShowWindow(child, SW_HIDE);
             continue;
         }
-
-        const int c = i % cols;
-        const int x = m_Spacing + c * (cellW + m_Spacing);
-        const int y = m_Spacing + r * (cellH + m_Spacing);
-        ::SetWindowPos(child, nullptr, x, y, cellW, cellH, SWP_NOZORDER);
+        ::SetWindowPos(child, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER);
         ::ShowWindow(child, SW_SHOW);
     }
 }

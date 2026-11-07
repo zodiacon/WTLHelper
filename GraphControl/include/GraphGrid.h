@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "GraphControl.h"
+#include "GraphGridLayout.h"
 
 namespace GraphCtrl {
 
@@ -45,6 +46,11 @@ public:
 
     void SetLayout(int columns, int rows);   // 0, 0 = auto (roughly square)
     void SetSpacing(int pixels);
+    // A key per tile: a run of tiles with the same key (the logical processors of one core) is a group, kept in
+    // one row when it fits and `groupSpacing` pixels apart, the gaps between groups growing by the room saved, and
+    // framed (in the theme's border color) in the gaps around them.
+    // An empty vector (or one shorter than the tiles) turns grouping off. See LayoutGridTiles.
+    void SetTileGroups(std::vector<uint32_t> groups, int groupSpacing = 1);
 
     // Hovering one tile marks the same time slot on all of them, which is what
     // makes "did these spike together?" answerable across a per-core view.
@@ -112,6 +118,9 @@ private:
     int   m_Cols        = 0;    // 0 = auto
     int   m_Rows        = 0;
     int   m_Spacing     = 4;
+    int   m_GroupSpacing = 1;
+    std::vector<uint32_t> m_Groups;   // per tile, see SetTileGroups
+    std::vector<RECT>     m_TileRects;   // where Layout put the tiles, for the groups' frames
 
     AxisRange     m_Range;
     GraphTheme    m_Theme = GraphTheme::Dark();
