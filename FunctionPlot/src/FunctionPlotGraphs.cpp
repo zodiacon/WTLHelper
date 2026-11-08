@@ -1913,3 +1913,19 @@ void FplHistory::Clear() {
 	m_Undo.clear();
 	m_Redo.clear();
 }
+
+bool FplSweep(FplParam& param, double dt) {
+	if (!(param.sweepSeconds > 0) || !(param.max > param.min) || !(dt >= 0))
+		return false;
+	double v = param.value + param.direction * (param.max - param.min) * dt / param.sweepSeconds;
+	if (v >= param.max) {
+		v = param.max;
+		param.direction = -1;
+	}
+	else if (v <= param.min) {
+		v = param.min;
+		param.direction = 1;
+	}
+	param.value = v;
+	return true;
+}

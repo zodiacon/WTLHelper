@@ -6114,6 +6114,73 @@ TEST(SpecialFunctions) {
 		CHECK(!g.geometry.lines.empty());
 }
 
+TEST(AnimationSpeed) {
+	// across the range in its seconds, whatever the range
+	FplParam p;
+	p.min = 0;
+	p.max = 10;
+	p.value = 0;
+	CHECK_NEAR(p.sweepSeconds, 4.0);
+	CHECK(FplSweep(p, 1));
+	CHECK_NEAR(p.value, 2.5);
+	p.value = 0;
+	p.sweepSeconds = 20;
+	CHECK(FplSweep(p, 1));
+	CHECK_NEAR(p.value, 0.5);
+	p.value = 0;
+	p.sweepSeconds = 0.5;
+	CHECK(FplSweep(p, 0.1));
+	CHECK_NEAR(p.value, 2.0);
+	// turning back at the ends, and carrying on the other way
+	p.sweepSeconds = 4;
+	p.value = 9.9;
+	p.direction = 1;
+	CHECK(FplSweep(p, 1));
+	CHECK_NEAR(p.value, 10.0);
+	CHECK_INT(p.direction, -1);
+	CHECK(FplSweep(p, 1));
+	CHECK_NEAR(p.value, 7.5);
+	p.value = 0.1;
+	CHECK(FplSweep(p, 1));
+	CHECK_NEAR(p.value, 0.0);
+	CHECK_INT(p.direction, 1);
+	// a whole sweep takes its time, by small steps
+	p.sweepSeconds = 2;
+	p.value = 0;
+	p.direction = 1;
+	int steps = 0;
+	while (p.direction == 1 && steps < 1000) {
+		FplSweep(p, 0.016);
+		steps++;
+	}
+	CHECK_NEAR_TOL(steps * 0.016, 2.0, 0.02);
+	// nothing to do
+	p.sweepSeconds = 0;
+	CHECK(!FplSweep(p, 1));
+	p.sweepSeconds = 4;
+	p.max = p.min;
+	CHECK(!FplSweep(p, 1));
+	// kept in the saved state; a text from before has the first one
+	FplSavedState a, b;
+	FplParam q;
+	q.name = L"q";
+	q.sweepSeconds = 7.5;
+	a.params.push_back(q);
+	CHECK(FplLoadState(FplSaveState(a), b));
+	CHECK_INT(b.params.size(), 1);
+	if (!b.params.empty())
+		CHECK_NEAR(b.params[0].sweepSeconds, 7.5);
+	FplSavedState old;
+	CHECK(FplLoadState(L"FunctionPlot 1\nparam\ta\t1\t0\t2\t0\t0\n", old));
+	CHECK_INT(old.params.size(), 1);
+	if (!old.params.empty())
+		CHECK_NEAR(old.params[0].sweepSeconds, 4.0);
+	FplSavedState zero;
+	CHECK(FplLoadState(L"FunctionPlot 1\nparam\ta\t1\t0\t2\t0\t0\t-3\n", zero));
+	if (!zero.params.empty())
+		CHECK_NEAR(zero.params[0].sweepSeconds, 4.0);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -6208,6 +6275,7 @@ int wmain() {
 	Run_ReadmeMatchesParser();
 	Run_SlowCurves();
 	Run_SpecialFunctions();
+	Run_AnimationSpeed();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

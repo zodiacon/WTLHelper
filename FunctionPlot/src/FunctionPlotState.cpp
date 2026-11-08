@@ -8,7 +8,7 @@
 //	log <x> <y>														log scales (1), when either is; before view
 //	view <xMin> <xMax> <yMin> <yMax>
 //	box <xMin> <xMax> <yMin> <yMax> <zMin> <zMax> <yaw> <pitch>
-//	param<TAB>name<TAB>value<TAB>min<TAB>max<TAB>step<TAB>flags
+//	param<TAB>name<TAB>value<TAB>min<TAB>max<TAB>step<TAB>flags<TAB>seconds to cross its range when playing
 //	list<TAB>name<TAB>v1 v2 v3 ...
 //	graph<TAB>id<TAB>color (-1: the palette's)<TAB>width<TAB>flags<TAB>range (0 or 1)<TAB>tMin<TAB>tMax<TAB>text
 //	style<TAB>id<TAB>opacity<TAB>fill opacity (-1: the default)		after its graph, when not the default
@@ -107,7 +107,7 @@ std::wstring FplSaveState(const FplSavedState& state) {
 		Number(b.zMin) + L" " + Number(b.zMax) + L" " + Number(state.yaw) + L" " + Number(state.pitch) + L"\n";
 	for (auto& p : state.params)
 		out += L"param\t" + Escape(p.name) + L"\t" + Number(p.value) + L"\t" + Number(p.min) + L"\t" + Number(p.max) +
-			L"\t" + Number(p.step) + L"\t" + std::to_wstring(p.flags) + L"\n";
+			L"\t" + Number(p.step) + L"\t" + std::to_wstring(p.flags) + L"\t" + Number(p.sweepSeconds) + L"\n";
 	for (auto& l : state.lists) {
 		out += L"list\t" + Escape(l.name) + L"\t";
 		for (size_t i = 0; i < l.values.size(); i++)
@@ -189,6 +189,8 @@ bool FplLoadState(std::wstring_view text, FplSavedState& state) {
 			p.max = ToNumber(fields[3]);
 			p.step = ToNumber(fields[4]);
 			p.flags = static_cast<unsigned>(ToNumber(fields[5]));
+			if (fields.size() >= 7 && ToNumber(fields[6]) > 0)
+				p.sweepSeconds = ToNumber(fields[6]);
 			if (!p.name.empty())
 				s.params.push_back(std::move(p));
 		}

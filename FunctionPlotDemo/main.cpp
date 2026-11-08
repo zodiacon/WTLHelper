@@ -87,6 +87,7 @@ enum {
 	ID_DEMO_PRINT,
 	ID_DEMO_POLARGRID,
 	ID_DEMO_ANIMATE,
+	ID_DEMO_SLOWTRANSITIONS,
 };
 
 // ---- Examples -------------------------------------------------------------------
@@ -113,6 +114,7 @@ static const Example g_Examples[] = {
 	{ L"Waves and Steps", L"y = square(x) + 5\r\ny = triangle(x) + 2.5\r\ny = sawtooth(x)\r\ny = step(x - 1) - 2.5\r\ny = 2sinc(2x) - 5", false },
 	{ L"Normal Distribution", L"y = 10normpdf(x, m, s)\r\ny = 3normcdf(x, m, s)\r\nm: -4..4\r\ns: 0.2..3", false },
 	{ L"Special Functions", L"y = 2besselj(0, x)\r\ny = 2airyai(x) - 3\r\ny = zeta(x) + 3\r\ny = lambertw(x) - 6\r\ny = ellipk(x/10) + 4", false },
+	{ L"Animation Speeds", L"y = sin(x - a) + 3\r\ny = sin(x - b)\r\ny = sin(x - c) - 3\r\na: 0..6.3, 16s\r\nb: 0..6.3, 4s\r\nc: 0..6.3, 0.1, 1s", false },
 	{ L"Series", L"y = sum(sin((2k - 1)x)/(2k - 1), k, 1, n) + 3\r\ny = sum(x^k/k!, k, 0, n) - 3\r\nn: 1..30, 1", false },
 	{ L"Substitutions", L"a = x - 1\r\nb = a^2\r\ny = 3a\r\ny = b/2 - 4\r\nx^2 + a^2 + y^2 = 16\r\ny' = -a y, y(0) = 3", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },
@@ -219,6 +221,7 @@ static bool ValidName(const wchar_t* name) {
 
 enum class RangeKind { NotOne, Good, Bad };
 struct RangeLine {
+	double seconds = 0;		// to play across it (0: as it was)
 	std::wstring name;
 	double min = 0, max = 0, step = 0;
 	std::wstring problem;		// Bad's
@@ -298,12 +301,23 @@ static RangeKind ParseRangeLine(const std::wstring& line, RangeLine& range) {
 	const std::wstring reads = L"a range reads like " + range.name + L": -8..8, or " + range.name + L": 0..2pi, 0.1";
 	std::wstring right = rest.substr(dots + 2);
 	range.step = 0;
-	const size_t comma = right.find(L',');
-	if (comma != std::wstring::npos) {
-		if (!ParseRangeNumber(Trimmed(std::wstring_view(right).substr(comma + 1)), range.step))
-			return bad(reads);
-		if (!(range.step > 0))
-			return bad(L"a slider's step must be more than 0");
+	range.seconds = 0;
+	// after the range, in this order: a step, and how long it takes to play across ("8s")
+	for (size_t comma = right.find_last_of(L','); comma != std::wstring::npos; comma = right.find_last_of(L',')) {
+		std::wstring part = Trimmed(std::wstring_view(right).substr(comma + 1));
+		if (!part.empty() && part.back() == L's' && part != L"s") {
+			part.pop_back();
+			if (range.seconds != 0 || range.step != 0 || !ParseRangeNumber(part, range.seconds))
+				return bad(reads);
+			if (!(range.seconds > 0))
+				return bad(L"playing across a range must take more than 0 seconds");
+		}
+		else {
+			if (range.step != 0 || !ParseRangeNumber(part, range.step))
+				return bad(reads);
+			if (!(range.step > 0))
+				return bad(L"a slider's step must be more than 0");
+		}
 		right.resize(comma);
 	}
 	if (!ParseRangeNumber(Trimmed(std::wstring_view(rest).substr(0, dots)), range.min) ||
@@ -320,6 +334,7 @@ static RangeKind ParseRangeLine(const std::wstring& line, RangeLine& range) {
 // What each ranged parameter's slider was before its line, to go back to when the line goes.
 struct SliderRange {
 	double min, max, step;
+	double seconds = 4;
 };
 static std::map<std::wstring, SliderRange> g_rangedParams;
 
@@ -343,6 +358,7 @@ static void ApplyRangeLines(const std::vector<std::wstring>& lines) {
 			p.max = it->second.max;
 			p.step = it->second.step;
 			g_plot.SetParameter(p);
+			g_plot.SetAnimationSpeed(name.c_str(), it->second.seconds);
 		}
 		it = g_rangedParams.erase(it);
 	}
@@ -350,7 +366,8 @@ static void ApplyRangeLines(const std::vector<std::wstring>& lines) {
 		FPLPARAM p{};
 		if (!g_plot.GetParameter(name.c_str(), p))
 			continue;		// nothing uses it (yet); ShowLineError says so
-		g_rangedParams.try_emplace(name, SliderRange{ p.min, p.max, p.step });
+		auto [before, isNew] = g_rangedParams.try_emplace(name, SliderRange{ p.min, p.max, p.step, g_plot.GetAnimationSpeed(name.c_str()) });
+		g_plot.SetAnimationSpeed(name.c_str(), range.seconds > 0 ? range.seconds : before->second.seconds);
 		const double value = std::clamp(p.value, range.min, range.max);
 		if (p.min == range.min && p.max == range.max && p.step == range.step && p.value == value)
 			continue;
@@ -688,6 +705,7 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_PITICKS, s & FPLS_PITICKS);
 	check(ID_DEMO_POLARGRID, s & FPLS_POLARGRID);
 	check(ID_DEMO_ANIMATE, !(s & FPLS_NOANIMATION));
+	check(ID_DEMO_SLOWTRANSITIONS, g_plot.GetTransitionTime() != 220);
 	check(ID_DEMO_DEGREES, g_plot.GetDegrees() != FALSE);
 	check(ID_DEMO_LEGEND, !(s & FPLS_NOLEGEND));
 	check(ID_DEMO_SLIDERS, !(s & FPLS_NOSLIDERS));
@@ -920,6 +938,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_TANGENT: ToggleStyle(FPLS_TANGENT); break;
 		case ID_DEMO_FIT: g_plot.ZoomToFit(TRUE); ShowView(); break;
 		case ID_DEMO_ANIMATE: ToggleStyle(FPLS_NOANIMATION | FPLS_ALWAYSANIMATE); break;
+		case ID_DEMO_SLOWTRANSITIONS: g_plot.SetTransitionTime(g_plot.GetTransitionTime() == 220 ? 1500 : 220); break;
 		case ID_DEMO_LOGX: g_plot.SetLogAxes(!g_plot.IsLogX(), g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_LOGY: g_plot.SetLogAxes(g_plot.IsLogX(), !g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_COPY:
@@ -1274,6 +1293,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_PITICKS, L"&Pi Ticks");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_POLARGRID, L"Pola&r Grid");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ANIMATE, L"Animate Transitions");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_SLOWTRANSITIONS, L"Slow Transitions");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TRACE, L"&Tracing");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TANGENT, L"Ta&ngent Line");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_DEGREES, L"&Degrees");

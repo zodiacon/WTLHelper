@@ -324,6 +324,12 @@ public:
 	// a parameter's value sweeping its slider's range and back (4 seconds a way), as its play button does
 	BOOL AnimateParameter(LPCWSTR pszName, BOOL play);
 	BOOL IsParameterAnimating(LPCWSTR pszName) const;
+	// How long a playing parameter takes to cross its range once, in seconds (4 at first). Kept in the saved state.
+	BOOL SetAnimationSpeed(LPCWSTR pszName, double seconds);
+	double GetAnimationSpeed(LPCWSTR pszName) const;	// 0: no such parameter
+	// How long undo, redo, Home, F and zooming to a rectangle take to glide there, in ms (220 at first; 0: they jump).
+	void SetTransitionTime(UINT milliseconds);
+	UINT GetTransitionTime() const;
 	void SetDegrees(BOOL degrees);             // the trigonometric functions in degrees
 	// Any name's value now: a parameter, a definition ("c = 2a"), a fitted name, an aggregate ("mean(L)"); NaN if
 	// there's none.

@@ -101,7 +101,11 @@ struct FplParam {
 	unsigned flags = 0;
 	bool animating = false;			// sweeping its range (the control's)
 	int direction = 1;
+	double sweepSeconds = 4;		// to cross its range once, when it's playing
 };
+
+// A playing parameter a step on: across its range in seconds, turning back at the ends. false if it can't move.
+bool FplSweep(FplParam& param, double dt);
 
 // Where a graph's label goes (screen coordinates) and what it says.
 struct FplLabelPlace {

@@ -85,7 +85,6 @@ struct FplTransition {
 	bool notifyView = false, notify3D = false;
 	std::vector<std::wstring> notifyParams;
 };
-constexpr ULONGLONG FplTransitionMs = 220;
 
 enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point, Box, Point3D };
 
@@ -172,6 +171,7 @@ struct FplState {
 	bool viewOnly = false;				// what's about to be sampled differs only by the view: old drawings can stretch
 
 	FplTransition transition;
+	UINT transitionMs = 220;
 
 	// look
 	bool customColors = false;

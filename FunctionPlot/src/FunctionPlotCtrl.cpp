@@ -1033,7 +1033,7 @@ FplEnds CFunctionPlotCtrl::CaptureEnds() const {
 bool CFunctionPlotCtrl::BeginTransition(const FplEnds& from) {
 	auto& s = *m_State;
 	auto& t = s.transition;
-	if ((GetStyle() & FPLS_NOANIMATION) || s.syncSampling || !s.viewSet || !IsWindowVisible())
+	if ((GetStyle() & FPLS_NOANIMATION) || s.transitionMs == 0 || s.syncSampling || !s.viewSet || !IsWindowVisible())
 		return false;
 	BOOL animations = TRUE;
 	if (!(GetStyle() & FPLS_ALWAYSANIMATE) && ::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0) && !animations)
@@ -1514,6 +1514,28 @@ int CFunctionPlotCtrl::NextSlider(bool back) const {
 
 // ---- Animation -------------------------------------------------------------------------
 
+BOOL CFunctionPlotCtrl::SetAnimationSpeed(LPCWSTR pszName, double seconds) {
+	const int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	if (i < 0 || !std::isfinite(seconds) || !(seconds > 0))
+		return FALSE;
+	m_State->plot.params[i].sweepSeconds = seconds;
+	return TRUE;
+}
+
+double CFunctionPlotCtrl::GetAnimationSpeed(LPCWSTR pszName) const {
+	const int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	return i < 0 ? 0 : m_State->plot.params[i].sweepSeconds;
+}
+
+void CFunctionPlotCtrl::SetTransitionTime(UINT milliseconds) {
+	EndTransition();
+	m_State->transitionMs = milliseconds;
+}
+
+UINT CFunctionPlotCtrl::GetTransitionTime() const {
+	return m_State->transitionMs;
+}
+
 BOOL CFunctionPlotCtrl::AnimateParameter(LPCWSTR pszName, BOOL play) {
 	EndTransition();
 	auto& s = *m_State;
@@ -1545,7 +1567,7 @@ LRESULT CFunctionPlotCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) 
 	auto& s = *m_State;
 	if (wParam == TransitionTimer) {
 		auto& t = s.transition;
-		const double f = t.active ? static_cast<double>(::GetTickCount64() - t.start) / FplTransitionMs : 1;
+		const double f = t.active ? static_cast<double>(::GetTickCount64() - t.start) / std::max(s.transitionMs, 1u) : 1;
 		if (f >= 1)
 			EndTransition();
 		else
@@ -1566,17 +1588,11 @@ LRESULT CFunctionPlotCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) 
 		if (!p.animating)
 			continue;
 		any = true;
-		// the range in 4 seconds, back and forth
-		double v = p.value + p.direction * (p.max - p.min) * dt / 4;
-		if (v >= p.max) {
-			v = p.max;
-			p.direction = -1;
+		FplParam next = p;
+		if (FplSweep(next, dt)) {
+			p.direction = next.direction;
+			SetParam((int)i, next.value, false);
 		}
-		else if (v <= p.min) {
-			v = p.min;
-			p.direction = 1;
-		}
-		SetParam((int)i, v, false);
 	}
 	if (!any)
 		KillTimer(AnimationTimer);
