@@ -20,6 +20,9 @@
 #ifdef _M_X64
 #define DEMO_WTLHELPER
 #include <WTLHelper.h>
+#include <CustomSplitterWindow.h>
+#else
+#include <atlsplit.h>
 #endif
 
 #include <algorithm>
@@ -139,6 +142,12 @@ static const Example g_Examples[] = {
 
 static CFunctionPlotCtrl g_plot;
 static CEdit g_edit;
+// the lines on the left, the plot on the right: WTLHelper's hairline, following its dark mode, where it's linked
+#ifdef DEMO_WTLHELPER
+static CCustomSplitterWindow g_splitter;
+#else
+static CSplitterWindow g_splitter;
+#endif
 static CStatusBarCtrl g_status;
 static CFont g_editFont;
 static HWND g_main;
@@ -702,13 +711,27 @@ static void Layout(HWND hwnd) {
 	RECT rs;
 	g_status.GetWindowRect(&rs);
 	const int statusHeight = rs.bottom - rs.top;
-	const UINT dpi = ::GetDpiForWindow(hwnd);
-	const int editWidth = ::MulDiv(300, dpi, 96), gap = ::MulDiv(4, dpi, 96);
-	const int h = rc.bottom - statusHeight;
-	g_edit.SetWindowPos(nullptr, 0, 0, editWidth, h, SWP_NOZORDER | SWP_NOACTIVATE);
-	g_plot.SetWindowPos(nullptr, editWidth + gap, 0, rc.right - editWidth - gap, h, SWP_NOZORDER | SWP_NOACTIVATE);
+	g_splitter.SetWindowPos(nullptr, 0, 0, rc.right, rc.bottom - statusHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+	// WTL keeps its limits on the bar's moves only: a narrower window mustn't squeeze the plot away
+	if (g_splitter.GetSplitterPos() >= 0)
+		g_splitter.SetSplitterPos(g_splitter.GetSplitterPos());
 	int parts[] = { rc.right * 45 / 100, rc.right * 75 / 100, -1 };
 	g_status.SetParts(3, parts);
+}
+
+// The plot's resizing changes what's in view without a notification (those are for the user's moves): the status bar's
+// range follows here, as dragging the splitter doesn't reach the main window.
+static LRESULT CALLBACK PlotSizeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+	LRESULT result = ::DefSubclassProc(hwnd, msg, wParam, lParam);
+	if (msg == WM_SIZE && g_status.IsWindow())
+		ShowView();
+	return result;
+}
+
+// A double click on the bar goes back to this; neither pane can be dragged smaller than the least.
+static void SetSplitterLimits(UINT dpi) {
+	g_splitter.m_xySplitterDefPos = ::MulDiv(300, dpi, 96);
+	g_splitter.m_cxyMin = ::MulDiv(120, dpi, 96);
 }
 
 static void MakeEditFont(HWND hwnd) {
@@ -724,15 +747,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 	switch (msg) {
 		case WM_CREATE: {
 			g_main = hwnd;
-			g_edit.Create(hwnd, CWindow::rcDefault, nullptr,
+			g_splitter.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS);
+			// the lines keep their width as the window's size changes
+			g_splitter.SetSplitterExtendedStyle(0, SPLIT_PROPORTIONAL);
+			SetSplitterLimits(::GetDpiForWindow(hwnd));
+			g_edit.Create(g_splitter, CWindow::rcDefault, nullptr,
 				WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL |
 				ES_WANTRETURN | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_EDIT);
 			MakeEditFont(hwnd);
 			g_edit.SetMargins(6, 6);
-			g_plot.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | FPLS_EQUALSCALE,
+			g_plot.Create(g_splitter, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | FPLS_EQUALSCALE,
 				0, IDC_PLOT);
+			g_splitter.SetSplitterPanes(g_edit, g_plot);
+			::SetWindowSubclass(g_plot, PlotSizeProc, 1, 0);
 			g_status.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, IDC_STATUS);
 			Layout(hwnd);
+			g_splitter.SetSplitterPos();		// its default: there's a size to place it in now
 			LoadExample(g_startExample);
 			if (!g_openPath.empty() && !OpenPlot(g_openPath.c_str()))
 				g_exitCode = 2;
@@ -759,6 +789,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			auto rc = (const RECT*)lParam;
 			::SetWindowPos(hwnd, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
 			MakeEditFont(hwnd);
+			{
+				const int before = g_splitter.m_xySplitterDefPos;
+				SetSplitterLimits(HIWORD(wParam));
+#ifndef DEMO_WTLHELPER
+				// (the custom splitter scales its own)
+				g_splitter.SetSplitterPos(::MulDiv(g_splitter.GetSplitterPos(), g_splitter.m_xySplitterDefPos, before));
+#else
+				(void)before;
+#endif
+			}
 			return 0;
 		}
 		case WM_INITMENUPOPUP:
