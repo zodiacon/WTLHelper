@@ -158,6 +158,16 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(g.width) +
 				"\" stroke-linecap=\"round\" stroke-linejoin=\"round\"" + dashes + opacity + "/>\n";
 		}
+		if (!g.geometry.asymptotes.empty()) {
+			std::string d;
+			for (double a : g.geometry.asymptotes)
+				d += g.expr.kind == FplKind::Function ? "M" + Num(a) + " 0V" + Num(h) : "M0 " + Num(a) + "H" + Num(w);
+			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"1.25\" stroke-dasharray=\"6 4\"" +
+				" stroke-opacity=\"" + Num(g.opacity * 0.5) + "\"/>\n";
+		}
+		for (auto& p : g.geometry.holes)
+			svg += "<circle cx=\"" + Num(p.x) + "\" cy=\"" + Num(p.y) + "\" r=\"" + Num(2.5 + g.width) + "\" fill=\"" +
+				Color(style.back) + "\" stroke=\"" + color + "\" stroke-width=\"2\"/>\n";
 		if (!g.geometry.marks.empty()) {
 			std::string d;
 			for (auto& m : g.geometry.marks)
@@ -179,7 +189,8 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 				AddPolyline(d, { l, a.to, r }, false);
 			}
 			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color +
-				"\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n";
+				"\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"" +
+				(g.expr.kind == FplKind::OdeSystem && !g.geometry.lines.empty() ? " stroke-opacity=\"0.45\"" : "") + "/>\n";
 		}
 		for (auto& p : g.geometry.points) {
 			if (!std::isfinite(p.x) || !std::isfinite(p.y))

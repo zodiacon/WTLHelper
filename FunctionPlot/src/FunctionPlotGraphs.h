@@ -25,6 +25,7 @@ enum : unsigned {
 	FplGraphHollow = 0x0100,		// points as rings
 	FplGraphMeshLines = 0x0200,		// 3D: lines on a surface (its grid, or the box's ticks)
 	FplGraphLevelLines = 0x0400,	// 3D: lines on a surface at heights
+	FplGraphNoSingular = 0x0800,	// no asymptotes or holes
 };
 
 struct FplGraph {
@@ -49,6 +50,7 @@ struct FplGraph {
 	int slot = -1;					// a definition's slot
 	int dragX = -1, dragY = -1;		// a point whose coordinate is a parameter: the parameter's index (dragging it
 									// sets the parameter)
+	std::vector<std::pair<int, int>> drags;	// an ODE's: each initial point's (the first is also dragX, dragY)
 	bool listDefinition = false;	// "L = [1, 2, a]": defines a list (definition is false)
 	std::vector<FplProgram> items;	// its items
 	std::vector<int> listSlots;		// the lists it reads: it's drawn once per element (the shortest's count)
@@ -64,6 +66,12 @@ struct FplGraph {
 			expr.kind != FplKind::Regression;
 	}
 	bool Listed() const { return !listSlots.empty(); }
+	// What dragging its geometry's point sets: x's and y's parameters (-1: none).
+	std::pair<int, int> DragOf(size_t point) const {
+		if (!drags.empty())
+			return point < drags.size() ? drags[point] : std::pair<int, int>{ -1, -1 };
+		return point == 0 ? std::pair<int, int>{ dragX, dragY } : std::pair<int, int>{ -1, -1 };
+	}
 };
 
 // An app's list of numbers (a table's column): "x1", "y1".
@@ -217,7 +225,8 @@ public:
 
 	// The draggable point (a point graph with a parameter for a coordinate) within maxDistance DIPs of a screen
 	// point, the nearest; -1 if none.
-	int DraggableAt(FplPoint screen, double maxDistance) const;
+	// point gets which of the graph's points it is.
+	int DraggableAt(FplPoint screen, double maxDistance, int* point = nullptr) const;
 
 	// z = F(x, y) of a surface graph (NaN for other kinds).
 	double EvalSurface(int graph, double x, double y) const;

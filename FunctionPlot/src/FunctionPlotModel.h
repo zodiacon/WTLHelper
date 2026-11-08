@@ -111,6 +111,7 @@ struct FplSampleOptions {
 	double slopeSpacing = 26;		// DIPs: a slope field's marks at least this far apart
 	double odeStep = 2;				// DIPs: an ODE's solution's longest step in x
 	double odeTolerance = 0.02;		// DIPs: its error in y a step
+	bool singularities = true;		// a function's asymptotes and holes
 };
 
 // A curve given as t -> a point in the plane (NaN where undefined), sampled over [t0, t1] from samples + 1 first
@@ -194,6 +195,8 @@ struct FplGeometry {
 	FplHeatmap heatmap;					// Surface (options.heatmap)
 	std::vector<FplArrow> arrows;		// VectorField
 	std::vector<FplArrow> marks;		// SlopeField: its slopes, short segments with no heads
+	std::vector<double> asymptotes;		// y = f(x): screen x's of vertical asymptotes; x = f(y): screen y's
+	std::vector<FplPoint> holes;		// where it isn't defined but its limit is, the same from both sides
 	bool dashed = false;				// a strict inequality's boundary
 	size_t evals = 0;
 };
@@ -207,6 +210,15 @@ std::vector<FplArrow> FplSampleSlopes(const std::function<double(double, double)
 // isn't defined, blows up off the screen or the steps get too small. In screen coordinates, not clipped.
 FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x0, double y0, const FplViewport& view,
 	const FplSampleOptions& options = {}, size_t* evals = nullptr);
+
+// y'' = F(x, y, y') through (x0, y0) with slope v0, as FplSolveOde.
+FplPolyline FplSolveOde2(const std::function<double(double, double, double)>& F, double x0, double y0, double v0,
+	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+// The trajectory of (x', y') = field(x, y) through (x0, y0), both ways in time, with steps of at most odeStep DIPs on
+// the screen; ended where it leaves the view grown by its size, settles on a point, closes on itself, or has run 8 times
+// around the view. A point where the field is zero has no line.
+FplPolyline FplSolveSystem(const std::function<FplPoint(double, double)>& field, double x0, double y0,
+	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
 
 // Samples a built expression with its parameters' values (slots from FplFirstParam on; the others are set here).
 // Definitions draw nothing.

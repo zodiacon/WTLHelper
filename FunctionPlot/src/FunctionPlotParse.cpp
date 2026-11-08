@@ -129,6 +129,7 @@ std::wstring FplError::Message() const {
 		case FplErrorCode::Redefined: return L"'" + name + L"' is already defined";
 		case FplErrorCode::ListNotAllowed: return L"A list can only be a definition's value: L = [1, 2, 3]";
 		case FplErrorCode::NotAList: return L"'" + name + L"' needs a list";
+		case FplErrorCode::BadInitial: return L"A second-order equation needs y(a) = b, y'(a) = c at one a";
 		case FplErrorCode::Internal: return L"Internal error";
 	}
 	return {};

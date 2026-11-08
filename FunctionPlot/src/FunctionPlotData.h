@@ -108,6 +108,7 @@ struct FplState {
 	POINT dragLast{};
 	int dragRow = -1;
 	int dragGraph = -1;					// the point being dragged
+	int dragPoint = 0;					// which of its graph's
 	POINT boxStart{}, boxEnd{};			// a rectangle to zoom to
 	bool boxShown = false;				// it's moved far enough to be one
 
@@ -116,7 +117,8 @@ struct FplState {
 	int lastKind = -1;					// the step being made (a burst of wheel notches, slider keys)
 	ULONGLONG lastTime = 0;
 	std::wstring axisTitles[3];
-	int hotPoint = -1;					// the draggable point under the mouse
+	int hotPoint = -1;					// the draggable point under the mouse: its graph
+	int hotPointIndex = 0;				// and which of its
 	bool trackingLeave = false;
 
 	// 3D

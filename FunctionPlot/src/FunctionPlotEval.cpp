@@ -3,6 +3,8 @@
 #include "FunctionPlotExpr.h"
 
 #include <algorithm>
+#include <utility>
+#include <functional>
 #include <memory>
 #include <cmath>
 #include <limits>
@@ -617,19 +619,45 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 		}
 		return false;
 	};
+	auto word = [&](std::wstring_view w) {
+		const size_t at = i;
+		for (wchar_t c : w)
+			if (!take(c)) {
+				i = at;
+				return false;
+			}
+		return true;
+	};
+	auto prime = [&] { return take(L'\'') || take(wchar_t(0x2032)); };
 	spaces();
 	const size_t start = i;
-	if (!(take(L'y') && (take(L'\'') || take(wchar_t(0x2032))))) {
+	// what it starts with: the order
+	if (take(L'y') && (word(L"''") || take(wchar_t(0x2033)) || word(L"\x2032\x2032")))
+		o.order = FplOdeOrder::Second;
+	else {
 		i = start;
-		if (!(take(L'd') && i < n && text[i] == L'y' && take(L'y') && take(L'/') && take(L'd') && i < n &&
-			text[i] == L'x' && take(L'x')))
-			return o;
+		if (take(L'y') && prime())
+			o.order = FplOdeOrder::First;
+		else {
+			i = start;
+			if (take(L'x') && prime())
+				o.order = FplOdeOrder::System;
+			else {
+				i = start;
+				if (word(L"dy/dx"))
+					o.order = FplOdeOrder::First;
+				else if (word(L"dx/dt"))
+					o.order = FplOdeOrder::System;
+				else
+					return o;
+			}
+		}
 	}
 	if (!take(L'='))
 		return o;
 	o.isOde = true;
 	o.rhs = i;
-	// the commas at the top: F, then each y(a) = b
+	// the commas at the top: F, then its conditions
 	auto nextComma = [&](size_t from) {
 		int depth = 0;
 		for (size_t k = from; k < n; k++) {
@@ -643,43 +671,113 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 		}
 		return n;
 	};
-	size_t comma = nextComma(i);
-	o.rhsLen = comma - o.rhs;
-	while (comma < n) {
-		i = comma + 1;
+	auto stop = [&](bool missingClose = false) {
 		spaces();
-		if (!take(L'y') || !take(L'(')) {
-			spaces();
-			o.errorAt = i;
-			return o;
-		}
-		FplOdeStart st;
-		st.a = i;
+		o.errorAt = missingClose ? n : i;
+		o.missingClose = missingClose;
+		return o;
+	};
+	// what's inside the parentheses just opened
+	auto inside = [&](size_t& at, size_t& len) {
+		at = i;
 		int depth = 1;
-		size_t close = std::wstring_view::npos;
 		for (size_t k = i; k < n; k++) {
 			if (text[k] == L'(')
 				depth++;
 			else if (text[k] == L')' && --depth == 0) {
-				close = k;
-				break;
+				len = k - at;
+				i = k + 1;
+				return true;
 			}
 		}
-		if (close == std::wstring_view::npos) {
-			o.errorAt = n;
-			o.missingClose = true;
-			return o;
+		return false;
+	};
+	auto trim = [&](size_t at, size_t len) {
+		std::wstring_view v = text.substr(at, len);
+		while (!v.empty() && v.front() == L' ')
+			v.remove_prefix(1);
+		while (!v.empty() && v.back() == L' ')
+			v.remove_suffix(1);
+		return v;
+	};
+	size_t comma = nextComma(i);
+	o.rhsLen = comma - o.rhs;
+	if (o.order == FplOdeOrder::System) {
+		if (comma >= n) {
+			i = n;
+			return stop();
 		}
-		st.aLen = close - st.a;
-		i = close + 1;
-		if (!take(L'=')) {
-			spaces();
-			o.errorAt = i;
-			return o;
-		}
-		st.b = i;
+		i = comma + 1;
+		if (!(take(L'y') && prime()) && !word(L"dy/dt"))
+			return stop();
+		if (!take(L'='))
+			return stop();
+		o.rhs2 = i;
 		comma = nextComma(i);
-		st.bLen = comma - i;
+		o.rhs2Len = comma - i;
+	}
+	while (comma < n) {
+		i = comma + 1;
+		FplOdeStart st;
+		if (o.order == FplOdeOrder::System) {
+			// (a, b)
+			if (!take(L'('))
+				return stop();
+			size_t at = 0, len = 0;
+			if (!inside(at, len))
+				return stop(true);
+			const size_t mid = nextComma(at);
+			if (mid >= at + len) {
+				i = at;
+				return stop();
+			}
+			st.a = at;
+			st.aLen = mid - at;
+			st.b = mid + 1;
+			st.bLen = at + len - mid - 1;
+			spaces();
+			if (i < n && text[i] != L',')
+				return stop();
+			comma = nextComma(i);
+		}
+		else {
+			// y(a) = b
+			if (!take(L'y') || !take(L'('))
+				return stop();
+			if (!inside(st.a, st.aLen))
+				return stop(true);
+			if (!take(L'='))
+				return stop();
+			st.b = i;
+			comma = nextComma(i);
+			st.bLen = comma - i;
+			if (o.order == FplOdeOrder::Second) {
+				// y'(a) = c, at the same a
+				o.badInitial = true;
+				if (comma >= n) {
+					i = n;
+					return stop();
+				}
+				i = comma + 1;
+				size_t a2 = 0, a2Len = 0;
+				if (!take(L'y') || !prime() || !take(L'('))
+					return stop();
+				if (!inside(a2, a2Len)) {
+					o.badInitial = false;
+					return stop(true);
+				}
+				if (trim(a2, a2Len) != trim(st.a, st.aLen)) {
+					i = a2;
+					return stop();
+				}
+				if (!take(L'='))
+					return stop();
+				o.badInitial = false;
+				st.c = i;
+				comma = nextComma(i);
+				st.cLen = comma - i;
+			}
+		}
 		o.starts.push_back(st);
 	}
 	return o;
@@ -717,6 +815,56 @@ void BuildOdePart(std::wstring_view text, size_t at, size_t len, unsigned allowe
 	}
 }
 
+// What's zero where the expression may be singular: the factors of denominators and of bases to negative powers, the
+// arguments of logarithms, those of tan and sec (where their cos is zero), csc and cot (their sin).
+struct SingularAtom {
+	int node;
+	uint8_t wrap;
+	bool guarded;
+};
+
+void CollectSingular(const FplAst& ast, int node, unsigned variable, bool guarded, std::vector<SingularAtom>& out) {
+	constexpr size_t Most = 32;
+	std::function<void(int, uint8_t)> factors = [&](int k, uint8_t wrap) {
+		auto& n = ast[k];
+		if (wrap == 0 && n.op == FplOp::Mul) {
+			for (int kid : n.kids)
+				factors(kid, 0);
+			return;
+		}
+		if (wrap == 0 && n.op == FplOp::Neg) {
+			factors(n.kids[0], 0);
+			return;
+		}
+		if (wrap == 0 && n.op == FplOp::Pow && ast[n.kids[1]].op == FplOp::Num && ast[n.kids[1]].value > 0) {
+			factors(n.kids[0], 0);
+			return;
+		}
+		if ((FplVariablesOf(ast, k) & variable) && out.size() < Most)
+			out.push_back({ k, wrap, guarded });
+	};
+	auto& n = ast[node];
+	if (n.op == FplOp::Integral)
+		return;		// its body's variable is its own
+	if (n.op == FplOp::Div)
+		factors(n.kids[1], 0);
+	else if (n.op == FplOp::Pow) {
+		auto& power = ast[n.kids[1]];
+		if ((power.op == FplOp::Num && power.value < 0) || (power.op == FplOp::Neg && ast[power.kids[0]].op == FplOp::Num))
+			factors(n.kids[0], 0);
+	}
+	else if (n.op == FplOp::Call && !n.kids.empty()) {
+		switch (n.func) {
+			case FplFunc::Tan: case FplFunc::Sec: factors(n.kids[0], 1); break;
+			case FplFunc::Csc: case FplFunc::Cot: factors(n.kids[0], 2); break;
+			case FplFunc::Ln: case FplFunc::Log: case FplFunc::Log2: factors(n.kids[0], 0); break;
+			default: break;
+		}
+	}
+	for (int kid : n.kids)
+		CollectSingular(ast, kid, variable, guarded || n.op == FplOp::Piecewise, out);
+}
+
 } // namespace
 
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
@@ -728,30 +876,56 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 	options.functions = functions;
 	options.lists = lists;
 	if (auto ode = FplSplitOde(text); ode.isOde) {
-		e.kind = FplKind::SlopeField;
-		BuildOdePart(text, ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, e.f, e.error);
+		e.kind = ode.order == FplOdeOrder::First ? FplKind::SlopeField
+			: ode.order == FplOdeOrder::Second ? FplKind::SecondOrder : FplKind::OdeSystem;
+		if (ode.order == FplOdeOrder::Second) {
+			// y' in F is the t slot. Written over its own two characters, so errors stay in their places; a t of the
+			// user's own is caught first, with y' as a number.
+			auto withPrime = [&](wchar_t name) {
+				std::wstring copy(text);
+				for (size_t k = ode.rhs; k + 1 < ode.rhs + ode.rhsLen; k++)
+					if (copy[k] == L'y' && (copy[k + 1] == L'\'' || copy[k + 1] == wchar_t(0x2032))) {
+						copy[k] = L' ';
+						copy[k + 1] = name;
+					}
+				return copy;
+			};
+			FplProgram check;
+			BuildOdePart(withPrime(L'0'), ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, check, e.error);
+			if (!e.error)
+				BuildOdePart(withPrime(L't'), ode.rhs, ode.rhsLen, FplVarX | FplVarY | FplVarT, options, parameters, e.f, e.error);
+		}
+		else
+			BuildOdePart(text, ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, e.f, e.error);
+		if (!e.error && ode.order == FplOdeOrder::System)
+			BuildOdePart(text, ode.rhs2, ode.rhs2Len, FplVarX | FplVarY, options, parameters, e.g, e.error);
 		if (!e.error && ode.errorAt != std::wstring_view::npos) {
-			e.error = { ode.missingClose ? FplErrorCode::MissingClose : FplErrorCode::UnexpectedToken,
+			e.error = { ode.badInitial ? FplErrorCode::BadInitial
+				: ode.missingClose ? FplErrorCode::MissingClose : FplErrorCode::UnexpectedToken,
 				static_cast<int>(std::min(ode.errorAt, text.size())), ode.errorAt < text.size() ? 1 : 0,
 				ode.missingClose ? L")" : L"" };
-			e.f = {};
 		}
 		else if (!e.error) {
-			// each y(a) = b: a and b one after the other
+			// each condition's values, one after the other
 			for (auto& st : ode.starts) {
-				FplProgram a, b;
+				FplProgram a, b, c;
 				BuildOdePart(text, st.a, st.aLen, 0, options, parameters, a, e.error);
 				if (!e.error)
 					BuildOdePart(text, st.b, st.bLen, 0, options, parameters, b, e.error);
+				if (!e.error && ode.order == FplOdeOrder::Second)
+					BuildOdePart(text, st.c, st.cLen, 0, options, parameters, c, e.error);
 				if (e.error)
 					break;
 				e.starts.push_back(std::move(a));
 				e.starts.push_back(std::move(b));
+				if (ode.order == FplOdeOrder::Second)
+					e.starts.push_back(std::move(c));
 			}
-			if (e.error) {
-				e.f = {};
-				e.starts.clear();
-			}
+		}
+		if (e.error) {
+			e.f = {};
+			e.g = {};
+			e.starts.clear();
 		}
 		return e;
 	}
@@ -777,6 +951,18 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 		e.g = FplCompile(parsed.ast, def.expr[1], parameters, &e.error);
 	if (!e.error && def.expr[2] >= 0)
 		e.h = FplCompile(parsed.ast, def.expr[2], parameters, &e.error);
+	if (!e.error && (def.kind == FplKind::Function || def.kind == FplKind::FunctionOfY)) {
+		std::vector<SingularAtom> atoms;
+		const unsigned bit = def.kind == FplKind::Function ? FplVarX : FplVarY;
+		CollectSingular(parsed.ast, def.expr[0], bit, false, atoms);
+		e.singular.reserve(atoms.size());
+		for (auto& atom : atoms) {
+			FplError ignored;
+			FplProgram program = FplCompile(parsed.ast, atom.node, parameters, &ignored);
+			if (!ignored)
+				e.singular.push_back({ std::move(program), atom.wrap, atom.guarded });
+		}
+	}
 	if (!e.error && (def.kind == FplKind::Function || def.kind == FplKind::FunctionOfY)) {
 		FplError ignored;
 		int d = FplDerive(parsed.ast, def.expr[0], def.kind == FplKind::Function ? L"x" : L"y", &ignored);

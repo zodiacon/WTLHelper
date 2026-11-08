@@ -18,14 +18,16 @@
 static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed && FPLGF_NOTRACE == FplGraphNoTrace &&
 	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours &&
 	FPLGF_NODRAG == FplGraphNoDrag && FPLGF_DOTTED == FplGraphDotted && FPLGF_HOLLOW == FplGraphHollow &&
-	FPLGF_MESHLINES == FplGraphMeshLines && FPLGF_LEVELLINES == FplGraphLevelLines);
+	FPLGF_MESHLINES == FplGraphMeshLines && FPLGF_LEVELLINES == FplGraphLevelLines &&
+	FPLGF_NOSINGULAR == FplGraphNoSingular);
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
 	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
 	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D &&
 	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface && FPLK_INTEGRAL == (int)FplKind::Integral &&
 	FPLK_REGRESSION == (int)FplKind::Regression && FPLK_BETWEEN == (int)FplKind::Between &&
-	FPLK_SLOPEFIELD == (int)FplKind::SlopeField);
+	FPLK_SLOPEFIELD == (int)FplKind::SlopeField && FPLK_SECONDORDER == (int)FplKind::SecondOrder &&
+	FPLK_ODESYSTEM == (int)FplKind::OdeSystem);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
@@ -1854,13 +1856,15 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		return 0;
 	}
 	// a draggable point: move it (and so its parameters)
-	int point = s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance);
+	int pointIndex = 0;
+	int point = s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance, &pointIndex);
 	if (point >= 0) {
 		if (s.traceDragged)
 			ClearTrace();
 		Remember(-1);
 		s.drag = FplDrag::Point;
 		s.dragGraph = point;
+		s.dragPoint = pointIndex;
 		SetCapture();
 		return 0;
 	}
@@ -1997,7 +2001,7 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 				auto& g = s.plot.graphs[s.dragGraph];
 				FplPoint p = s.view.ToPlane({ ToDips(pt.x), ToDips(pt.y) });
 				// read both first: setting one samples again
-				const int px = g.dragX, py = g.dragY;
+				const auto [px, py] = g.DragOf(s.dragPoint);
 				if (px >= 0)
 					SetParam(px, p.x, true);
 				if (py >= 0)
@@ -2039,10 +2043,12 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		s.hotToggle = hotToggle;
 		Invalidate();
 	}
+	int hotIndex = 0;
 	int hotPoint = hit.part == FplPanelPart::None && !s.mode3D
-		? s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance) : -1;
-	if (hotPoint != s.hotPoint) {
+		? s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance, &hotIndex) : -1;
+	if (hotPoint != s.hotPoint || hotIndex != s.hotPointIndex) {
 		s.hotPoint = hotPoint;
+		s.hotPointIndex = hotIndex;
 		Invalidate();
 	}
 	if (hit.part == FplPanelPart::None && hotPoint < 0) {

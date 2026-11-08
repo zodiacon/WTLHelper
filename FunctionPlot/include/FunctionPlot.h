@@ -61,6 +61,7 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLGF_MESHLINES    0x0200   // 3D: lines on a surface: z = F(x, y) in x and y at the box's ticks, a parametric
                                     // surface along its u and v, an implicit one in x, y and z
 #define FPLGF_LEVELLINES   0x0400   // 3D: lines on a surface at heights
+#define FPLGF_NOSINGULAR   0x0800   // y = f(x), x = f(y): no dashed lines at asymptotes, no open circles at holes
 
 struct FPLGRAPH {
 	UINT     mask;             // FPLGM_*: the members to set, or to fill
@@ -96,8 +97,10 @@ enum FPLKIND {
 	FPLK_INTEGRAL,             // integral(f, lo, hi) alone: the area shaded, its value (FPLGRAPHINFO::value)
 	FPLK_REGRESSION,           // y1 ~ m x1 + b: m and b fitted to lists (GetValue); FPLGRAPHINFO::value is R squared
 	FPLK_BETWEEN,              // f(x) < y < g(x) or f(y) < x < g(y): the region between two curves
-	FPLK_SLOPEFIELD,           // y' = F(x, y): its slopes; with ", y(a) = b" the solution through (a, b) too (a and b
-	                           // parameters alone: the point can be dragged)
+	FPLK_SLOPEFIELD,           // y' = F(x, y): its slopes; with ", y(a) = b" (any number) the solutions through (a, b) too
+	                           // (a and b parameters alone: the point can be dragged)
+	FPLK_SECONDORDER,          // y'' = F(x, y, y'), ", y(a) = b, y'(a) = c" (any number): the solutions
+	FPLK_ODESYSTEM,            // x' = P(x, y), y' = Q(x, y), ", (a, b)" (any number): arrows, and trajectories through them
 };
 
 // 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D
@@ -118,7 +121,7 @@ enum FPLERROR {
 	FPLE_NONE, FPLE_EMPTY, FPLE_UNEXPECTEDCHAR, FPLE_BADNUMBER, FPLE_UNEXPECTEDTOKEN, FPLE_UNEXPECTEDEND,
 	FPLE_MISSINGCLOSE, FPLE_UNKNOWNNAME, FPLE_ARGCOUNT, FPLE_MISSINGARGUMENT, FPLE_TOOMANYRELATIONS,
 	FPLE_MISPLACEDRELATION, FPLE_MISPLACEDPOINT, FPLE_MISPLACEDCONDITION, FPLE_VARIABLENOTALLOWED, FPLE_NOTAPLOT,
-	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_INTERNAL,
+	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_BADINITIAL, FPLE_INTERNAL,
 };
 
 struct FPLGRAPHINFO {

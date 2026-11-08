@@ -95,6 +95,7 @@ void FplPlot::Build() {
 		g.function = -1;
 		g.slot = -1;
 		g.dragX = g.dragY = -1;
+		g.drags.clear();
 		g.geometry = {};
 		g.features.clear();
 	}
@@ -244,7 +245,8 @@ void FplPlot::Build() {
 			}
 			else {
 				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames);
-				if (!g.expr.error && (g.expr.kind == FplKind::Point || g.expr.kind == FplKind::SlopeField))
+				if (!g.expr.error && (g.expr.kind == FplKind::Point || g.expr.kind == FplKind::SlopeField ||
+					g.expr.kind == FplKind::SecondOrder || g.expr.kind == FplKind::OdeSystem))
 					FindDragged(g, options);
 				// a regression with nothing to fit
 				if (!g.expr.error && g.expr.kind == FplKind::Regression)
@@ -257,8 +259,10 @@ void FplPlot::Build() {
 						g.expr.value.Reads(l.slot) || std::any_of(g.expr.starts.begin(), g.expr.starts.end(),
 							[&](const FplProgram& p) { return p.Reads(l.slot); }))
 						g.listSlots.push_back(l.slot);
-			if (!g.listSlots.empty())
+			if (!g.listSlots.empty()) {
 				g.dragX = g.dragY = -1;
+				g.drags.clear();
+			}
 			continue;
 		}
 		// its value, compiled against every name but its own
@@ -479,11 +483,16 @@ void FplPlot::FindDragged(FplGraph& g, FplParseOptions options) {
 		return n.op == FplOp::Var ? FindParam(n.name) : -1;
 	};
 	if (auto ode = FplSplitOde(g.text); ode.isOde) {
-		// the first condition's point
-		if (!ode.starts.empty() && ode.errorAt == std::wstring_view::npos) {
+		// each condition's point
+		if (ode.errorAt == std::wstring_view::npos) {
 			std::wstring_view text = g.text;
-			g.dragX = paramOf(text.substr(ode.starts[0].a, ode.starts[0].aLen));
-			g.dragY = paramOf(text.substr(ode.starts[0].b, ode.starts[0].bLen));
+			g.drags.reserve(ode.starts.size());
+			for (auto& st : ode.starts)
+				g.drags.push_back({ paramOf(text.substr(st.a, st.aLen)), paramOf(text.substr(st.b, st.bLen)) });
+			if (!g.drags.empty()) {
+				g.dragX = g.drags[0].first;
+				g.dragY = g.drags[0].second;
+			}
 		}
 		return;
 	}
@@ -501,18 +510,25 @@ void FplPlot::FindDragged(FplGraph& g, FplParseOptions options) {
 	g.dragY = param(def.expr[1]);
 }
 
-int FplPlot::DraggableAt(FplPoint screen, double maxDistance) const {
+int FplPlot::DraggableAt(FplPoint screen, double maxDistance, int* point) const {
 	int best = -1;
 	double bestD = maxDistance;
 	for (size_t i = 0; i < graphs.size(); i++) {
 		auto& g = graphs[i];
-		if (!g.Drawable() || (g.flags & FplGraphNoDrag) || (g.dragX < 0 && g.dragY < 0) || g.geometry.points.empty())
+		if (!g.Drawable() || (g.flags & FplGraphNoDrag))
 			continue;
-		auto p = g.geometry.points[0];
-		double d = std::hypot(p.x - screen.x, p.y - screen.y);
-		if (d <= bestD) {
-			bestD = d;
-			best = static_cast<int>(i);
+		for (size_t k = 0; k < g.geometry.points.size(); k++) {
+			const auto [px, py] = g.DragOf(k);
+			if (px < 0 && py < 0)
+				continue;
+			auto& p = g.geometry.points[k];
+			double d = std::hypot(p.x - screen.x, p.y - screen.y);
+			if (d <= bestD) {
+				bestD = d;
+				best = static_cast<int>(i);
+				if (point)
+					*point = static_cast<int>(k);
+			}
 		}
 	}
 	return best;
@@ -621,6 +637,7 @@ FplSampleOptions FplPlot::OptionsFor(int graph, const FplSampleOptions& base) co
 	FplSampleOptions o = base;
 	o.heatmap = (g.flags & FplGraphHeatmap) != 0;
 	o.contours = !(g.flags & FplGraphNoContours);
+	o.singularities = !(g.flags & FplGraphNoSingular);
 	if (g.hasRange) {
 		o.tMin = o.thetaMin = g.tMin;
 		o.tMax = o.thetaMax = g.tMax;
@@ -875,7 +892,8 @@ void FplPlot::FindCurveMeetings(int graph, const FplViewport& view) {
 			return false;
 		switch (g.expr.kind) {
 			case FplKind::Function: case FplKind::FunctionOfY: case FplKind::Polar: case FplKind::Parametric:
-			case FplKind::Implicit: case FplKind::SlopeField: case FplKind::Between:
+			case FplKind::Implicit: case FplKind::SlopeField: case FplKind::Between: case FplKind::SecondOrder:
+			case FplKind::OdeSystem:
 				return true;
 			default:
 				return false;
@@ -1424,7 +1442,8 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 					}
 					break;
 				}
-				case FplKind::Implicit: case FplKind::SlopeField: case FplKind::Between:
+				case FplKind::Implicit: case FplKind::SlopeField: case FplKind::Between: case FplKind::SecondOrder:
+				case FplKind::OdeSystem:
 					// what was sampled (the view grown by its size; an ODE's solution)
 					for (auto& line : g.geometry.lines)
 						for (auto& p : line) {

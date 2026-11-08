@@ -696,9 +696,26 @@ void CFunctionPlotCtrl::PaintGraphs() {
 		if (!g.Drawable())
 			continue;
 		auto* brush = s.Brush(GraphColor((int)i));
+		// asymptotes first, thin and faint: they're not the curve
+		if (!g.geometry.asymptotes.empty()) {
+			auto& v = s.view;
+			brush->SetOpacity(g.opacity * 0.5f);
+			const bool upright = g.expr.kind == FplKind::Function;
+			for (double a : g.geometry.asymptotes) {
+				const float at = (float)a;
+				rt->DrawLine(upright ? D2D1::Point2F(at, 0) : D2D1::Point2F(0, at),
+					upright ? D2D1::Point2F(at, (float)v.height) : D2D1::Point2F((float)v.width, at),
+					brush, 1.25f, s.dashStroke.Get());
+			}
+		}
 		brush->SetOpacity(g.opacity);
-		if (s.paths[i].arrows)
+		// a system's arrows fainter under its trajectories
+		if (s.paths[i].arrows) {
+			if (g.expr.kind == FplKind::OdeSystem && !g.geometry.lines.empty())
+				brush->SetOpacity(g.opacity * 0.45f);
 			rt->DrawGeometry(s.paths[i].arrows.Get(), brush, 1.5f, s.roundStroke.Get());
+			brush->SetOpacity(g.opacity);
+		}
 		if (s.paths[i].marks) {
 			// fainter under a solution
 			brush->SetOpacity(g.opacity * (g.geometry.lines.empty() ? 0.75f : 0.4f));
@@ -714,9 +731,16 @@ void CFunctionPlotCtrl::PaintGraphs() {
 			rt->DrawGeometry(s.paths[i].lines.Get(), brush, width, stroke);
 		}
 		brush->SetOpacity(1);
-		const bool draggable = (g.dragX >= 0 || g.dragY >= 0) && !(g.flags & FplGraphNoDrag);
 		const bool hollow = (g.flags & FplGraphHollow) != 0;
 		auto* back = s.Brush(GetColors().crBack);
+		// holes: open circles on the curve
+		for (auto& p : g.geometry.holes) {
+			D2D1_ELLIPSE ring = D2D1::Ellipse(Pt(p), 2.5f + width, 2.5f + width);
+			rt->FillEllipse(ring, back);
+			brush->SetOpacity(g.opacity);
+			rt->DrawEllipse(ring, brush, 2);
+			brush->SetOpacity(1);
+		}
 		for (auto& p : g.geometry.points) {
 			if (!std::isfinite(p.x) || !std::isfinite(p.y))
 				continue;
@@ -729,10 +753,13 @@ void CFunctionPlotCtrl::PaintGraphs() {
 			else
 				rt->FillEllipse(dot, brush);
 			brush->SetOpacity(1);
-			// a draggable point (the first: an ODE's others aren't): a ring around it, stronger under the mouse
-			if (draggable && &p == &g.geometry.points[0]) {
-				const float ring = 6.5f + width + ((int)i == s.hotPoint ? 2 : 0);
-				brush->SetOpacity((int)i == s.hotPoint ? 0.55f : 0.3f);
+			// a draggable point: a ring around it, stronger under the mouse
+			const size_t index = &p - g.geometry.points.data();
+			const auto [dragX, dragY] = g.DragOf(index);
+			if ((dragX >= 0 || dragY >= 0) && !(g.flags & FplGraphNoDrag)) {
+				const bool hot = (int)i == s.hotPoint && (int)index == s.hotPointIndex;
+				const float ring = 6.5f + width + (hot ? 2 : 0);
+				brush->SetOpacity(hot ? 0.55f : 0.3f);
 				rt->DrawEllipse(D2D1::Ellipse(Pt(p), ring, ring), brush, 2);
 				brush->SetOpacity(1);
 			}

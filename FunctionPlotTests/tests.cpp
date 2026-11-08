@@ -3546,6 +3546,322 @@ TEST(ColorScale) {
 	CHECK((low & 0xFF) < 100 && (high & 0xFF) > 200);
 }
 
+TEST(HigherOdes) {
+	// the text
+	std::wstring_view text = L"y'' = -y, y(0) = 1, y'(0) = 2, y(3) = a, y'(3) = 0";
+	auto o = FplSplitOde(text);
+	CHECK(o.isOde);
+	CHECK(o.order == FplOdeOrder::Second);
+	CHECK_INT(o.starts.size(), 2);
+	CHECK(text.substr(o.starts[0].c, o.starts[0].cLen) == L" 2");
+	CHECK(text.substr(o.starts[1].b, o.starts[1].bLen) == L" a");
+	CHECK(FplSplitOde(std::wstring(L"y") + wchar_t(0x2033) + L" = y").order == FplOdeOrder::Second);
+	text = L"x' = y, y' = -x, (1, f(2, 3)), (0, 1)";
+	o = FplSplitOde(text);
+	CHECK(o.order == FplOdeOrder::System);
+	CHECK(text.substr(o.rhs2, o.rhs2Len) == L" -x");
+	CHECK_INT(o.starts.size(), 2);
+	CHECK(text.substr(o.starts[0].b, o.starts[0].bLen) == L" f(2, 3)");
+	CHECK(FplSplitOde(L"dx/dt = y, dy/dt = -x").order == FplOdeOrder::System);
+	CHECK(FplSplitOde(L"y' = y").order == FplOdeOrder::First);
+	CHECK(!FplSplitOde(L"x = y").isOde);
+
+	// errors in their places
+	std::vector<std::wstring> params = { L"a" };
+	auto e = FplBuild(L"y'' = -y - y'/4, y(0) = a, y'(0) = 0", params);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::SecondOrder);
+	CHECK_INT(e.starts.size(), 3);
+	e = FplBuild(L"y'' = t", params);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	CHECK_INT(e.error.pos, 6);
+	CHECK(e.error.name == L"t");
+	e = FplBuild(L"y'' = y' + q", params);
+	CHECK(e.error.code == FplErrorCode::UnknownName);
+	CHECK_INT(e.error.pos, 11);
+	e = FplBuild(L"y'' = y, y(0) = 1", params);
+	CHECK(e.error.code == FplErrorCode::BadInitial);
+	CHECK(!e.error.Message().empty());
+	e = FplBuild(L"y'' = y, y(0) = 1, y'(1) = 0", params);
+	CHECK(e.error.code == FplErrorCode::BadInitial);
+	e = FplBuild(L"y'' = y, y(0) = 1, y(0) = 2", params);
+	CHECK(e.error.code == FplErrorCode::BadInitial);
+	e = FplBuild(L"x' = y", params);
+	CHECK(e.error.code != FplErrorCode::None);
+	e = FplBuild(L"x' = t, y' = 1", params);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	e = FplBuild(L"x' = y, y' = -x, (1)", params);
+	CHECK(e.error.code != FplErrorCode::None);
+	e = FplBuild(L"x' = y, y' = -x, (x, 1)", params);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	e = FplBuild(L"x' = y, y' = -x, (a, 1)", params);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::OdeSystem);
+
+	// second order against the exact: y'' = -y is sin and cos; y'' = y' is e^x; damped too
+	FplViewport v = View(-10, 10, -10, 10, 800, 800);
+	auto worst = [&](const FplPolyline& line, auto exact) {
+		double w = 0;
+		for (auto& p : line) {
+			FplPoint q = v.ToPlane(p);
+			w = std::max(w, std::abs(q.y - exact(q.x)));
+		}
+		return w;
+	};
+	std::function<double(double, double, double)> spring = [](double, double y, double) { return -y; };
+	auto line = FplSolveOde2(spring, 0, 1, 2, v);
+	CHECK(line.size() > 100);
+	CHECK(worst(line, [](double x) { return std::cos(x) + 2 * std::sin(x); }) < 1e-3);
+	CHECK(v.ToPlaneX(line.front().x) < -10 && v.ToPlaneX(line.back().x) > 10);
+	std::function<double(double, double, double)> grow = [](double, double, double p) { return p; };
+	line = FplSolveOde2(grow, 0, 1, 1, v);
+	CHECK(worst(line, [](double x) { return std::exp(x); }) < 1e-3);
+	// y'' = 2 is x^2 + x: through the formula's own numbers
+	std::function<double(double, double, double)> two = [](double, double, double) { return 2.0; };
+	line = FplSolveOde2(two, 1, 2, 3, v);
+	CHECK(worst(line, [](double x) { return x * x + x; }) < 1e-4);
+	// steps of at most odeStep DIPs in x
+	double longest = 0;
+	for (size_t k = 1; k < line.size(); k++)
+		longest = std::max(longest, std::abs(line[k].x - line[k - 1].x));
+	CHECK(longest <= 2 + 1e-9);
+	CHECK(FplSolveOde2(grow, NaN, 1, 1, v).empty());
+
+	// a system: x' = y, y' = -x is a circle, closed where it began, and it stops there
+	std::function<FplPoint(double, double)> rotate = [](double x, double y) { return FplPoint{ y, -x }; };
+	size_t used = 0;
+	line = FplSolveSystem(rotate, 3, 0, v, {}, &used);
+	CHECK(line.size() > 100);
+	double off = 0;
+	for (auto& p : line) {
+		FplPoint q = v.ToPlane(p);
+		off = std::max(off, std::abs(std::hypot(q.x, q.y) - 3));
+	}
+	CHECK(off < 1e-3);
+	CHECK(std::hypot(line.front().x - line.back().x, line.front().y - line.back().y) < 2);
+	CHECK(line.size() < 800);		// once around: 2 pi 120 DIPs in steps of about 2
+	CHECK(used < 100000);
+	// settling on a point; leaving the view; none at a rest point
+	std::function<FplPoint(double, double)> sink = [](double x, double y) { return FplPoint{ -x, -y }; };
+	line = FplSolveSystem(sink, 4, 3, v);
+	CHECK(line.size() > 10);
+	CHECK(std::hypot(line.back().x - 400, line.back().y - 400) < 2);
+	std::function<FplPoint(double, double)> away = [](double x, double y) { return FplPoint{ x, y }; };
+	line = FplSolveSystem(away, 1, 1, v);
+	CHECK(v.ToPlaneX(line.back().x) > 10);
+	CHECK(FplSolveSystem(sink, 0, 0, v).empty());
+	// on log axes it's still the same curves
+	FplViewport lv = View(0.1, 100, 0.1, 100, 600, 600);
+	lv.logX = lv.logY = true;
+	std::function<double(double, double, double)> square = [](double x, double, double) { return 2.0 + 0 * x; };
+	line = FplSolveOde2(square, 1, 1, 2, lv);
+	double bend = 0;
+	for (auto& p : line) {
+		FplPoint q = lv.ToPlane(p);
+		bend = std::max(bend, std::abs(q.y - q.x * q.x) / q.y);
+	}
+	CHECK(bend < 1e-3);
+
+	// in a plot: points and lines, every point dragged by its own parameters
+	auto plot = MakePlot({ L"y'' = -y, y(a) = b, y'(a) = 0, y(c) = 2, y'(c) = 1", L"x' = y, y' = -x, (d, k), (5, 0)",
+		L"y' = -y, y(a) = 1, y(d) = k" },
+		{ Param(L"a", 0), Param(L"b", 1), Param(L"c", 4), Param(L"d", 2), Param(L"k", 3) });
+	for (auto& g : plot.graphs)
+		CHECK(!g.expr.error);
+	CHECK(plot.graphs[0].Drawable());
+	plot.Sample(v);
+	CHECK_INT(plot.graphs[0].geometry.points.size(), 2);
+	CHECK_INT(plot.graphs[0].geometry.lines.size(), 2);
+	CHECK_INT(plot.graphs[1].geometry.points.size(), 2);
+	CHECK_INT(plot.graphs[1].geometry.lines.size(), 2);
+	CHECK(!plot.graphs[1].geometry.arrows.empty());
+	CHECK(plot.graphs[0].geometry.arrows.empty() && plot.graphs[0].geometry.marks.empty());
+	auto pair = plot.graphs[0].DragOf(0);
+	CHECK_INT(pair.first, 0);
+	CHECK_INT(pair.second, 1);
+	pair = plot.graphs[0].DragOf(1);
+	CHECK_INT(pair.first, 2);
+	CHECK_INT(pair.second, -1);		// y(c) = 2: only its x
+	pair = plot.graphs[1].DragOf(0);
+	CHECK_INT(pair.first, 3);
+	CHECK_INT(pair.second, 4);
+	pair = plot.graphs[1].DragOf(1);
+	CHECK(pair.first == -1 && pair.second == -1);	// (5, 0)
+	CHECK(plot.graphs[1].DragOf(7).first == -1);
+	pair = plot.graphs[2].DragOf(1);		// a first-order ODE's second point
+	CHECK_INT(pair.first, 3);
+	CHECK_INT(pair.second, 4);
+	int point = -1;
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 4, 2 }), 3, &point), 0);
+	CHECK_INT(point, 1);
+	point = -1;
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 2, 3 }), 3, &point), 2);	// two there: the last drawn, on top
+	CHECK_INT(point, 1);
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 5, 0 }), 3), -1);		// no parameters
+	// a Point's own stays as it was
+	auto one = MakePlot({ L"(a, 2)" }, { Param(L"a", 1) });
+	one.Sample(v);
+	CHECK_INT(one.graphs[0].DragOf(0).first, 0);
+	CHECK(one.graphs[0].DragOf(1).first == -1);
+	// tracing and meeting: a solution and a trajectory are curves
+	plot = MakePlot({ L"y'' = 0, y(0) = 1, y'(0) = 1", L"x^2 + y^2 = 25", L"x' = y, y' = -x, (3, 0)" });
+	plot.Sample(v);
+	auto hit = plot.Nearest(v.ToScreen({ 2, 3 }), v, 6, 6);
+	CHECK_INT(hit.graph, 0);
+	plot.FindFeatures(0, v);
+	CHECK(Count(plot.graphs[0].features, FplFeatureKind::Intersection) >= 2);
+	plot.FindFeatures(2, v);
+	CHECK(Count(plot.graphs[2].features, FplFeatureKind::Intersection) >= 2);
+	double x0, x1, y0, y1;
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+}
+
+TEST(Singularities) {
+	FplViewport v = View(-10, 10, -10, 10, 800, 800);
+	auto one = [&](const wchar_t* text) {
+		auto plot = MakePlot({ text });
+		plot.Sample(v);
+		return plot.graphs[0].geometry;
+	};
+	auto xs = [&](const std::vector<double>& screens) {
+		std::vector<double> out;
+		for (double s : screens)
+			out.push_back(v.ToPlaneX(s));
+		std::sort(out.begin(), out.end());
+		return out;
+	};
+	const double Pi2 = 1.5707963267948966;
+	// poles
+	auto g = one(L"y = 1/x");
+	auto a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 0, 1e-9);
+	CHECK(g.holes.empty());
+	g = one(L"y = 1/(x - 3)^2");		// no sign change, through the power
+	a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 3, 1e-9);
+	g = one(L"y = 1/(x^2 - 2x + 1)");	// no sign change, not factored
+	a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 1, 1e-4);
+	g = one(L"y = x^-1");
+	CHECK_INT(g.asymptotes.size(), 1);
+	g = one(L"y = tan x");
+	a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 6);				// odd multiples of pi/2 in -10 to 10
+	if (a.size() == 6) {
+		CHECK_NEAR_TOL(a[2], -Pi2, 1e-9);
+		CHECK_NEAR_TOL(a[3], Pi2, 1e-9);
+	}
+	CHECK_INT(one(L"y = cot x").asymptotes.size(), 7);
+	CHECK_INT(one(L"y = sec x").asymptotes.size(), 6);
+	// one side only
+	g = one(L"y = ln x");
+	a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 0, 1e-9);
+	g = one(L"y = ln(x - 2)");
+	a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 2, 1e-9);
+	// holes, at their limits
+	g = one(L"y = (x^2 - 1)/(x - 1)");
+	CHECK(g.asymptotes.empty());
+	CHECK_INT(g.holes.size(), 1);
+	if (g.holes.size() == 1) {
+		FplPoint q = v.ToPlane(g.holes[0]);
+		CHECK_NEAR_TOL(q.x, 1, 1e-9);
+		CHECK_NEAR_TOL(q.y, 2, 1e-4);
+	}
+	g = one(L"y = sin(x)/x");
+	CHECK_INT(g.holes.size(), 1);
+	if (g.holes.size() == 1)
+		CHECK_NEAR_TOL(v.ToPlane(g.holes[0]).y, 1, 1e-4);
+	CHECK(g.asymptotes.empty());
+	g = one(L"y = (x^2 - 4)/(x^2 - 2x)");		// a hole at 2, a pole at 0
+	CHECK_INT(g.holes.size(), 1);
+	if (g.holes.size() == 1) {
+		FplPoint q = v.ToPlane(g.holes[0]);
+		CHECK_NEAR_TOL(q.x, 2, 1e-9);
+		CHECK_NEAR_TOL(q.y, 2, 1e-4);
+	}
+	CHECK_INT(g.asymptotes.size(), 1);
+	// nothing: no zero; a jump; a value it has; swinging; out of the view
+	g = one(L"y = 1/(x^2 + 1)");
+	CHECK(g.asymptotes.empty() && g.holes.empty());
+	g = one(L"y = x/|x|");						// differing limits
+	CHECK(g.asymptotes.empty() && g.holes.empty());
+	g = one(L"y = {x > 1: 1/x, x}");			// its denominator's zero in the branch not taken
+	CHECK(g.asymptotes.empty() && g.holes.empty());
+	g = one(L"y = {x < 1: 1/x, x}");			// but a branch taken still runs off
+	a = xs(g.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 0, 1e-9);
+	g = one(L"y = sin(1/x)");
+	CHECK(g.asymptotes.empty() && g.holes.empty());
+	g = one(L"y = 1/(x - 50)");
+	CHECK(g.asymptotes.empty());
+	g = one(L"y = x^2");
+	CHECK(g.asymptotes.empty() && g.holes.empty());
+	g = one(L"y = 2/3 + x/2");					// constant denominators
+	CHECK(g.asymptotes.empty() && g.holes.empty());
+	// other kinds of graph
+	g = one(L"x = 1/y");
+	CHECK_INT(g.asymptotes.size(), 1);
+	if (g.asymptotes.size() == 1)
+		CHECK_NEAR_TOL(v.ToPlaneY(g.asymptotes[0]), 0, 1e-9);
+	CHECK(one(L"x y = 1").asymptotes.empty());
+	// through the user's functions, parameters and definitions
+	auto plot = MakePlot({ L"f(x) = 1/(x - 2)", L"f(x)", L"y = 1/(x - a)" }, { Param(L"a", 4) });
+	plot.Sample(v);
+	a = xs(plot.graphs[1].geometry.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 2, 1e-9);
+	a = xs(plot.graphs[2].geometry.asymptotes);
+	CHECK_INT(a.size(), 1);
+	if (a.size() == 1)
+		CHECK_NEAR_TOL(a[0], 4, 1e-9);
+	// degrees
+	auto deg = FplBuild(L"y = tan x", {}, true);
+	CHECK(!deg.error);
+	FplGeometry dg = FplSample(deg, std::vector<double>(FplFirstParam, 0.0), View(-180, 180, -10, 10, 720, 400));
+	CHECK_INT(dg.asymptotes.size(), 2);
+	// off by flag
+	plot = MakePlot({ L"y = 1/x" });
+	plot.graphs[0].flags |= FplGraphNoSingular;
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.asymptotes.empty());
+	// log axes: where x is positive only
+	FplViewport lv = View(0.1, 100, 0.1, 100, 600, 600);
+	lv.logX = lv.logY = true;
+	plot = MakePlot({ L"y = 1/(x - 10)", L"y = 1/x" });
+	plot.Sample(lv);
+	CHECK_INT(plot.graphs[0].geometry.asymptotes.size(), 1);
+	if (!plot.graphs[0].geometry.asymptotes.empty())
+		CHECK_NEAR_TOL(lv.ToPlaneX(plot.graphs[0].geometry.asymptotes[0]), 10, 1e-6);
+	CHECK(plot.graphs[1].geometry.asymptotes.empty());
+	// many of them at once stay cheap, and past what can be seen there are none
+	auto many = one(L"y = tan(100x)");
+	CHECK(many.asymptotes.size() <= 256);
+	// the SVG draws them
+	FplSvgStyle style;
+	style.graphColors = { 0x0000FF };
+	plot = MakePlot({ L"y = 1/x", L"y = sin(x)/x" });
+	plot.Sample(v);
+	auto svg = FplWriteSvg(plot, v, style);
+	CHECK(svg.find("stroke-dasharray=\"6 4\"") != std::string::npos);
+	CHECK(svg.find("<circle") != std::string::npos);
+	CHECK(svg.find("\"nan") == std::string::npos && svg.find("\"-nan") == std::string::npos);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -3615,6 +3931,8 @@ int wmain() {
 	Run_LogAxesKinds();
 	Run_BetweenCurves();
 	Run_ColorScale();
+	Run_HigherOdes();
+	Run_Singularities();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;
