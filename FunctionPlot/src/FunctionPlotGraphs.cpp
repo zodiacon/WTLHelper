@@ -800,6 +800,34 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 			}, box, implicitCells);
 			break;
 		// the 2D kinds that are curves or points, on the z = 0 plane
+		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem: {
+			// an ODE's solutions as sampled for a view of the box's x and y; its slopes and arrows stay 2D's, as a
+			// vector field's do
+			FplViewport plane;
+			plane.xMin = box.xMin, plane.xMax = box.xMax, plane.yMin = box.yMin, plane.yMax = box.yMax;
+			plane.width = plane.height = 1000;
+			FplGeometry flat = FplSample(e, m_Slots, plane, OptionsFor(static_cast<int>(&g - graphs.data()), {}));
+			std::vector<std::vector<FplVec3>> lines;
+			lines.reserve(flat.lines.size());
+			for (auto& line : flat.lines) {
+				std::vector<FplVec3> tube;
+				tube.reserve(line.size());
+				for (auto& p : line) {
+					const FplPoint q = plane.ToPlane(p);
+					tube.push_back(box.ToBox(q.x, q.y, 0));
+				}
+				lines.push_back(std::move(tube));
+			}
+			if (!lines.empty())
+				mesh = FplTubes(lines, radius);
+			for (auto& p : flat.points) {
+				const FplPoint q = plane.ToPlane(p);
+				const FplVec3 c = box.ToBox(q.x, q.y, 0);
+				if (std::isfinite(c.x) && std::isfinite(c.y) && std::abs(c.x) <= 1 && std::abs(c.y) <= 1 && std::abs(c.z) <= 1)
+					FplAppend(mesh, FplSphere(c, dot));
+			}
+			break;
+		}
 		case FplKind::Function:
 			tubes([&](double x) {
 				s[FplSlotX] = x;
@@ -1272,6 +1300,9 @@ FplTraceHit FplPlot::Pick3D(FplVec3 origin, FplVec3 dir, const FplBox3& box) con
 		case FplKind::Point:
 			if (!graph.Listed())
 				p = { graph.expr.f.Eval(slots.data()), graph.expr.g.Eval(slots.data()), 0 };
+			break;
+		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem:
+			p.z = 0;		// on its plane, not the tube's surface
 			break;
 		default:
 			break;

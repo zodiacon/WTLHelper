@@ -187,7 +187,8 @@ public:
 	// listed ones, which go element by element here).
 	bool IsHeavy(int graph, bool in3D) const;
 	// The drawable graphs' meshes for a 3D box: surfaces (z = F(x, y), parametric), curves as tubes (space curves, and
-	// the 2D curves on the z = 0 plane), points as spheres. Implicit curves, regions and vector fields have none.
+	// the 2D curves on the z = 0 plane), points as spheres. An ODE's solutions too (its slopes and arrows stay 2D's);
+	// implicit curves, regions and vector fields have none.
 	void Build3D(const FplBox3& box);
 	void Build3DGraph(int graph, const FplBox3& box, int implicitCells = 48);
 	// The lines a surface has by its flags: z = F(x, y) in x and y at the box's ticks, a parametric surface along its u

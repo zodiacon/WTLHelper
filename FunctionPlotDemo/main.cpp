@@ -324,8 +324,18 @@ static void ShowTrace(const FPLTRACE& t) {
 }
 
 // The error of the line with the caret, in the third part.
+// The line the caret is on, counted by line breaks: with wrapping the edit's own lines aren't the graphs'.
+static int CaretLine() {
+	int start = 0, end = 0;
+	g_edit.GetSel(start, end);
+	int len = g_edit.GetWindowTextLength();
+	std::wstring text(len + 1, L'\0');
+	g_edit.GetWindowText(text.data(), len + 1);
+	return (int)std::count(text.begin(), text.begin() + std::min(end, len), L'\n');
+}
+
 static void ShowLineError() {
-	int line = g_edit.LineFromChar(-1);
+	const int line = CaretLine();
 	FPLGRAPHINFO info;
 	std::wstring text;
 	if (g_plot.GetGraphInfo((UINT)line + 1, info)) {
@@ -384,6 +394,7 @@ static void LoadExample(int index) {
 	g_edit.SetWindowText(e.text);   // a multiline edit sends no EN_CHANGE for this
 	SyncGraphs();
 	ShowLineError();
+	g_edit.Invalidate(FALSE);
 	if (e.setup == Setup::Animate) {
 		// the animation: p around a circle, playing
 		FPLPARAM p{ L"p", 0, 0, 6.283185307179586, 0, 0 };
@@ -719,6 +730,107 @@ static void Layout(HWND hwnd) {
 	g_status.SetParts(3, parts);
 }
 
+// ---- The lines' errors, marked in the edit ------------------------------------------
+
+static void SetEditMargins(HWND hwnd) {
+	// on the left, room for a dot beside a line that doesn't read
+	const UINT dpi = ::GetDpiForWindow(hwnd);
+	g_edit.SetMargins(::MulDiv(14, dpi, 96), ::MulDiv(6, dpi, 96));
+}
+
+static bool g_marksShown = false;
+
+// A dot in the margin and a wavy line under the part the error is about, over what the edit has painted.
+static void PaintErrorMarks(HWND hwnd) {
+	CEdit edit(hwnd);
+	const int length = edit.GetWindowTextLength();
+	std::wstring text(length + 1, L'\0');
+	edit.GetWindowText(text.data(), length + 1);
+	text.resize(length);
+	HDC dc = ::GetDC(hwnd);
+	const UINT dpi = ::GetDpiForWindow(hwnd);
+	const bool dark = GetRValue(::GetSysColor(COLOR_WINDOW)) < 128;
+	const COLORREF color = dark ? RGB(255, 107, 107) : RGB(196, 43, 28);
+	HPEN pen = ::CreatePen(PS_SOLID, std::max(1, ::MulDiv(1, dpi, 96)), color);
+	HBRUSH brush = ::CreateSolidBrush(color);
+	HGDIOBJ oldPen = ::SelectObject(dc, pen), oldBrush = ::SelectObject(dc, brush);
+	HGDIOBJ oldFont = ::SelectObject(dc, edit.GetFont());
+	TEXTMETRICW tm{};
+	::GetTextMetricsW(dc, &tm);
+	const int wave = std::max(2, ::MulDiv(2, dpi, 96));
+	auto posOf = [&](int ch) {
+		const LRESULT r = edit.SendMessage(EM_POSFROMCHAR, ch);
+		return POINT{ (short)LOWORD(r), (short)HIWORD(r) };
+	};
+	bool any = false;
+	int start = 0, id = 1;
+	for (;;) {
+		size_t end = text.find(L'\n', start);
+		const int lineEnd = end == std::wstring::npos ? length : (int)end - (end > 0 && text[end - 1] == L'\r' ? 1 : 0);
+		FPLGRAPHINFO info;
+		if (g_plot.GetGraphInfo((UINT)id, info) && info.error != FPLE_NONE && info.error != FPLE_EMPTY && lineEnd > start) {
+			any = true;
+			// the dot, at the line's first row
+			const POINT first = posOf(start);
+			const int d = ::MulDiv(6, dpi, 96), x = ::MulDiv(4, dpi, 96), y = first.y + (tm.tmHeight - d) / 2;
+			::Ellipse(dc, x, y, x + d, y + d);
+			// the wave, row by row: a part at the very end of the line goes under its last character
+			int a = std::clamp(start + info.errorPos, start, lineEnd - 1);
+			int b = std::clamp(a + std::max(info.errorLen, 1), a + 1, lineEnd);
+			const int rowA = edit.LineFromChar(a), rowB = edit.LineFromChar(b - 1);
+			for (int row = rowA; row <= rowB; row++) {
+				const int rowStart = edit.LineIndex(row);
+				const int from = std::max(a, rowStart), to = std::min(b, rowStart + edit.LineLength(rowStart));
+				if (to <= from)
+					continue;
+				const POINT left = posOf(from), last = posOf(to - 1);
+				SIZE one{};
+				::GetTextExtentPoint32W(dc, text.c_str() + to - 1, 1, &one);
+				const int base = left.y + tm.tmHeight - wave;
+				int px = left.x;
+				bool up = false;
+				::MoveToEx(dc, px, base, nullptr);
+				while (px < last.x + one.cx) {
+					px += wave;
+					::LineTo(dc, px, up ? base : base + wave);
+					up = !up;
+				}
+			}
+		}
+		if (end == std::wstring::npos)
+			break;
+		start = (int)end + 1;
+		id++;
+	}
+	::SelectObject(dc, oldFont);
+	::SelectObject(dc, oldBrush);
+	::SelectObject(dc, oldPen);
+	::DeleteObject(brush);
+	::DeleteObject(pen);
+	::ReleaseDC(hwnd, dc);
+	g_marksShown = any;
+}
+
+// The edit draws its text and selection directly as well as in WM_PAINT, over the marks: asked to paint again after what
+// does that, while there are marks to keep.
+static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
+	LRESULT result = ::DefSubclassProc(hwnd, msg, wParam, lParam);
+	switch (msg) {
+		case WM_PAINT:
+			PaintErrorMarks(hwnd);
+			break;
+		case WM_KEYUP: case WM_LBUTTONUP: case WM_MOUSEWHEEL: case WM_VSCROLL: case WM_SETFOCUS: case WM_KILLFOCUS:
+			if (g_marksShown)
+				::InvalidateRect(hwnd, nullptr, FALSE);
+			break;
+		case WM_MOUSEMOVE:
+			if (g_marksShown && (wParam & MK_LBUTTON))
+				::InvalidateRect(hwnd, nullptr, FALSE);
+			break;
+	}
+	return result;
+}
+
 // The plot's resizing changes what's in view without a notification (those are for the user's moves): the status bar's
 // range follows here, as dragging the splitter doesn't reach the main window.
 static LRESULT CALLBACK PlotSizeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR) {
@@ -752,10 +864,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_splitter.SetSplitterExtendedStyle(0, SPLIT_PROPORTIONAL);
 			SetSplitterLimits(::GetDpiForWindow(hwnd));
 			g_edit.Create(g_splitter, CWindow::rcDefault, nullptr,
-				WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL |
-				ES_WANTRETURN | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_EDIT);
+				WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_TABSTOP,
+				WS_EX_CLIENTEDGE, IDC_EDIT);
+			::SetWindowSubclass(g_edit, EditProc, 1, 0);
 			MakeEditFont(hwnd);
-			g_edit.SetMargins(6, 6);
+			SetEditMargins(hwnd);
 			g_plot.Create(g_splitter, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | FPLS_EQUALSCALE,
 				0, IDC_PLOT);
 			g_splitter.SetSplitterPanes(g_edit, g_plot);
@@ -789,6 +902,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			auto rc = (const RECT*)lParam;
 			::SetWindowPos(hwnd, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
 			MakeEditFont(hwnd);
+			SetEditMargins(hwnd);
 			{
 				const int before = g_splitter.m_xySplitterDefPos;
 				SetSplitterLimits(HIWORD(wParam));
@@ -809,6 +923,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				if (HIWORD(wParam) == EN_CHANGE) {
 					SyncGraphs();
 					ShowLineError();
+					// the graphs' errors may have changed
+					g_edit.Invalidate(FALSE);
 				}
 				return 0;
 			}

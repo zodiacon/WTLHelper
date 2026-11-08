@@ -59,6 +59,12 @@ bool StepN(D f, int n, double s, const double* y, double h, double* y5, double* 
 	return true;
 }
 
+// How far to cut a step that moved too far, at most tenfold: on a stiff equation an unstable trial's move is astronomical,
+// and cutting by its ratio went straight past the smallest step allowed, so nothing was drawn at all.
+double Shrink(double ratio) {
+	return std::max(0.9 * ratio, 0.1);
+}
+
 // DIPs per unit where it's defined, else the axis's scale.
 double DipsX(const FplViewport& view, double x) {
 	const double d = view.DipsPerUnitX(std::abs(x));
@@ -117,12 +123,9 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 				continue;
 			}
 			const double dips = DipsY(view, y5[0]);
-			// upright on the screen: it's gone (a blow-up, a vertical tangent)
-			if (order > 1 && std::abs(y[1]) * dips > 1000 * dipsX)
-				break;
 			const double rise = std::abs(y5[0] - y[0]) * dips;
 			if (rise > chord) {
-				h *= 0.9 * chord / rise;
+				h *= Shrink(chord / rise);
 				if (std::abs(h) * dipsX < 1e-4)
 					break;
 				continue;
@@ -135,6 +138,7 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 			}
 			err *= dips;
 			if (err <= tolerance) {
+				const double before = std::abs(y[1]);
 				x += h;
 				std::copy(y5, y5 + order, y);
 				FplPoint p = view.ToScreen({ x, y[0] });
@@ -142,6 +146,9 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 					break;
 				line.push_back(p);
 				if (p.y < -11 * view.height || p.y > 12 * view.height)
+					break;
+				// upright on the screen and getting steeper: it's gone (a blow-up); a stiff transient falls
+				if (order > 1 && std::abs(y[1]) * dips > 1000 * dipsX && std::abs(y[1]) >= before)
 					break;
 			}
 			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
@@ -233,7 +240,7 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 			}
 			const double move = std::hypot(p.x - line.back().x, p.y - line.back().y);
 			if (move > chord) {
-				h *= 0.9 * chord / move;
+				h *= Shrink(chord / move);
 				continue;
 			}
 			const double err = std::max(error[0] * DipsX(view, y5[0]), error[1] * DipsY(view, y5[1]));
@@ -337,7 +344,7 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 			const double dx = (y5[0] - y[0]) * sx, dy = (y5[1] - y[1]) * sy, dz = (y5[2] - y[2]) * sz;
 			const double move = std::sqrt(dx * dx + dy * dy + dz * dz);
 			if (move > 2 * MaxStep) {
-				h *= 0.9 * MaxStep / move;
+				h *= Shrink(MaxStep / move);
 				continue;
 			}
 			const double err = std::max({ error[0] * sx, error[1] * sy, error[2] * sz });
@@ -422,16 +429,14 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 			double dips = view.DipsPerUnitY(std::abs(y5));
 			if (!std::isfinite(dips) || dips <= 0)
 				dips = view.ScaleY();
-			// upright on the screen: a vertical tangent, where the solution ends (past it, steps only chatter across)
-			if (std::isfinite(k[0]) && std::abs(k[0]) * dips > 1000 * view.DipsPerUnitX(x))
-				break;
-			// a steep slope turning right around over the step (k[6] is the slope at its end): it went through a vertical
-			// tangent; closer steps, up to it
-			const double steep = 10 * view.DipsPerUnitX(x) / dips;
-			if (finite && k[0] * k[6] < 0 && std::abs(k[0]) > steep && std::abs(k[6]) > steep) {
-				h /= 4;
-				if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-					break;
+			// a steep slope changing by more than half over the step (k[6] is the slope at its end): near a vertical tangent
+			// the error estimate alone lets steps through that jump about, so closer ones. A stiff transient pays a little
+			// for this too, but its slope is falling. At the smallest steps it's let through: a jump in F is no tangent.
+			const double dipsX = view.DipsPerUnitX(x);
+			const double steep = 10 * dipsX / dips;
+			if (finite && std::max(std::abs(k[0]), std::abs(k[6])) > steep &&
+				std::abs(k[6] - k[0]) > 0.5 * std::max(std::abs(k[0]), std::abs(k[6])) && std::abs(h) * dipsX >= 1e-4) {
+				h /= 2;
 				continue;
 			}
 			const double err = std::abs(y5 - y4) * dips;
@@ -446,7 +451,7 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 			// going through it
 			const double rise = std::abs(y5 - y) * dips, chord = std::max(options.maxChord / 2, 0.5);
 			if (rise > chord) {
-				h *= 0.9 * chord / rise;
+				h *= Shrink(chord / rise);
 				if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
 					break;
 				continue;
@@ -460,6 +465,10 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 				line.push_back(p);
 				// gone off the screen for good
 				if (p.y < top - 10 * view.height || p.y > bottom + 10 * view.height)
+					break;
+				// upright on the screen and getting steeper: a vertical tangent, where the solution ends (a stiff
+				// transient starts as steep, but falls)
+				if (std::abs(k[6]) * dips > 1000 * dipsX && std::abs(k[6]) >= std::abs(k[0]))
 					break;
 			}
 			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;

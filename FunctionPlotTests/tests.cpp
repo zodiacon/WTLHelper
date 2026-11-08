@@ -4161,6 +4161,170 @@ TEST(Systems3D) {
 	CHECK(bare.graphs[0].mesh.Empty());
 }
 
+TEST(StiffOdes) {
+	FplViewport v = View(-5, 10, -3, 3, 1500, 600);
+	struct Reach {
+		double hi = -1e300, worst = 0;
+		size_t points = 0;
+	};
+	auto reach = [&](const FplPolyline& line, auto exact) {
+		Reach r;
+		r.points = line.size();
+		for (auto& p : line) {
+			FplPoint q = v.ToPlane(p);
+			r.hi = std::max(r.hi, q.x);
+			if (q.x >= 0 && q.y > -3 && q.y < 3)
+				r.worst = std::max(r.worst, std::abs(q.y - exact(q.x)));
+		}
+		return r;
+	};
+	// y' = -L (y - cos x) from y(0) = 1: stiff the more L is. A stable step is small but reachable: these once drew
+	// nothing at all past 1e4, as cutting by the first trial's huge move went past the smallest step.
+	for (double L : { 1e2, 1e3, 1e4 }) {
+		std::function<double(double, double)> F = [L](double x, double y) { return -L * (y - std::cos(x)); };
+		auto r = reach(FplSolveOde(F, 0, 1, v), [L](double x) { return (L * L * std::cos(x) + L * std::sin(x)) / (L * L + 1); });
+		CHECK(r.hi > 10);
+		CHECK(r.worst < 0.002);		// a fifth of a DIP
+	}
+	// starting off the slow solution, as steep as a tangent: a stiff transient falls, so it isn't one. Down to it almost
+	// at once, and then along it.
+	{
+		const double L = 1e4;
+		std::function<double(double, double)> F = [L](double x, double y) { return -L * (y - std::cos(x)); };
+		auto line = FplSolveOde(F, 0, 2.5, v);
+		CHECK(line.size() > 100);
+		double hi = -1e300, worst = 0;
+		for (auto& p : line) {
+			FplPoint q = v.ToPlane(p);
+			hi = std::max(hi, q.x);
+			if (q.x > 0.01 && q.y > -3 && q.y < 3)
+				worst = std::max(worst, std::abs(q.y - (L * L * std::cos(q.x) + L * std::sin(q.x)) / (L * L + 1)));
+		}
+		CHECK(hi > 10);
+		CHECK(worst < 0.002);
+		std::function<double(double, const double*)> G = [L](double, const double* y) { return -L * y[1] - y[0]; };
+		const double fast[] = { 1, 5000 };			// y' falls from 5000 to the slow mode
+		line = FplSolveOdeN(G, 2, 0, fast, v);
+		hi = -1e300;
+		for (auto& p : line)
+			hi = std::max(hi, v.ToPlaneX(p.x));
+		CHECK(hi > 10);
+	}
+	// while a jump in F, steep on both sides, doesn't end it
+	std::function<double(double, double)> jump = [](double x, double) { return x < 1 ? 50.0 : -50.0; };
+	auto jumped = FplSolveOde(jump, 0, -2, v);
+	double beyond = -1e300;
+	for (auto& p : jumped)
+		beyond = std::max(beyond, v.ToPlaneX(p.x));
+	CHECK(beyond > 1.05);
+	// too stiff for its budget: it stops early, right as far as it goes, and within the budget
+	for (double L : { 1e5, 1e6 }) {
+		std::function<double(double, double)> F = [L](double x, double y) { return -L * (y - std::cos(x)); };
+		size_t used = 0;
+		auto line = FplSolveOde(F, 0, 1, v, {}, &used);
+		auto r = reach(line, [L](double x) { return (L * L * std::cos(x) + L * std::sin(x)) / (L * L + 1); });
+		CHECK(r.points > 1000);
+		CHECK(r.hi > 0.01);
+		CHECK(r.worst < 0.002);
+		CHECK(used <= FplSampleOptions{}.maxEvals + 100);
+	}
+	// second order: the slow mode e^(-x/L)
+	for (double L : { 1e3, 1e4, 1e5 }) {
+		std::function<double(double, const double*)> F = [L](double, const double* y) { return -L * y[1] - y[0]; };
+		const double start[] = { 1, -1 / L };
+		auto r = reach(FplSolveOdeN(F, 2, 0, start, v), [L](double x) { return std::exp(-x / L); });
+		CHECK(r.points > 1000);
+		CHECK(r.hi > (L <= 1e4 ? 10 : 0.01));
+		CHECK(r.worst < 0.002);
+	}
+	// a system
+	for (double L : { 1e3, 1e5 }) {
+		std::function<FplPoint(double, double)> F = [L](double x, double y) { return FplPoint{ 1, -L * (y - std::sin(x)) }; };
+		auto r = reach(FplSolveSystem(F, 0, 0, v), [L](double x) { return (L * L * std::sin(x) - L * std::cos(x)) / (L * L + 1); });
+		CHECK(r.points > 100);
+		CHECK(r.hi > 0.01);
+		CHECK(r.worst < 0.002);
+	}
+	// and in 3D
+	FplBox3 box{ -5, 5, -5, 5, -5, 5 };
+	std::function<FplPoint3(double, double, double, double)> stiff3 = [](double, double x, double y, double z) {
+		return FplPoint3{ 1, -1e4 * (y - std::sin(x)), 0 * z };
+	};
+	auto line3 = FplSolveSystem3(stiff3, true, { 0, 0, 0 }, box);
+	CHECK(line3.size() > 10);
+}
+
+TEST(Odes3DAndPicking) {
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	FplCamera cam;
+	const float w = 800, h = 600;
+	auto pick = [&](FplPlot& plot, FplPoint3 at) {
+		FplPoint s;
+		FplVec3 origin, dir;
+		CHECK(cam.Project(box.ToBox(at), w, h, s));
+		cam.Ray(s, w, h, origin, dir);
+		return plot.Pick3D(origin, dir, box);
+	};
+	// 2D ODEs show on the z = 0 plane
+	auto plot = MakePlot({ L"y' = -y, y(0) = 3", L"y'' = -y, y(0) = 2, y'(0) = 0", L"x' = y, y' = -x, (4, 0)", L"y' = x", L"x' = y, y' = -x" });
+	plot.Build3D(box);
+	for (int i = 0; i < 3; i++)
+		CHECK(!plot.graphs[i].mesh.Empty());
+	// no solutions: nothing, as a vector field has nothing in 3D
+	CHECK(plot.graphs[3].mesh.Empty());
+	CHECK(plot.graphs[4].mesh.Empty());
+	// on the plane, within the tube's radius or the start's dot
+	const float flat = box.ToBox(0, 0, 0).z;
+	bool onPlane = true;
+	for (auto& vertex : plot.graphs[0].mesh.vertices)
+		onPlane = onPlane && std::abs(vertex.pos.z - flat) < 0.05f;
+	CHECK(onPlane);
+	// following the solution: the mesh's points near y = 3 e^-x, in the box
+	double off = 0;
+	for (auto& vertex : plot.graphs[0].mesh.vertices) {
+		const FplPoint3 q = box.ToSpace(vertex.pos);
+		if (q.x > 0.5 && q.x < 5)
+			off = std::max(off, std::abs(q.y - 3 * std::exp(-q.x)));
+	}
+	CHECK(off < 1.0);		// a tube's radius, measured up a slope of at most 3, and the dot
+	// its point moves the sphere: a start outside the box has none
+	auto outside = MakePlot({ L"y'' = -y, y(50) = 2, y'(50) = 0" });
+	auto inside = MakePlot({ L"y'' = -y, y(0) = 2, y'(0) = 0" });
+	outside.Build3D(box);
+	inside.Build3D(box);
+	CHECK(inside.graphs[0].mesh.indices.size() > outside.graphs[0].mesh.indices.size());
+
+	// hover: a 3D trajectory's tube is hit, near where it is
+	auto helix = MakePlot({ L"x' = -6y/6, y' = x, z' = 1, (5, 0, 0)" });
+	helix.Build3D(box);
+	CHECK(!helix.graphs[0].mesh.Empty());
+	const double t = 2.0;
+	auto hit = pick(helix, { 5 * std::cos(t), 5 * std::sin(t), t });
+	CHECK_INT(hit.graph, 0);
+	if (hit) {
+		CHECK_NEAR_TOL(hit.plane.x, 5 * std::cos(t), 0.5);
+		CHECK_NEAR_TOL(hit.plane.y, 5 * std::sin(t), 0.5);
+		CHECK_NEAR_TOL(hit.z, t, 0.5);
+	}
+	// away from it, nothing
+	CHECK(!pick(helix, { 9, 9, 9 }));
+	// the nearer of two: the same curve, with the other drawn behind it
+	// 2D ODEs: on their plane exactly
+	auto ode = MakePlot({ L"y' = -y/4, y(0) = 3" });
+	ode.Build3D(box);
+	const double x1 = 2.0, y1 = 3 * std::exp(-0.5);
+	hit = pick(ode, { x1, y1, 0 });
+	CHECK_INT(hit.graph, 0);
+	if (hit) {
+		CHECK_NEAR(hit.z, 0.0);
+		CHECK_NEAR_TOL(hit.plane.x, x1, 0.5);
+		CHECK_NEAR_TOL(hit.plane.y, y1, 0.5);
+	}
+	// not traced when it's asked not to be
+	helix.graphs[0].flags |= FplGraphNoTrace;
+	CHECK(!pick(helix, { 5 * std::cos(t), 5 * std::sin(t), t }));
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -4235,6 +4399,8 @@ int wmain() {
 	Run_OdesOfAnyOrder();
 	Run_SystemsWithTime();
 	Run_Systems3D();
+	Run_StiffOdes();
+	Run_Odes3DAndPicking();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;
