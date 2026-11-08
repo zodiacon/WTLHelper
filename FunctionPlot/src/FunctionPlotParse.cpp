@@ -758,6 +758,8 @@ public:
 	int Top() {
 		if (Peek().type == Tk::End)
 			Fail(FplErrorCode::Empty, Peek());
+		if (m_Options.display)
+			return DisplayTop();
 		// "a = 2" with an unknown a defines it.
 		if (Peek().type == Tk::Name && Peek().kind == NameKind::Unknown && Peek().definable && IsOp(m_Tokens[m_Pos + 1], L'=')) {
 			auto& t = Next();
@@ -797,6 +799,28 @@ public:
 	}
 
 private:
+	// As many relations as were typed, and commas between them (y' = -y, y(0) = 1).
+	int DisplayTop() {
+		FplNode sequence;
+		sequence.op = FplOp::Sequence;
+		for (;;) {
+			int node = Sum();
+			while (IsRelation(Peek()) || IsOp(Peek(), L'~')) {
+				FplRel rel = IsOp(Peek(), L'~') ? (Next(), FplRel::Fit) : RelOf(Next());
+				int rhs = Sum();
+				node = Span(m_Ast.Cmp(rel, node, rhs), node, rhs);
+			}
+			sequence.kids.push_back(node);
+			if (!IsOp(Peek(), L','))
+				break;
+			Next();
+		}
+		Expect(Tk::End);
+		if (sequence.kids.size() == 1)
+			return sequence.kids[0];
+		return m_Ast.Add(std::move(sequence));
+	}
+
 	const Token& Peek() const { return m_Tokens[m_Pos]; }
 	const Token& Next() { return m_Tokens[m_Pos < m_Tokens.size() - 1 ? m_Pos++ : m_Pos]; }
 
@@ -886,6 +910,7 @@ private:
 			else if (StartsImplicitFactor(Peek())) {
 				int rhs = Power();
 				node = Span(m_Ast.Binary(FplOp::Mul, node, rhs), node, rhs);
+				m_Ast.nodes[node].implicit = true;
 			}
 			else if (Peek().type == Tk::Num) {
 				Fail(FplErrorCode::UnexpectedToken, Peek());	// "3 4", "x 2"
@@ -931,6 +956,10 @@ private:
 				int e = Make(m_Ast.Num(t.value), t.pos, t.len);
 				node = Span(m_Ast.Binary(FplOp::Pow, node, e), node, e);
 			}
+			else if (m_Options.display && IsOp(t, Prime) && m_Ast[node].op == FplOp::Var) {
+				Next();
+				m_Ast.nodes[node].primes++;
+			}
 			else
 				return node;
 		}
@@ -940,7 +969,8 @@ private:
 		auto& t = Next();
 		switch (t.type) {
 			case Tk::Num:
-				return Make(m_Ast.Num(t.value), t.pos, t.len);
+				// (a display parse keeps it as it was typed)
+				return Make(m_Options.display ? m_Ast.Num(t.value, t.name) : m_Ast.Num(t.value), t.pos, t.len);
 
 			case Tk::Name:
 				switch (t.kind) {
@@ -951,7 +981,10 @@ private:
 					case NameKind::User: return UserCall(t);
 					case NameKind::Integral: return Integral(t);
 					case NameKind::Aggregate: return Aggregate(t, t.name);
-					case NameKind::Unknown: Fail(FplErrorCode::UnknownName, t);
+					case NameKind::Unknown:
+						if (m_Options.display)
+							return Make(m_Ast.Var(t.name), t.pos, t.len);
+						Fail(FplErrorCode::UnknownName, t);
 				}
 				break;
 
@@ -967,6 +1000,14 @@ private:
 							Next(), items.push_back(Sum());
 						Close(close);
 						m_AbsDepth = saved;
+						if (items.size() == 1 && m_Options.display) {
+							FplNode group;
+							group.op = FplOp::Group;
+							group.kids = std::move(items);
+							if (close == L']')
+								group.name = L"[";
+							return Make(m_Ast.Add(std::move(group)), t.pos, m_Tokens[m_Pos - 1].pos + 1 - t.pos);
+						}
 						if (items.size() == 1)
 							return items[0];
 						FplNode n;
@@ -1093,7 +1134,7 @@ private:
 			args.push_back(a);
 			end = m_Ast[a].pos + m_Ast[a].len;
 		}
-		if ((func == FplFunc::Min || func == FplFunc::Max) && args.size() == 1 && m_Ast[args[0]].op == FplOp::Var &&
+		if (!m_Options.display && (func == FplFunc::Min || func == FplFunc::Max) && args.size() == 1 && m_Ast[args[0]].op == FplOp::Var &&
 			IsList(m_Ast[args[0]].name) && power < 0)
 			return Make(m_Ast.Var(FplAggregateName(func == FplFunc::Min ? L"min" : L"max", m_Ast[args[0]].name)),
 				name.pos, end - name.pos);
@@ -1104,7 +1145,7 @@ private:
 			m_Error.name = finfo.name;
 			throw ParseError();
 		}
-		if (primes > 0) {
+		if (primes > 0 && !m_Options.display) {
 			// derived in a name of its own, then the argument put in
 			if (args.size() != 1) {
 				m_Error = { FplErrorCode::NotDifferentiable, name.pos, end - name.pos, finfo.name };
@@ -1138,7 +1179,8 @@ private:
 		// derivative taken later in the parse sees them)
 		if (m_Options.degrees && IsTrig(func))
 			args[0] = m_Ast.Binary(FplOp::Mul, args[0], m_Ast.Num(std::numbers::pi / 180));
-		int call = Make(Expand(func, std::move(args)), name.pos, end - name.pos);
+		int call = Make(m_Options.display ? m_Ast.Call(func, std::move(args)) : Expand(func, std::move(args)), name.pos, end - name.pos);
+		m_Ast.nodes[call].primes = primes;
 		if (m_Options.degrees && IsInverseTrig(func))
 			call = Make(m_Ast.Binary(FplOp::Mul, call, m_Ast.Num(180 / std::numbers::pi)), name.pos, end - name.pos);
 		if (power >= 0)
@@ -1173,6 +1215,20 @@ private:
 	// The user's function, inlined: "f(2x)", "f'(x)", "g(a, b)".
 	int UserCall(const Token& name) {
 		const auto& fn = (*m_Options.functions)[name.user];
+		if (m_Options.display) {
+			if (fn.params.empty())
+				return Make(m_Ast.Var(fn.name), name.pos, name.len);
+			int primes = 0;
+			while (IsOp(Peek(), Prime))
+				Next(), primes++;
+			int end;
+			FplNode call;
+			call.op = FplOp::Named;
+			call.name = fn.name;
+			call.primes = primes;
+			call.kids = Arguments(name, end);
+			return Make(m_Ast.Add(std::move(call)), name.pos, end - name.pos);
+		}
 		if (fn.params.empty()) {
 			// a substitution: its name stands for its body, with no arguments (a(x + 1) is a times x + 1)
 			if (IsOp(Peek(), Prime))
@@ -1221,6 +1277,13 @@ private:
 		std::vector<int> args = Arguments(name, end);
 		if (aggregate == L"sum" && args.size() == 4)
 			return Series(name, std::move(args), end, false);
+		if (m_Options.display) {
+			FplNode call;
+			call.op = FplOp::Named;
+			call.name = aggregate;
+			call.kids = std::move(args);
+			return Make(m_Ast.Add(std::move(call)), name.pos, end - name.pos);
+		}
 		if (args.size() != 1 || m_Ast[args[0]].op != FplOp::Var || !IsList(m_Ast[args[0]].name)) {
 			m_Error = { FplErrorCode::NotAList, name.pos, end - name.pos, aggregate };
 			throw ParseError();
@@ -1291,6 +1354,13 @@ private:
 			m_Error = { FplErrorCode::ArgCount, op.pos, end - op.pos, name.name };
 			throw ParseError();
 		}
+		if (m_Options.display) {
+			FplNode deriv;
+			deriv.op = FplOp::Deriv;
+			deriv.name = op.name;
+			deriv.kids = std::move(args);
+			return Make(m_Ast.Add(std::move(deriv)), op.pos, end - op.pos);
+		}
 		FplError e;
 		int d = FplDerive(m_Ast, args[0], op.name, &e);
 		if (d < 0) {
@@ -1341,6 +1411,7 @@ private:
 			!IsOp(Peek(), DerivOp)) {
 			int rhs = Power();
 			node = Span(m_Ast.Binary(FplOp::Mul, node, rhs), node, rhs);
+			m_Ast.nodes[node].implicit = true;
 		}
 		return node;
 	}
@@ -1442,7 +1513,7 @@ FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) 
 		return result;
 	}
 	// a sum's index used outside it is an unknown name (unless a parameter has the name too)
-	if (!lexer.Indexes().empty()) {
+	if (!lexer.Indexes().empty() && !options.display) {
 		std::vector<std::wstring> scope;
 		const FplAst& ast = result.ast;
 		std::function<bool(int)> check = [&](int node) {

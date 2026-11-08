@@ -4,6 +4,8 @@ A math function plotter control for WTL, in 2D (Direct2D) and 3D (Direct3D 11). 
 
 This page lists what can be written in a graph's text. `include/FunctionPlot.h` has the control's API.
 
+The legend shows each graph's text as mathematics, with real roots, fractions and limits, unless the control has `FPLS_PLAINLEGEND`. `CFunctionPlotMathCtrl` shows one text the same way in a window of its own. A text that has an error, or doesn't fit, stays as it was typed.
+
 ## Functions
 
 An angle is in radians unless the control is in degrees (`SetDegrees`). In degrees, the functions marked ° take degrees, and the inverse ones return them.

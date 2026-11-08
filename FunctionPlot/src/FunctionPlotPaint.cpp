@@ -336,7 +336,26 @@ void CFunctionPlotCtrl::LayoutPanel() {
 			row.error = (bool)g.expr.error;
 			row.note = !row.error && g.expr.kind == FplKind::Regression;
 			row.stopped = !row.error && (s.mode3D ? g.incomplete3D : g.geometry.incomplete);
-			float h = FplGraphRow + (row.error || row.note || row.stopped ? FplErrorLine : 0);
+			// the text as mathematics, if it reads and fits, with room left for a value after it
+			if (!(style & FPLS_PLAINLEGEND) && !row.error) {
+				const bool hasValue = g.definition || g.listDefinition || g.expr.kind == FplKind::Integral;
+				const double room = width - 36 - (hasValue ? 70 : 0);
+				const std::wstring key = g.text + L'\n' + std::to_wstring((int)room);
+				if (s.mathCache.size() > 256)
+					s.mathCache.clear();
+				auto found = s.mathCache.find(key);
+				if (found == s.mathCache.end()) {
+					FplMathLayout layout;
+					std::shared_ptr<FplMathDrawing> drawing;
+					if (FplFitMath(g.text, s.plot.DisplayOptions(), { 15, 13, 11 }, room, FplDWriteMeasure(), layout))
+						drawing = FplMakeMathDrawing(std::move(layout));
+					found = s.mathCache.emplace(key, std::move(drawing)).first;
+				}
+				row.math = found->second;
+				if (row.math)
+					row.main = std::max(FplGraphRow, (float)(row.math->layout.ascent + row.math->layout.descent) + 8);
+			}
+			float h = row.main + (row.error || row.note || row.stopped ? FplErrorLine : 0);
 			row.rect = { left, y, right, y + h };
 			s.rows.push_back(row);
 			y += h;
@@ -1000,7 +1019,7 @@ void CFunctionPlotCtrl::PaintPanel() {
 		}
 		if (row.kind == FplPanelRow::Graph) {
 			auto& g = s.plot.graphs[row.index];
-			const float mid = top + FplGraphRow / 2;
+			const float mid = top + row.main / 2;
 			const bool hidden = (g.flags & FplGraphHidden) != 0;
 			if (!g.definition && !g.listDefinition && g.expr.kind != FplKind::Regression &&
 				!(g.expr.kind == FplKind::Definition && !g.expr.error)) {
@@ -1011,7 +1030,7 @@ void CFunctionPlotCtrl::PaintPanel() {
 				else
 					rt->FillEllipse(swatch, color);
 			}
-			std::wstring label = g.text;
+			std::wstring label = row.math ? std::wstring() : g.text;
 			if (g.definition && !g.expr.error) {
 				double value = s.plot.DefinitionValue(row.index);
 				label += L"   = " + FplFormatCoordinate(value, 1e-6);
@@ -1025,15 +1044,21 @@ void CFunctionPlotCtrl::PaintPanel() {
 				size_t n = values ? values->size() : 0;
 				label += L"   (" + std::to_wstring(n) + (n == 1 ? L" item)" : L" items)");
 			}
-			Text(rt, label, s.panelText.Get(), { left + 28, top, right - 8, top + FplGraphRow }, hidden ? muted : text);
+			float textLeft = left + 28;
+			if (row.math) {
+				auto& layout = row.math->layout;
+				FplDrawMath(rt, *row.math, textLeft, mid + (float)(layout.ascent - layout.descent) / 2, hidden ? muted : text, s.roundStroke.Get());
+				textLeft += (float)layout.width;
+			}
+			Text(rt, label, s.panelText.Get(), { textLeft, mid - FplGraphRow / 2, right - 8, mid + FplGraphRow / 2 }, hidden ? muted : text);
 			if (row.error) {
 				Text(rt, g.expr.error.Message(), s.panelSmall.Get(),
-					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine },
+					{ left + 28, top + row.main - 6, right - 8, top + row.main - 6 + FplErrorLine },
 					s.Brush(c.crError));
 			}
 			else if (row.stopped) {
 				Text(rt, L"Stops early: it ran out of steps", s.panelSmall.Get(),
-					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine }, muted);
+					{ left + 28, top + row.main - 6, right - 8, top + row.main - 6 + FplErrorLine }, muted);
 			}
 			else if (row.note) {
 				// the fit: its names' values and R squared (U+00B2)
@@ -1042,7 +1067,7 @@ void CFunctionPlotCtrl::PaintPanel() {
 					fit += name + L" = " + FplFormatCoordinate(value, std::max(std::abs(value), 1.0) * 1e-5) + L",  ";
 				fit += L"R\x00B2 = " + FplFormatCoordinate(g.r2, 1e-5);
 				Text(rt, fit, s.panelSmall.Get(),
-					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine }, muted);
+					{ left + 28, top + row.main - 6, right - 8, top + row.main - 6 + FplErrorLine }, muted);
 			}
 		}
 		else {

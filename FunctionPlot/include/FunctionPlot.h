@@ -41,6 +41,7 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLS_NOANIMATION   0x0800   // undo, redo, Home, F and zooming to a rectangle jump instead of gliding (as they do when
                                     // Windows' client area animations are off)
 #define FPLS_ALWAYSANIMATE 0x1000   // they glide even when Windows' client area animations are off
+#define FPLS_PLAINLEGEND   0x2000   // the legend shows graphs' texts as typed, not as mathematics (roots, fractions, powers)
 #define FPLS_POLARGRID     0x0400   // circles and spokes for the grid, labeled by radius and angle (not on log axes, or in 3D)
 
 // ---- Graphs -------------------------------------------------------------------
@@ -251,6 +252,7 @@ struct NMFPLVIEW3D {
 struct FplState;
 
 class CFunctionPlotCtrl : public ATL::CWindowImpl<CFunctionPlotCtrl> {
+	friend class CFunctionPlotMathCtrl;
 public:
 	DECLARE_WND_CLASS_EX(L"WC_FunctionPlot", CS_DBLCLKS, -1)
 
@@ -513,4 +515,42 @@ private:
 	void NotifyView3D();
 
 	std::unique_ptr<FplState> m_State;
+};
+
+// ---- An expression as mathematics --------------------------------------------------------------------------------------
+
+constexpr wchar_t WC_FUNCTIONPLOTMATH[] = L"WC_FunctionPlotMath";
+
+// A small window that shows one graph's text as mathematics, as large as fits, in the system's window colors: a preview beside
+// where it's typed, or a formula on its own. Text that doesn't read is shown as it is.
+class CFunctionPlotMathCtrl : public ATL::CWindowImpl<CFunctionPlotMathCtrl> {
+public:
+	DECLARE_WND_CLASS_EX(L"WC_FunctionPlotMath", 0, -1)
+
+	CFunctionPlotMathCtrl();
+	~CFunctionPlotMathCtrl();
+
+	// plot: whose names to read it by (it must outlive this, and SetText be called again when its graphs change).
+	void SetText(LPCWSTR text, const CFunctionPlotCtrl* plot = nullptr);
+	int GetIdealHeight() const;					// pixels, for what it's showing now
+
+	BEGIN_MSG_MAP(CFunctionPlotMathCtrl)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_SIZE, OnSize)
+		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnColorsChanged)
+		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
+		MESSAGE_HANDLER(CFunctionPlotCtrl::ThemeChangedMessage, OnColorsChanged)
+	END_MSG_MAP()
+
+private:
+	LRESULT OnPaint(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) { return 1; }
+	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
+	void Fit();
+
+	std::unique_ptr<struct FplMathViewState> m_State;
 };

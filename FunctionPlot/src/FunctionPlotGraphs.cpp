@@ -125,6 +125,8 @@ void FplPlot::Build() {
 	}
 	for (auto& p : params)
 		options.weakQ = options.weakQ || (p.name == L"q" && (p.flags & FplParamAuto));
+	m_PlainQ = options.plainQ;
+	m_WeakQ = options.weakQ;
 	std::vector<FplError> functionErrors(graphs.size());
 	auto taken = [&](const std::wstring& name) {
 		if (std::find(m_Names.begin(), m_Names.end(), name) != m_Names.end())
@@ -813,6 +815,17 @@ bool FplPlot::IsHeavy(int graph, bool in3D) const {
 	if (g.expr.kind == FplKind::Implicit || g.expr.kind == FplKind::Surface)
 		return true;
 	return IsCurveKind(g.expr.kind) && EvalCost(graph) > SlowEval;
+}
+
+FplParseOptions FplPlot::DisplayOptions() const {
+	FplParseOptions options;
+	options.parameters = &m_Names;
+	options.functions = &m_Functions;
+	options.lists = &m_ListNames;
+	options.plainQ = m_PlainQ;
+	options.weakQ = m_WeakQ;
+	options.display = true;
+	return options;
 }
 
 double FplPlot::EvalCost(int graph) const {

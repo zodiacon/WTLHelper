@@ -70,6 +70,11 @@ enum class FplOp : uint8_t {
 	Integral,	// integral(body, var, lo, hi): name is the variable, bound in the body; kids body, lo, hi
 	Series,		// sum(body, k, lo, hi), or prod(...) with product: name is the index, bound in the body; kids body, lo, hi
 	List,		// [a, b, c]: only as a definition's value
+	// a display parse's (FplParseOptions::display), which is drawn and never evaluated
+	Group,		// (a), with the name "[" for [a]: parentheses as typed
+	Deriv,		// d/dx a: name is the variable
+	Named,		// f(a, b) of the user's, or mean(L): name, with its primes
+	Sequence,	// a, b: what's separated at the top, as an ODE's conditions
 };
 
 enum class FplRel : uint8_t { Eq, Lt, Le, Gt, Ge, Fit };	// Fit: "~", a regression
@@ -119,6 +124,8 @@ struct FplNode {
 	std::vector<int> kids;
 	int pos = 0, len = 0;			// in the source; 0, 0 for nodes made later (a derivative's)
 	bool product = false;		// Series: prod rather than sum
+	bool implicit = false;		// Mul: written with no sign
+	int primes = 0;				// a display parse's Var, Call, Named
 };
 
 // Nodes in one vector, referred to by index. Nodes are never changed once made, so a subtree can be shared (a chained
@@ -165,6 +172,9 @@ struct FplParseOptions {
 	bool plainQ = false;
 	// A parameter q that was only added for another line (FPLPF_AUTO) doesn't take it from a line with r and no other variable.
 	bool weakQ = false;
+	// What was typed rather than what it means, for drawing it: no expansions, inlining or derivatives; primes on names, commas at
+	// the top and names nothing knows are kept (FunctionPlotMath.h).
+	bool display = false;
 };
 
 // The list aggregates, and the parameter name one of a list is.

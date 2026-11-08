@@ -21,6 +21,21 @@ using Microsoft::WRL::ComPtr;
 ID2D1Factory* FplD2DFactory();
 IDWriteFactory* FplDWriteFactory();
 
+// sizes, in DIPs
+constexpr float FplPanelMargin = 10, FplPanelPad = 6, FplGraphRow = 26, FplErrorLine = 16, FplSliderRow = 30;
+constexpr float FplTraceDistance = 10, FplSnapDistance = 8;
+
+// a text as mathematics, ready to draw
+struct FplMathDrawing {
+	FplMathLayout layout;
+	std::vector<ComPtr<IDWriteTextLayout>> texts;		// by item
+	std::vector<float> baselines;						// where the layout's baseline is in each
+	std::vector<ComPtr<ID2D1PathGeometry>> lines;		// by item
+};
+FplMathMeasure FplDWriteMeasure();
+std::shared_ptr<FplMathDrawing> FplMakeMathDrawing(FplMathLayout layout);
+void FplDrawMath(ID2D1RenderTarget* rt, const FplMathDrawing& drawing, float x, float baseline, ID2D1Brush* brush, ID2D1StrokeStyle* stroke);
+
 // a graph's sampled geometry for drawing
 struct FplGraphPaths {
 	bool full = false;					// not the coarse version a heavy graph shows at first
@@ -58,6 +73,8 @@ struct FplPanelRow {
 	bool error = false;					// a graph's: a second line with the message
 	bool note = false;					// a graph's: a second line with a regression's fit
 	bool stopped = false;				// an ODE's solution ran out of steps
+	std::shared_ptr<FplMathDrawing> math;	// a graph's text as mathematics (none: as it was typed)
+	float main = FplGraphRow;			// a graph's first line: its height
 };
 
 enum class FplPanelPart : uint8_t { None, Panel, Graph, Slider, Play, Toggle };
@@ -88,9 +105,6 @@ struct FplTransition {
 
 enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point, Box, Point3D };
 
-// sizes, in DIPs
-constexpr float FplPanelMargin = 10, FplPanelPad = 6, FplGraphRow = 26, FplErrorLine = 16, FplSliderRow = 30;
-constexpr float FplTraceDistance = 10, FplSnapDistance = 8;
 
 struct FplState {
 	FplPlot plot;
@@ -109,6 +123,7 @@ struct FplState {
 	bool exporting = false;
 	std::unordered_map<COLORREF, ComPtr<ID2D1SolidColorBrush>> brushes;
 	ComPtr<ID2D1StrokeStyle> roundStroke, dashStroke, dotStroke;
+	std::unordered_map<std::wstring, std::shared_ptr<FplMathDrawing>> mathCache;	// by the text and the room it had
 	ComPtr<IDWriteTextFormat> labelCenter, labelLeft, labelRight, panelText, panelSmall, traceText, icons;
 	std::vector<FplGraphPaths> paths;	// by graph
 

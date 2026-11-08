@@ -6181,6 +6181,208 @@ TEST(AnimationSpeed) {
 		CHECK_NEAR(zero.params[0].sweepSeconds, 4.0);
 }
 
+TEST(MathDisplay) {
+	// a measure that needs no fonts: half an em a character
+	FplMathMeasure measure = [](const std::wstring& text, double size, bool) { return text.size() * size * 0.5; };
+	auto layout = [&](const wchar_t* text, FplParseOptions options = {}) {
+		FplMathLayout out;
+		CHECK(FplFitMath(text, options, { 20 }, 0, measure, out));
+		return out;
+	};
+	auto said = [&](const wchar_t* text) { return FplDescribeMath(layout(text)); };
+	const std::wstring minus(1, wchar_t(0x2212)), dot(1, wchar_t(0x00B7)), prime(1, wchar_t(0x2032)), theta(1, wchar_t(0x03B8));
+	const std::wstring le(1, wchar_t(0x2264));
+
+	// what's typed comes out, in order, with a stroke for what's drawn
+	CHECK_STR(said(L"y = 2x"), L"y=2x");
+	CHECK_STR(said(L"y = 2*x"), L"y=2" + dot + L"x");
+	CHECK_STR(said(L"x - 1"), L"x" + minus + L"1");
+	CHECK_STR(said(L"-x"), minus + L"x");
+	CHECK_STR(said(L"sqrt(x^2 + y^2)"), L"|x2+y2");
+	CHECK_STR(said(L"\x221Ax"), L"|x");
+	CHECK_STR(said(L"root(3, x)"), L"|x3");
+	CHECK_STR(said(L"|x - 1|"), L"|x" + minus + L"1|");
+	CHECK_STR(said(L"abs(x)"), L"|x|");
+	CHECK_STR(said(L"floor(x)"), L"|x|");
+	CHECK_STR(said(L"exp(x)"), L"ex");
+	CHECK_STR(said(L"e^x"), L"ex");
+	CHECK_STR(said(L"pi x"), L"\x03C0x");
+	CHECK_STR(said(L"x!"), L"x!");
+	CHECK_STR(said(L"x^2 <= 1"), L"x2" + le + L"1");
+	CHECK_STR(said(L"0.50 x"), L"0.50x");		// numbers as typed
+	CHECK_STR(said(L"y1 + y"), L"y1+y");
+
+	// parentheses as typed, except where the layout shows the grouping itself
+	CHECK_STR(said(L"(x + 1)(x - 1)"), L"|x+1||x" + minus + L"1|");
+	CHECK_STR(said(L"(x + 1)^2"), L"|x+1|2");
+	CHECK_STR(said(L"(x + 1)/(x - 1)"), L"x+1x" + minus + L"1|");
+	CHECK_STR(said(L"2^(x + 1)"), L"2x+1");
+	CHECK_STR(said(L"sqrt((x))"), L"|x");
+	CHECK_STR(said(L"f(x) = (x)"), L"f|x|=|x|");		// f is nothing known here
+	CHECK_STR(said(L"[x]"), L"|x|");
+
+	// functions: bare with a plain argument, else in parentheses
+	CHECK_STR(said(L"sin x"), L"sinx");
+	CHECK_STR(said(L"sin(x)"), L"sinx");
+	CHECK_STR(said(L"sin 2x"), L"sin2x");
+	CHECK_STR(said(L"sin(x + 1)"), L"sin|x+1|");
+	CHECK_STR(said(L"gamma(x)"), L"gamma|x|");
+	CHECK_STR(said(L"atan2(y, x)"), L"atan2|y,x|");
+	CHECK_STR(said(L"sin^2 x"), L"sin2x");
+	CHECK_STR(said(L"sin^-1 x"), L"sin" + minus + L"1x");
+	CHECK_STR(said(L"asin(x)"), L"sin" + minus + L"1x");
+	CHECK_STR(said(L"log2(x)"), L"log2x");
+	CHECK_STR(said(L"log(x, 3)"), L"log3x");
+	CHECK_STR(said(L"sin'(x)"), L"sin" + prime + L"x");
+	CHECK_STR(said(L"sin''(2x)"), L"sin" + prime + prime + L"2x");
+
+	// as typed, not as it means: no derivative taken, nothing expanded, degrees left alone
+	CHECK_STR(said(L"d/dx x^3"), L"ddx|x3");
+	CHECK_STR(said(L"clamp(x, 0, 1)"), L"clamp|x,0,1|");
+	CHECK_STR(said(L"frac(x)"), L"frac|x|");
+	FplParseOptions degrees;
+	degrees.degrees = true;
+	CHECK_STR(FplDescribeMath(layout(L"sin x", degrees)), L"sinx");
+	// with a plot's names: its functions and substitutions stay as written, a parameter is a name
+	auto plot = MakePlot({ L"f(x) = x^2", L"a = x - 1", L"y = f(2x) + a + f'(x) + k" }, { Param(L"k", 2) });
+	CHECK_STR(FplDescribeMath(layout(L"y = f(2x) + a + f'(x) + k", plot.DisplayOptions())),
+		L"y=f|2x|+a+f" + prime + L"|x|+k");
+	CHECK_STR(FplDescribeMath(layout(L"f(x) = x^2", plot.DisplayOptions())), L"f|x|=x2");
+	// q as what it reads as: theta in a polar line
+	CHECK_STR(said(L"r = 2 + cos 3q"), L"r=2+cos3" + theta);
+	// names nothing knows don't stop it; an ODE, with its conditions; systems; dy/dx
+	CHECK_STR(said(L"y = a b"), L"y=ab");
+	CHECK_STR(said(L"y' = -x/y, y(0) = 3"), L"y" + prime + L"=" + minus + L"xy|,y|0|=3");
+	CHECK_STR(said(L"y'' = -y, y(0) = 1, y'(0) = 0"), L"y" + prime + prime + L"=" + minus + L"y,y|0|=1,y" + prime + L"|0|=0");
+	CHECK_STR(said(L"x' = y, y' = -x, (1, 2)"), L"x" + prime + L"=y,y" + prime + L"=" + minus + L"x,|1,2|");
+	CHECK_STR(said(L"dy/dx = x"), L"dydx|=x");
+	CHECK_STR(said(L"(cos t, sin t)"), L"|cost,sint|");
+	CHECK_STR(said(L"L = [1, 2, 3]"), L"L=|1,2,3|");
+	CHECK_STR(said(L"y1 ~ m x1 + b"), L"y1\x223C" L"mx1+b");
+	CHECK_STR(said(L"mean(L)"), L"mean|L|");
+	// a chain, a condition, cases
+	CHECK_STR(said(L"x^2 < y < 4"), L"x2<y<4");
+	CHECK_STR(said(L"x^2 {0 < x < 2}"), L"x2|0<x<2|");
+	CHECK_STR(said(L"{x < 0: -x, x^2}"), L"|" + minus + L"xx<0x2");
+	// sums, products and integrals, with their limits
+	CHECK_STR(said(L"sum(x^k/k!, k, 0, n)"), L"\x2211k=0nxkk!|");
+	CHECK_STR(said(L"prod(k, k, 1, 3)"), L"\x220Fk=13k");
+	CHECK_STR(said(L"integral(x^2, 0, 1)"), L"\x222B" L"10x2dx");
+	CHECK_STR(said(L"integral(t, t, 0, x)"), L"\x222Bx0tdt");
+
+	// it doesn't read: no layout
+	FplMathLayout none;
+	for (const wchar_t* text : { L"x +", L"(x", L"", L"a: 0..5", L"sin", L"1 2" })
+		CHECK(!FplFitMath(text, {}, { 20 }, 0, measure, none));
+
+	// the shapes. A power: smaller, and above where its base's text sits
+	auto power = layout(L"x^2");
+	CHECK_INT(power.items.size(), 2);
+	CHECK(power.items[1].size < power.items[0].size);
+	CHECK(power.items[1].y < power.items[0].y);
+	CHECK(power.items[1].x >= 10);		// past the x
+	CHECK(power.width > 10);
+	auto subscript = layout(L"y1");
+	CHECK(subscript.items[1].y > 0);
+	// a fraction: over and under its bar, centered, around the axis
+	auto fraction = layout(L"1/abcd");
+	CHECK_INT(fraction.items.size(), 3);
+	auto& top = fraction.items[0];
+	auto& bottom = fraction.items[1];
+	auto& bar = fraction.items[2];
+	CHECK(bar.isLine);
+	CHECK(top.y < bar.points[0].y);
+	CHECK(bottom.y > bar.points[0].y);
+	CHECK(bar.points[0].y < 0);
+	CHECK(top.x > bottom.x);
+	CHECK_NEAR_TOL(top.x + top.text.size() * top.size * 0.25, bottom.x + bottom.text.size() * bottom.size * 0.25, 1e-9);
+	CHECK(fraction.ascent > 20 * 0.72);		// taller than a line
+	CHECK(fraction.descent > 20 * 0.22);
+	// a radical: over all of what's in it, however tall, and wider
+	auto radical = layout(L"sqrt(1/x)");
+	auto plainRoot = layout(L"sqrt(x)");
+	CHECK(radical.ascent > plainRoot.ascent);
+	const FplMathItem* sign = nullptr;
+	for (auto& item : radical.items)
+		if (item.isLine && item.points.size() == 5)
+			sign = &item;
+	CHECK(sign != nullptr);
+	if (sign) {
+		for (auto& item : radical.items)
+			if (!item.isLine) {
+				CHECK(item.x > sign->points[3].x);
+				CHECK(item.y - 0.72 * item.size > sign->points[3].y);
+			}
+		CHECK_NEAR(sign->points.back().x + 0.04 * 20, radical.width);
+	}
+	// delimiters grow with what's in them
+	auto tall = layout(L"(1/x)");
+	auto low = layout(L"(x)");
+	auto extent = [](const FplMathLayout& l) {
+		double lo = 1e9, hi = -1e9;
+		for (auto& item : l.items)
+			if (item.isLine && item.points.size() > 2)
+				for (auto& p : item.points)
+					lo = std::min(lo, p.y), hi = std::max(hi, p.y);
+		return hi - lo;
+	};
+	CHECK(extent(tall) > extent(low) * 1.3);
+	// everything is inside its box, for every kind
+	for (const wchar_t* text : { L"sqrt(x^2 + y^2)", L"(x + 1)/(x - 1)", L"sum(x^k/k!, k, 0, n)", L"integral(sin x, 0, 1)", L"{x < 0: -x, x^2}",
+		L"root(3, x + 1)", L"|x/2|", L"floor(x)/ceil(x)", L"e^(x^2)", L"y' = -x/y, y(0) = 3" }) {
+		auto l = layout(text);
+		CHECK(l.width > 0);
+		bool inside = true;
+		for (auto& item : l.items) {
+			if (item.isLine) {
+				for (auto& p : item.points)
+					inside = inside && p.x + item.x >= -1e-9 && p.x + item.x <= l.width + 1e-9 && p.y + item.y >= -l.ascent - 1e-9 && p.y + item.y <= l.descent + 1e-9;
+			}
+			else {
+				const double w = item.text.size() * item.size * 0.5;
+				inside = inside && item.x >= -1e-9 && item.x + w <= l.width + 1e-9;
+				inside = inside && item.y - 0.72 * item.size >= -l.ascent - 1e-9 && item.y + 0.22 * item.size <= l.descent + 1e-9;
+			}
+		}
+		CHECK(inside);
+	}
+	// nothing runs over what's before it in a row: each item starts past where the last text in a plain row ends
+	auto row = layout(L"x + y + z");
+	for (size_t i = 1; i < row.items.size(); i++)
+		CHECK(row.items[i].x >= row.items[i - 1].x + row.items[i - 1].text.size() * row.items[i - 1].size * 0.5 - 1e-9);
+
+	// the size that fits, or none
+	FplMathLayout fit;
+	CHECK(FplFitMath(L"x + y + z + w", {}, { 20, 10 }, 200, measure, fit));
+	CHECK(fit.width <= 200);
+	CHECK_NEAR(fit.items[0].size, 20.0);
+	CHECK(FplFitMath(L"x + y + z + w", {}, { 20, 10 }, 60, measure, fit));
+	CHECK_NEAR(fit.items[0].size, 10.0);
+	CHECK(!FplFitMath(L"x + y + z + w", {}, { 20, 10 }, 5, measure, fit));
+
+	// a display parse changes nothing for one that's evaluated
+	std::vector<std::wstring> names;
+	auto e = FplBuild(L"y = sin 2x", names);
+	double slots[FplFirstParam] = {};
+	slots[FplSlotX] = 0.5;
+	CHECK_NEAR(e.f.Eval(slots), std::sin(1.0));
+
+	// the SVG's legend: as text and strokes with a measure, as typed without one
+	FplViewport v = View(-10, 10, -8, 8, 1000, 800);
+	auto drawn = MakePlot({ L"y = sqrt(x^2 + 1)/2", L"x +" });
+	drawn.Sample(v);
+	FplSvgStyle style;
+	style.graphColors = { 0xFF0000, 0x00FF00 };
+	std::string svg = FplWriteSvg(drawn, v, style);
+	CHECK(svg.find(">y = sqrt(x^2 + 1)/2<") != std::string::npos);
+	style.mathMeasure = measure;
+	svg = FplWriteSvg(drawn, v, style);
+	CHECK(svg.find(">y = sqrt(x^2 + 1)/2<") == std::string::npos);
+	CHECK(svg.find("font-style=\"italic\">x<") != std::string::npos);
+	CHECK(svg.find("font-family=\"Cambria Math, Cambria, serif\">=<") != std::string::npos);
+	CHECK(svg.find(">x +<") != std::string::npos);		// one with an error stays as typed
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -6276,6 +6478,7 @@ int wmain() {
 	Run_SlowCurves();
 	Run_SpecialFunctions();
 	Run_AnimationSpeed();
+	Run_MathDisplay();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

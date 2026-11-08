@@ -99,6 +99,7 @@
     <ClInclude Include="src\FunctionPlot3D.h" />
     <ClInclude Include="src\FunctionPlotData.h" />
     <ClInclude Include="src\FunctionPlotExpr.h" />
+    <ClInclude Include="src\FunctionPlotMath.h" />
     <ClInclude Include="src\FunctionPlotGraphs.h" />
     <ClInclude Include="src\FunctionPlotModel.h" />
     <ClInclude Include="src\FunctionPlotRender3D.h" />
@@ -114,6 +115,8 @@
     <ClCompile Include="src\FunctionPlotEval.cpp" />
     <ClCompile Include="src\FunctionPlotExport.cpp" />
     <ClCompile Include="src\FunctionPlotGraphs.cpp" />
+    <ClCompile Include="src\FunctionPlotMath.cpp" />
+    <ClCompile Include="src\FunctionPlotMathDraw.cpp" />
     <ClCompile Include="src\FunctionPlotPaint.cpp" />
     <ClCompile Include="src\FunctionPlotParse.cpp" />
     <ClCompile Include="src\FunctionPlotRender3D.cpp" />

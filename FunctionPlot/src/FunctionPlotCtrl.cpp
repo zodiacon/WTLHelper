@@ -555,6 +555,7 @@ BOOL CFunctionPlotCtrl::GetDegrees() const {
 void CFunctionPlotCtrl::Rebuild() {
 	auto& s = *m_State;
 	EndTransition();
+	s.mathCache.clear();		// the names known may change how a text reads
 	// the graphs change: what's being sampled for the old ones isn't wanted
 	if (s.worker)
 		s.worker->Cancel();
@@ -1812,6 +1813,8 @@ std::string CFunctionPlotCtrl::BuildSvg() {
 	svg.piTicks = (style & FPLS_PITICKS) != 0;
 	svg.polarGrid = (style & FPLS_POLARGRID) != 0;
 	svg.showColorScale = !(style & FPLS_NOCOLORSCALE);
+	if (!(style & FPLS_PLAINLEGEND))
+		svg.mathMeasure = FplDWriteMeasure();
 	svg.showLegend = !(style & FPLS_NOLEGEND) && !s.collapsed;
 	svg.axisTitles[0] = s.axisTitles[0];
 	svg.axisTitles[1] = s.axisTitles[1];

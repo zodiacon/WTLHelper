@@ -4,6 +4,7 @@
 // order, sampling every visible graph for a view, the features of a function (roots, extrema, intersections with the
 // other functions), and what a trace lands on.
 
+#include "FunctionPlotMath.h"
 #include "FunctionPlot3D.h"
 #include "FunctionPlotModel.h"
 
@@ -206,6 +207,8 @@ public:
 	// Seconds one evaluation takes, measured now, if the graph has an integral, a sum or a product, whose cost can't be seen
 	// from its size (else 0). A curve past about 8 microseconds is heavy, and past 50 its features aren't looked for.
 	double EvalCost(int graph) const;
+	// For drawing a text as mathematics with the names this plot knows.
+	FplParseOptions DisplayOptions() const;
 	// How to sample a heavy graph at once, on the UI thread: a surface or implicit curve on large cells, a slow curve as many
 	// straight lines as about 6 ms of evaluations make, with no refining or analysis.
 	FplSampleOptions CoarseOptions(int graph, const FplViewport& view) const;
@@ -274,6 +277,7 @@ private:
 	void SetElement(std::vector<double>& slots, const FplGraph& g, size_t i) const;
 	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
 	bool m_MeshIncomplete = false;
+	bool m_PlainQ = false, m_WeakQ = false;	// what Build found q to be
 	FplMesh m_FillMesh;				// what Mesh3D made of a region's fills
 	FplMesh m_FieldMesh;			// and of a field's slopes or arrows
 	float m_FieldOpacity = 1;
@@ -325,6 +329,7 @@ struct FplSvgStyle {
 	uint32_t panelBack = 0xF8F8F8, panelText = 0, panelBorder = 0xCCCCCC;
 	std::vector<uint32_t> graphColors;
 	bool showGrid = true, showAxes = true, piTicks = false, showLegend = true, polarGrid = false, showColorScale = true;
+	FplMathMeasure mathMeasure;			// the legend's texts as mathematics, measured by this (none: as they were typed)
 	std::wstring axisTitles[2];			// x, y: at the axes' ends
 };
 std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplSvgStyle& style);

@@ -88,6 +88,7 @@ enum {
 	ID_DEMO_POLARGRID,
 	ID_DEMO_ANIMATE,
 	ID_DEMO_SLOWTRANSITIONS,
+	ID_DEMO_MATHLEGEND,
 };
 
 // ---- Examples -------------------------------------------------------------------
@@ -115,6 +116,7 @@ static const Example g_Examples[] = {
 	{ L"Normal Distribution", L"y = 10normpdf(x, m, s)\r\ny = 3normcdf(x, m, s)\r\nm: -4..4\r\ns: 0.2..3", false },
 	{ L"Special Functions", L"y = 2besselj(0, x)\r\ny = 2airyai(x) - 3\r\ny = zeta(x) + 3\r\ny = lambertw(x) - 6\r\ny = ellipk(x/10) + 4", false },
 	{ L"Animation Speeds", L"y = sin(x - a) + 3\r\ny = sin(x - b)\r\ny = sin(x - c) - 3\r\na: 0..6.3, 16s\r\nb: 0..6.3, 4s\r\nc: 0..6.3, 0.1, 1s", false },
+	{ L"Math Display", L"y = sqrt(x^2 + 4)/(x^2 + 1)\r\nf(x) = root(3, x) + |x - 1|\r\ny = sin^2 x + log2(x) + e^(-x)\r\ny = sum(x^k/k!, k, 0, 5)\r\ny = integral(sin t/t, t, 1, x)\r\n{x < 0: -x, x^2}\r\ny' = -x/y, y(0) = 3\r\nd/dx x^3", false },
 	{ L"Series", L"y = sum(sin((2k - 1)x)/(2k - 1), k, 1, n) + 3\r\ny = sum(x^k/k!, k, 0, n) - 3\r\nn: 1..30, 1", false },
 	{ L"Substitutions", L"a = x - 1\r\nb = a^2\r\ny = 3a\r\ny = b/2 - 4\r\nx^2 + a^2 + y^2 = 16\r\ny' = -a y, y(0) = 3", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },
@@ -156,6 +158,8 @@ static const Example g_Examples[] = {
 
 static CFunctionPlotCtrl g_plot;
 static CEdit g_edit;
+static CFunctionPlotMathCtrl g_math;	// the caret's line as mathematics, under the lines
+static HWND g_leftPane;					// holds the two
 // the lines on the left, the plot on the right: WTLHelper's hairline, following its dark mode, where it's linked
 #ifdef DEMO_WTLHELPER
 static CCustomSplitterWindow g_splitter;
@@ -570,7 +574,44 @@ static int CaretLine() {
 	return (int)std::count(text.begin(), text.begin() + std::min(end, len), L'\n');
 }
 
+// The lines above, and under them what the caret's line looks like, as tall as that needs.
+static void LayoutLeftPane() {
+	if (!g_leftPane || !g_edit.IsWindow() || !g_math.IsWindow())
+		return;
+	RECT rc;
+	::GetClientRect(g_leftPane, &rc);
+	const int height = std::min<int>(g_math.GetIdealHeight(), rc.bottom / 2);
+	g_edit.SetWindowPos(nullptr, 0, 0, rc.right, rc.bottom - height, SWP_NOZORDER | SWP_NOACTIVATE);
+	g_math.SetWindowPos(nullptr, 0, rc.bottom - height, rc.right, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void UpdatePreview() {
+	if (!g_math.IsWindow())
+		return;
+	const int line = CaretLine();
+	auto lines = EditorLines();
+	std::wstring text = line < (int)lines.size() ? lines[line] : L"";
+	// a slider's range isn't an expression
+	RangeLine range;
+	if (ParseRangeLine(text, range) != RangeKind::NotOne)
+		text.clear();
+	g_math.SetText(text.c_str(), &g_plot);
+	LayoutLeftPane();
+}
+
+static LRESULT CALLBACK LeftPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg) {
+		case WM_SIZE:
+			LayoutLeftPane();
+			return 0;
+		case WM_COMMAND: case WM_NOTIFY: case WM_CTLCOLOREDIT: case WM_CTLCOLORSTATIC: case WM_CTLCOLORSCROLLBAR:
+			return ::SendMessageW(g_main, msg, wParam, lParam);
+	}
+	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 static void ShowLineError() {
+	UpdatePreview();
 	const int line = CaretLine();
 	FPLGRAPHINFO info;
 	std::wstring text;
@@ -706,6 +747,7 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_POLARGRID, s & FPLS_POLARGRID);
 	check(ID_DEMO_ANIMATE, !(s & FPLS_NOANIMATION));
 	check(ID_DEMO_SLOWTRANSITIONS, g_plot.GetTransitionTime() != 220);
+	check(ID_DEMO_MATHLEGEND, !(s & FPLS_PLAINLEGEND));
 	check(ID_DEMO_DEGREES, g_plot.GetDegrees() != FALSE);
 	check(ID_DEMO_LEGEND, !(s & FPLS_NOLEGEND));
 	check(ID_DEMO_SLIDERS, !(s & FPLS_NOSLIDERS));
@@ -939,6 +981,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_FIT: g_plot.ZoomToFit(TRUE); ShowView(); break;
 		case ID_DEMO_ANIMATE: ToggleStyle(FPLS_NOANIMATION | FPLS_ALWAYSANIMATE); break;
 		case ID_DEMO_SLOWTRANSITIONS: g_plot.SetTransitionTime(g_plot.GetTransitionTime() == 220 ? 1500 : 220); break;
+		case ID_DEMO_MATHLEGEND: ToggleStyle(FPLS_PLAINLEGEND); break;
 		case ID_DEMO_LOGX: g_plot.SetLogAxes(!g_plot.IsLogX(), g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_LOGY: g_plot.SetLogAxes(g_plot.IsLogX(), !g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_COPY:
@@ -1086,7 +1129,12 @@ static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 		case WM_PAINT:
 			PaintErrorMarks(hwnd);
 			break;
-		case WM_KEYUP: case WM_LBUTTONUP: case WM_MOUSEWHEEL: case WM_VSCROLL: case WM_SETFOCUS: case WM_KILLFOCUS:
+		case WM_KEYUP: case WM_LBUTTONUP:
+			UpdatePreview();
+			if (g_marksShown)
+				::InvalidateRect(hwnd, nullptr, FALSE);
+			break;
+		case WM_MOUSEWHEEL: case WM_VSCROLL: case WM_SETFOCUS: case WM_KILLFOCUS:
 			if (g_marksShown)
 				::InvalidateRect(hwnd, nullptr, FALSE);
 			break;
@@ -1130,7 +1178,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			// the lines keep their width as the window's size changes
 			g_splitter.SetSplitterExtendedStyle(0, SPLIT_PROPORTIONAL);
 			SetSplitterLimits(::GetDpiForWindow(hwnd));
-			g_edit.Create(g_splitter, CWindow::rcDefault, nullptr,
+			{
+				WNDCLASSEXW pane{ sizeof(pane) };
+				pane.lpfnWndProc = LeftPaneProc;
+				pane.hInstance = ::GetModuleHandleW(nullptr);
+				pane.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+				pane.lpszClassName = L"FunctionPlotDemoLeftPane";
+				::RegisterClassExW(&pane);
+				g_leftPane = ::CreateWindowExW(WS_EX_CONTROLPARENT, pane.lpszClassName, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+					0, 0, 0, 0, g_splitter, nullptr, pane.hInstance, nullptr);
+			}
+			g_math.Create(g_leftPane, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE);
+			g_edit.Create(g_leftPane, CWindow::rcDefault, nullptr,
 				WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_TABSTOP,
 				WS_EX_CLIENTEDGE, IDC_EDIT);
 			::SetWindowSubclass(g_edit, EditProc, 1, 0);
@@ -1138,7 +1197,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			SetEditMargins(hwnd);
 			g_plot.Create(g_splitter, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | FPLS_EQUALSCALE | FPLS_ALWAYSANIMATE,
 				0, IDC_PLOT);
-			g_splitter.SetSplitterPanes(g_edit, g_plot);
+			g_splitter.SetSplitterPanes(g_leftPane, g_plot);
 			::SetWindowSubclass(g_plot, PlotSizeProc, 1, 0);
 			g_status.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, IDC_STATUS);
 			Layout(hwnd);
@@ -1281,6 +1340,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_LOGY, L"Log &Y Axis");
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_LEGEND, L"&Legend");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_MATHLEGEND, L"Math in Legend");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_SLIDERS, L"&Sliders");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_COLLAPSE, L"&Collapse Panel\tCtrl+L");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_HEATMAPS, L"&Heat Maps");

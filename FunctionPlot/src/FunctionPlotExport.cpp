@@ -409,17 +409,50 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 				rows.push_back(i);
 		if (!rows.empty()) {
 			const double left = 10, top = 10, width = std::clamp(w * 0.4, 200.0, 340.0), row = 26;
+			// each text as mathematics, if there's a way to measure it and it reads and fits, its row as tall as it needs
+			std::vector<FplMathLayout> math(rows.size());
+			double height = 12;
+			for (size_t r = 0; r < rows.size(); r++) {
+				auto& g = plot.graphs[rows[r]];
+				if (!style.mathMeasure || g.expr.error ||
+					!FplFitMath(g.text, plot.DisplayOptions(), { 15, 13, 11 }, width - 36, style.mathMeasure, math[r]))
+					math[r] = {};
+				height += math[r].Empty() ? row : std::max(row, math[r].ascent + math[r].descent + 8);
+			}
 			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(width) + "\" height=\"" +
-				Num(rows.size() * row + 12) + "\" rx=\"6\" fill=\"" + Color(style.panelBack) + "\" stroke=\"" +
+				Num(height) + "\" rx=\"6\" fill=\"" + Color(style.panelBack) + "\" stroke=\"" +
 				Color(style.panelBorder) + "\"/>\n";
-			double y = top + 6 + row / 2;
-			for (size_t i : rows) {
-				auto& g = plot.graphs[i];
+			double rowTop = top + 6;
+			for (size_t r = 0; r < rows.size(); r++) {
+				auto& g = plot.graphs[rows[r]];
+				const double rowHeight = math[r].Empty() ? row : std::max(row, math[r].ascent + math[r].descent + 8);
+				const double y = rowTop + rowHeight / 2;
 				if (!g.definition && !g.expr.error)
 					svg += "<circle cx=\"" + Num(left + 15) + "\" cy=\"" + Num(y) + "\" r=\"6\" fill=\"" +
-						Color(colorOf(i)) + "\"" + ((g.flags & FplGraphHidden) ? " fill-opacity=\"0.25\"" : "") + "/>\n";
-				Text(svg, left + 28, y, "start", style.panelText, 14, g.text);
-				y += row;
+						Color(colorOf(rows[r])) + "\"" + ((g.flags & FplGraphHidden) ? " fill-opacity=\"0.25\"" : "") + "/>\n";
+				if (math[r].Empty())
+					Text(svg, left + 28, y, "start", style.panelText, 14, g.text);
+				else {
+					const double x = left + 28, baseline = y + (math[r].ascent - math[r].descent) / 2;
+					for (auto& item : math[r].items) {
+						if (item.isLine) {
+							std::string d;
+							FplPolyline line;
+							line.reserve(item.points.size());
+							for (auto& p : item.points)
+								line.push_back({ p.x + item.x + x, p.y + item.y + baseline });
+							AddPolyline(d, line, false);
+							svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + Color(style.panelText) + "\" stroke-width=\"" +
+								Num(item.stroke) + "\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n";
+						}
+						else {
+							svg += "<text x=\"" + Num(item.x + x) + "\" y=\"" + Num(item.y + baseline) + "\" fill=\"" + Color(style.panelText) +
+								"\" font-size=\"" + Num(item.size) + (item.italic ? "\" font-family=\"Cambria, serif\" font-style=\"italic\">"
+									: "\" font-family=\"Cambria Math, Cambria, serif\">") + Escape(item.text) + "</text>\n";
+						}
+					}
+				}
+				rowTop += rowHeight;
 			}
 		}
 	}
