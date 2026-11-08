@@ -929,7 +929,9 @@ void CollectSingular(const FplAst& ast, int node, unsigned variable, bool guarde
 
 } // namespace
 
-FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
+namespace {
+
+FplExpression BuildExpression(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
 	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists) {
 	FplExpression e;
 	FplParseOptions options;
@@ -1070,6 +1072,61 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 			e.df = FplCompile(parsed.ast, d, parameters, &ignored);
 		if (ignored)
 			e.df = {};
+	}
+	return e;
+}
+
+// Whether the text starts like the definition of a variable's name: "u(x) =" (y(x) = x^2 reads as an equation), or "u =" for
+// those never on the left of a plot (z = t and y = t are errors about t). Where's its name.
+bool DefinesVariable(std::wstring_view text, size_t& at, size_t& length) {
+	const size_t n = text.size();
+	size_t i = 0;
+	while (i < n && text[i] == L' ')
+		i++;
+	at = i;
+	while (i < n && ((text[i] >= L'a' && text[i] <= L'z') || (text[i] >= L'A' && text[i] <= L'Z') || text[i] == wchar_t(0x3B8)))
+		i++;
+	length = i - at;
+	if (length == 0 || !FplIsVariable(text.substr(at, length)))
+		return false;
+	const std::wstring_view name = text.substr(at, length);
+	while (i < n && text[i] == L' ')
+		i++;
+	if (i >= n || text[i] != L'(') {
+		if (name != L"t" && name != L"u" && name != L"v")
+			return false;
+	}
+	else {
+		if (name == L"y")
+			return false;
+		int depth = 0;
+		for (; i < n; i++) {
+			if (text[i] == L'(')
+				depth++;
+			else if (text[i] == L')' && --depth == 0)
+				break;
+		}
+		if (i >= n)
+			return false;
+		i++;
+		while (i < n && text[i] == L' ')
+			i++;
+	}
+	return i < n && text[i] == L'=';
+}
+
+} // namespace
+
+FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
+	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists) {
+	FplExpression e = BuildExpression(text, parameters, degrees, functions, lists);
+	// "u(x) = x - 1" reads as u times x, and "u = x - 1" as an equation with a variable that has no place in it: say what's
+	// wrong (only when it doesn't read: z = x y and r = 2 are plots)
+	if (e.error.code == FplErrorCode::VariableNotAllowed || e.error.code == FplErrorCode::NotAPlot ||
+		e.error.code == FplErrorCode::MisplacedPoint) {
+		size_t at = 0, length = 0;
+		if (DefinesVariable(text, at, length))
+			e.error = { FplErrorCode::ReservedName, static_cast<int>(at), static_cast<int>(length), std::wstring(text.substr(at, length)) };
 	}
 	return e;
 }

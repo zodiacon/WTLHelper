@@ -108,6 +108,7 @@ static const Example g_Examples[] = {
 	{ L"&Between Curves", L"x^2/4 - 3 < y < 4 - x^2/2\r\n6 < x < 8\r\ny^2 - 8 \x2264 x \x2264 -y^2 - 2\r\ny = 3sin x", false },
 	{ L"&Steps and Domains", L"y = floor x\r\ny = sqrt(9 - x^2)\r\ny = |x - 2| - 3\r\ny = x^3/10 {-4 < x < 4}\r\ny = sign(x) - 5", false },
 	{ L"&User Functions", L"f(x) = x^3/6 - x\r\nf'(x)\r\nf''(x)\r\ng(x) = f(x - a) + 1\r\ny = d/dx sin(x^2/4)", false },
+	{ L"Substitutions", L"a = x - 1\r\nb = a^2\r\ny = 3a\r\ny = b/2 - 4\r\nx^2 + a^2 + y^2 = 16\r\ny' = -a y, y(0) = 3", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },
 	{ L"&Vector Field", L"(y, -sin x)\r\ny^2/2 - cos x = c", false, false, Setup::FieldSlider },
 	{ L"&Animation", L"x^2 + y^2 = 4\r\n(2cos p, 2sin p)\r\ny = 2sin(x - p)\r\nr = 3 + cos(5\x03B8 + 2p)", false, false,
@@ -521,7 +522,7 @@ static void ShowLineError() {
 			text = L"Line " + std::to_wstring(line + 1) + L": " + info.szError + L" (at " + std::to_wstring(info.errorPos + 1) + L")";
 		else if (info.kind == FPLK_DEFINITION && std::isnan(info.value) && g_plot.GetList(info.szName, nullptr, 0) > 0)
 			text = std::wstring(info.szName) + L": " + std::to_wstring(g_plot.GetList(info.szName, nullptr, 0)) + L" items";
-		else if (info.kind == FPLK_DEFINITION)
+		else if (info.kind == FPLK_DEFINITION && !std::isnan(info.value))
 			text = std::wstring(info.szName) + L" = " + Number(info.value);
 	}
 	g_status.SetText(2, text.c_str());

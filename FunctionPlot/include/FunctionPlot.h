@@ -87,7 +87,8 @@ enum FPLKIND {
 	FPLK_PARAMETRIC,           // (x(t), y(t))
 	FPLK_IMPLICIT,             // F(x, y) = 0, or an inequality
 	FPLK_POINT,                // (a, b)
-	FPLK_DEFINITION,           // "c = 2a": defines c for the other graphs; "g(a, b) = a b" (a function of others)
+	FPLK_DEFINITION,           // "c = 2a": defines c for the other graphs; "g(a, b) = a b" (a function of others);
+	                           // "u1 = x - 1", a substitution: the name stands for that, in the graphs
 	FPLK_SURFACE,              // z = F(x, y): contours and, with FPLGF_HEATMAP, a heat map
 	FPLK_VECTORFIELD,          // (P(x, y), Q(x, y)): arrows
 	FPLK_SPACECURVE,           // (x(t), y(t), z(t)): 3D only
@@ -123,7 +124,7 @@ enum FPLERROR {
 	FPLE_NONE, FPLE_EMPTY, FPLE_UNEXPECTEDCHAR, FPLE_BADNUMBER, FPLE_UNEXPECTEDTOKEN, FPLE_UNEXPECTEDEND,
 	FPLE_MISSINGCLOSE, FPLE_UNKNOWNNAME, FPLE_ARGCOUNT, FPLE_MISSINGARGUMENT, FPLE_TOOMANYRELATIONS,
 	FPLE_MISPLACEDRELATION, FPLE_MISPLACEDPOINT, FPLE_MISPLACEDCONDITION, FPLE_VARIABLENOTALLOWED, FPLE_NOTAPLOT,
-	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_BADINITIAL, FPLE_ODEORDER, FPLE_INTERNAL,
+	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_BADINITIAL, FPLE_ODEORDER, FPLE_RESERVEDNAME, FPLE_INTERNAL,
 };
 
 struct FPLGRAPHINFO {

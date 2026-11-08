@@ -39,6 +39,7 @@ enum class FplErrorCode : uint8_t {
 	NotAList,			// mean(3): name is the function
 	BadInitial,			// a higher-order ODE's conditions aren't y(a) = b, y'(a) = c ... at one a
 	OdeOrder,			// y'''''' = ...: past the fifth order
+	ReservedName,		// u(x) = ..., u = x - 1: a variable can't name a function or a substitution; name is the name
 	Internal,
 };
 
@@ -124,6 +125,7 @@ bool FplIsVariable(std::wstring_view name);
 
 // A function the user defined ("f(x) = x^2", "g(a, b) = a b"): its parameters and its body, in a tree of its own. A
 // call is inlined: the body copied with the arguments for the parameters ("f'(x)": its derivative first).
+// A function of the user's. With no parameters it's a substitution, "a = x - 1": its name stands for its body, in place.
 struct FplUserFunction {
 	std::wstring name;
 	std::vector<std::wstring> params;

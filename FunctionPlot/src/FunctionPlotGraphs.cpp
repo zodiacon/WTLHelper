@@ -141,6 +141,24 @@ void FplPlot::Build() {
 				found = true;
 				continue;
 			}
+			// a substitution's name again, "a = ...": it would read as an equation with a put in
+			{
+				const size_t begin = g.text.find_first_not_of(L' ');
+				const size_t equal = g.text.find(L'=');
+				if (begin != std::wstring::npos && equal != std::wstring::npos && equal > begin) {
+					size_t last = equal;
+					while (last > begin && g.text[last - 1] == L' ')
+						last--;
+					const std::wstring head = g.text.substr(begin, last - begin);
+					bool again = false;
+					for (auto& f : m_Functions)
+						again = again || (f.params.empty() && f.name == head);
+					if (again) {
+						g.expr.error = { FplErrorCode::Redefined, static_cast<int>(begin), static_cast<int>(last - begin), head };
+						continue;
+					}
+				}
+			}
 			auto r = FplParse(g.text, options);
 			std::wstring name;
 			if (RedefinesName(r, m_Names, name)) {
@@ -150,6 +168,27 @@ void FplPlot::Build() {
 			}
 			if (r.error)
 				continue;
+			// "a = x - 1", a name standing for what has variables in it: a substitution, a function with no parameters. A
+			// name already taken (a parameter's too) is an error.
+			{
+				auto& root = r.ast[r.root];
+				if (root.op == FplOp::Cmp && root.rel == FplRel::Eq && r.ast[root.kids[0]].op == FplOp::Var &&
+					!FplIsVariable(r.ast[root.kids[0]].name) && FplVariablesOf(r.ast, root.kids[1]) != 0) {
+					const std::wstring substituted = r.ast[root.kids[0]].name;
+					if (taken(substituted)) {
+						g.expr.error = { FplErrorCode::Redefined, 0, static_cast<int>(substituted.size()), substituted };
+						continue;
+					}
+					FplUserFunction fn;
+					fn.name = substituted;
+					fn.body = root.kids[1];
+					fn.ast = std::move(r.ast);
+					g.function = static_cast<int>(m_Functions.size());
+					m_Functions.push_back(std::move(fn));
+					found = true;
+					continue;
+				}
+			}
 			auto def = FplClassify(r.ast, r.root);
 			if (def.error || def.kind != FplKind::Definition)
 				continue;

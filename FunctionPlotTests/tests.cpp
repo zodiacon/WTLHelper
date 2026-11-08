@@ -4628,6 +4628,122 @@ TEST(Dragging3D) {
 	CHECK(!FplDragUpright(origin, dir, bad, 0, 0, z));
 }
 
+TEST(Substitutions) {
+	auto at = [](FplPlot& plot, int graph, double x) {
+		auto slots = plot.Slots();
+		slots[FplSlotX] = x;
+		return plot.graphs[graph].expr.f.Eval(slots.data());
+	};
+	// it stands for its text, and draws nothing itself
+	auto plot = MakePlot({ L"a = x - 1", L"y = 3a" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK(plot.graphs[0].expr.kind == FplKind::Definition);
+	CHECK(!plot.graphs[0].Drawable() || plot.graphs[0].expr.f.Empty());
+	CHECK_NEAR(at(plot, 1, 3), 6.0);
+	FplViewport v = View();
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.lines.empty());
+	CHECK(!plot.graphs[1].geometry.lines.empty());
+	// whichever line comes first; through another; with a parameter; in products and powers
+	plot = MakePlot({ L"y = 3a", L"a = x - 1" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK_NEAR(at(plot, 0, 3), 6.0);
+	plot = MakePlot({ L"y = b + 1", L"b = a^2", L"a = x - 1" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK_NEAR(at(plot, 0, 3), 5.0);
+	plot = MakePlot({ L"a = k x", L"y = a + 1" }, { Param(L"k", 2) });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR(at(plot, 1, 3), 7.0);
+	plot = MakePlot({ L"a = x - 1", L"y = 2a^2 + a(x + 1)", L"y = sin a" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR(at(plot, 1, 3), 8.0 + 2 * 4);	// a(x + 1) is a times x + 1
+	CHECK_NEAR(at(plot, 2, 3), std::sin(2.0));
+	// its whole text at once: a = x + 1 in 2a is 2(x + 1), not 2x + 1
+	plot = MakePlot({ L"a = x + 1", L"y = 2a" });
+	CHECK_NEAR(at(plot, 1, 3), 8.0);
+	// a definition by a number stays one, with a value; one through a parameter too
+	plot = MakePlot({ L"c = 2", L"d = c + 1", L"y = d x" });
+	CHECK(plot.graphs[0].definition && plot.graphs[1].definition);
+	CHECK_NEAR(at(plot, 2, 3), 9.0);
+	// other kinds of graph use it; a function; features see through it; derivatives
+	plot = MakePlot({ L"a = x - 1", L"x^2 + a^2 = 4", L"f(x) = a^2", L"y = d/dx a^2", L"y = f'(x)" });
+	for (int i = 0; i < 5; i++)
+		CHECK(!plot.graphs[i].expr.error);
+	CHECK_NEAR(at(plot, 3, 3), 4.0);
+	CHECK_NEAR(at(plot, 4, 3), 4.0);
+	plot.Sample(v);
+	CHECK(!plot.graphs[1].geometry.lines.empty());
+	plot = MakePlot({ L"a = x - 1", L"y = a^2 - 4" });
+	plot.Sample(v);
+	plot.FindFeatures(1, v);
+	CHECK(Has(plot.graphs[1].features, FplFeatureKind::Root, 3, 0, 1e-9));
+	CHECK(Has(plot.graphs[1].features, FplFeatureKind::Root, -1, 0, 1e-9));
+	CHECK(Has(plot.graphs[1].features, FplFeatureKind::Minimum, 1, -4, 1e-6));
+	plot = MakePlot({ L"a = x - y", L"z = a^2" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK(plot.graphs[1].expr.kind == FplKind::Surface);
+	plot = MakePlot({ L"a = 2x", L"y' = -a y, y(0) = 1" });
+	CHECK(!plot.graphs[1].expr.error);
+	plot = MakePlot({ L"a = sin t", L"(a, cos t)" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK(plot.graphs[1].expr.kind == FplKind::Parametric);
+	// a variable the graph hasn't: as if it were written out
+	plot = MakePlot({ L"a = t", L"y = a" });
+	CHECK(plot.graphs[1].expr.error.code == FplErrorCode::VariableNotAllowed);
+
+	// a parameter by that name has it (and the equations with one read as they did)
+	plot = MakePlot({ L"a = x - 1", L"x - 1 = a", L"x = a + 1" }, { Param(L"a", 2) });
+	CHECK(plot.graphs[0].expr.error.code == FplErrorCode::Redefined);
+	CHECK(plot.graphs[0].expr.error.name == L"a");
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK(!plot.graphs[2].expr.error);
+	// the name taken: twice, or a function of that name
+	plot = MakePlot({ L"a = x - 1", L"a = x + 1" });
+	CHECK(plot.graphs[1].expr.error.code == FplErrorCode::Redefined);
+	plot = MakePlot({ L"a = x - 1", L"a(x) = x" });
+	CHECK(plot.graphs[1].expr.error.code == FplErrorCode::Redefined);
+	plot = MakePlot({ L"a = x - 1", L"a = 2" });
+	CHECK(plot.graphs[1].expr.error.code == FplErrorCode::Redefined);
+	// around in a circle, or of itself: nothing defined
+	plot = MakePlot({ L"a = x + b", L"b = x + a" });
+	CHECK(plot.graphs[0].expr.error.code == FplErrorCode::UnknownName);
+	plot = MakePlot({ L"a = a + x" });
+	CHECK(plot.graphs[0].expr.error.code == FplErrorCode::UnknownName);
+	// no derivative by prime (of what?); d/dx it
+	plot = MakePlot({ L"a = x^2", L"y = a'", L"y = d/dx a" });
+	CHECK(plot.graphs[1].expr.error.code == FplErrorCode::NotDifferentiable);
+	CHECK(!plot.graphs[2].expr.error);
+	CHECK_NEAR(at(plot, 2, 3), 6.0);
+
+	// a variable's name: says so
+	std::vector<std::wstring> none;
+	for (const wchar_t* text : { L"u(x) = x - 1", L"t(x) = x", L"v(x, y) = x y", L"u = x - 1", L"v = x", L"t = x + 1",
+		L"  u (x) = x - 1" }) {
+		auto e = FplBuild(text, none);
+		CHECK(e.error.code == FplErrorCode::ReservedName);
+		CHECK(!e.error.Message().empty());
+	}
+	auto e = FplBuild(L"  u(x) = x", none);
+	CHECK_INT(e.error.pos, 2);
+	CHECK_INT(e.error.len, 1);
+	CHECK(e.error.name == L"u");
+	CHECK(e.error.Message().find(L"'u'") != std::wstring::npos);
+	// what reads stays as it was: plots with those on the left, errors of another kind
+	CHECK(FplBuild(L"z = x y", none).kind == FplKind::Surface);
+	CHECK(!FplBuild(L"z = x y", none).error);
+	CHECK(FplBuild(L"r = 2", none).kind == FplKind::Polar);
+	CHECK(FplBuild(L"y = x", none).kind == FplKind::Function);
+	CHECK(FplBuild(L"x = y^2", none).kind == FplKind::FunctionOfY);
+	CHECK(!FplBuild(L"y(x) = x^2", none).error);		// y times x, an equation
+	CHECK(FplBuild(L"u(x) = x +", none).error.code == FplErrorCode::UnexpectedEnd);
+	CHECK(FplBuild(L"y = t", none).error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(FplBuild(L"sin t", none).error.code != FplErrorCode::ReservedName);
+	CHECK(FplBuild(L"z = t", none).error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(FplBuild(L"y = u x", none).error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(!FplBuild(L"z(x) = x", none).error);			// z times x, a surface in 3D
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -4707,6 +4823,7 @@ int wmain() {
 	Run_PrimesOnBuiltIns();
 	Run_Fills3D();
 	Run_Dragging3D();
+	Run_Substitutions();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

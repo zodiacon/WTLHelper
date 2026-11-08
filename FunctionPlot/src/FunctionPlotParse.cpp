@@ -131,6 +131,7 @@ std::wstring FplError::Message() const {
 		case FplErrorCode::NotAList: return L"'" + name + L"' needs a list";
 		case FplErrorCode::BadInitial: return L"A higher-order equation needs y(a) = b, y'(a) = c and so on, at one a";
 		case FplErrorCode::OdeOrder: return L"Equations go up to the fifth order";
+		case FplErrorCode::ReservedName: return L"'" + name + L"' is a variable: pick another name";
 		case FplErrorCode::Internal: return L"Internal error";
 	}
 	return {};
@@ -894,6 +895,14 @@ private:
 	// The user's function, inlined: "f(2x)", "f'(x)", "g(a, b)".
 	int UserCall(const Token& name) {
 		const auto& fn = (*m_Options.functions)[name.user];
+		if (fn.params.empty()) {
+			// a substitution: its name stands for its body, with no arguments (a(x + 1) is a times x + 1)
+			if (IsOp(Peek(), Prime))
+				Fail(FplErrorCode::NotDifferentiable, name, fn.name);
+			int body = CopyTree(m_Ast, fn.ast, fn.body);
+			FplNode wrap = m_Ast[body];
+			return Make(m_Ast.Add(std::move(wrap)), name.pos, name.len);
+		}
 		int primes = 0;
 		while (IsOp(Peek(), Prime))
 			Next(), primes++;
