@@ -121,6 +121,7 @@ std::wstring FplError::Message() const {
 		case FplErrorCode::NotAPlot: return L"Nothing to plot: write an equation such as y = f(x)";
 		case FplErrorCode::BadPoint: return L"A point has two coordinates";
 		case FplErrorCode::NotDifferentiable: return L"Can't differentiate an equation or a point";
+		case FplErrorCode::Redefined: return L"'" + name + L"' is already defined";
 		case FplErrorCode::Internal: return L"Internal error";
 	}
 	return {};

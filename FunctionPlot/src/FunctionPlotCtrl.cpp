@@ -1,0 +1,938 @@
+// The function plot control: the API, the view, tracing, and the mouse and keys. Painting is in FunctionPlotPaint.cpp.
+
+#include "FunctionPlotData.h"
+
+#include <uxtheme.h>
+#include <windowsx.h>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+#pragma comment(lib, "uxtheme.lib")
+
+static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed && FPLGF_NOTRACE == FplGraphNoTrace &&
+	FPLGF_NOFEATURES == FplGraphNoFeatures);
+static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
+	FPLK_IMPLICIT == (int)FplKind::Implicit);
+static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
+static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
+
+namespace {
+
+COLORREF Blend(COLORREF a, COLORREF b, int percentB) {
+	auto mix = [=](int x, int y) { return (BYTE)((x * (100 - percentB) + y * percentB) / 100); };
+	return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)), mix(GetBValue(a), GetBValue(b)));
+}
+
+bool IsDarkColor(COLORREF color) {
+	return GetRValue(color) * 299 + GetGValue(color) * 587 + GetBValue(color) * 114 < 128 * 1000;
+}
+
+constexpr double Pi = 3.14159265358979323846;
+
+}  // namespace
+
+// ---- Construction ------------------------------------------------------------------
+
+CFunctionPlotCtrl::CFunctionPlotCtrl() : m_State(std::make_unique<FplState>()) {
+}
+
+CFunctionPlotCtrl::~CFunctionPlotCtrl() = default;
+
+LRESULT CFunctionPlotCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	s.dpi = ::GetDpiForWindow(m_hWnd);
+	RECT rc;
+	GetClientRect(&rc);
+	s.client = { rc.right, rc.bottom };
+	Rebuild();
+	BOOL handled;
+	OnSize(0, 0, MAKELPARAM(rc.right, rc.bottom), handled);
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	DiscardTarget();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&) {
+	return 1;
+}
+
+float CFunctionPlotCtrl::ToDips(int pixels) const {
+	return pixels * 96.0f / m_State->dpi;
+}
+
+LRESULT CFunctionPlotCtrl::OnSize(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
+	s.client = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	if (s.target)
+		s.target->Resize(D2D1::SizeU(s.client.cx, s.client.cy));
+	double w = ToDips(s.client.cx), h = ToDips(s.client.cy);
+	if (w <= 0 || h <= 0)
+		return 0;
+	if (!s.viewSet) {
+		s.view.width = w;
+		s.view.height = h;
+		s.viewSet = true;
+		ResetView();
+	}
+	else {
+		s.view.Resize(w, h);
+		ViewChanged(false);
+	}
+	LayoutPanel();
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnStyleChanged(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	auto ss = (const STYLESTRUCT*)lParam;
+	if (wParam == (WPARAM)GWL_STYLE) {
+		if ((ss->styleNew & FPLS_EQUALSCALE) && !(ss->styleOld & FPLS_EQUALSCALE) && m_State->viewSet) {
+			m_State->view.EqualScale();
+			ViewChanged(false);
+		}
+		if ((ss->styleOld ^ ss->styleNew) & FPLS_NOTRACE)
+			ClearTrace();
+		LayoutPanel();
+		Invalidate();
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	// everything is in DIPs: the target's DPI changes, and WM_SIZE follows with the new size
+	auto& s = *m_State;
+	s.dpi = ::GetDpiForWindow(m_hWnd);
+	if (s.target)
+		s.target->SetDpi((float)s.dpi, (float)s.dpi);
+	Invalidate();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	m_State->brushes.clear();
+	Invalidate();
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnSettingChange(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	if (wParam == SPI_SETHIGHCONTRAST) {
+		BOOL handled;
+		OnColorsChanged(0, 0, 0, handled);
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+// ---- Look ------------------------------------------------------------------------------
+
+void CFunctionPlotCtrl::ForceHighContrast(int value) {
+	m_State->forceHighContrast = value;
+	BOOL handled;
+	OnColorsChanged(0, 0, 0, handled);
+}
+
+bool CFunctionPlotCtrl::IsHighContrast() const {
+	if (m_State->forceHighContrast >= 0)
+		return m_State->forceHighContrast != 0;
+	HIGHCONTRASTW hc{ sizeof(hc) };
+	return ::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+void CFunctionPlotCtrl::SetColors(const FPLCOLORS* colors) {
+	m_State->customColors = colors != nullptr;
+	if (colors)
+		m_State->colors = *colors;
+	m_State->brushes.clear();
+	if (IsWindow())
+		Invalidate();
+}
+
+FPLCOLORS CFunctionPlotCtrl::GetColors() const {
+	FPLCOLORS c{};
+	if (IsHighContrast()) {
+		c.crBack = c.crPanelBack = ::GetSysColor(COLOR_WINDOW);
+		// no minor lines: one gray for both would be a thicket
+		c.crGrid = ::GetSysColor(COLOR_GRAYTEXT);
+		c.crGridMinor = c.crBack;
+		c.crAxis = c.crLabel = c.crPanelText = c.crPanelBorder = ::GetSysColor(COLOR_WINDOWTEXT);
+		c.crError = ::GetSysColor(COLOR_WINDOWTEXT);
+		const COLORREF cycle[] = { ::GetSysColor(COLOR_WINDOWTEXT), ::GetSysColor(COLOR_HOTLIGHT),
+			::GetSysColor(COLOR_HIGHLIGHT), ::GetSysColor(COLOR_GRAYTEXT) };
+		for (int i = 0; i < FPL_PALETTE; i++)
+			c.crPalette[i] = cycle[i % 4];
+		return c;
+	}
+	if (m_State->customColors)
+		return m_State->colors;
+	// read each time: WTLHelper's dark mode hooks GetSysColor
+	c.crBack = ::GetSysColor(COLOR_WINDOW);
+	const COLORREF text = ::GetSysColor(COLOR_WINDOWTEXT);
+	const bool dark = IsDarkColor(c.crBack);
+	c.crGridMinor = Blend(c.crBack, text, dark ? 9 : 7);
+	c.crGrid = Blend(c.crBack, text, dark ? 20 : 17);
+	c.crAxis = Blend(c.crBack, text, 70);
+	c.crLabel = Blend(c.crBack, text, 72);
+	c.crPanelBack = Blend(c.crBack, text, dark ? 6 : 3);
+	c.crPanelText = text;
+	c.crPanelBorder = Blend(c.crBack, text, dark ? 25 : 18);
+	c.crError = dark ? RGB(255, 153, 164) : RGB(196, 43, 28);
+	static const COLORREF Light[FPL_PALETTE] = { RGB(0xC7, 0x44, 0x40), RGB(0x2D, 0x70, 0xB3), RGB(0x38, 0x8C, 0x46),
+		RGB(0x60, 0x42, 0xA6), RGB(0xFA, 0x7E, 0x19), RGB(0x1B, 0x8E, 0x8E), RGB(0xB0, 0x36, 0x7C),
+		RGB(0x40, 0x40, 0x40) };
+	static const COLORREF Dark[FPL_PALETTE] = { RGB(0xF0, 0x6E, 0x69), RGB(0x5F, 0xA2, 0xE8), RGB(0x5C, 0xC2, 0x6D),
+		RGB(0xA4, 0x88, 0xE8), RGB(0xFF, 0xA1, 0x49), RGB(0x4F, 0xD1, 0xD1), RGB(0xE8, 0x6E, 0xB0),
+		RGB(0xD8, 0xD8, 0xD8) };
+	std::copy(std::begin(dark ? Dark : Light), std::end(dark ? Dark : Light), c.crPalette);
+	return c;
+}
+
+COLORREF CFunctionPlotCtrl::GraphColor(int index) const {
+	auto& g = m_State->plot.graphs[index];
+	if (!g.autoColor && !IsHighContrast())
+		return g.color;
+	return GetColors().crPalette[index % FPL_PALETTE];
+}
+
+// ---- Graphs ----------------------------------------------------------------------------
+
+namespace {
+
+void Apply(FplGraph& g, const FPLGRAPH& in, bool& rebuild) {
+	if (in.mask & FPLGM_TEXT) {
+		std::wstring text = in.pszText ? in.pszText : L"";
+		rebuild = rebuild || text != g.text;
+		g.text = std::move(text);
+	}
+	if (in.mask & FPLGM_COLOR) {
+		g.autoColor = in.color == CLR_DEFAULT;
+		g.color = in.color;
+	}
+	if (in.mask & FPLGM_WIDTH)
+		g.width = in.width > 0 ? std::min(in.width, 50.0f) : 2.5f;
+	if (in.mask & FPLGM_FLAGS) {
+		// hiding needs sampling (and a hidden function no longer meets the others)
+		rebuild = rebuild || ((g.flags ^ in.flags) & FplGraphHidden);
+		g.flags = in.flags;
+	}
+	if (in.mask & FPLGM_RANGE) {
+		g.hasRange = std::isfinite(in.tMin) && std::isfinite(in.tMax) && in.tMin != in.tMax;
+		g.tMin = in.tMin;
+		g.tMax = in.tMax;
+		rebuild = true;
+	}
+	if (in.mask & FPLGM_LPARAM)
+		g.lParam = in.lParam;
+}
+
+}  // namespace
+
+BOOL CFunctionPlotCtrl::AddGraph(const FPLGRAPH& graph) {
+	auto& plot = m_State->plot;
+	if (graph.id == 0 || plot.FindGraph(graph.id) >= 0)
+		return FALSE;
+	FplGraph g;
+	g.id = graph.id;
+	bool rebuild = true;
+	Apply(g, graph, rebuild);
+	plot.graphs.push_back(std::move(g));
+	Rebuild();
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::SetGraph(const FPLGRAPH& graph) {
+	auto& plot = m_State->plot;
+	int i = plot.FindGraph(graph.id);
+	if (i < 0)
+		return FALSE;
+	bool rebuild = false;
+	Apply(plot.graphs[i], graph, rebuild);
+	if (rebuild)
+		Rebuild();
+	else {
+		LayoutPanel();
+		if (IsWindow())
+			Invalidate();
+	}
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::GetGraph(FPLGRAPH& graph) const {
+	auto& plot = m_State->plot;
+	int i = plot.FindGraph(graph.id);
+	if (i < 0)
+		return FALSE;
+	auto& g = plot.graphs[i];
+	if (graph.mask & FPLGM_TEXT)
+		graph.pszText = g.text.c_str();
+	if (graph.mask & FPLGM_COLOR)
+		graph.color = g.autoColor ? CLR_DEFAULT : g.color;
+	if (graph.mask & FPLGM_WIDTH)
+		graph.width = g.width;
+	if (graph.mask & FPLGM_FLAGS)
+		graph.flags = g.flags;
+	if (graph.mask & FPLGM_RANGE) {
+		graph.tMin = g.hasRange ? g.tMin : 0;
+		graph.tMax = g.hasRange ? g.tMax : 2 * Pi;
+	}
+	if (graph.mask & FPLGM_LPARAM)
+		graph.lParam = g.lParam;
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::GetGraphInfo(UINT id, FPLGRAPHINFO& info) const {
+	auto& plot = m_State->plot;
+	int i = plot.FindGraph(id);
+	if (i < 0)
+		return FALSE;
+	auto& g = plot.graphs[i];
+	info = {};
+	info.kind = (FPLKIND)g.expr.kind;
+	info.error = (FPLERROR)g.expr.error.code;
+	info.errorPos = g.expr.error.pos;
+	info.errorLen = g.expr.error.len;
+	wcsncpy_s(info.szError, g.expr.error.Message().c_str(), _TRUNCATE);
+	const std::wstring& name = g.expr.error ? g.expr.error.name : g.expr.name;
+	wcsncpy_s(info.szName, name.c_str(), _TRUNCATE);
+	info.value = plot.DefinitionValue(i);
+	info.color = GraphColor(i);
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::RemoveGraph(UINT id) {
+	auto& plot = m_State->plot;
+	int i = plot.FindGraph(id);
+	if (i < 0)
+		return FALSE;
+	plot.graphs.erase(plot.graphs.begin() + i);
+	ClearTrace();
+	m_State->featuresGraph = -1;
+	Rebuild();
+	return TRUE;
+}
+
+void CFunctionPlotCtrl::RemoveAllGraphs() {
+	m_State->plot.graphs.clear();
+	ClearTrace();
+	m_State->featuresGraph = -1;
+	Rebuild();
+}
+
+int CFunctionPlotCtrl::GetGraphCount() const {
+	return (int)m_State->plot.graphs.size();
+}
+
+UINT CFunctionPlotCtrl::GetGraphId(int index) const {
+	auto& graphs = m_State->plot.graphs;
+	return index >= 0 && index < (int)graphs.size() ? graphs[index].id : 0;
+}
+
+BOOL CFunctionPlotCtrl::MoveGraph(UINT id, int index) {
+	auto& graphs = m_State->plot.graphs;
+	int i = m_State->plot.FindGraph(id);
+	if (i < 0)
+		return FALSE;
+	index = std::clamp(index, 0, (int)graphs.size() - 1);
+	FplGraph g = std::move(graphs[i]);
+	graphs.erase(graphs.begin() + i);
+	graphs.insert(graphs.begin() + index, std::move(g));
+	ClearTrace();
+	m_State->featuresGraph = -1;
+	Rebuild();
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::ShowGraph(UINT id, BOOL show) {
+	int i = m_State->plot.FindGraph(id);
+	if (i < 0)
+		return FALSE;
+	FPLGRAPH g{ FPLGM_FLAGS, id };
+	g.flags = show ? m_State->plot.graphs[i].flags & ~FplGraphHidden : m_State->plot.graphs[i].flags | FplGraphHidden;
+	return SetGraph(g);
+}
+
+// ---- Parameters ----------------------------------------------------------------------
+
+BOOL CFunctionPlotCtrl::SetParameter(const FPLPARAM& param) {
+	if (!param.pszName || !*param.pszName)
+		return FALSE;
+	auto& plot = m_State->plot;
+	int i = plot.FindParam(param.pszName);
+	bool added = i < 0;
+	if (added) {
+		plot.params.push_back({});
+		i = (int)plot.params.size() - 1;
+		plot.params[i].name = param.pszName;
+	}
+	auto& p = plot.params[i];
+	p.min = std::isfinite(param.min) ? param.min : -10;
+	p.max = std::isfinite(param.max) && param.max > p.min ? param.max : p.min + 1;
+	p.step = std::isfinite(param.step) && param.step > 0 ? param.step : 0;
+	p.value = std::isfinite(param.value) ? param.value : 0;
+	p.flags = param.flags;
+	if (added)
+		Rebuild();
+	else {
+		ValuesChanged();
+		LayoutPanel();
+	}
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::GetParameter(LPCWSTR pszName, FPLPARAM& param) const {
+	int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	return i >= 0 && GetParameterAt(i, param);
+}
+
+BOOL CFunctionPlotCtrl::GetParameterAt(int index, FPLPARAM& param) const {
+	auto& params = m_State->plot.params;
+	if (index < 0 || index >= (int)params.size())
+		return FALSE;
+	auto& p = params[index];
+	param.pszName = p.name.c_str();
+	param.value = p.value;
+	param.min = p.min;
+	param.max = p.max;
+	param.step = p.step;
+	param.flags = p.flags;
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::SetParameterValue(LPCWSTR pszName, double value) {
+	int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	if (i < 0 || !std::isfinite(value))
+		return FALSE;
+	m_State->plot.params[i].value = value;
+	ValuesChanged();
+	return TRUE;
+}
+
+double CFunctionPlotCtrl::GetParameterValue(LPCWSTR pszName) const {
+	int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	return i < 0 ? std::numeric_limits<double>::quiet_NaN() : m_State->plot.params[i].value;
+}
+
+BOOL CFunctionPlotCtrl::RemoveParameter(LPCWSTR pszName) {
+	int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	if (i < 0)
+		return FALSE;
+	m_State->plot.params.erase(m_State->plot.params.begin() + i);
+	Rebuild();
+	return TRUE;
+}
+
+int CFunctionPlotCtrl::GetParameterCount() const {
+	return (int)m_State->plot.params.size();
+}
+
+void CFunctionPlotCtrl::SetDegrees(BOOL degrees) {
+	if (m_State->plot.degrees == (degrees != FALSE))
+		return;
+	m_State->plot.degrees = degrees != FALSE;
+	Rebuild();
+}
+
+BOOL CFunctionPlotCtrl::GetDegrees() const {
+	return m_State->plot.degrees;
+}
+
+// ---- Building and sampling -------------------------------------------------------------
+
+void CFunctionPlotCtrl::Rebuild() {
+	auto& s = *m_State;
+	s.plot.Build();
+	if (s.traceGraph >= (int)s.plot.graphs.size() || s.featuresGraph >= (int)s.plot.graphs.size()) {
+		s.traceGraph = s.featuresGraph = -1;
+		s.traceValid = false;
+	}
+	Resample();
+	LayoutPanel();
+	if (IsWindow())
+		Invalidate();
+}
+
+void CFunctionPlotCtrl::ValuesChanged() {
+	auto& s = *m_State;
+	s.plot.UpdateValues();
+	Resample();
+	// the traced point follows its function
+	if (s.traceValid && s.traceGraph >= 0 && s.traceFeature < 0) {
+		auto kind = s.plot.graphs[s.traceGraph].expr.kind;
+		if (kind == FplKind::Function)
+			s.traceY = s.plot.Eval(s.traceGraph, s.traceX);
+		else if (kind == FplKind::FunctionOfY)
+			s.traceX = s.plot.Eval(s.traceGraph, s.traceY);
+		else
+			s.traceValid = false;
+		if (!std::isfinite(s.traceX) || !std::isfinite(s.traceY))
+			s.traceValid = false;
+	}
+	else if (s.traceFeature >= 0) {
+		s.traceValid = false;
+	}
+	LayoutPanel();
+	if (IsWindow())
+		Invalidate();
+}
+
+void CFunctionPlotCtrl::Resample() {
+	auto& s = *m_State;
+	if (!s.viewSet)
+		return;
+	s.plot.Sample(s.view);
+	if (s.featuresGraph >= 0 && !(GetStyle() & FPLS_NOTRACE))
+		s.plot.FindFeatures(s.featuresGraph, s.view);
+	BuildGeometries();
+}
+
+void CFunctionPlotCtrl::ViewChanged(bool notify) {
+	Resample();
+	if (IsWindow())
+		Invalidate();
+	if (notify)
+		NotifyView();
+}
+
+// ---- The view --------------------------------------------------------------------------
+
+void CFunctionPlotCtrl::SetViewport(double xMin, double xMax, double yMin, double yMax) {
+	auto& v = m_State->view;
+	FplViewport next = v;
+	next.xMin = xMin;
+	next.xMax = xMax;
+	next.yMin = yMin;
+	next.yMax = yMax;
+	if (!next.Valid())
+		return;
+	if (IsWindow() && (GetStyle() & FPLS_EQUALSCALE))
+		next.EqualScale();
+	v = next;
+}
+
+void CFunctionPlotCtrl::SetView(const FPLVIEW& view) {
+	SetViewport(view.xMin, view.xMax, view.yMin, view.yMax);
+	ViewChanged(false);
+}
+
+FPLVIEW CFunctionPlotCtrl::GetView() const {
+	auto& v = m_State->view;
+	return { v.xMin, v.xMax, v.yMin, v.yMax };
+}
+
+void CFunctionPlotCtrl::SetHomeView(const FPLVIEW* view) {
+	m_State->homeSet = view != nullptr;
+	if (view)
+		m_State->home = *view;
+}
+
+void CFunctionPlotCtrl::ResetView() {
+	auto& s = *m_State;
+	if (s.homeSet) {
+		SetViewport(s.home.xMin, s.home.xMax, s.home.yMin, s.home.yMax);
+	}
+	else {
+		// x from -10 to 10, y at the same scale around 0
+		double half = 10 * s.view.height / std::max(s.view.width, 1.0);
+		SetViewport(-10, 10, -half, half);
+	}
+	ViewChanged(false);
+}
+
+void CFunctionPlotCtrl::Zoom(double factor) {
+	auto& v = m_State->view;
+	if (!(factor > 0))
+		return;
+	v.Zoom(factor, factor, { v.width / 2, v.height / 2 });
+	ViewChanged(false);
+}
+
+BOOL CFunctionPlotCtrl::ClientToPlane(POINT pt, double& x, double& y) const {
+	auto& v = m_State->view;
+	if (!v.Valid())
+		return FALSE;
+	x = v.ToPlaneX(ToDips(pt.x));
+	y = v.ToPlaneY(ToDips(pt.y));
+	return TRUE;
+}
+
+POINT CFunctionPlotCtrl::PlaneToClient(double x, double y) const {
+	auto& v = m_State->view;
+	const double scale = m_State->dpi / 96.0;
+	auto clampToInt = [](double d) { return (LONG)std::clamp(std::lround(d), -1000000L, 1000000L); };
+	return { clampToInt(v.ToScreenX(x) * scale), clampToInt(v.ToScreenY(y) * scale) };
+}
+
+void CFunctionPlotCtrl::NotifyView() {
+	if (!IsWindow())
+		return;
+	NMFPLVIEW nm{};
+	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_VIEWCHANGED };
+	nm.view = GetView();
+	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
+// ---- Tracing ---------------------------------------------------------------------------
+
+BOOL CFunctionPlotCtrl::GetTrace(FPLTRACE& trace) const {
+	auto& s = *m_State;
+	trace = {};
+	trace.feature = FPLF_NONE;
+	if (!s.traceValid || s.traceGraph < 0)
+		return FALSE;
+	auto& g = s.plot.graphs[s.traceGraph];
+	trace.id = g.id;
+	trace.valid = TRUE;
+	trace.x = s.traceX;
+	trace.y = s.traceY;
+	if (s.traceFeature >= 0 && s.traceFeature < (int)g.features.size())
+		trace.feature = (FPLFEATUREKIND)g.features[s.traceFeature].kind;
+	return TRUE;
+}
+
+void CFunctionPlotCtrl::ClearTrace() {
+	auto& s = *m_State;
+	bool had = s.traceValid || s.featuresGraph >= 0;
+	if (s.featuresGraph >= 0 && s.featuresGraph < (int)s.plot.graphs.size())
+		s.plot.graphs[s.featuresGraph].features.clear();
+	s.featuresGraph = -1;
+	s.traceDragged = false;
+	SetTraceHit(-1, -1, 0, 0, false);
+	if (had && IsWindow())
+		Invalidate();
+}
+
+int CFunctionPlotCtrl::GetFeatures(UINT id, FPLFEATURE* features, int max) const {
+	auto& s = *m_State;
+	int i = s.plot.FindGraph(id);
+	if (i < 0)
+		return 0;
+	// found for the asking (the traced graph's are kept; others are found here and dropped)
+	FplPlot& plot = const_cast<FplPlot&>(s.plot);
+	std::vector<FplFeature> saved = plot.graphs[i].features;
+	if (i != s.featuresGraph)
+		plot.FindFeatures(i, s.view);
+	auto& found = plot.graphs[i].features;
+	int n = (int)found.size();
+	for (int k = 0; k < n && k < max && features; k++)
+		features[k] = { (FPLFEATUREKIND)found[k].kind, found[k].x, found[k].y };
+	if (i != s.featuresGraph)
+		plot.graphs[i].features = std::move(saved);
+	return n;
+}
+
+void CFunctionPlotCtrl::SetTraceHit(int graph, int feature, double x, double y, bool valid) {
+	auto& s = *m_State;
+	if (s.traceGraph == graph && s.traceFeature == feature && s.traceValid == valid && (!valid || (s.traceX == x && s.traceY == y)))
+		return;
+	s.traceGraph = graph;
+	s.traceFeature = feature;
+	s.traceX = x;
+	s.traceY = y;
+	s.traceValid = valid;
+	NotifyTrace();
+	if (IsWindow())
+		Invalidate();
+}
+
+void CFunctionPlotCtrl::NotifyTrace() {
+	if (!IsWindow())
+		return;
+	NMFPLTRACE nm{};
+	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_TRACE };
+	GetTrace(nm.trace);
+	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
+void CFunctionPlotCtrl::UpdateTrace(POINT pt, bool dragging) {
+	auto& s = *m_State;
+	if (GetStyle() & FPLS_NOTRACE)
+		return;
+	FplPoint p = { ToDips(pt.x), ToDips(pt.y) };
+	FplTraceHit hit;
+	if (dragging)
+		hit = s.plot.TraceAt(s.traceGraph, p, s.view, FplSnapDistance);
+	else
+		hit = s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance);
+	if (hit && hit.graph != s.featuresGraph) {
+		// a new graph: its features found, the last one's dropped
+		if (s.featuresGraph >= 0 && s.featuresGraph < (int)s.plot.graphs.size())
+			s.plot.graphs[s.featuresGraph].features.clear();
+		s.featuresGraph = hit.graph;
+		s.plot.FindFeatures(hit.graph, s.view);
+		hit = dragging ? s.plot.TraceAt(hit.graph, p, s.view, FplSnapDistance)
+			: s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance);
+		Invalidate();
+	}
+	if (hit)
+		SetTraceHit(hit.graph, hit.feature, hit.plane.x, hit.plane.y, true);
+	else if (!dragging && !s.traceDragged) {
+		if (s.featuresGraph >= 0) {
+			s.plot.graphs[s.featuresGraph].features.clear();
+			s.featuresGraph = -1;
+			Invalidate();
+		}
+		SetTraceHit(-1, -1, 0, 0, false);
+	}
+}
+
+// ---- The panel -------------------------------------------------------------------------
+
+FplPanelHit CFunctionPlotCtrl::HitPanel(POINT pt) const {
+	auto& s = *m_State;
+	FplPanelHit hit;
+	float x = ToDips(pt.x), y = ToDips(pt.y);
+	if (s.panel.right <= s.panel.left || x < s.panel.left || x >= s.panel.right || y < s.panel.top ||
+		y >= s.panel.bottom)
+		return hit;
+	hit.part = FplPanelPart::Panel;
+	for (size_t i = 0; i < s.rows.size(); i++) {
+		auto& r = s.rows[i];
+		if (y >= r.rect.top && y < r.rect.bottom) {
+			hit.part = r.kind == FplPanelRow::Graph ? FplPanelPart::Graph : FplPanelPart::Slider;
+			hit.row = (int)i;
+			break;
+		}
+	}
+	return hit;
+}
+
+void CFunctionPlotCtrl::DragSlider(int row, float x) {
+	auto& s = *m_State;
+	if (row < 0 || row >= (int)s.rows.size() || s.rows[row].kind != FplPanelRow::Slider)
+		return;
+	auto& r = s.rows[row];
+	auto& p = s.plot.params[r.index];
+	float width = r.track.right - r.track.left;
+	double t = width > 0 ? std::clamp((x - r.track.left) / width, 0.0f, 1.0f) : 0;
+	double value = p.min + t * (p.max - p.min);
+	if (p.step > 0)
+		value = std::clamp(p.min + std::round((value - p.min) / p.step) * p.step, p.min, p.max);
+	if (value == p.value)
+		return;
+	p.value = value;
+	ValuesChanged();
+	NMFPLPARAM nm{};
+	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_PARAMCHANGED };
+	nm.pszName = p.name.c_str();
+	nm.value = value;
+	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
+// ---- Input -----------------------------------------------------------------------------
+
+LRESULT CFunctionPlotCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
+	return DLGC_WANTARROWS | DLGC_WANTCHARS;
+}
+
+LRESULT CFunctionPlotCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
+	Invalidate();
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	auto& s = *m_State;
+	const bool canMove = !(GetStyle() & FPLS_NOPANZOOM);
+	auto& v = s.view;
+	switch (wParam) {
+		case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+			if (!canMove)
+				break;
+			v.Pan(wParam == VK_LEFT ? v.width / 10 : wParam == VK_RIGHT ? -v.width / 10 : 0,
+				wParam == VK_UP ? v.height / 10 : wParam == VK_DOWN ? -v.height / 10 : 0);
+			ViewChanged(true);
+			return 0;
+		case VK_ADD: case VK_OEM_PLUS: case VK_SUBTRACT: case VK_OEM_MINUS:
+			if (!canMove)
+				break;
+			Zoom(wParam == VK_ADD || wParam == VK_OEM_PLUS ? 1.25 : 0.8);
+			NotifyView();
+			return 0;
+		case VK_HOME:
+			if (!canMove)
+				break;
+			ResetView();
+			NotifyView();
+			return 0;
+		case VK_ESCAPE:
+			if (s.drag != FplDrag::None)
+				ReleaseCapture();
+			ClearTrace();
+			return 0;
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
+	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	SetFocus();
+	auto hit = HitPanel(pt);
+	if (hit.part == FplPanelPart::Graph) {
+		auto& g = s.plot.graphs[s.rows[hit.row].index];
+		if (!g.definition) {
+			bool hidden = !(g.flags & FplGraphHidden);
+			ShowGraph(g.id, !hidden);
+			if (s.traceGraph >= 0 && hidden)
+				ClearTrace();
+			NMFPLGRAPH nm{};
+			nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_GRAPHTOGGLED };
+			nm.id = g.id;
+			nm.hidden = hidden;
+			::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+		}
+		return 0;
+	}
+	if (hit.part == FplPanelPart::Slider) {
+		s.drag = FplDrag::Slider;
+		s.dragRow = hit.row;
+		SetCapture();
+		DragSlider(hit.row, ToDips(pt.x));
+		return 0;
+	}
+	if (hit.part == FplPanelPart::Panel)
+		return 0;
+	// on a graph: trace it; elsewhere: pan
+	if (!(GetStyle() & FPLS_NOTRACE)) {
+		FplPoint p = { ToDips(pt.x), ToDips(pt.y) };
+		auto onGraph = s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance);
+		if (onGraph) {
+			UpdateTrace(pt, false);
+			s.drag = FplDrag::Trace;
+			s.traceDragged = true;
+			SetCapture();
+			return 0;
+		}
+	}
+	if (s.traceDragged) {
+		s.traceDragged = false;
+		ClearTrace();
+	}
+	if (!(GetStyle() & FPLS_NOPANZOOM)) {
+		s.drag = FplDrag::Pan;
+		s.dragLast = pt;
+		SetCapture();
+		::SetCursor(::LoadCursor(nullptr, IDC_SIZEALL));
+	}
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_State->drag != FplDrag::None)
+		ReleaseCapture();
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	s.drag = FplDrag::None;
+	s.dragRow = -1;
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
+	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	if (!s.trackingLeave) {
+		TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, m_hWnd };
+		s.trackingLeave = ::TrackMouseEvent(&tme) != FALSE;
+	}
+	switch (s.drag) {
+		case FplDrag::Pan:
+			if (pt.x != s.dragLast.x || pt.y != s.dragLast.y) {
+				s.view.Pan(ToDips(pt.x - s.dragLast.x), ToDips(pt.y - s.dragLast.y));
+				s.dragLast = pt;
+				ViewChanged(true);
+			}
+			return 0;
+		case FplDrag::Trace:
+			UpdateTrace(pt, true);
+			return 0;
+		case FplDrag::Slider:
+			DragSlider(s.dragRow, ToDips(pt.x));
+			return 0;
+		default:
+			break;
+	}
+	auto hit = HitPanel(pt);
+	int hot = hit.part == FplPanelPart::Graph || hit.part == FplPanelPart::Slider ? hit.row : -1;
+	if (hot != s.hotRow) {
+		s.hotRow = hot;
+		Invalidate();
+	}
+	if (hit.part == FplPanelPart::None) {
+		if (!s.traceDragged)
+			UpdateTrace(pt, false);
+	}
+	else if (!s.traceDragged && s.traceValid) {
+		UpdateTrace({ -10000, -10000 }, false);
+	}
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	s.trackingLeave = false;
+	if (s.hotRow >= 0) {
+		s.hotRow = -1;
+		Invalidate();
+	}
+	if (s.drag == FplDrag::None && !s.traceDragged)
+		UpdateTrace({ -10000, -10000 }, false);
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+	if (LOWORD(lParam) != HTCLIENT || (HWND)wParam != m_hWnd) {
+		bHandled = FALSE;
+		return 0;
+	}
+	auto& s = *m_State;
+	LPCWSTR cursor = IDC_ARROW;
+	if (s.drag == FplDrag::Pan)
+		cursor = IDC_SIZEALL;
+	else if (s.drag == FplDrag::Slider || s.hotRow >= 0)
+		cursor = IDC_HAND;
+	else if (s.drag == FplDrag::Trace || s.traceValid)
+		cursor = IDC_CROSS;
+	::SetCursor(::LoadCursor(nullptr, cursor));
+	return TRUE;
+}
+
+LRESULT CFunctionPlotCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
+	auto& s = *m_State;
+	if (GetStyle() & FPLS_NOPANZOOM)
+		return 0;
+	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	ScreenToClient(&pt);
+	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	const UINT keys = GET_KEYSTATE_WPARAM(wParam);
+	const double factor = std::pow(1.2, delta / 120.0);
+	double fx = factor, fy = factor;
+	if (!(GetStyle() & FPLS_EQUALSCALE)) {
+		if (keys & MK_CONTROL)
+			fy = 1;     // x only
+		else if (keys & MK_SHIFT)
+			fx = 1;     // y only
+	}
+	s.view.Zoom(fx, fy, { ToDips(pt.x), ToDips(pt.y) });
+	ViewChanged(true);
+	if (s.traceValid && !s.traceDragged)
+		UpdateTrace(pt, false);
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnPaint(UINT, WPARAM, LPARAM, BOOL&) {
+	PAINTSTRUCT ps;
+	BeginPaint(&ps);
+	Paint();
+	EndPaint(&ps);
+	return 0;
+}

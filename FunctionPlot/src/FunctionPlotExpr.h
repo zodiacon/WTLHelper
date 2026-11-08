@@ -32,6 +32,7 @@ enum class FplErrorCode : uint8_t {
 	NotAPlot,			// an expression that isn't something to draw ("sin theta" alone, "x + y")
 	BadPoint,			// a point that isn't (x, y)
 	NotDifferentiable,	// a relation or a point where a derivative was asked for
+	Redefined,			// a name defined twice, or a definition of a parameter the app has; name is the name
 	Internal,
 };
 

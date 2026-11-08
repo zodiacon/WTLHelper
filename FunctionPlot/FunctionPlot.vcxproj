@@ -95,14 +95,20 @@
     </Lib>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\FunctionPlot.h" />
+    <ClInclude Include="src\FunctionPlotData.h" />
     <ClInclude Include="src\FunctionPlotExpr.h" />
+    <ClInclude Include="src\FunctionPlotGraphs.h" />
     <ClInclude Include="src\FunctionPlotModel.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\FunctionPlotAnalysis.cpp" />
     <ClCompile Include="src\FunctionPlotAxes.cpp" />
     <ClCompile Include="src\FunctionPlotCalc.cpp" />
+    <ClCompile Include="src\FunctionPlotCtrl.cpp" />
     <ClCompile Include="src\FunctionPlotEval.cpp" />
+    <ClCompile Include="src\FunctionPlotGraphs.cpp" />
+    <ClCompile Include="src\FunctionPlotPaint.cpp" />
     <ClCompile Include="src\FunctionPlotParse.cpp" />
     <ClCompile Include="src\FunctionPlotSample.cpp" />
   </ItemGroup>

@@ -4,9 +4,11 @@
 // checks. Covered: the expression engine (lexing, implicit products, name splitting, parsing, errors and their
 // positions, what an expression draws, constant folding, compiling and the stack machine against the tree, the math
 // functions, degrees, derivatives against differences, simplifying and printing), and the 2D model (the view, ticks
-// and labels, clipping, sampling functions, curves, implicit curves and regions, roots, extrema and intersections).
+// and labels, clipping, sampling functions, curves, implicit curves and regions, roots, extrema and intersections), and the
+// control's graphs (definitions, sampling, features, tracing, coordinates).
 
 #include "FunctionPlotExpr.h"
+#include "FunctionPlotGraphs.h"
 #include "FunctionPlotModel.h"
 
 #include <windows.h>
@@ -1301,6 +1303,182 @@ TEST(SampleSpeed) {
 	CHECK(!g2.lines.empty());
 }
 
+// ---- The graphs ----------------------------------------------------------------
+
+static FplPlot MakePlot(std::initializer_list<const wchar_t*> texts, std::initializer_list<FplParam> params = {}) {
+	FplPlot plot;
+	unsigned id = 1;
+	for (auto t : texts) {
+		FplGraph g;
+		g.id = id++;
+		g.text = t;
+		plot.graphs.push_back(g);
+	}
+	plot.params = params;
+	plot.Build();
+	return plot;
+}
+
+static FplParam Param(const wchar_t* name, double value) {
+	FplParam p;
+	p.name = name;
+	p.value = value;
+	return p;
+}
+
+TEST(GraphDefinitions) {
+	auto plot = MakePlot({ L"y = a x", L"c = 2a", L"y = c", L"d = c + 1" }, { Param(L"a", 3) });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(plot.graphs[1].definition);
+	CHECK_NEAR(plot.DefinitionValue(1), 6);
+	CHECK_NEAR(plot.DefinitionValue(3), 7);
+	CHECK(std::isnan(plot.DefinitionValue(0)));
+	CHECK_INT(plot.graphs[2].expr.kind, FplKind::Function);
+	CHECK_NEAR(plot.Eval(2, 100), 6);
+	CHECK_NEAR(plot.Eval(0, 2), 6);
+	CHECK_INT(plot.Slots().size(), FplFirstParam + 3);
+
+	// a definition used before it's written, and one using another after it
+	plot = MakePlot({ L"y = k x", L"k = m/2", L"m = 10" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK_NEAR(plot.DefinitionValue(1), 5);
+	CHECK_NEAR(plot.Eval(0, 3), 15);
+
+	// the values change: the definitions follow
+	plot = MakePlot({ L"c = 2a", L"y = c x" }, { Param(L"a", 1) });
+	plot.params[0].value = 4;
+	plot.UpdateValues();
+	CHECK_NEAR(plot.DefinitionValue(0), 8);
+	CHECK_NEAR(plot.Eval(1, 1), 8);
+
+	// twice, or over the app's parameter
+	plot = MakePlot({ L"c = 1", L"c = 2" });
+	CHECK(plot.graphs[0].definition);
+	CHECK_INT(plot.graphs[1].expr.error.code, FplErrorCode::Redefined);
+	CHECK_STR(plot.graphs[1].expr.error.name, L"c");
+	CHECK_INT(plot.graphs[1].expr.error.pos, 0);
+	plot = MakePlot({ L"a = 3" }, { Param(L"a", 1) });
+	CHECK_INT(plot.graphs[0].expr.error.code, FplErrorCode::Redefined);
+	CHECK_STR((FplError{ FplErrorCode::Redefined, 0, 1, L"a" }.Message()), L"'a' is already defined");
+	// a cycle defines nothing
+	plot = MakePlot({ L"p = q", L"q = p" });
+	CHECK(!plot.graphs[0].definition && !plot.graphs[1].definition);
+	CHECK_INT(plot.graphs[0].expr.error.code, FplErrorCode::UnknownName);
+	// an unknown name stays an error the app can offer to add
+	plot = MakePlot({ L"y = 2bx" });
+	CHECK_INT(plot.graphs[0].expr.error.code, FplErrorCode::UnknownName);
+	CHECK_STR(plot.graphs[0].expr.error.name, L"b");
+	// degrees
+	plot = MakePlot({ L"y = sin x" });
+	plot.degrees = true;
+	plot.Build();
+	CHECK_NEAR(plot.Eval(0, 90), 1);
+	plot = MakePlot({});
+	CHECK(plot.graphs.empty());
+	CHECK_INT(plot.Slots().size(), FplFirstParam);
+}
+
+TEST(GraphSampling) {
+	auto v = View();
+	auto plot = MakePlot({ L"y = x", L"c = 2", L"y = 2 +", L"x^2 + y^2 < 4" });
+	plot.graphs[0].flags = 0;
+	plot.Sample(v);
+	CHECK(!plot.graphs[0].geometry.lines.empty());
+	CHECK(plot.graphs[1].geometry.lines.empty());
+	CHECK(plot.graphs[2].geometry.lines.empty());
+	CHECK(!plot.graphs[3].geometry.fills.empty());
+	plot.graphs[0].flags = FplGraphHidden;
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.lines.empty());
+	CHECK(!plot.graphs[0].Drawable());
+	// a curve's own range
+	plot = MakePlot({ L"(cos t, sin t)" });
+	plot.graphs[0].hasRange = true;
+	plot.graphs[0].tMin = 0;
+	plot.graphs[0].tMax = Pi;
+	plot.Sample(v);
+	auto end = v.ToPlane(plot.graphs[0].geometry.lines[0].back());
+	CHECK_NEAR_TOL(end.x, -1, 1e-12);
+}
+
+TEST(GraphFeatures) {
+	auto v = View();
+	auto plot = MakePlot({ L"y = x^2 - 1", L"y = x", L"y = 2 +", L"(cos t, sin t)" });
+	plot.Sample(v);
+	plot.FindFeatures(0, v);
+	auto& fs = plot.graphs[0].features;
+	using K = FplFeatureKind;
+	CHECK(Has(fs, K::Root, -1));
+	CHECK(Has(fs, K::Root, 1));
+	CHECK(Has(fs, K::Minimum, 0, -1));
+	CHECK(Has(fs, K::YIntercept, 0, -1));
+	CHECK(Has(fs, K::Intersection, (1 - std::sqrt(5.0)) / 2, NaN, 1e-12));
+	CHECK(Has(fs, K::Intersection, (1 + std::sqrt(5.0)) / 2, NaN, 1e-12));
+	CHECK_INT(fs.size(), 6);
+	// only functions have them
+	plot.FindFeatures(3, v);
+	CHECK(plot.graphs[3].features.empty());
+	plot.graphs[0].flags = FplGraphNoFeatures;
+	plot.FindFeatures(0, v);
+	CHECK(plot.graphs[0].features.empty());
+	// a hidden function meets nothing
+	plot.graphs[0].flags = 0;
+	plot.graphs[1].flags = FplGraphHidden;
+	plot.FindFeatures(0, v);
+	CHECK_INT(Count(plot.graphs[0].features, K::Intersection), 0);
+}
+
+TEST(GraphTracing) {
+	auto v = View();
+	auto plot = MakePlot({ L"y = x^2/4", L"(3, 3)", L"x^2 + y^2 = 49" });
+	plot.Sample(v);
+	// near the parabola at x = 2: on it exactly
+	FplPoint s = v.ToScreen({ 2, 1 });
+	auto hit = plot.Nearest({ s.x + 3, s.y - 2 }, v, 10, 8);
+	CHECK_INT(hit.graph, 0);
+	CHECK_NEAR(hit.plane.y, hit.plane.x * hit.plane.x / 4);
+	CHECK(hit.distance < 4);
+	CHECK_INT(hit.feature, -1);
+	// too far from everything
+	CHECK(!plot.Nearest(v.ToScreen({ -6, 1 }), v, 10, 8));
+	// the point
+	hit = plot.Nearest(v.ToScreen({ 3, 3 }), v, 10, 8);
+	CHECK_INT(hit.graph, 1);
+	CHECK_NEAR(hit.plane.x, 3);
+	// the circle: on its polyline
+	hit = plot.Nearest(v.ToScreen({ 7.05, 0 }), v, 10, 8);
+	CHECK_INT(hit.graph, 2);
+	CHECK_NEAR_TOL(std::hypot(hit.plane.x, hit.plane.y), 7, 1e-3);
+	// features snap
+	plot.FindFeatures(0, v);
+	FplPoint origin = v.ToScreen({ 0, 0 });
+	hit = plot.Nearest({ origin.x + 5, origin.y - 3 }, v, 10, 8);
+	CHECK_INT(hit.graph, 0);
+	CHECK(hit.feature >= 0);
+	CHECK_NEAR(hit.plane.x, 0);
+	// following the function by the mouse's x, wherever its y is
+	hit = plot.TraceAt(0, { v.ToScreenX(4), 5 }, v, 8);
+	CHECK_NEAR(hit.plane.x, 4);
+	CHECK_NEAR(hit.plane.y, 4);
+	hit = plot.TraceAt(0, { origin.x + 4, 5 }, v, 8);
+	CHECK(hit.feature >= 0);
+	CHECK_NEAR(hit.plane.x, 0);
+	CHECK(!plot.TraceAt(7, { 0, 0 }, v, 8));
+	plot.graphs[0].flags = FplGraphNoTrace;
+	CHECK_INT(plot.Nearest(v.ToScreen({ 2, 1 }), v, 10, 8).graph, -1);
+}
+
+TEST(Coordinates) {
+	CHECK_STR(FplFormatCoordinate(1.23456, 0.025), L"1.235");
+	CHECK_STR(FplFormatCoordinate(-1.5, 0.025), L"\x2212" L"1.5");
+	CHECK_STR(FplFormatCoordinate(2, 0.025), L"2");
+	CHECK_STR(FplFormatCoordinate(-0.00001, 0.025), L"0");
+	CHECK_STR(FplFormatCoordinate(1.0 / 3, 1e-6), L"0.3333333");
+	CHECK_STR(FplFormatCoordinate(2.5e8, 1e5), L"2.5\x00D7" L"10\x2078");
+	CHECK_STR(FplFormatCoordinate(NaN, 1), L"undefined");
+	CHECK_STR(FplFormatCoordinate(1234.5678, 50), L"1235");
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -1332,6 +1510,11 @@ int wmain() {
 	Run_SampleOthers();
 	Run_Analysis();
 	Run_SampleSpeed();
+	Run_GraphDefinitions();
+	Run_GraphSampling();
+	Run_GraphFeatures();
+	Run_GraphTracing();
+	Run_Coordinates();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;
