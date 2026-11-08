@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 #pragma comment(lib, "d2d1.lib")
@@ -285,7 +286,8 @@ void CFunctionPlotCtrl::LayoutPanel() {
 			row.kind = FplPanelRow::Graph;
 			row.index = (int)i;
 			row.error = (bool)g.expr.error;
-			float h = FplGraphRow + (row.error ? FplErrorLine : 0);
+			row.note = !row.error && g.expr.kind == FplKind::Regression;
+			float h = FplGraphRow + (row.error || row.note ? FplErrorLine : 0);
 			row.rect = { left, y, right, y + h };
 			s.rows.push_back(row);
 			y += h;
@@ -542,9 +544,17 @@ void CFunctionPlotCtrl::PaintGraphs() {
 			bool dashed = g.geometry.dashed || (g.flags & FplGraphDashed);
 			rt->DrawGeometry(s.paths[i].lines.Get(), brush, width, dashed ? s.dashStroke.Get() : s.roundStroke.Get());
 		}
+		const bool draggable = (g.dragX >= 0 || g.dragY >= 0) && !(g.flags & FplGraphNoDrag);
 		for (auto& p : g.geometry.points) {
 			D2D1_ELLIPSE dot = D2D1::Ellipse(Pt(p), 2.5f + width, 2.5f + width);
 			rt->FillEllipse(dot, brush);
+			// a draggable point: a ring around it, stronger under the mouse
+			if (draggable) {
+				const float ring = 6.5f + width + ((int)i == s.hotPoint ? 2 : 0);
+				brush->SetOpacity((int)i == s.hotPoint ? 0.55f : 0.3f);
+				rt->DrawEllipse(D2D1::Ellipse(Pt(p), ring, ring), brush, 2);
+				brush->SetOpacity(1);
+			}
 		}
 	}
 }
@@ -578,6 +588,30 @@ void CFunctionPlotCtrl::PaintTrace() {
 	if (!std::isfinite(p.x) || !std::isfinite(p.y))
 		return;
 	auto* color = s.Brush(GraphColor(s.traceGraph));
+	// the tangent through it, across the view
+	double slope = std::numeric_limits<double>::quiet_NaN();
+	if (!s.mode3D && (GetStyle() & FPLS_TANGENT)) {
+		auto kind = s.plot.graphs[s.traceGraph].expr.kind;
+		slope = s.plot.Slope(s.traceGraph, kind == FplKind::FunctionOfY ? s.traceY : s.traceX);
+		if (std::isfinite(slope)) {
+			const double span = (v.xMax - v.xMin) + (v.yMax - v.yMin);
+			FplPoint a, b;
+			if (kind == FplKind::Function) {
+				a = v.ToScreen({ s.traceX - span, s.traceY - span * slope });
+				b = v.ToScreen({ s.traceX + span, s.traceY + span * slope });
+			}
+			else {
+				a = v.ToScreen({ s.traceX - span * slope, s.traceY - span });
+				b = v.ToScreen({ s.traceX + span * slope, s.traceY + span });
+			}
+			auto clampPt = [](FplPoint q) {
+				return D2D1::Point2F((float)std::clamp(q.x, -1e6, 1e6), (float)std::clamp(q.y, -1e6, 1e6));
+			};
+			color->SetOpacity(0.7f);
+			rt->DrawLine(clampPt(a), clampPt(b), color, 1.5f, s.dashStroke.Get());
+			color->SetOpacity(1);
+		}
+	}
 	D2D1_ELLIPSE dot = D2D1::Ellipse(Pt(p), 5.5f, 5.5f);
 	rt->FillEllipse(dot, color);
 	rt->DrawEllipse(dot, s.Brush(c.crBack), 2);
@@ -601,6 +635,8 @@ void CFunctionPlotCtrl::PaintTrace() {
 		// a surface's value: to about five figures
 		if (std::isfinite(s.traceZ))
 			text += L"   z = " + FplFormatCoordinate(s.traceZ, std::max(std::abs(s.traceZ), 1.0) * 1e-5);
+		if (std::isfinite(slope))
+			text += L"   slope " + FplFormatCoordinate(slope, std::max(std::abs(slope), 1.0) * 1e-5);
 	}
 	const float tw = TextWidth(text, s.traceText.Get()) + 14, th = 24;
 	float x = (float)p.x + 10, y = (float)p.y - th - 10;
@@ -654,7 +690,8 @@ void CFunctionPlotCtrl::PaintPanel() {
 			auto& g = s.plot.graphs[row.index];
 			const float mid = top + FplGraphRow / 2;
 			const bool hidden = (g.flags & FplGraphHidden) != 0;
-			if (!g.definition && !(g.expr.kind == FplKind::Definition && !g.expr.error)) {
+			if (!g.definition && !g.listDefinition && g.expr.kind != FplKind::Regression &&
+				!(g.expr.kind == FplKind::Definition && !g.expr.error)) {
 				auto* color = s.Brush(GraphColor(row.index));
 				D2D1_ELLIPSE swatch = D2D1::Ellipse({ left + 15, mid }, 6, 6);
 				if (hidden || g.expr.error)
@@ -667,11 +704,29 @@ void CFunctionPlotCtrl::PaintPanel() {
 				double value = s.plot.DefinitionValue(row.index);
 				label += L"   = " + FplFormatCoordinate(value, 1e-6);
 			}
+			else if (g.expr.kind == FplKind::Integral && !g.expr.error) {
+				double value = s.plot.IntegralValue(row.index);
+				label += L"   = " + FplFormatCoordinate(value, 1e-6);
+			}
+			else if (g.listDefinition && !g.expr.error) {
+				auto* values = s.plot.ListValues(g.expr.name);
+				size_t n = values ? values->size() : 0;
+				label += L"   (" + std::to_wstring(n) + (n == 1 ? L" item)" : L" items)");
+			}
 			Text(rt, label, s.panelText.Get(), { left + 28, top, right - 8, top + FplGraphRow }, hidden ? muted : text);
 			if (row.error) {
 				Text(rt, g.expr.error.Message(), s.panelSmall.Get(),
 					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine },
 					s.Brush(c.crError));
+			}
+			else if (row.note) {
+				// the fit: its names' values and R squared (U+00B2)
+				std::wstring fit;
+				for (auto& [name, value] : s.plot.Fitted(row.index))
+					fit += name + L" = " + FplFormatCoordinate(value, std::max(std::abs(value), 1.0) * 1e-5) + L",  ";
+				fit += L"R\x00B2 = " + FplFormatCoordinate(g.r2, 1e-5);
+				Text(rt, fit, s.panelSmall.Get(),
+					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine }, muted);
 			}
 		}
 		else {

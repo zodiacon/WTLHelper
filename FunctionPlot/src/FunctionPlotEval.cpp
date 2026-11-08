@@ -3,6 +3,7 @@
 #include "FunctionPlotExpr.h"
 
 #include <algorithm>
+#include <memory>
 #include <cmath>
 #include <limits>
 #include <numbers>
@@ -167,6 +168,67 @@ double FplPow(double x, double y) {
 
 // ---- Evaluating the tree ---------------------------------------------------------------------------------------------
 
+namespace {
+
+// Adaptive Simpson with Richardson's correction; budget: how many more evaluations it may make.
+template <typename F>
+double Simpson(F& f, double a, double b, double fa, double fm, double fb, double whole, double eps, int depth,
+	int& budget) {
+	double m = (a + b) / 2, l = (a + m) / 2, r = (m + b) / 2;
+	double fl = f(l), fr = f(r);
+	budget -= 2;
+	if (std::isnan(fl) || std::isnan(fr))
+		return NaN;
+	double left = (m - a) / 6 * (fa + 4 * fl + fm), right = (b - m) / 6 * (fm + 4 * fr + fb);
+	double delta = left + right - whole;
+	if (depth <= 0 || budget <= 0 || std::abs(delta) <= 15 * eps)
+		return left + right + delta / 15;
+	return Simpson(f, a, m, fa, fl, fm, left, eps / 2, depth - 1, budget) +
+		Simpson(f, m, b, fm, fr, fb, right, eps / 2, depth - 1, budget);
+}
+
+template <typename F>
+double Integrate(F& f, double a, double b) {
+	if (!std::isfinite(a) || !std::isfinite(b))
+		return NaN;
+	if (a == b)
+		return 0;
+	// a first pass over a few pieces, so a narrow feature isn't missed between three points
+	constexpr int Pieces = 8;
+	double xs[Pieces + 1], fx[Pieces + 1], fm[Pieces], piece[Pieces];
+	for (int i = 0; i <= Pieces; i++) {
+		xs[i] = i == Pieces ? b : a + (b - a) * i / Pieces;
+		fx[i] = f(xs[i]);
+		if (std::isnan(fx[i]))
+			return NaN;
+	}
+	double rough = 0;
+	for (int i = 0; i < Pieces; i++) {
+		fm[i] = f((xs[i] + xs[i + 1]) / 2);
+		if (std::isnan(fm[i]))
+			return NaN;
+		piece[i] = (xs[i + 1] - xs[i]) / 6 * (fx[i] + 4 * fm[i] + fx[i + 1]);
+		rough += std::abs(piece[i]);
+	}
+	const double eps = 1e-10 * std::max(rough, 1e-300);
+	int budget = 200000;
+	double sum = 0;
+	for (int i = 0; i < Pieces; i++)
+		sum += Simpson(f, xs[i], xs[i + 1], fx[i], fm[i], fx[i + 1], piece[i], eps / Pieces, 40, budget);
+	return sum;
+}
+
+} // namespace
+
+double FplIntegrate(const std::function<double(double)>& f, double a, double b) {
+	auto g = [&](double t) { return f(t); };
+	return Integrate(g, a, b);
+}
+
+int FplStandardSlot(std::wstring_view name) {
+	return StandardSlot(name);
+}
+
 double FplEvalTree(const FplAst& ast, int node, const std::vector<std::wstring>& names, const double* values) {
 	auto& n = ast[node];
 	auto& k = n.kids;
@@ -204,7 +266,22 @@ double FplEvalTree(const FplAst& ast, int node, const std::vector<std::wstring>&
 					return ev(int(2 * i + 1));
 			return n.hasDefault ? ev(int(k.size() - 1)) : NaN;
 		}
-		case FplOp::Tuple: return NaN;
+		case FplOp::Tuple: case FplOp::List: return NaN;
+		case FplOp::Integral: {
+			// the body with its variable first among the names
+			std::vector<std::wstring> inner;
+			inner.reserve(names.size() + 1);
+			inner.push_back(n.name);
+			inner.insert(inner.end(), names.begin(), names.end());
+			std::vector<double> vals(names.size() + 1);
+			for (size_t i = 0; i < names.size(); i++)
+				vals[i + 1] = values[i];
+			auto f = [&](double t) {
+				vals[0] = t;
+				return FplEvalTree(ast, k[0], inner, vals.data());
+			};
+			return Integrate(f, ev(1), ev(2));
+		}
 	}
 	return NaN;
 }
@@ -245,9 +322,29 @@ private:
 		return false;
 	}
 
-	// The constant an exponent folds to, if it has no names.
+	// Names that aren't bound by an integral around them.
+	bool HasFreeNames(int node, std::vector<std::wstring>& bound) {
+		auto& n = m_Ast[node];
+		if (n.op == FplOp::Var)
+			return std::find(bound.begin(), bound.end(), n.name) == bound.end();
+		if (n.op == FplOp::Integral) {
+			if (HasFreeNames(n.kids[1], bound) || HasFreeNames(n.kids[2], bound))
+				return true;
+			bound.push_back(n.name);
+			bool free = HasFreeNames(n.kids[0], bound);
+			bound.pop_back();
+			return free;
+		}
+		for (int k : n.kids)
+			if (HasFreeNames(k, bound))
+				return true;
+		return false;
+	}
+
+	// The constant a part folds to, if it has no free names.
 	bool ConstantOf(int node, double& v) {
-		if (FplHasNames(m_Ast, node) || m_Ast[node].op == FplOp::Tuple)
+		std::vector<std::wstring> bound;
+		if (HasFreeNames(node, bound) || m_Ast[node].op == FplOp::Tuple || m_Ast[node].op == FplOp::List)
 			return false;
 		v = FplEvalTree(m_Ast, node, {}, nullptr);
 		return true;
@@ -258,6 +355,8 @@ private:
 		auto& k = n.kids;
 		if (n.op == FplOp::Tuple)
 			return Fail(FplErrorCode::MisplacedPoint, node);
+		if (n.op == FplOp::List)
+			return Fail(FplErrorCode::ListNotAllowed, node);
 		double v;
 		if (n.op != FplOp::Cmp && n.op != FplOp::And && ConstantOf(node, v)) {
 			Const(v);
@@ -278,8 +377,9 @@ private:
 				FplInstr in{ FplCode::Load };
 				in.arg = slot;
 				Push(in, 1);
-				if (slot < 64)
+				if (slot < 64 && !Bound(n.name))
 					m_Prog.m_Slots |= uint64_t(1) << slot;
+				m_Prog.m_SlotCount = std::max(m_Prog.m_SlotCount, slot + 1);
 				return true;
 			}
 			case FplOp::Neg:
@@ -365,9 +465,34 @@ private:
 					m_Prog.m_Code[j].arg = int(m_Prog.m_Code.size());
 				return true;
 			}
+			case FplOp::Integral: {
+				// the body as a program of its own, run over the variable's slot
+				int slot = StandardSlot(n.name);
+				if (slot < 0)
+					return Fail(FplErrorCode::Internal, node);
+				auto body = std::make_shared<FplProgram>();
+				FplCompiler inner(m_Ast, m_Params, *body, m_Error);
+				inner.m_Bound = m_Bound;
+				inner.m_Bound.push_back(n.name);
+				if (!inner.Compile(k[0]) || !Emit(k[1]) || !Emit(k[2]))
+					return false;
+				// what the body reads, but not its variable, is read here too
+				m_Prog.m_Slots |= body->m_Slots;
+				m_Prog.m_SlotCount = std::max({ m_Prog.m_SlotCount, body->m_SlotCount, slot + 1 });
+				FplInstr in{ FplCode::Integral };
+				in.arg = int(m_Prog.m_Subs.size());
+				in.value = slot;
+				m_Prog.m_Subs.push_back(std::move(body));
+				Push(in, -1);
+				return true;
+			}
 			default:
 				return Fail(FplErrorCode::Internal, node);
 		}
+	}
+
+	bool Bound(const std::wstring& name) const {
+		return std::find(m_Bound.begin(), m_Bound.end(), name) != m_Bound.end();
 	}
 
 	bool Op(FplCode code, int delta) {
@@ -381,6 +506,7 @@ private:
 	FplError& m_Error;
 	int m_Depth = 0;
 	int m_Max = 0;
+	std::vector<std::wstring> m_Bound;	// the integrals' variables around what's compiled
 };
 
 FplProgram FplCompile(const FplAst& ast, int node, const std::vector<std::wstring>& parameters, FplError* error) {
@@ -401,6 +527,16 @@ FplProgram FplCompile(const FplAst& ast, int node, const std::vector<std::wstrin
 	if (!c.Compile(node))
 		return FplProgram();
 	return prog;
+}
+
+bool FplProgram::Reads(int slot) const {
+	for (auto& in : m_Code)
+		if (in.code == FplCode::Load && in.arg == slot)
+			return true;
+	for (auto& sub : m_Subs)
+		if (sub->Reads(slot))
+			return true;
+	return false;
 }
 
 // ---- The stack machine -----------------------------------------------------------------------------------------------
@@ -445,6 +581,19 @@ double FplProgram::Eval(const double* slots) const {
 					pc = size_t(in.arg);
 				break;
 			case FplCode::Jump: pc = size_t(in.arg); break;
+			case FplCode::Integral: {
+				sp--;
+				const FplProgram& body = *m_Subs[in.arg];
+				const int slot = int(in.value);
+				// the slots copied, so the body's variable can move without touching the caller's
+				std::vector<double> local(slots, slots + std::max(m_SlotCount, slot + 1));
+				auto f = [&](double t) {
+					local[slot] = t;
+					return body.Eval(local.data());
+				};
+				st[sp - 1] = Integrate(f, st[sp - 1], st[sp]);
+				break;
+			}
 		}
 	}
 	return st[0];
@@ -453,12 +602,13 @@ double FplProgram::Eval(const double* slots) const {
 // ---- All of it -------------------------------------------------------------------------------------------------------
 
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
-	const std::vector<FplUserFunction>* functions) {
+	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists) {
 	FplExpression e;
 	FplParseOptions options;
 	options.parameters = &parameters;
 	options.degrees = degrees;
 	options.functions = functions;
+	options.lists = lists;
 	auto parsed = FplParse(text, options);
 	if (parsed.error) {
 		e.error = parsed.error;
@@ -473,6 +623,10 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 	e.rel = def.rel;
 	e.name = def.name;
 	e.f = FplCompile(parsed.ast, def.expr[0], parameters, &e.error);
+	if (!e.error && def.kind == FplKind::Integral)
+		e.value = FplCompile(parsed.ast, parsed.root, parameters, &e.error);
+	if (def.kind == FplKind::Regression)
+		e.df = {};
 	if (!e.error && def.expr[1] >= 0)
 		e.g = FplCompile(parsed.ast, def.expr[1], parameters, &e.error);
 	if (!e.error && def.expr[2] >= 0)

@@ -7,6 +7,8 @@
 // Text positions are UTF-16 offsets into the source, so an app can underline an error.
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +35,8 @@ enum class FplErrorCode : uint8_t {
 	BadPoint,			// a point that isn't (x, y)
 	NotDifferentiable,	// a relation or a point where a derivative was asked for
 	Redefined,			// a name defined twice, or a definition of a parameter the app has; name is the name
+	ListNotAllowed,		// a list ([1, 2, 3]) anywhere but as a definition's value, or a list used where one number is
+	NotAList,			// mean(3): name is the function
 	Internal,
 };
 
@@ -59,9 +63,11 @@ enum class FplOp : uint8_t {
 	And,		// a chained comparison: 0 < x < 1 is And(0 < x, x < 1), the middle shared
 	Piecewise,	// {cond: value, cond: value, default}: kids are cond, value pairs, then the default if hasDefault
 	Tuple,		// (a, b): a point or a parametric curve, only as the whole expression
+	Integral,	// integral(body, var, lo, hi): name is the variable, bound in the body; kids body, lo, hi
+	List,		// [a, b, c]: only as a definition's value
 };
 
-enum class FplRel : uint8_t { Eq, Lt, Le, Gt, Ge };
+enum class FplRel : uint8_t { Eq, Lt, Le, Gt, Ge, Fit };	// Fit: "~", a regression
 
 enum class FplFunc : uint8_t {
 	Sin, Cos, Tan, Sec, Csc, Cot,
@@ -127,7 +133,14 @@ struct FplParseOptions {
 	const std::vector<std::wstring>* parameters = nullptr;	// the names an app has defined
 	bool degrees = false;	// trigonometric functions in degrees
 	const std::vector<FplUserFunction>* functions = nullptr;	// the user's functions, known by name
+	// the names (among parameters) that are lists: mean(L), median, stdev, sum, count, min and max of one are the
+	// parameter named "mean(L)" and so on (FplAggregateName), which the app works out
+	const std::vector<std::wstring>* lists = nullptr;
 };
+
+// The list aggregates, and the parameter name one of a list is.
+inline constexpr const wchar_t* FplAggregates[] = { L"mean", L"median", L"stdev", L"sum", L"count", L"min", L"max" };
+std::wstring FplAggregateName(std::wstring_view aggregate, std::wstring_view list);
 
 struct FplParseResult {
 	FplAst ast;
@@ -139,7 +152,8 @@ struct FplParseResult {
 // implicit ("2x", "x(x+1)", "2 sin x"). '^' binds tighter than unary minus and is right associative; a function's
 // argument can go without parentheses, taking the implicit product after it up to an operator or the next function
 // ("sin 2x cos x" is sin(2x) cos(x)); "sin^2 x" is (sin x)^2. A name that isn't known is split into known ones
-// ("xy", "pix", "sinx"). The user's functions are called as the built-in ones are, f'(x) and f''(x) their
+// ("xy", "pix", "sinx"). integral(f, lo, hi) integrates over x, integral(f, t, lo, hi) over a variable named (U+222B
+// too); the variable is bound inside. The user's functions are called as the built-in ones are, f'(x) and f''(x) their
 // derivatives; "d/dx" (d/dy, d/dt, d/dtheta) is the derivative of what follows, as a function's argument. Also: |x|, x!, {x < 0: -x, x}, {0 < x < 1} (1 inside, nothing outside), (a, b), "**" for
 // '^', "<=" ">=", and the characters people paste: times and dots (U+00D7 U+00B7 U+22C5), U+00F7, the minus U+2212,
 // U+2264 U+2265, the square root sign U+221A (of the factor after it), superscript 2 and 3 (U+00B2 U+00B3), and the
@@ -173,6 +187,9 @@ enum class FplKind : uint8_t {
 	ParametricSurface,	// (x(u, v), y(u, v), z(u, v)); expr[0..2] (3D)
 	Point3D,		// (a, b, c) with no variables; expr[0..2] (3D)
 	ImplicitSurface,	// F(x, y, z) = 0, an equation with z that isn't z = F(x, y); expr[0] is F (3D)
+	Integral,		// integral(f, var, lo, hi) alone, with no free variables: its area; expr[0] f (in the variable,
+					// the def's name), expr[1] lo, expr[2] hi
+	Regression,		// lhs ~ rhs: the unknown names in it fitted over lists; expr[0] lhs - rhs, expr[1] lhs
 };
 
 struct FplPlotDef {
@@ -222,6 +239,7 @@ enum class FplCode : uint8_t {
 	Call1, Call2, CallN,
 	Lt, Le, Gt, Ge, Eq, And,
 	JumpIfFalse, Jump,
+	Integral,			// pops hi and lo: the integral of a sub-program (arg) over the slot in value
 };
 
 struct FplInstr {
@@ -233,24 +251,37 @@ struct FplInstr {
 	double (*fn)(const double*, int) = nullptr;
 };
 
+class FplProgram;
+using FplProgramPtr = std::shared_ptr<const FplProgram>;
+
 class FplProgram {
 public:
 	double Eval(const double* slots) const;
 	bool Empty() const { return m_Code.empty(); }
 	bool UsesSlot(int slot) const { return slot < 64 && (m_Slots >> slot) & 1; }
+	bool Reads(int slot) const;		// any slot (UsesSlot only knows the first 64)
 	bool IsConstant() const { return m_Slots == 0; }
 	size_t Size() const { return m_Code.size(); }
 
 private:
 	friend class FplCompiler;
 	std::vector<FplInstr> m_Code;
+	std::vector<FplProgramPtr> m_Subs;	// integrals' bodies
 	int m_MaxDepth = 0;
+	int m_SlotCount = 0;				// one past the highest slot it reads (its bodies' too)
 	uint64_t m_Slots = 0;
 };
 
 // Compiles one node (not a relation or a point: their sides). Parts without names are folded to constants; constant
 // integer powers multiply.
 FplProgram FplCompile(const FplAst& ast, int node, const std::vector<std::wstring>& parameters, FplError* error = nullptr);
+
+// A standard variable's slot (x, y, t, theta, z, u, v), or -1.
+int FplStandardSlot(std::wstring_view name);
+
+// The integral of f over [a, b] by adaptive Simpson (an error of about 1e-10 of its size; NaN where f is undefined
+// somewhere it looks).
+double FplIntegrate(const std::function<double(double)>& f, double a, double b);
 
 // x^y as a grapher means it: a negative x to a rational power with an odd denominator is real ((-8)^(1/3) = -2).
 double FplPow(double x, double y);
@@ -262,6 +293,7 @@ struct FplExpression {
 	FplRel rel = FplRel::Eq;
 	FplProgram f, g;			// g only for Parametric and Point (and the 3D kinds)
 	FplProgram h;				// the 3D kinds' z
+	FplProgram value;			// Integral's: its value
 	FplProgram df;				// Function's df/dx, FunctionOfY's df/dy (empty if it can't be derived)
 	std::wstring name;			// Definition's
 	FplError error;
@@ -269,4 +301,4 @@ struct FplExpression {
 
 // Parses, classifies and compiles text; the slots are as for FplCompile with the same parameters.
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees = false,
-	const std::vector<FplUserFunction>* functions = nullptr);
+	const std::vector<FplUserFunction>* functions = nullptr, const std::vector<std::wstring>* lists = nullptr);

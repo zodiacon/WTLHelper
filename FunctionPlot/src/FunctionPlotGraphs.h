@@ -20,6 +20,7 @@ enum : unsigned {
 	FplGraphNoFeatures = 0x0008,
 	FplGraphHeatmap = 0x0010,		// a surface: a heat map of its values
 	FplGraphNoContours = 0x0020,	// a surface: no contour lines
+	FplGraphNoDrag = 0x0040,		// a point the user can't drag
 };
 
 struct FplGraph {
@@ -39,11 +40,29 @@ struct FplGraph {
 	int function = -1;				// "f(x) = x^2": the user function it defines (drawn when its parameter is x, y, t or
 									// theta, as y = f(x), x = f(y), a curve, r = f(theta))
 	int slot = -1;					// a definition's slot
+	int dragX = -1, dragY = -1;		// a point whose coordinate is a parameter: the parameter's index (dragging it
+									// sets the parameter)
+	bool listDefinition = false;	// "L = [1, 2, a]": defines a list (definition is false)
+	std::vector<FplProgram> items;	// its items
+	std::vector<int> listSlots;		// the lists it reads: it's drawn once per element (the shortest's count)
+	std::vector<int> fitted;		// a regression's: the slots of the names it fits
+	std::vector<double> fit;		// their values (where the next fit starts)
+	double r2 = std::numeric_limits<double>::quiet_NaN();	// a regression's R squared
 	FplGeometry geometry;			// from the last Sample
 	FplMesh mesh;					// from the last Build3D
 	std::vector<FplFeature> features;	// from the last FindFeatures (a function's only)
 
-	bool Drawable() const { return !definition && !expr.error && !(flags & FplGraphHidden); }
+	bool Drawable() const {
+		return !definition && !listDefinition && !expr.error && !(flags & FplGraphHidden) &&
+			expr.kind != FplKind::Regression;
+	}
+	bool Listed() const { return !listSlots.empty(); }
+};
+
+// An app's list of numbers (a table's column): "x1", "y1".
+struct FplList {
+	std::wstring name;
+	std::vector<double> values;
 };
 
 struct FplParam {
@@ -71,6 +90,7 @@ class FplPlot {
 public:
 	std::vector<FplGraph> graphs;
 	std::vector<FplParam> params;
+	std::vector<FplList> lists;		// the app's (a list defined by a graph is that graph's)
 	bool degrees = false;
 
 	int FindGraph(unsigned id) const;
@@ -84,6 +104,16 @@ public:
 	const std::vector<FplUserFunction>& Functions() const { return m_Functions; }
 	// A definition's value (NaN if it has none).
 	double DefinitionValue(int graph) const;
+	// An integral's (kind Integral) value (NaN for other kinds).
+	double IntegralValue(int graph) const;
+	// Any name's value now: a parameter, a definition, a fitted name, an aggregate ("mean(L)"); NaN if none.
+	double ValueOf(std::wstring_view name) const;
+	// A list's values (the app's or a defined one), null if there's no such list.
+	const std::vector<double>* ListValues(std::wstring_view name) const;
+	// A regression's fitted names and values.
+	std::vector<std::pair<std::wstring, double>> Fitted(int graph) const;
+	// The lists' count a listed graph is drawn for (0 when it isn't listed or a list is empty).
+	size_t ElementCount(int graph) const;
 
 	// Samples every drawable graph; the others' geometry is cleared.
 	void Sample(const FplViewport& view, const FplSampleOptions& options = {});
@@ -106,6 +136,20 @@ public:
 	// Following one graph while the mouse drags: a function at the mouse's x (y for x = f(y)), snapping to a feature
 	// within snapDistance in that direction; other kinds the nearest point on their polylines.
 	FplTraceHit TraceAt(int graph, FplPoint screen, const FplViewport& view, double snapDistance) const;
+	// Keyboard tracing: the point dips DIPs further along the graph from a plane point (negative: back), a function by
+	// its x (y for x = f(y)), past where it's undefined, other kinds along their polylines (stopping at their ends).
+	FplTraceHit Step(int graph, FplPoint plane, double dips, const FplViewport& view) const;
+	// The graph's next feature (FindFeatures') past x, dir +1 or -1; none if there isn't one.
+	FplTraceHit NextFeature(int graph, double x, int dir, const FplViewport& view) const;
+	// The next drawable, traceable function graph after graph (dir +1 or -1, going round) defined at x, at x.
+	FplTraceHit NextGraphAt(int graph, double x, int dir, const FplViewport& view) const;
+	// dy/dx of y = f(x) (dx/dy of x = f(y)) at v: the derivative's program, else differences; NaN for other kinds.
+	double Slope(int graph, double v) const;
+
+	// The draggable point (a point graph with a parameter for a coordinate) within maxDistance DIPs of a screen
+	// point, the nearest; -1 if none.
+	int DraggableAt(FplPoint screen, double maxDistance) const;
+
 	// z = F(x, y) of a surface graph (NaN for other kinds).
 	double EvalSurface(int graph, double x, double y) const;
 	// 3D: the nearest graph the ray (in the cube) meets, by its mesh (Build3D's): the point in space (plane and z),
@@ -113,15 +157,47 @@ public:
 	FplTraceHit Pick3D(FplVec3 origin, FplVec3 dir, const FplBox3& box) const;
 
 private:
+	void FindDragged(FplGraph& g, FplParseOptions options);
+	void AddList(const std::wstring& name);
+	bool TryRegression(FplGraph& g, FplParseOptions options);
+	void Fit(FplGraph& g);
+	void SetElement(std::vector<double>& slots, const FplGraph& g, size_t i) const;
+	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box);
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;
 	void SnapToFeature(FplTraceHit& hit, FplPoint screen, const FplViewport& view, double snapDistance,
 		bool alongOnly) const;
 
-	std::vector<std::wstring> m_Names;	// the parameters, then the definitions
+	std::vector<std::wstring> m_Names;	// the parameters, the app's lists, then the definitions (and lists, fitted names)
 	std::vector<double> m_Slots;
 	std::vector<int> m_Definitions;		// graphs, in order
 	std::vector<FplUserFunction> m_Functions;
+	struct ListSlot {
+		std::wstring name;
+		int slot = -1;					// its element's slot; its aggregates' follow
+		int graph = -1;					// a defined list's graph; -1: the app's (lists[app])
+		int app = -1;
+		std::vector<double> values;
+	};
+	std::vector<ListSlot> m_Lists;
+	std::vector<std::wstring> m_ListNames;
+	std::vector<int> m_Regressions;		// graphs
 };
+
+// A plot's state (the control's GetState and SetState): the graphs' settings (not what's built from them, not lParam),
+// the parameters, the lists, the angle unit, the 2D view's ranges, the 3D box and camera, the mode and the panel's fold.
+struct FplSavedState {
+	std::vector<FplGraph> graphs;
+	std::vector<FplParam> params;
+	std::vector<FplList> lists;
+	bool degrees = false, mode3D = false, collapsed = false;
+	FplViewport view;					// its ranges (the size is the window's)
+	FplBox3 box;
+	float yaw = FplCamera{}.yaw, pitch = FplCamera{}.pitch;
+};
+// As text: a line per setting, tab-separated fields, names and texts escaped (FunctionPlotState.cpp has the format).
+std::wstring FplSaveState(const FplSavedState& state);
+// false if it isn't a plot's state; lines it doesn't know are skipped.
+bool FplLoadState(std::wstring_view text, FplSavedState& state);
 
 // The graphs as SVG: the grid, the axes and their labels, the fills, contours, curves, arrows and points (no heat
 // maps), and a legend of the graphs. Colors are COLORREFs; graphColors by graph.

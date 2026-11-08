@@ -102,6 +102,9 @@ unsigned FplVariablesOf(const FplAst& ast, int node) {
 	auto& n = ast[node];
 	if (n.op == FplOp::Var)
 		return VarBit(n.name);
+	if (n.op == FplOp::Integral)		// its variable is bound in the body
+		return (FplVariablesOf(ast, n.kids[0]) & ~VarBit(n.name)) | FplVariablesOf(ast, n.kids[1]) |
+			FplVariablesOf(ast, n.kids[2]);
 	unsigned mask = 0;
 	for (int k : n.kids)
 		mask |= FplVariablesOf(ast, k);
@@ -169,6 +172,15 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 		return def;
 	}
 
+	// an integral alone with nothing free: its area
+	if (top.op == FplOp::Integral && FplVariablesOf(ast, root) == 0) {
+		def.kind = FplKind::Integral;
+		def.name = top.name;
+		for (int k = 0; k < 3; k++)
+			def.expr[k] = top.kids[k];
+		return def;
+	}
+
 	if (top.op != FplOp::Cmp) {
 		// A bare expression is y = f(x).
 		unsigned vars = FplVariablesOf(ast, root);
@@ -186,6 +198,22 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 	int lhs = top.kids[0], rhs = top.kids[1];
 	FplRel rel = top.rel;
 	unsigned lv = FplVariablesOf(ast, lhs), rv = FplVariablesOf(ast, rhs);
+
+	// lhs ~ rhs: a regression over lists, no variables in it
+	if (rel == FplRel::Fit) {
+		if (lv | rv) {
+			NotAllowed(def, ast, root, ~0u);
+			return def;
+		}
+		int f = ast.Binary(FplOp::Sub, lhs, rhs);
+		ast.nodes[f].pos = top.pos;
+		ast.nodes[f].len = top.len;
+		def.kind = FplKind::Regression;
+		def.rel = rel;
+		def.expr[0] = f;
+		def.expr[1] = lhs;
+		return def;
+	}
 
 	// name = value: a definition.
 	if (ast[lhs].op == FplOp::Var && !FplIsVariable(ast[lhs].name) && rel == FplRel::Eq) {
@@ -404,6 +432,8 @@ private:
 		auto& n = m_Ast[node];
 		if (n.op == FplOp::Var)
 			return n.name == m_Var;
+		if (n.op == FplOp::Integral && n.name == m_Var)		// bound in the body
+			return Depends(n.kids[1]) || Depends(n.kids[2]);
 		for (int k : n.kids)
 			if (Depends(k))
 				return true;
@@ -464,6 +494,18 @@ private:
 				t.pos = t.len = 0;
 				return m_Ast.Add(std::move(t));
 			}
+			case FplOp::Integral: {
+				// Leibniz: f(hi) hi' - f(lo) lo' (+ the integral of df/dv when v isn't the bound variable)
+				int body = k[0], lo = k[1], hi = k[2];
+				int result = Sub(Mul(Subst(body, n.name, hi), D(hi)), Mul(Subst(body, n.name, lo), D(lo)));
+				if (n.name != m_Var) {
+					FplNode inner = n;
+					inner.kids[0] = D(body);
+					inner.pos = inner.len = 0;
+					result = Add(result, m_Ast.Add(std::move(inner)));
+				}
+				return result;
+			}
 			case FplOp::Cmp:
 			case FplOp::And:
 				failed = true;
@@ -471,6 +513,30 @@ private:
 		}
 		failed = true;
 		return Num(0);
+	}
+
+	// A copy of the node with the variable replaced by another node (not where an integral binds it).
+	int Subst(int node, const std::wstring& name, int with) {
+		const FplNode n = m_Ast[node];
+		if (n.op == FplOp::Var)
+			return n.name == name ? with : node;
+		if (n.op == FplOp::Integral && n.name == name) {
+			FplNode c = n;
+			c.kids[1] = Subst(n.kids[1], name, with);
+			c.kids[2] = Subst(n.kids[2], name, with);
+			return m_Ast.Add(std::move(c));
+		}
+		FplNode c = n;
+		bool changed = false;
+		for (auto& kid : c.kids) {
+			int nk = Subst(kid, name, with);
+			changed = changed || nk != kid;
+			kid = nk;
+		}
+		if (!changed)
+			return node;
+		c.pos = c.len = 0;
+		return m_Ast.Add(std::move(c));
 	}
 
 	int Function(int node, const FplNode& n) {
@@ -609,6 +675,7 @@ const wchar_t* RelText(FplRel rel) {
 		case FplRel::Le: return L" <= ";
 		case FplRel::Gt: return L" > ";
 		case FplRel::Ge: return L" >= ";
+		case FplRel::Fit: return L" ~ ";
 		default: return L" = ";
 	}
 }
@@ -715,6 +782,24 @@ void Print(const FplAst& ast, int node, std::wstring& out) {
 					out += L", ";
 				Print(ast, k[i], out);
 			}
+			out += L')';
+			break;
+		case FplOp::List:
+			out += L'[';
+			for (size_t i = 0; i < k.size(); i++) {
+				if (i)
+					out += L", ";
+				Print(ast, k[i], out);
+			}
+			out += L']';
+			break;
+		case FplOp::Integral:
+			out += L"integral(";
+			Print(ast, k[0], out);
+			out += L", " + n.name + L", ";
+			Print(ast, k[1], out);
+			out += L", ";
+			Print(ast, k[2], out);
 			out += L')';
 			break;
 	}

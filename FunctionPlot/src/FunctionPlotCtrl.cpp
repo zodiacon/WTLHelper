@@ -15,12 +15,14 @@
 #pragma comment(lib, "windowscodecs.lib")
 
 static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed && FPLGF_NOTRACE == FplGraphNoTrace &&
-	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours);
+	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours &&
+	FPLGF_NODRAG == FplGraphNoDrag);
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
 	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
 	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D &&
-	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface);
+	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface && FPLK_INTEGRAL == (int)FplKind::Integral &&
+	FPLK_REGRESSION == (int)FplKind::Regression);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
@@ -96,7 +98,14 @@ LRESULT CFunctionPlotCtrl::OnSize(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		s.view.width = w;
 		s.view.height = h;
 		s.viewSet = true;
-		ResetView();
+		if (s.pendingView) {
+			// SetState's ranges, given before there was a size
+			s.pendingView = false;
+			SetViewport(s.view.xMin, s.view.xMax, s.view.yMin, s.view.yMax);
+			ViewChanged(false);
+		}
+		else
+			ResetView();
 	}
 	else {
 		s.view.Resize(w, h);
@@ -321,7 +330,8 @@ BOOL CFunctionPlotCtrl::GetGraphInfo(UINT id, FPLGRAPHINFO& info) const {
 	wcsncpy_s(info.szError, g.expr.error.Message().c_str(), _TRUNCATE);
 	const std::wstring& name = g.expr.error ? g.expr.error.name : g.expr.name;
 	wcsncpy_s(info.szName, name.c_str(), _TRUNCATE);
-	info.value = plot.DefinitionValue(i);
+	info.value = g.expr.kind == FplKind::Integral ? plot.IntegralValue(i)
+		: g.expr.kind == FplKind::Regression ? g.r2 : plot.DefinitionValue(i);
 	info.color = GraphColor(i);
 	return TRUE;
 }
@@ -457,6 +467,54 @@ void CFunctionPlotCtrl::SetDegrees(BOOL degrees) {
 		return;
 	m_State->plot.degrees = degrees != FALSE;
 	Rebuild();
+}
+
+double CFunctionPlotCtrl::GetValue(LPCWSTR pszName) const {
+	return pszName ? m_State->plot.ValueOf(pszName) : std::numeric_limits<double>::quiet_NaN();
+}
+
+BOOL CFunctionPlotCtrl::SetList(LPCWSTR pszName, const double* values, int count) {
+	if (!pszName || !*pszName || count < 0 || (count > 0 && !values))
+		return FALSE;
+	auto& lists = m_State->plot.lists;
+	auto it = std::find_if(lists.begin(), lists.end(), [&](const FplList& l) { return l.name == pszName; });
+	if (it == lists.end()) {
+		lists.push_back({ pszName, std::vector<double>(values, values + count) });
+		Rebuild();
+	}
+	else {
+		it->values.assign(values, values + count);
+		ValuesChanged();
+	}
+	return TRUE;
+}
+
+int CFunctionPlotCtrl::GetList(LPCWSTR pszName, double* values, int max) const {
+	auto* list = pszName ? m_State->plot.ListValues(pszName) : nullptr;
+	if (!list)
+		return 0;
+	for (int i = 0; values && i < max && i < (int)list->size(); i++)
+		values[i] = (*list)[i];
+	return (int)list->size();
+}
+
+BOOL CFunctionPlotCtrl::RemoveList(LPCWSTR pszName) {
+	auto& lists = m_State->plot.lists;
+	auto it = std::find_if(lists.begin(), lists.end(), [&](const FplList& l) { return pszName && l.name == pszName; });
+	if (it == lists.end())
+		return FALSE;
+	lists.erase(it);
+	Rebuild();
+	return TRUE;
+}
+
+int CFunctionPlotCtrl::GetListCount() const {
+	return (int)m_State->plot.lists.size();
+}
+
+LPCWSTR CFunctionPlotCtrl::GetListName(int index) const {
+	auto& lists = m_State->plot.lists;
+	return index >= 0 && index < (int)lists.size() ? lists[index].name.c_str() : nullptr;
 }
 
 BOOL CFunctionPlotCtrl::GetDegrees() const {
@@ -722,6 +780,11 @@ BOOL CFunctionPlotCtrl::GetTrace(FPLTRACE& trace) const {
 	trace.y = s.traceY;
 	trace.hasZ = std::isfinite(s.traceZ);
 	trace.z = trace.hasZ ? s.traceZ : 0;
+	if (!s.mode3D) {
+		double slope = s.plot.Slope(s.traceGraph, g.expr.kind == FplKind::FunctionOfY ? s.traceY : s.traceX);
+		trace.hasSlope = std::isfinite(slope);
+		trace.slope = trace.hasSlope ? slope : 0;
+	}
 	if (s.traceFeature >= 0 && s.traceFeature < (int)g.features.size())
 		trace.feature = (FPLFEATUREKIND)g.features[s.traceFeature].kind;
 	return TRUE;
@@ -782,6 +845,77 @@ void CFunctionPlotCtrl::NotifyTrace() {
 	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_TRACE };
 	GetTrace(nm.trace);
 	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
+BOOL CFunctionPlotCtrl::StartTrace() {
+	auto& s = *m_State;
+	if (s.mode3D || (GetStyle() & FPLS_NOTRACE) || !s.view.Valid())
+		return FALSE;
+	const double x = (s.view.xMin + s.view.xMax) / 2;
+	FplTraceHit hit = s.plot.NextGraphAt(-1, x, 1, s.view);
+	if (!hit)
+		return FALSE;
+	ApplyTraceHit(hit);
+	return TRUE;
+}
+
+void CFunctionPlotCtrl::ApplyTraceHit(const FplTraceHit& hit) {
+	auto& s = *m_State;
+	if (!hit)
+		return;
+	if (hit.graph != s.featuresGraph) {
+		if (s.featuresGraph >= 0 && s.featuresGraph < (int)s.plot.graphs.size())
+			s.plot.graphs[s.featuresGraph].features.clear();
+		s.featuresGraph = hit.graph;
+		s.plot.FindFeatures(hit.graph, s.view);
+	}
+	// pinned: the mouse moving doesn't take it away
+	s.traceDragged = true;
+	// kept in view: the view follows a point that would leave it
+	FplPoint p = s.view.ToScreen(hit.plane);
+	double dx = 0, dy = 0;
+	if (p.x < 0 || p.x > s.view.width)
+		dx = s.view.width / 2 - p.x;
+	if (p.y < 0 || p.y > s.view.height)
+		dy = s.view.height / 2 - p.y;
+	if ((dx != 0 || dy != 0) && !(GetStyle() & FPLS_NOPANZOOM)) {
+		s.view.Pan(dx, dy);
+		ViewChanged(true);
+		if (s.featuresGraph >= 0)
+			s.plot.FindFeatures(s.featuresGraph, s.view);
+	}
+	SetTraceHit(hit.graph, hit.feature, hit.plane.x, hit.plane.y, true, hit.z);
+	Invalidate();
+}
+
+bool CFunctionPlotCtrl::TraceKey(UINT vk) {
+	auto& s = *m_State;
+	if (s.mode3D || (GetStyle() & FPLS_NOTRACE))
+		return false;
+	if (vk == 'T' && !s.traceValid)
+		return StartTrace() != FALSE;
+	if (!s.traceValid || s.traceGraph < 0 || s.traceGraph >= (int)s.plot.graphs.size())
+		return false;
+	const bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
+	const FplPoint at = { s.traceX, s.traceY };
+	FplTraceHit hit;
+	switch (vk) {
+		case VK_LEFT: case VK_RIGHT: {
+			const int dir = vk == VK_RIGHT ? 1 : -1;
+			if (ctrl)
+				hit = s.plot.NextFeature(s.traceGraph, s.traceX, dir, s.view);
+			else
+				hit = s.plot.Step(s.traceGraph, at, dir * (shift ? 1.0 : 4.0), s.view);
+			break;
+		}
+		case VK_UP: case VK_DOWN:
+			hit = s.plot.NextGraphAt(s.traceGraph, s.traceX, vk == VK_UP ? 1 : -1, s.view);
+			break;
+		default:
+			return false;
+	}
+	ApplyTraceHit(hit);
+	return true;
 }
 
 void CFunctionPlotCtrl::UpdateTrace(POINT pt, bool dragging) {
@@ -961,6 +1095,70 @@ LRESULT CFunctionPlotCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) 
 	return 0;
 }
 
+// ---- State -----------------------------------------------------------------------------
+
+CString CFunctionPlotCtrl::GetState() const {
+	auto& s = *m_State;
+	FplSavedState st;
+	st.graphs.reserve(s.plot.graphs.size());
+	for (auto& g : s.plot.graphs) {
+		FplGraph copy;
+		copy.id = g.id;
+		copy.text = g.text;
+		copy.color = g.color;
+		copy.autoColor = g.autoColor;
+		copy.width = g.width;
+		copy.flags = g.flags;
+		copy.hasRange = g.hasRange;
+		copy.tMin = g.tMin;
+		copy.tMax = g.tMax;
+		st.graphs.push_back(std::move(copy));
+	}
+	st.params = s.plot.params;
+	st.lists = s.plot.lists;
+	st.degrees = s.plot.degrees;
+	st.mode3D = s.mode3D;
+	st.collapsed = s.collapsed;
+	st.view = s.view;
+	st.box = s.box;
+	st.yaw = s.camera.yaw;
+	st.pitch = s.camera.pitch;
+	return FplSaveState(st).c_str();
+}
+
+BOOL CFunctionPlotCtrl::SetState(LPCWSTR pszState) {
+	auto& s = *m_State;
+	FplSavedState st;
+	if (!pszState || !FplLoadState(pszState, st))
+		return FALSE;
+	if (IsWindow())
+		KillTimer(AnimationTimer);
+	ClearTrace();
+	s.plot.graphs = std::move(st.graphs);
+	s.plot.params = std::move(st.params);
+	s.plot.lists = std::move(st.lists);
+	s.plot.degrees = st.degrees;
+	s.collapsed = st.collapsed;
+	s.box = st.box;
+	s.camera.yaw = 0;
+	s.camera.pitch = 0;
+	s.camera.Orbit(st.yaw, st.pitch);
+	s.featuresGraph = -1;
+	if (s.viewSet)
+		SetViewport(st.view.xMin, st.view.xMax, st.view.yMin, st.view.yMax);
+	else {
+		s.view.xMin = st.view.xMin;
+		s.view.xMax = st.view.xMax;
+		s.view.yMin = st.view.yMin;
+		s.view.yMax = st.view.yMax;
+		s.pendingView = true;
+	}
+	if (!SetMode(st.mode3D ? FPLM_3D : FPLM_2D))
+		SetMode(FPLM_2D);
+	Rebuild();
+	return TRUE;
+}
+
 // ---- The panel's button ----------------------------------------------------------------
 
 void CFunctionPlotCtrl::SetPanelCollapsed(BOOL collapsed) {
@@ -1118,6 +1316,9 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 			case VK_ESCAPE: s.focusRow = -1; Invalidate(); return 0;
 		}
 	}
+	// a trace takes the arrows (T starts one)
+	if (TraceKey((UINT)wParam))
+		return 0;
 	const bool canMove = !(GetStyle() & FPLS_NOPANZOOM);
 	if (s.mode3D) {
 		// the arrows orbit, +/- zoom the box, Home starts over
@@ -1227,6 +1428,16 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		SetCapture();
 		return 0;
 	}
+	// a draggable point: move it (and so its parameters)
+	int point = s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance);
+	if (point >= 0) {
+		if (s.traceDragged)
+			ClearTrace();
+		s.drag = FplDrag::Point;
+		s.dragGraph = point;
+		SetCapture();
+		return 0;
+	}
 	// on a graph: trace it; elsewhere: pan
 	if (!(GetStyle() & FPLS_NOTRACE)) {
 		FplPoint p = { ToDips(pt.x), ToDips(pt.y) };
@@ -1262,6 +1473,7 @@ LRESULT CFunctionPlotCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& s = *m_State;
 	s.drag = FplDrag::None;
 	s.dragRow = -1;
+	s.dragGraph = -1;
 	return 0;
 }
 
@@ -1285,6 +1497,18 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 			return 0;
 		case FplDrag::Slider:
 			DragSlider(s.dragRow, ToDips(pt.x));
+			return 0;
+		case FplDrag::Point:
+			if (s.dragGraph >= 0 && s.dragGraph < (int)s.plot.graphs.size()) {
+				auto& g = s.plot.graphs[s.dragGraph];
+				FplPoint p = s.view.ToPlane({ ToDips(pt.x), ToDips(pt.y) });
+				// read both first: setting one samples again
+				const int px = g.dragX, py = g.dragY;
+				if (px >= 0)
+					SetParam(px, p.x, true);
+				if (py >= 0)
+					SetParam(py, p.y, true);
+			}
 			return 0;
 		case FplDrag::Orbit:
 			if (pt.x != s.dragLast.x || pt.y != s.dragLast.y) {
@@ -1321,7 +1545,13 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		s.hotToggle = hotToggle;
 		Invalidate();
 	}
-	if (hit.part == FplPanelPart::None) {
+	int hotPoint = hit.part == FplPanelPart::None && !s.mode3D
+		? s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance) : -1;
+	if (hotPoint != s.hotPoint) {
+		s.hotPoint = hotPoint;
+		Invalidate();
+	}
+	if (hit.part == FplPanelPart::None && hotPoint < 0) {
 		if (!s.traceDragged)
 			UpdateTrace(pt, false);
 	}
@@ -1351,7 +1581,9 @@ LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 	}
 	auto& s = *m_State;
 	LPCWSTR cursor = IDC_ARROW;
-	if (s.drag == FplDrag::Pan || s.drag == FplDrag::Pan3D)
+	if (s.drag == FplDrag::Point || (s.drag == FplDrag::None && s.hotPoint >= 0))
+		cursor = IDC_SIZEALL;
+	else if (s.drag == FplDrag::Pan || s.drag == FplDrag::Pan3D)
 		cursor = IDC_SIZEALL;
 	else if (s.drag == FplDrag::Slider || s.hotRow >= 0 || s.hotToggle)
 		cursor = IDC_HAND;

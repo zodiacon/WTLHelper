@@ -31,6 +31,7 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLS_NOTRACE       0x0020   // no tracing
 #define FPLS_EQUALSCALE    0x0040   // x and y always at the same scale (circles look round)
 #define FPLS_PITICKS       0x0080   // the x axis in multiples of pi
+#define FPLS_TANGENT       0x0100   // the tangent at a traced point of a function, and its slope
 
 // ---- Graphs -------------------------------------------------------------------
 
@@ -48,6 +49,8 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLGF_NOFEATURES   0x0008   // no roots, extrema or intersections marked while tracing it
 #define FPLGF_HEATMAP      0x0010   // a surface (z = F(x, y)): its values as colors
 #define FPLGF_NOCONTOURS   0x0020   // a surface: no contour lines
+#define FPLGF_NODRAG       0x0040   // a point like (a, b), a and b parameters, can't be dragged (it can by default;
+                                    // dragging sets the parameters: FPLN_PARAMCHANGED)
 
 struct FPLGRAPH {
 	UINT     mask;             // FPLGM_*: the members to set, or to fill
@@ -75,6 +78,8 @@ enum FPLKIND {
 	FPLK_PARAMSURFACE,         // (x(u, v), y(u, v), z(u, v)): 3D only; u and v over the graph's range
 	FPLK_POINT3D,              // (a, b, c): 3D only
 	FPLK_IMPLICITSURFACE,      // F(x, y, z) = 0 ("x^2 + y^2 + z^2 = 25"): 3D only
+	FPLK_INTEGRAL,             // integral(f, lo, hi) alone: the area shaded, its value (FPLGRAPHINFO::value)
+	FPLK_REGRESSION,           // y1 ~ m x1 + b: m and b fitted to lists (GetValue); FPLGRAPHINFO::value is R squared
 };
 
 // 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D
@@ -95,7 +100,7 @@ enum FPLERROR {
 	FPLE_NONE, FPLE_EMPTY, FPLE_UNEXPECTEDCHAR, FPLE_BADNUMBER, FPLE_UNEXPECTEDTOKEN, FPLE_UNEXPECTEDEND,
 	FPLE_MISSINGCLOSE, FPLE_UNKNOWNNAME, FPLE_ARGCOUNT, FPLE_MISSINGARGUMENT, FPLE_TOOMANYRELATIONS,
 	FPLE_MISPLACEDRELATION, FPLE_MISPLACEDPOINT, FPLE_MISPLACEDCONDITION, FPLE_VARIABLENOTALLOWED, FPLE_NOTAPLOT,
-	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_INTERNAL,
+	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_INTERNAL,
 };
 
 struct FPLGRAPHINFO {
@@ -105,7 +110,7 @@ struct FPLGRAPHINFO {
 	int      errorLen;
 	WCHAR    szError[128];     // the message
 	WCHAR    szName[64];       // the name it's about (FPLE_UNKNOWNNAME: one an app may add as a parameter); a definition's name
-	double   value;            // FPLK_DEFINITION: its value
+	double   value;            // FPLK_DEFINITION, FPLK_INTEGRAL: its value; FPLK_REGRESSION: R squared
 	COLORREF color;            // the color it's drawn in
 };
 
@@ -167,6 +172,8 @@ struct FPLTRACE {
 	FPLFEATUREKIND feature;        // the point is one of the graph's features, else FPLF_NONE
 	BOOL           hasZ;           // z is: a surface's value under the mouse (2D), the point's z (3D)
 	double         z;
+	BOOL           hasSlope;       // a function's slope there (dy/dx; dx/dy for x = f(y))
+	double         slope;
 };
 
 // ---- Notifications --------------------------------------------------------------------
@@ -277,6 +284,18 @@ public:
 	BOOL AnimateParameter(LPCWSTR pszName, BOOL play);
 	BOOL IsParameterAnimating(LPCWSTR pszName) const;
 	void SetDegrees(BOOL degrees);             // the trigonometric functions in degrees
+	// Any name's value now: a parameter, a definition ("c = 2a"), a fitted name, an aggregate ("mean(L)"); NaN if
+	// there's none.
+	double GetValue(LPCWSTR pszName) const;
+
+	// ---- Lists (a table's columns) ----
+	// A list of numbers the expressions use by name: (x1, y1) is a point per element, y1 ~ m x1 + b fits m and b,
+	// mean(x1) is one number. Adds it, or replaces the values of the one with the name.
+	BOOL SetList(LPCWSTR pszName, const double* values, int count);
+	int GetList(LPCWSTR pszName, double* values, int max) const;   // its count (a defined list's too); up to max filled
+	BOOL RemoveList(LPCWSTR pszName);
+	int GetListCount() const;                  // the app's lists
+	LPCWSTR GetListName(int index) const;
 	BOOL GetDegrees() const;
 
 	// ---- The view ----
@@ -299,9 +318,20 @@ public:
 	// ---- Tracing and features ----
 	BOOL GetTrace(FPLTRACE& trace) const;
 	void ClearTrace();
+	// Starts a trace from the keyboard (T does too): the first function at the view's middle, else nothing. With a
+	// trace, Left/Right step along its graph (Shift: finer), Ctrl+Left/Right go to its previous or next root, extremum
+	// or intersection, Up/Down to the other functions at its x, Escape ends it.
+	BOOL StartTrace();
 	// A function's roots, extrema, y intercept and intersections with the other functions over the view; the
 	// number there are (up to max filled).
 	int GetFeatures(UINT id, FPLFEATURE* features, int max) const;
+
+	// ---- State ----
+	// Everything the plot shows as text, to keep and give back: the graphs (text, color, width, flags, range), the
+	// parameters, the lists, degrees, the 2D view, the 3D box and camera, the mode and the panel's fold (not lParam,
+	// not the styles). SetState replaces them all; FALSE (and nothing changed) if the text isn't a plot's state.
+	CString GetState() const;
+	BOOL SetState(LPCWSTR pszState);
 
 	// ---- The panel (the legend and the sliders) ----
 	void SetPanelCollapsed(BOOL collapsed);    // folded to its button (the user's click on it too)
@@ -351,6 +381,8 @@ private:
 	void Resample();
 	void SetViewport(double xMin, double xMax, double yMin, double yMax);
 	void UpdateTrace(POINT pt, bool dragging);
+	bool TraceKey(UINT vk);                    // the keys of a trace
+	void ApplyTraceHit(const struct FplTraceHit& hit);   // a keyboard's: pinned, kept in view
 	void SetTraceHit(int graph, int feature, double x, double y, bool valid,
 		double z = std::numeric_limits<double>::quiet_NaN());
 	void NotifyTrace();

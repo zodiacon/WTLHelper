@@ -116,6 +116,7 @@
     <ClCompile Include="src\FunctionPlotParse.cpp" />
     <ClCompile Include="src\FunctionPlotRender3D.cpp" />
     <ClCompile Include="src\FunctionPlotSample.cpp" />
+    <ClCompile Include="src\FunctionPlotState.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

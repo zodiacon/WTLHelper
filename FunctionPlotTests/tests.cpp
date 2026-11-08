@@ -7,7 +7,8 @@
 // and labels, clipping, sampling functions, curves, implicit curves and regions, roots, extrema and intersections), and the
 // control's graphs (definitions, sampling, features, tracing, coordinates), user functions
 // and d/dx, surfaces (heat maps, contours), vector fields and the SVG export, and 3D (the
-// box, the camera, meshes, tubes and the graphs' meshes).
+// box, the camera, meshes, tubes and the graphs' meshes), tracing by keys, draggable points, integrals, lists and
+// regressions, and the saved state.
 
 #include "FunctionPlotExpr.h"
 #include "FunctionPlot3D.h"
@@ -2210,6 +2211,347 @@ TEST(Trace3D) {
 	CHECK(!plot.Pick3D({ 0.9f, 0.9f, 3 }, { 0, 0, 1 }, box));
 }
 
+TEST(KeyboardTrace) {
+	auto v = View();
+	auto plot = MakePlot({ L"y = x^2/4 - 1", L"y = 1/x", L"(5cos t, 5sin t)", L"y = 3" });
+	plot.Sample(v);
+	// a function: by 4 DIPs of x (0.1 here); past where it's undefined
+	auto hit = plot.Step(0, { 2, 0 }, 4, v);
+	CHECK_INT(hit.graph, 0);
+	CHECK_NEAR(hit.plane.x, 2.1);
+	CHECK_NEAR(hit.plane.y, 2.1 * 2.1 / 4 - 1);
+	hit = plot.Step(0, { 2, 0 }, -1, v);
+	CHECK_NEAR(hit.plane.x, 2.0 - 0.025);
+	hit = plot.Step(1, { -0.05, -20 }, 4, v);		// over x = 0 (1/0)
+	CHECK(hit.plane.x > 0);
+	// a curve: along its polyline by arc length on the screen
+	FplPoint start = { 5, 0 };
+	hit = plot.Step(2, start, 40, v);
+	CHECK_INT(hit.graph, 2);
+	CHECK_NEAR_TOL(std::hypot(hit.plane.x, hit.plane.y), 5, 1e-3);
+	CHECK_NEAR_TOL(std::hypot(hit.screen.x - v.ToScreenX(5), hit.screen.y - v.ToScreenY(0)), 40, 0.5);
+	auto back = plot.Step(2, hit.plane, -40, v);
+	CHECK_NEAR_TOL(back.plane.x, 5, 1e-3);
+	// features: the next root or extremum along x
+	plot.FindFeatures(0, v);
+	hit = plot.NextFeature(0, -3, 1, v);
+	CHECK(hit.feature >= 0);
+	CHECK_NEAR(hit.plane.x, -2);
+	hit = plot.NextFeature(0, -2, 1, v);
+	CHECK_NEAR(hit.plane.x, 0);
+	hit = plot.NextFeature(0, 0, -1, v);
+	CHECK_NEAR(hit.plane.x, -2);
+	CHECK(!plot.NextFeature(0, 100, 1, v));
+	// the other functions at the same x, going round; not the curve
+	hit = plot.NextGraphAt(0, 2, 1, v);
+	CHECK_INT(hit.graph, 1);
+	CHECK_NEAR(hit.plane.y, 0.5);
+	hit = plot.NextGraphAt(1, 2, 1, v);
+	CHECK_INT(hit.graph, 3);
+	hit = plot.NextGraphAt(3, 2, 1, v);
+	CHECK_INT(hit.graph, 0);
+	CHECK_INT(plot.NextGraphAt(0, 0, -1, v).graph, 3);		// 1/x isn't defined at 0
+	// slopes
+	CHECK_NEAR(plot.Slope(0, 2), 1);
+	CHECK_NEAR_TOL(plot.Slope(1, 2), -0.25, 1e-12);
+	CHECK(std::isnan(plot.Slope(2, 0)));
+	plot = MakePlot({ L"x = y^3" });
+	CHECK_NEAR(plot.Slope(0, 2), 12);
+}
+
+TEST(DraggablePoints) {
+	auto v = View();
+	auto plot = MakePlot({ L"(a, b)", L"(a, 2)", L"(1, sin a)", L"(2a, b)", L"(c, 1)", L"c = 3" },
+		{ Param(L"a", 1), Param(L"b", -2) });
+	CHECK_INT(plot.graphs[0].dragX, 0);
+	CHECK_INT(plot.graphs[0].dragY, 1);
+	CHECK_INT(plot.graphs[1].dragX, 0);
+	CHECK_INT(plot.graphs[1].dragY, -1);
+	CHECK_INT(plot.graphs[2].dragX, -1);		// sin a: follows a, isn't a
+	CHECK_INT(plot.graphs[2].dragY, -1);
+	CHECK_INT(plot.graphs[3].dragX, -1);		// 2a
+	CHECK_INT(plot.graphs[3].dragY, 1);
+	CHECK_INT(plot.graphs[4].dragX, -1);		// a definition isn't the app's to set
+	plot.Sample(v);
+	// the one under the mouse: (a, b) and (2a, b) are apart; (a, 2) elsewhere
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 1, -2 }), 10), 0);
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 1.1, 2 }), 10), 1);
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 2, -2.1 }), 10), 3);
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 5, 5 }), 10), -1);
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 1, std::sin(1.0) }), 10), -1);
+	plot.graphs[0].flags = FplGraphNoDrag;
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 1, -2 }), 10), -1);
+}
+
+TEST(Integrals) {
+	// values: over x, over a variable named, the sign too
+	auto r = FplParse(L"integral(x^2, 0, 3)");
+	CHECK(!r.error);
+	CHECK_NEAR_TOL(FplEvalTree(r.ast, r.root, {}, nullptr), 9, 1e-9);
+	CHECK_STR(FplToString(r.ast, r.root), L"integral(x^2, x, 0, 3)");
+	auto e = FplBuild(L"integral(x^2, 0, 3)", {});
+	CHECK_INT(e.kind, FplKind::Integral);
+	double sl[16] = {};
+	CHECK_NEAR_TOL(e.value.Eval(sl), 9, 1e-9);
+	CHECK_NEAR(e.g.Eval(sl), 0);
+	CHECK_NEAR(e.h.Eval(sl), 3);
+	CHECK_STR(e.name, L"x");
+	CHECK_NEAR_TOL(F(L"A = integral(x^2, 3, 0)"), -9, 1e-9);
+	CHECK_NEAR_TOL(F(L"y = \x222B(x, 0, 1)"), 0.5, 1e-12);
+	CHECK_NEAR_TOL(F(L"y = integral(exp(-t^2), t, -10, 10)"), std::sqrt(Pi), 1e-9);
+	CHECK_NEAR_TOL(F(L"y = integral(cos(40t), t, 0, 1)"), std::sin(40.0) / 40, 1e-9);
+	// a function of x: the antiderivative; the bound variable doesn't make it a function of t
+	e = FplBuild(L"y = integral(sin t, t, 0, x)", {});
+	CHECK_INT(e.kind, FplKind::Function);
+	CHECK_NEAR_TOL(F(L"y = integral(sin t, t, 0, x)", Pi), 2, 1e-9);
+	CHECK_NEAR_TOL(F(L"y = integral(x t, t, 0, 1)", 3), 1.5, 1e-9);
+	CHECK_NEAR_TOL(F(L"y = integral(t, t, 0, a)"), 2, 1e-9);		// a = 2
+	// constant parts folded: x + 9
+	e = FplBuild(L"y = x + integral(t^2, t, 0, 3)", {});
+	CHECK(e.f.Size() <= 3);
+	// undefined somewhere: undefined
+	CHECK(std::isnan(F(L"y = integral(sqrt(t), t, -1, 1)")));
+	CHECK_NEAR_TOL(FplIntegrate([](double t) { return t * t; }, 0, 1), 1.0 / 3, 1e-12);
+	// derivatives: Leibniz
+	auto d = FplDerive(r.ast, r.root, L"x");
+	CHECK_NEAR(FplEvalTree(r.ast, d, {}, nullptr), 0);
+	r = FplParse(L"integral(sin t, t, 0, x^2)");
+	d = FplDerive(r.ast, r.root, L"x");
+	std::vector<std::wstring> xs = { L"x" };
+	double one = 1;
+	CHECK_NEAR_TOL(FplEvalTree(r.ast, d, xs, &one), 2 * std::sin(1.0), 1e-9);
+	r = FplParse(L"integral(x t, t, 0, 1)");
+	d = FplDerive(r.ast, r.root, L"x");
+	CHECK_NEAR_TOL(FplEvalTree(r.ast, d, xs, &one), 0.5, 1e-9);
+	CHECK_NEAR_TOL(F(L"y = d/dx integral(cos t, t, 0, x)", 0.7), std::cos(0.7), 1e-9);
+	// mistakes
+	CHECK_INT(BuildError(L"integral(x, 0)").code, FplErrorCode::ArgCount);
+	CHECK_INT(BuildError(L"integral(x, 2, 0, 1)").code, FplErrorCode::UnexpectedToken);
+	CHECK_INT(BuildError(L"y = integral x").code, FplErrorCode::MissingArgument);
+	// the area: shaded between the integrand and the axis, its value
+	auto v = View();
+	auto plot = MakePlot({ L"integral(x/2 + 1, 0, 4)", L"A = integral(x^2, 0, 3)", L"y = 2 integral(1, 0, 3)" });
+	plot.Sample(v);
+	CHECK_NEAR_TOL(plot.IntegralValue(0), 8, 1e-9);
+	CHECK(std::isnan(plot.IntegralValue(1)));
+	CHECK_NEAR_TOL(plot.DefinitionValue(1), 9, 1e-9);
+	CHECK_INT(plot.graphs[0].geometry.fills.size(), 1);
+	CHECK(!plot.graphs[0].geometry.lines.empty());
+	double area = std::abs(SignedArea(plot.graphs[0].geometry.fills[0]));
+	CHECK_NEAR_TOL(area, 8 * v.ScaleX() * v.ScaleY(), 1e-3);
+	CHECK_INT(plot.graphs[2].expr.kind, FplKind::Function);
+	CHECK_NEAR(plot.Eval(2, 5), 6);
+}
+
+static FplPlot MakeDataPlot(std::initializer_list<const wchar_t*> texts, std::initializer_list<FplList> data,
+	std::initializer_list<FplParam> params = {}) {
+	FplPlot plot;
+	unsigned id = 1;
+	for (auto t : texts) {
+		FplGraph g;
+		g.id = id++;
+		g.text = t;
+		plot.graphs.push_back(g);
+	}
+	plot.lists = data;
+	plot.params = params;
+	plot.Build();
+	return plot;
+}
+
+TEST(Lists) {
+	// a list defined, its aggregates
+	auto plot = MakePlot({ L"L = [1, 2, 6]", L"c = mean(L)", L"d = max(L) - min(L)", L"n = count(L)" });
+	CHECK(plot.graphs[0].listDefinition);
+	CHECK(!plot.graphs[0].Drawable());
+	auto* values = plot.ListValues(L"L");
+	CHECK(values && values->size() == 3);
+	CHECK_NEAR(plot.ValueOf(L"mean(L)"), 3);
+	CHECK_NEAR(plot.ValueOf(L"median(L)"), 2);
+	CHECK_NEAR(plot.ValueOf(L"stdev(L)"), std::sqrt(7.0));
+	CHECK_NEAR(plot.ValueOf(L"sum(L)"), 9);
+	CHECK_NEAR(plot.DefinitionValue(1), 3);
+	CHECK_NEAR(plot.DefinitionValue(2), 5);
+	CHECK_NEAR(plot.DefinitionValue(3), 3);
+	// items from parameters follow them
+	plot = MakePlot({ L"L = [a, 2a]", L"s = sum(L)" }, { Param(L"a", 3) });
+	CHECK_NEAR(plot.DefinitionValue(1), 9);
+	plot.params[0].value = 5;
+	plot.UpdateValues();
+	CHECK_NEAR((*plot.ListValues(L"L"))[1], 10);
+	CHECK_NEAR(plot.DefinitionValue(1), 15);
+	// mistakes: a list where one number goes, an aggregate of a number, a list inside an expression
+	plot = MakePlot({ L"L = [1, 2]", L"c = L + 1", L"y = mean(3)", L"y = [1, 2] x" });
+	CHECK_INT(plot.graphs[1].expr.error.code, FplErrorCode::ListNotAllowed);
+	CHECK_INT(plot.graphs[2].expr.error.code, FplErrorCode::NotAList);
+	CHECK_STR(plot.graphs[2].expr.error.name, L"mean");
+	CHECK_INT(plot.graphs[3].expr.error.code, FplErrorCode::ListNotAllowed);
+	CHECK_STR((FplError{ FplErrorCode::NotAList, 0, 0, L"mean" }.Message()), L"'mean' needs a list");
+
+	// the app's lists: a scatter plot, a family of curves
+	auto v = View();
+	plot = MakeDataPlot({ L"(x1, y1)", L"y = x + x1", L"c = max(y1)" },
+		{ { L"x1", { 1, 2, 3, 4 } }, { L"y1", { 2, 4, 6, 8 } } });
+	CHECK_INT(plot.graphs[0].listSlots.size(), 2);
+	CHECK_INT(plot.ElementCount(0), 4);
+	CHECK_INT(plot.graphs[1].listSlots.size(), 1);
+	CHECK_NEAR(plot.DefinitionValue(2), 8);
+	plot.Sample(v);
+	CHECK_INT(plot.graphs[0].geometry.points.size(), 4);
+	CHECK_NEAR(plot.graphs[0].geometry.points[3].x, v.ToScreenX(4));
+	CHECK_NEAR(plot.graphs[0].geometry.points[3].y, v.ToScreenY(8));
+	CHECK_INT(plot.graphs[1].geometry.lines.size(), 4);
+	// a listed point isn't draggable, its trace is where it is; a listed function has no features
+	CHECK_INT(plot.graphs[0].dragX, -1);
+	auto hit = plot.Nearest(v.ToScreen({ 3, 6 }), v, 10, 8);
+	CHECK_INT(hit.graph, 0);
+	CHECK_NEAR_TOL(hit.plane.y, 6, 1e-9);
+	plot.FindFeatures(1, v);
+	CHECK(plot.graphs[1].features.empty());
+	// the shortest list counts; the app changes the values
+	plot.lists[1].values = { 1, 1 };
+	plot.UpdateValues();
+	CHECK_INT(plot.ElementCount(0), 2);
+	// 3D: a sphere per element
+	plot = MakeDataPlot({ L"(x1, y1, 0)" }, { { L"x1", { 1, 2, 3 } }, { L"y1", { 1, 1, 1 } } });
+	plot.Build3D(FplBox3{});
+	CHECK_INT(plot.graphs[0].mesh.vertices.size(), 3 * FplSphere({}, 1).vertices.size());
+}
+
+TEST(Regression) {
+	// exact data: the line itself, R squared 1; the fitted names usable elsewhere
+	auto plot = MakeDataPlot({ L"y1 ~ m x1 + b", L"y = m x + b", L"k = 2m" },
+		{ { L"x1", { 0, 1, 2, 3, 4 } }, { L"y1", { 1, 3, 5, 7, 9 } } });
+	CHECK_INT(plot.graphs[0].expr.kind, FplKind::Regression);
+	CHECK(!plot.graphs[0].Drawable());
+	auto fitted = plot.Fitted(0);
+	CHECK_INT(fitted.size(), 2);
+	CHECK_STR(fitted[0].first, L"m");
+	CHECK_NEAR_TOL(fitted[0].second, 2, 1e-8);
+	CHECK_NEAR_TOL(fitted[1].second, 1, 1e-8);
+	CHECK_NEAR_TOL(plot.graphs[0].r2, 1, 1e-12);
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR_TOL(plot.Eval(1, 3), 7, 1e-8);
+	CHECK_NEAR_TOL(plot.DefinitionValue(2), 4, 1e-8);
+	CHECK_NEAR_TOL(plot.ValueOf(L"b"), 1, 1e-8);
+	// not a line: y = 3 e^(x/2)
+	std::vector<double> xs, ys;
+	for (int i = 0; i <= 10; i++) {
+		xs.push_back(i * 0.5);
+		ys.push_back(3 * std::exp(0.25 * i));
+	}
+	plot = MakeDataPlot({ L"y1 ~ a e^(k x1)" }, { { L"x1", xs }, { L"y1", ys } });
+	fitted = plot.Fitted(0);
+	CHECK_INT(fitted.size(), 2);
+	CHECK_NEAR_TOL(plot.ValueOf(L"a"), 3, 1e-6);
+	CHECK_NEAR_TOL(plot.ValueOf(L"k"), 0.5, 1e-6);
+	// noisy data: close, R squared below 1
+	plot = MakeDataPlot({ L"y1 ~ m x1 + b" }, { { L"x1", { 0, 1, 2, 3, 4, 5 } }, { L"y1", { 0.1, 0.9, 2.2, 2.8, 4.1, 5.0 } } });
+	CHECK_NEAR_TOL(plot.ValueOf(L"m"), 0.98, 0.05);
+	CHECK(plot.graphs[0].r2 > 0.98 && plot.graphs[0].r2 < 1);
+	// the data changes: fitted again from where it was
+	plot.lists[1].values = { 0, 2, 4, 6, 8, 10 };
+	plot.UpdateValues();
+	CHECK_NEAR_TOL(plot.ValueOf(L"m"), 2, 1e-8);
+	// nothing to fit, or a variable in it
+	plot = MakeDataPlot({ L"y1 ~ 2x1", L"y1 ~ m x" }, { { L"x1", { 1, 2 } }, { L"y1", { 2, 4 } } });
+	CHECK_INT(plot.graphs[0].expr.error.code, FplErrorCode::NotAPlot);
+	CHECK((bool)plot.graphs[1].expr.error);
+	// printed with its tilde
+	auto r = FplParse(L"y ~ x");
+	CHECK_STR(FplToString(r.ast, r.root), L"y ~ x");
+}
+
+TEST(SavedState) {
+	FplSavedState st;
+	FplGraph g;
+	g.id = 3;
+	g.text = L"y = a sin(\x03B8)\tx\n";		// a tab and a backslash to escape, a non-ASCII letter
+	g.autoColor = false;
+	g.color = 0x123456;
+	g.width = 3.5f;
+	g.flags = FplGraphHidden | FplGraphHeatmap;
+	g.hasRange = true;
+	g.tMin = -1;
+	g.tMax = 0.1;
+	st.graphs.push_back(g);
+	FplGraph auto2;
+	auto2.id = 7;
+	auto2.text = L"x^2 + y^2 = 4\nsecond line";
+	st.graphs.push_back(auto2);
+	st.params.push_back(Param(L"a", 1.0 / 3));
+	st.params[0].min = -2;
+	st.params[0].max = 5;
+	st.params[0].step = 0.25;
+	st.params[0].flags = 1;
+	st.lists.push_back({ L"x1", { 1.5, -2, 1e-300 } });
+	st.lists.push_back({ L"empty", {} });
+	st.degrees = true;
+	st.mode3D = true;
+	st.collapsed = true;
+	st.view.xMin = -3.25;
+	st.view.xMax = 7;
+	st.view.yMin = -1e6;
+	st.view.yMax = 2;
+	st.box = { -1, 1, -2, 2, -3, 3 };
+	st.yaw = 0.7f;
+	st.pitch = -0.2f;
+
+	std::wstring text = FplSaveState(st);
+	CHECK(text.rfind(L"FunctionPlot 1\n", 0) == 0);
+	FplSavedState back;
+	CHECK(FplLoadState(text, back));
+	CHECK_INT(back.graphs.size(), 2);
+	CHECK_STR(back.graphs[0].text, g.text);
+	CHECK_STR(back.graphs[1].text, auto2.text);
+	CHECK_INT(back.graphs[0].id, 3);
+	CHECK(!back.graphs[0].autoColor);
+	CHECK_INT(back.graphs[0].color, 0x123456);
+	CHECK(back.graphs[1].autoColor);
+	CHECK_NEAR(back.graphs[0].width, 3.5);
+	CHECK_INT(back.graphs[0].flags, FplGraphHidden | FplGraphHeatmap);
+	CHECK(back.graphs[0].hasRange);
+	CHECK(back.graphs[0].tMax == 0.1);
+	CHECK(back.params[0].value == 1.0 / 3);
+	CHECK_NEAR(back.params[0].step, 0.25);
+	CHECK_INT(back.params[0].flags, 1);
+	CHECK_INT(back.lists.size(), 2);
+	CHECK(back.lists[0].values[2] == 1e-300);
+	CHECK(back.lists[1].values.empty());
+	CHECK(back.degrees && back.mode3D && back.collapsed);
+	CHECK(back.view.yMin == -1e6);
+	CHECK_NEAR(back.box.zMax, 3);
+	CHECK_NEAR(back.yaw, 0.7f);
+	CHECK_NEAR(back.pitch, -0.2f);
+	// the same text again
+	CHECK_STR(FplSaveState(back), text);
+	// CR LF line ends, an unknown line, not a state at all
+	std::wstring crlf;
+	for (wchar_t c : text) {
+		if (c == L'\n')
+			crlf += L'\r';
+		crlf += c;
+	}
+	crlf += L"future\tsomething new\r\n";
+	CHECK(FplLoadState(crlf, back));
+	CHECK_STR(back.graphs[1].text, auto2.text);
+	CHECK(FplLoadState(L"FunctionPlot 1\ngraph\t1\t-1\t2\t0\t0\t0\t1\ty = 1 \\ x \\q", back));
+	CHECK_STR(back.graphs[0].text, L"y = 1 \\ x \\q");		// not escapes: kept
+	CHECK(FplLoadState(text, back));
+	CHECK(!FplLoadState(L"y = x", back));
+	CHECK_INT(back.graphs.size(), 2);		// unchanged by a failed load
+	// a plot built from a loaded state
+	FplPlot plot;
+	plot.graphs = back.graphs;
+	plot.graphs[1].text = L"y = a x + mean(x1)";
+	plot.params = back.params;
+	plot.lists = back.lists;
+	plot.Build();
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR_TOL(plot.Eval(1, 3), 1 + (1.5 - 2 + 1e-300) / 3, 1e-12);
+	CHECK(plot.ListValues(L"x1") != nullptr);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -2260,6 +2602,12 @@ int wmain() {
 	Run_ImplicitSurfaces();
 	Run_TraceSurfaces();
 	Run_Trace3D();
+	Run_KeyboardTrace();
+	Run_DraggablePoints();
+	Run_Integrals();
+	Run_Lists();
+	Run_Regression();
+	Run_SavedState();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

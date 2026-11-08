@@ -46,6 +46,7 @@ struct FplPanelRow {
 	D2D1_RECT_F track{};				// a slider's
 	D2D1_RECT_F play{};					// a slider's play button
 	bool error = false;					// a graph's: a second line with the message
+	bool note = false;					// a graph's: a second line with a regression's fit
 };
 
 enum class FplPanelPart : uint8_t { None, Panel, Graph, Slider, Play, Toggle };
@@ -55,7 +56,7 @@ struct FplPanelHit {
 	int row = -1;
 };
 
-enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D };
+enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point };
 
 // sizes, in DIPs
 constexpr float FplPanelMargin = 10, FplPanelPad = 6, FplGraphRow = 26, FplErrorLine = 16, FplSliderRow = 30;
@@ -65,6 +66,7 @@ struct FplState {
 	FplPlot plot;
 	FplViewport view;
 	bool viewSet = false;				// the view has been given a size once
+	bool pendingView = false;			// SetState's ranges, for the first size to keep
 	bool homeSet = false;
 	FPLVIEW home{};
 	UINT dpi = 96;
@@ -103,6 +105,8 @@ struct FplState {
 	FplDrag drag = FplDrag::None;
 	POINT dragLast{};
 	int dragRow = -1;
+	int dragGraph = -1;					// the point being dragged
+	int hotPoint = -1;					// the draggable point under the mouse
 	bool trackingLeave = false;
 
 	// 3D

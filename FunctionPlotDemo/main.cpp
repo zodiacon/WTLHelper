@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iterator>
 #include <set>
 #include <string>
@@ -47,6 +48,8 @@ enum {
 	ID_DEMO_EXIT = 201,
 	ID_DEMO_EXPORTPNG,
 	ID_DEMO_EXPORTSVG,
+	ID_DEMO_OPEN,
+	ID_DEMO_SAVE,
 	ID_EXAMPLE_FIRST = 210,     // one per example
 
 	ID_DEMO_HOME = 301,
@@ -67,11 +70,12 @@ enum {
 	ID_DEMO_HEATMAPS,
 	ID_DEMO_COLLAPSE,
 	ID_DEMO_3D,
+	ID_DEMO_TANGENT,
 };
 
 // ---- Examples -------------------------------------------------------------------
 
-enum class Setup { None, FieldSlider, Animate };
+enum class Setup { None, FieldSlider, Animate, Bounds, Data };
 
 struct Example {
 	const wchar_t* name;
@@ -93,6 +97,11 @@ static const Example g_Examples[] = {
 	{ L"&Vector Field", L"(y, -sin x)\r\ny^2/2 - cos x = c", false, false, Setup::FieldSlider },
 	{ L"&Animation", L"x^2 + y^2 = 4\r\n(2cos p, 2sin p)\r\ny = 2sin(x - p)\r\nr = 3 + cos(5\x03B8 + 2p)", false, false,
 		Setup::Animate },
+	{ L"I&ntegrals", L"y = sin x + x/4\r\nintegral(sin x + x/4, a, b)\r\ny = integral(sin t + t/4, t, 0, x) - 4\r\nA = integral(x^2, 0, 3)\r\n(a, 0)\r\n(b, 0)", false, false, Setup::Bounds },
+	{ L"D&ata and Regression", L"(x1, y1)\r\ny1 ~ a e^(k x1)\r\ny = a e^(k x)\r\ny = mean(y1)", false, false,
+		Setup::Data },
+	{ L"&Lists", L"L = [1, 2, 3, 4, 5]\r\ny = 3sin(x L/2)/L\r\n(L, mean(L))", false },
+	{ L"&Draggable Points", L"(a, b)\r\ny = (x - a)^2/2 + b\r\n(c, 3sin c)\r\ny = 3sin x", false },
 	{ L"&Errors", L"y = 2 +\r\ny = sin(x\r\nx = y = 1\r\ny = sin()\r\ny = 2 * * 3", false },
 	{ L"3D: Su&rfaces", L"z = 4sin(x/2)cos(y/2)\r\nz = (x^2 - y^2)/20 - 6\r\ny = 6cos(x/2)", false, true },
 	{ L"3D: Curves and S&olids", L"(5cos 4t, 5sin 4t, 3t - 9)\r\n(4cos u sin(v/2), 4sin u sin(v/2), 4cos(v/2))\r\n"
@@ -112,9 +121,11 @@ static CFont g_editFont;
 static HWND g_main;
 static bool g_autoSliders = true;
 static bool g_heatmaps = true;
-// FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg), then exit
+// FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg), then exit;
+// /open plot.fplot starts with a saved plot (File > Save Plot)
 static int g_startExample = 0;
 static std::wstring g_exportPath;
+static std::wstring g_openPath;			// /open file.fplot: a saved plot to start with
 static int g_exitCode = 0;
 static std::set<std::wstring> g_autoParams;   // the sliders the demo added
 
@@ -258,6 +269,8 @@ static void ShowTrace(const FPLTRACE& t) {
 		(t.hasZ && g_plot.GetMode() == FPLM_3D ? L", " + Number(t.z) + L")" : L")");
 	if (t.hasZ && g_plot.GetMode() != FPLM_3D)
 		text += L"  z = " + Number(t.z);
+	if (t.hasSlope)
+		text += L"  slope " + Number(t.slope);
 	if (t.feature != FPLF_NONE)
 		text += std::wstring(L"  ") + Kinds[t.feature];
 	g_status.SetText(0, text.c_str());
@@ -271,6 +284,8 @@ static void ShowLineError() {
 	if (g_plot.GetGraphInfo((UINT)line + 1, info)) {
 		if (info.error != FPLE_NONE && info.error != FPLE_EMPTY)
 			text = L"Line " + std::to_wstring(line + 1) + L": " + info.szError + L" (at " + std::to_wstring(info.errorPos + 1) + L")";
+		else if (info.kind == FPLK_DEFINITION && std::isnan(info.value) && g_plot.GetList(info.szName, nullptr, 0) > 0)
+			text = std::wstring(info.szName) + L": " + std::to_wstring(g_plot.GetList(info.szName, nullptr, 0)) + L" items";
 		else if (info.kind == FPLK_DEFINITION)
 			text = std::wstring(info.szName) + L" = " + Number(info.value);
 	}
@@ -290,6 +305,20 @@ static void LoadExample(int index) {
 		g_plot.RemoveParameter(name.c_str());
 	g_autoParams.clear();
 	g_plot.RemoveAllGraphs();
+	while (g_plot.GetListCount() > 0)
+		g_plot.RemoveList(g_plot.GetListName(0));
+	// a table's columns before the text that uses them
+	if (e.setup == Setup::Data) {
+		// a table: growth with noise, as if measured
+		double xs[12], ys[12];
+		const double noise[12] = { 0.3, -0.4, 0.2, 0.5, -0.6, 0.1, 0.7, -0.5, 0.4, -0.8, 0.6, -0.2 };
+		for (int i = 0; i < 12; i++) {
+			xs[i] = i * 0.8 - 2;
+			ys[i] = 1.5 * std::exp(0.3 * xs[i]) + noise[i] * 0.4;
+		}
+		g_plot.SetList(L"x1", xs, 12);
+		g_plot.SetList(L"y1", ys, 12);
+	}
 	DWORD style = g_plot.GetStyle();
 	g_plot.SetWindowLong(GWL_STYLE, e.piTicks ? style | FPLS_PITICKS : style & ~FPLS_PITICKS);
 	g_plot.SetMode(e.is3D ? FPLM_3D : FPLM_2D);
@@ -303,6 +332,11 @@ static void LoadExample(int index) {
 		FPLPARAM p{ L"p", 0, 0, 6.283185307179586, 0, 0 };
 		g_plot.SetParameter(p);
 		g_plot.AnimateParameter(L"p", TRUE);
+	}
+	else if (e.setup == Setup::Bounds) {
+		FPLPARAM a{ L"a", -2, -10, 10, 0.1, 0 }, b{ L"b", 4, -10, 10, 0.1, 0 };
+		g_plot.SetParameter(a);
+		g_plot.SetParameter(b);
 	}
 	else if (e.setup == Setup::FieldSlider) {
 		FPLPARAM c{ L"c", 0.5, -1, 3, 0.05, 0 };
@@ -328,6 +362,7 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_HEATMAPS, g_heatmaps);
 	check(ID_DEMO_COLLAPSE, g_plot.IsPanelCollapsed() != FALSE);
 	check(ID_DEMO_3D, g_plot.GetMode() == FPLM_3D);
+	check(ID_DEMO_TANGENT, s & FPLS_TANGENT);
 #ifdef DEMO_WTLHELPER
 	check(ID_DEMO_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -358,6 +393,74 @@ static void ShowFeatures() {
 	else if (n > 40)
 		text += L"...and " + std::to_wstring(n - 40) + L" more";
 	::MessageBoxW(g_main, text.c_str(), L"Features", MB_ICONINFORMATION);
+}
+
+// ---- Saving and opening a plot (GetState / SetState as UTF-8) ---------------------------------
+
+static bool SavePlot(LPCWSTR path) {
+	CString state = g_plot.GetState();
+	int bytes = ::WideCharToMultiByte(CP_UTF8, 0, state, state.GetLength(), nullptr, 0, nullptr, nullptr);
+	std::string utf8(bytes, '\0');
+	::WideCharToMultiByte(CP_UTF8, 0, state, state.GetLength(), utf8.data(), bytes, nullptr, nullptr);
+	FILE* f = nullptr;
+	if (_wfopen_s(&f, path, L"wb") || !f)
+		return false;
+	bool ok = fwrite("\xEF\xBB\xBF", 1, 3, f) == 3 && fwrite(utf8.data(), 1, utf8.size(), f) == utf8.size();
+	return fclose(f) == 0 && ok;
+}
+
+static bool OpenPlot(LPCWSTR path) {
+	FILE* f = nullptr;
+	if (_wfopen_s(&f, path, L"rb") || !f)
+		return false;
+	std::string bytes;
+	char buf[4096];
+	for (size_t n; (n = fread(buf, 1, sizeof(buf), f)) > 0;)
+		bytes.append(buf, n);
+	fclose(f);
+	if (bytes.size() >= 3 && bytes.compare(0, 3, "\xEF\xBB\xBF") == 0)
+		bytes.erase(0, 3);
+	int chars = ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), nullptr, 0);
+	std::wstring text(chars, L'\0');
+	::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), text.data(), chars);
+	if (!g_plot.SetState(text.c_str()))
+		return false;
+	// the editor shows the graphs' texts, a line each; the parameters count as the demo's sliders
+	std::wstring lines;
+	for (int i = 0; i < g_plot.GetGraphCount(); i++) {
+		FPLGRAPH g{ FPLGM_TEXT, g_plot.GetGraphId(i) };
+		g_plot.GetGraph(g);
+		if (i)
+			lines += L"\r\n";
+		lines += g.pszText;
+	}
+	g_autoParams.clear();
+	for (int i = 0; i < g_plot.GetParameterCount(); i++) {
+		FPLPARAM p{};
+		g_plot.GetParameterAt(i, p);
+		g_autoParams.insert(p.pszName);
+	}
+	g_edit.SetWindowText(lines.c_str());
+	SyncGraphs();
+	ShowLineError();
+	ShowView();
+	return true;
+}
+
+static void SaveOrOpen(bool save) {
+	wchar_t path[MAX_PATH] = L"";
+	OPENFILENAMEW ofn{ sizeof(ofn) };
+	ofn.hwndOwner = g_main;
+	ofn.lpstrFilter = L"Plots (*.fplot)\0*.fplot\0All Files\0*.*\0";
+	ofn.lpstrDefExt = L"fplot";
+	ofn.lpstrFile = path;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.Flags = save ? OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST : OFN_FILEMUSTEXIST;
+	if (!(save ? ::GetSaveFileNameW(&ofn) : ::GetOpenFileNameW(&ofn)))
+		return;
+	if (!(save ? SavePlot(path) : OpenPlot(path)))
+		::MessageBoxW(g_main, save ? L"The plot couldn't be saved." : L"That isn't a plot this demo saved.",
+			save ? L"Save" : L"Open", MB_ICONERROR);
 }
 
 static void Export(bool svg) {
@@ -401,10 +504,13 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_GRID: ToggleStyle(FPLS_NOGRID); break;
 		case ID_DEMO_AXES: ToggleStyle(FPLS_NOAXES); break;
 		case ID_DEMO_TRACE: ToggleStyle(FPLS_NOTRACE); break;
+		case ID_DEMO_TANGENT: ToggleStyle(FPLS_TANGENT); break;
 		case ID_DEMO_AUTOSLIDERS: g_autoSliders = !g_autoSliders; SyncGraphs(); break;
 		case ID_DEMO_HIGHCONTRAST: g_plot.ForceHighContrast(g_plot.IsHighContrast() ? 0 : 1); break;
 		case ID_DEMO_FEATURES: ShowFeatures(); break;
 		case ID_DEMO_EXPORTPNG: Export(false); break;
+		case ID_DEMO_OPEN: SaveOrOpen(false); break;
+		case ID_DEMO_SAVE: SaveOrOpen(true); break;
 		case ID_DEMO_EXPORTSVG: Export(true); break;
 		case ID_DEMO_HEATMAPS: g_heatmaps = !g_heatmaps; SyncGraphs(); break;
 		case ID_DEMO_COLLAPSE: g_plot.SetPanelCollapsed(!g_plot.IsPanelCollapsed()); break;
@@ -462,6 +568,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_status.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, IDC_STATUS);
 			Layout(hwnd);
 			LoadExample(g_startExample);
+			if (!g_openPath.empty() && !OpenPlot(g_openPath.c_str()))
+				g_exitCode = 2;
 			if (!g_exportPath.empty()) {
 				bool svg = g_exportPath.size() > 4 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 4, L".svg") == 0;
 				BOOL ok = svg ? g_plot.ExportSvg(g_exportPath.c_str()) : g_plot.ExportPng(g_exportPath.c_str(), 1);
@@ -523,6 +631,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 				g_startExample = std::clamp(_wtoi(argv[++i]), 0, (int)std::size(g_Examples) - 1);
 			else if (_wcsicmp(argv[i], L"/export") == 0)
 				g_exportPath = argv[++i];
+			else if (_wcsicmp(argv[i], L"/open") == 0)
+				g_openPath = argv[++i];
 		}
 		::LocalFree(argv);
 	}
@@ -550,6 +660,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	HMENU hExamples = ::CreatePopupMenu();
 	for (UINT i = 0; i < std::size(g_Examples); i++)
 		::AppendMenuW(hExamples, MF_STRING, ID_EXAMPLE_FIRST + i, g_Examples[i].name);
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_OPEN, L"&Open Plot...\tCtrl+O");
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_SAVE, L"&Save Plot...\tCtrl+S");
+	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_POPUP, (UINT_PTR)hExamples, L"&Examples");
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTPNG, L"Export &PNG...");
@@ -574,6 +687,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AXES, L"A&xes");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_PITICKS, L"&Pi Ticks");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TRACE, L"&Tracing");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_TANGENT, L"Ta&ngent Line");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_DEGREES, L"&Degrees");
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_HIGHCONTRAST, L"&High Contrast Drawing");
@@ -598,6 +712,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY, VK_F2, ID_DEMO_FEATURES },
 		{ FVIRTKEY | FCONTROL, 'L', ID_DEMO_COLLAPSE },
 		{ FVIRTKEY | FCONTROL, '3', ID_DEMO_3D },
+		{ FVIRTKEY | FCONTROL, 'O', ID_DEMO_OPEN },
+		{ FVIRTKEY | FCONTROL, 'S', ID_DEMO_SAVE },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));
 

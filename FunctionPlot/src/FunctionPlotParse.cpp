@@ -127,6 +127,8 @@ std::wstring FplError::Message() const {
 		case FplErrorCode::BadPoint: return L"A point has two coordinates";
 		case FplErrorCode::NotDifferentiable: return L"Can't differentiate an equation or a point";
 		case FplErrorCode::Redefined: return L"'" + name + L"' is already defined";
+		case FplErrorCode::ListNotAllowed: return L"A list can only be a definition's value: L = [1, 2, 3]";
+		case FplErrorCode::NotAList: return L"'" + name + L"' needs a list";
 		case FplErrorCode::Internal: return L"Internal error";
 	}
 	return {};
@@ -137,7 +139,7 @@ std::wstring FplError::Message() const {
 namespace {
 
 enum class Tk : uint8_t { Num, Name, Op, Sup, End };
-enum class NameKind : uint8_t { Func, User, Const, Var, Param, Unknown };
+enum class NameKind : uint8_t { Func, User, Integral, Aggregate, Const, Var, Param, Unknown };
 
 struct Token {
 	Tk type = Tk::End;
@@ -197,11 +199,17 @@ public:
 			wchar_t next = i + 1 < m_Text.size() ? m_Text[i + 1] : 0;
 			switch (c) {
 				case L'+': case L'/': case L'^': case L'(': case L')': case L'[': case L']': case L'{': case L'}':
-				case L',': case L':': case L'|': case L'!': case SqrtSign:
+				case L',': case L':': case L'|': case L'!': case SqrtSign: case L'~':
 					t.op = c;
 					break;
 				case Prime: case L'\x2032':
 					t.op = Prime;
+					break;
+				case L'\x222B':
+					// the integral sign: as the name
+					t.type = Tk::Name;
+					t.kind = NameKind::Integral;
+					t.name = L"integral";
 					break;
 				case L'-': case L'\x2212':
 					t.op = L'-';
@@ -330,6 +338,17 @@ private:
 	// What a whole name is, if it's known.
 	bool Lookup(std::wstring_view s, Token& t) const {
 		t.type = Tk::Name;
+		if (s == L"integral") {
+			t.kind = NameKind::Integral;
+			t.name = s;
+			return true;
+		}
+		for (auto a : FplAggregates)
+			if (s == a && s != L"min" && s != L"max") {
+				t.kind = NameKind::Aggregate;
+				t.name = s;
+				return true;
+			}
 		for (size_t f = 0; f < std::size(g_Funcs); f++)
 			if (s == g_Funcs[f].name) {
 				t.kind = NameKind::Func;
@@ -508,10 +527,10 @@ public:
 			return Span(m_Ast.Cmp(FplRel::Eq, lhs, rhs), lhs, rhs);
 		}
 		int node = Sum();
-		if (IsRelation(Peek())) {
-			FplRel rel = RelOf(Next());
+		if (IsRelation(Peek()) || IsOp(Peek(), L'~')) {
+			FplRel rel = IsOp(Peek(), L'~') ? (Next(), FplRel::Fit) : RelOf(Next());
 			int rhs = Sum();
-			if (IsRelation(Peek()))
+			if (IsRelation(Peek()) || IsOp(Peek(), L'~'))
 				Fail(FplErrorCode::TooManyRelations, Peek());
 			node = Span(m_Ast.Cmp(rel, node, rhs), node, rhs);
 		}
@@ -673,6 +692,8 @@ private:
 					case NameKind::Param: return Make(m_Ast.Var(t.name), t.pos, t.len);
 					case NameKind::Func: return Function(t);
 					case NameKind::User: return UserCall(t);
+					case NameKind::Integral: return Integral(t);
+					case NameKind::Aggregate: return Aggregate(t, t.name);
 					case NameKind::Unknown: Fail(FplErrorCode::UnknownName, t);
 				}
 				break;
@@ -692,7 +713,7 @@ private:
 						if (items.size() == 1)
 							return items[0];
 						FplNode n;
-						n.op = FplOp::Tuple;
+						n.op = close == L']' ? FplOp::List : FplOp::Tuple;
 						n.kids = std::move(items);
 						return Make(m_Ast.Add(std::move(n)), t.pos, m_Tokens[m_Pos - 1].pos + 1 - t.pos);
 					}
@@ -771,6 +792,10 @@ private:
 			args.push_back(a);
 			end = m_Ast[a].pos + m_Ast[a].len;
 		}
+		if ((func == FplFunc::Min || func == FplFunc::Max) && args.size() == 1 && m_Ast[args[0]].op == FplOp::Var &&
+			IsList(m_Ast[args[0]].name) && power < 0)
+			return Make(m_Ast.Var(FplAggregateName(func == FplFunc::Min ? L"min" : L"max", m_Ast[args[0]].name)),
+				name.pos, end - name.pos);
 		if (int(args.size()) < finfo.minArgs || (finfo.maxArgs >= 0 && int(args.size()) > finfo.maxArgs)) {
 			m_Error.code = FplErrorCode::ArgCount;
 			m_Error.pos = name.pos;
@@ -847,6 +872,48 @@ private:
 		return Make(m_Ast.Add(std::move(wrap)), name.pos, end - name.pos);
 	}
 
+	bool IsList(const std::wstring& name) const {
+		return m_Options.lists && std::find(m_Options.lists->begin(), m_Options.lists->end(), name) != m_Options.lists->end();
+	}
+
+	// mean(L) and the like: the parameter the app keeps for it.
+	int Aggregate(const Token& name, const std::wstring& aggregate) {
+		int end;
+		std::vector<int> args = Arguments(name, end);
+		if (args.size() != 1 || m_Ast[args[0]].op != FplOp::Var || !IsList(m_Ast[args[0]].name)) {
+			m_Error = { FplErrorCode::NotAList, name.pos, end - name.pos, aggregate };
+			throw ParseError();
+		}
+		return Make(m_Ast.Var(FplAggregateName(aggregate, m_Ast[args[0]].name)), name.pos, end - name.pos);
+	}
+
+	// integral(f, lo, hi) over x, or integral(f, t, lo, hi) over a standard variable.
+	int Integral(const Token& name) {
+		if (!IsOp(Peek(), L'(') && !IsOp(Peek(), L'['))
+			Fail(FplErrorCode::MissingArgument, name, name.name);
+		int end;
+		std::vector<int> args = Arguments(name, end);
+		std::wstring var = L"x";
+		if (args.size() == 4) {
+			auto& v = m_Ast[args[1]];
+			if (v.op != FplOp::Var || FplStandardSlot(v.name) < 0) {
+				m_Error = { FplErrorCode::UnexpectedToken, v.pos, v.len, L"integral" };
+				throw ParseError();
+			}
+			var = v.name;
+			args.erase(args.begin() + 1);
+		}
+		else if (args.size() != 3) {
+			m_Error = { FplErrorCode::ArgCount, name.pos, end - name.pos, L"integral" };
+			throw ParseError();
+		}
+		FplNode n;
+		n.op = FplOp::Integral;
+		n.name = var;
+		n.kids = std::move(args);
+		return Make(m_Ast.Add(std::move(n)), name.pos, end - name.pos);
+	}
+
 	// "d/dx x^2", "d/dx (x sin x)": the derivative of the argument.
 	int Derivative(const Token& op) {
 		Token name = op;
@@ -896,7 +963,8 @@ private:
 		}
 		int node = Power();
 		while (StartsImplicitFactor(Peek()) &&
-			!(Peek().type == Tk::Name && (Peek().kind == NameKind::Func || Peek().kind == NameKind::User)) &&
+			!(Peek().type == Tk::Name && (Peek().kind == NameKind::Func || Peek().kind == NameKind::User ||
+				Peek().kind == NameKind::Integral)) &&
 			!IsOp(Peek(), DerivOp)) {
 			int rhs = Power();
 			node = Span(m_Ast.Binary(FplOp::Mul, node, rhs), node, rhs);
@@ -958,6 +1026,10 @@ private:
 
 	void CheckTuples(int node, bool top) {
 		auto& n = m_Ast[node];
+		if (n.op == FplOp::List) {
+			m_Error = { FplErrorCode::ListNotAllowed, n.pos, n.len };
+			throw ParseError();
+		}
 		if (n.op == FplOp::Tuple && !top) {
 			m_Error.code = FplErrorCode::MisplacedPoint;
 			m_Error.pos = n.pos;
@@ -1062,4 +1134,8 @@ FplFunctionDefinition FplParseFunction(std::wstring_view text, const FplParseOpt
 	d.function.ast = std::move(r.ast);
 	d.function.body = r.root;
 	return d;
+}
+
+std::wstring FplAggregateName(std::wstring_view aggregate, std::wstring_view list) {
+	return std::wstring(aggregate) + L"(" + std::wstring(list) + L")";
 }

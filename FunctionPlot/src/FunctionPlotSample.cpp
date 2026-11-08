@@ -859,6 +859,34 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 		g.arrows = FplSampleField(field, view, options, &g.evals);
 		break;
 	}
+	case FplKind::Integral: {
+		// the area between the integrand and the x axis from lo to hi, and the integrand over it
+		double lo = e.g.Eval(s), hi = e.h.Eval(s);
+		int slot = FplStandardSlot(e.name);
+		if (!std::isfinite(lo) || !std::isfinite(hi) || lo == hi || slot < 0)
+			break;
+		if (lo > hi)
+			std::swap(lo, hi);
+		std::function<FplPoint(double)> curve = [&](double t) -> FplPoint {
+			s[slot] = t;
+			return { t, e.f.Eval(s) };
+		};
+		int samples = std::clamp(static_cast<int>(std::ceil((hi - lo) * view.ScaleX() / std::max(options.initialStep, 0.1))),
+			8, 100000);
+		auto lines = SampleRaw(curve, lo, hi, samples, view, options, &g.evals);
+		const double axis = std::clamp(view.ToScreenY(0), box.top, box.bottom);
+		for (auto& line : lines) {
+			FplPolygon poly;
+			poly.reserve(line.size() + 2);
+			for (auto& p : line)
+				poly.push_back(box.Clamp(p));
+			poly.push_back({ poly.back().x, axis });
+			poly.push_back({ poly.front().x, axis });
+			g.fills.push_back(std::move(poly));
+		}
+		g.lines = FplClip(lines, box.left, box.top, box.right, box.bottom);
+		break;
+	}
 	case FplKind::Point: {
 		FplPoint p = view.ToScreen({ e.f.Eval(s), e.g.Eval(s) });
 		if (Finite(p))
