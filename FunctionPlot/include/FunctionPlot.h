@@ -38,6 +38,9 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLS_PITICKS       0x0080   // the x axis in multiples of pi
 #define FPLS_TANGENT       0x0100   // the tangent at a traced point of a function, and its slope
 #define FPLS_NOCOLORSCALE  0x0200   // no color scale beside a heat map
+#define FPLS_NOANIMATION   0x0800   // undo, redo, Home, F and zooming to a rectangle jump instead of gliding (as they do when
+                                    // Windows' client area animations are off)
+#define FPLS_ALWAYSANIMATE 0x1000   // they glide even when Windows' client area animations are off
 #define FPLS_POLARGRID     0x0400   // circles and spokes for the grid, labeled by radius and angle (not on log axes, or in 3D)
 
 // ---- Graphs -------------------------------------------------------------------
@@ -287,7 +290,7 @@ public:
 		MESSAGE_HANDLER(WM_FPL_SAMPLED, OnSampled)
 	END_MSG_MAP()
 
-	enum : UINT_PTR { AnimationTimer = 1 };
+	enum : UINT_PTR { AnimationTimer = 1, TransitionTimer = 2 };
 	enum : UINT {
 		WM_FPL_PAINT3D = WM_USER + 130,        // the 3D view's window asks for a frame
 		WM_FPL_SAMPLED = WM_USER + 131,        // the sampling thread has results
@@ -343,7 +346,7 @@ public:
 	BOOL IsLogX() const;
 	BOOL IsLogY() const;
 	void SetHomeView(const FPLVIEW* view);     // where ResetView (and Home) goes; null: x -10 to 10, y to match
-	void ResetView();
+	void ResetView(BOOL animate = FALSE);      // animate: it glides there, then FPLN_VIEWCHANGED
 	void Zoom(double factor);                  // about the center; > 1 zooms in
 	BOOL ClientToPlane(POINT pt, double& x, double& y) const;
 	POINT PlaneToClient(double x, double y) const;
@@ -353,13 +356,13 @@ public:
 	FPLMODE GetMode() const;
 	void SetView3D(const FPLVIEW3D& view);
 	FPLVIEW3D GetView3D() const;
-	void ResetView3D();                        // x, y and z from -10 to 10, the camera where it starts
+	void ResetView3D(BOOL animate = FALSE);    // x, y and z from -10 to 10, the camera where it starts
 	BOOL IsSoftwareRendering() const;          // 3D on WARP, the software rasterizer
 
 	// ---- Fitting the view, and undo ----
 	// The view around what the graphs draw (F too; 2D only): points and curves whole, functions' values over the view's
 	// x; FALSE if there's nothing to fit. Right-dragging (or Shift-dragging) a rectangle zooms to it.
-	BOOL ZoomToFit();
+	BOOL ZoomToFit(BOOL animate = FALSE);
 	// The user's changes, a step back or forward (Ctrl+Z, Ctrl+Y): sliders, dragged points, graphs shown or hidden,
 	// the view (2D and 3D). The app's changes aren't steps, and don't end them (names and ids are matched).
 	BOOL Undo();
@@ -454,6 +457,11 @@ private:
 	void Remember(int kind);
 	struct FplSnapshot TakeSnapshot() const;
 	void Restore(const struct FplSnapshot& snapshot);
+	struct FplEnds CaptureEnds() const;
+	bool BeginTransition(const struct FplEnds& from);	// from there to where things are now; false: it just jumps
+	void ApplyTransition(double t);
+	void EndTransition();                      // to its end at once, if one is running
+	void NotifyTransition();
 	void EndBox(POINT pt);
 	bool TraceKey(UINT vk);                    // the keys of a trace
 	void ApplyTraceHit(const struct FplTraceHit& hit);   // a keyboard's: pinned, kept in view

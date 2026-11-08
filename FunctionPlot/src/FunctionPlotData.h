@@ -23,6 +23,14 @@ IDWriteFactory* FplDWriteFactory();
 
 // a graph's sampled geometry for drawing
 struct FplGraphPaths {
+	bool full = false;					// not the coarse version a heavy graph shows at first
+	FplViewport view;					// what it was made for (when full)
+	// While a heavy graph's full version is being made after the view moved: the last full one, stretched to the view. It's
+	// good inside staleRect, its old view; the coarse version shows around that.
+	std::shared_ptr<FplGraphPaths> stale;
+	FplViewMap staleMap;
+	D2D1_RECT_F staleRect{};
+	ComPtr<ID2D1Geometry> staleLines, staleFills, staleContours;
 	ComPtr<ID2D1PathGeometry> lines;
 	ComPtr<ID2D1PathGeometry> fills;
 	ComPtr<ID2D1PathGeometry> contours;
@@ -58,6 +66,26 @@ struct FplPanelHit {
 	FplPanelPart part = FplPanelPart::None;
 	int row = -1;
 };
+
+// the state a transition runs between
+struct FplEnds {
+	FplViewport view;
+	FplBox3 box;
+	float yaw = 0, pitch = 0;
+	std::vector<std::pair<std::wstring, double>> params;
+};
+
+// the view, the box, the camera and the parameters gliding to where they've been told to go
+struct FplTransition {
+	bool active = false;
+	ULONGLONG start = 0;
+	FplEnds from, to;
+	bool moveView = false, moveBox = false, moveCamera = false;
+	// what to tell the parent at the end
+	bool notifyView = false, notify3D = false;
+	std::vector<std::wstring> notifyParams;
+};
+constexpr ULONGLONG FplTransitionMs = 220;
 
 enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point, Box, Point3D };
 
@@ -141,6 +169,9 @@ struct FplState {
 	std::vector<uint64_t> generations;	// by graph: the job whose result is wanted
 	uint64_t nextGeneration = 1;
 	bool syncSampling = false;			// everything at full quality now (exports)
+	bool viewOnly = false;				// what's about to be sampled differs only by the view: old drawings can stretch
+
+	FplTransition transition;
 
 	// look
 	bool customColors = false;

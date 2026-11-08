@@ -144,8 +144,11 @@ void CFunctionPlotCtrl::DiscardTarget() {
 	s.target.Reset();
 	s.brushes.clear();
 	// the heat maps' bitmaps belong to the target
-	for (auto& p : s.paths)
+	for (auto& p : s.paths) {
 		p.heat.Reset();
+		if (p.stale)
+			p.stale->heat.Reset();
+	}
 }
 
 namespace {
@@ -162,6 +165,30 @@ void AddOpen(ID2D1GeometrySink* sink, const FplPolyline& line, std::vector<D2D1_
 }
 
 // An arrow: its shaft and a head of two strokes.
+// What a heavy graph shows while its full version is made after the view moved: the coarse drawing around the old view's
+// rectangle, and the last full one, stretched, in it.
+template <class Own, class Stale>
+void DrawAroundStale(ID2D1RenderTarget* rt, const FplGraphPaths& p, const FplViewport& view, Own own, Stale stale) {
+	if (!p.stale) {
+		own();
+		return;
+	}
+	const float w = (float)view.width, h = (float)view.height;
+	const D2D1_RECT_F r = { std::clamp(p.staleRect.left, 0.0f, w), std::clamp(p.staleRect.top, 0.0f, h),
+		std::clamp(p.staleRect.right, 0.0f, w), std::clamp(p.staleRect.bottom, 0.0f, h) };
+	const D2D1_RECT_F around[4] = { { 0, 0, w, r.top }, { 0, r.bottom, w, h }, { 0, r.top, r.left, r.bottom }, { r.right, r.top, w, r.bottom } };
+	for (auto& strip : around) {
+		if (strip.right <= strip.left || strip.bottom <= strip.top)
+			continue;
+		rt->PushAxisAlignedClip(strip, D2D1_ANTIALIAS_MODE_ALIASED);
+		own();
+		rt->PopAxisAlignedClip();
+	}
+	rt->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_ALIASED);
+	stale();
+	rt->PopAxisAlignedClip();
+}
+
 void AddArrow(ID2D1GeometrySink* sink, const FplArrow& a, std::vector<D2D1_POINT_2F>& points) {
 	FplPoint l, r;
 	if (!FplArrowHead(a, l, r))
@@ -400,17 +427,30 @@ void CFunctionPlotCtrl::PaintHeatmaps() {
 	auto* rt = s.rt;
 	for (size_t i = 0; i < s.plot.graphs.size() && i < s.paths.size(); i++) {
 		auto& p = s.paths[i];
-		if (!s.plot.graphs[i].Drawable() || p.heatPixels.empty())
+		if (!s.plot.graphs[i].Drawable())
 			continue;
-		if (!p.heat) {
+		auto make = [&](FplGraphPaths& paths) {
+			if (paths.heatPixels.empty())
+				return false;
+			if (paths.heat)
+				return true;
 			auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-			if (FAILED(rt->CreateBitmap(D2D1::SizeU(p.heatCols, p.heatRows), p.heatPixels.data(), p.heatCols * 4, props,
-				p.heat.GetAddressOf())))
-				continue;
-		}
+			return SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(paths.heatCols, paths.heatRows), paths.heatPixels.data(),
+				paths.heatCols * 4, props, paths.heat.GetAddressOf()));
+		};
 		const float opacity = s.plot.graphs[i].fillOpacity >= 0 ? s.plot.graphs[i].fillOpacity : 0.85f;
-		rt->DrawBitmap(p.heat.Get(), D2D1::RectF(0, 0, p.heatCols * p.heatCell, p.heatRows * p.heatCell), opacity,
-			D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+		DrawAroundStale(rt, p, s.view, [&] {
+			if (make(p))
+				rt->DrawBitmap(p.heat.Get(), D2D1::RectF(0, 0, p.heatCols * p.heatCell, p.heatRows * p.heatCell), opacity,
+					D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+		}, [&] {
+			auto& old = *p.stale;
+			if (!make(old))
+				return;
+			const FplPoint a = p.staleMap.Apply({ 0, 0 }), b = p.staleMap.Apply({ old.heatCols * (double)old.heatCell, old.heatRows * (double)old.heatCell });
+			rt->DrawBitmap(old.heat.Get(), D2D1::RectF((float)a.x, (float)a.y, (float)b.x, (float)b.y), opacity,
+				D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+		});
 	}
 }
 
@@ -423,7 +463,18 @@ void CFunctionPlotCtrl::PaintContourLabels() {
 		if (!s.plot.graphs[i].Drawable())
 			continue;
 		auto* color = s.Brush(GraphColor((int)i));
-		for (auto& label : s.paths[i].labels) {
+		auto& paths = s.paths[i];
+		// the last full version's where it's shown, stretched
+		std::vector<FplGraphPaths::Label> labels;
+		if (paths.stale) {
+			for (auto& label : paths.stale->labels)
+				labels.push_back({ paths.staleMap.Apply(label.at), label.text });
+			for (auto& label : paths.labels)
+				if (label.at.x < paths.staleRect.left || label.at.x > paths.staleRect.right ||
+					label.at.y < paths.staleRect.top || label.at.y > paths.staleRect.bottom)
+					labels.push_back(label);
+		}
+		for (auto& label : paths.stale ? labels : paths.labels) {
 			const float x = (float)label.at.x, y = (float)label.at.y;
 			if (x < 0 || y < 0 || x > s.view.width || y > s.view.height)
 				continue;
@@ -707,19 +758,33 @@ void CFunctionPlotCtrl::PaintGraphs() {
 	auto& graphs = s.plot.graphs;
 	// the regions first, under every curve
 	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
-		if (!graphs[i].Drawable() || !s.paths[i].fills)
+		auto& p = s.paths[i];
+		if (!graphs[i].Drawable() || (!p.fills && !p.staleFills))
 			continue;
 		auto* brush = s.Brush(GraphColor((int)i));
 		const float fill = graphs[i].fillOpacity >= 0 ? graphs[i].fillOpacity : IsHighContrast() ? 0.35f : 0.22f;
 		brush->SetOpacity(fill);
-		rt->FillGeometry(s.paths[i].fills.Get(), brush);
+		DrawAroundStale(rt, p, s.view, [&] {
+			if (p.fills)
+				rt->FillGeometry(p.fills.Get(), brush);
+		}, [&] {
+			if (p.staleFills)
+				rt->FillGeometry(p.staleFills.Get(), brush);
+		});
 		brush->SetOpacity(1);
 	}
 	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
-		if (graphs[i].Drawable() && s.paths[i].contours) {
+		auto& p = s.paths[i];
+		if (graphs[i].Drawable() && (p.contours || p.staleContours)) {
 			auto* brush = s.Brush(GraphColor((int)i));
 			brush->SetOpacity(graphs[i].opacity);
-			rt->DrawGeometry(s.paths[i].contours.Get(), brush, 1.25f, s.roundStroke.Get());
+			DrawAroundStale(rt, p, s.view, [&] {
+				if (p.contours)
+					rt->DrawGeometry(p.contours.Get(), brush, 1.25f, s.roundStroke.Get());
+			}, [&] {
+				if (p.staleContours)
+					rt->DrawGeometry(p.staleContours.Get(), brush, 1.25f, s.roundStroke.Get());
+			});
 			brush->SetOpacity(1);
 		}
 	}
@@ -757,10 +822,17 @@ void CFunctionPlotCtrl::PaintGraphs() {
 		float width = g.width;
 		if ((int)i == s.traceGraph && s.traceValid)
 			width += 1;
-		if (s.paths[i].lines) {
+		if (s.paths[i].lines || s.paths[i].staleLines) {
 			bool dashed = g.geometry.dashed || (g.flags & FplGraphDashed);
 			auto* stroke = (g.flags & FplGraphDotted) ? s.dotStroke.Get() : dashed ? s.dashStroke.Get() : s.roundStroke.Get();
-			rt->DrawGeometry(s.paths[i].lines.Get(), brush, width, stroke);
+			auto& p = s.paths[i];
+			DrawAroundStale(rt, p, s.view, [&] {
+				if (p.lines)
+					rt->DrawGeometry(p.lines.Get(), brush, width, stroke);
+			}, [&] {
+				if (p.staleLines)
+					rt->DrawGeometry(p.staleLines.Get(), brush, width, stroke);
+			});
 		}
 		brush->SetOpacity(1);
 		const bool hollow = (g.flags & FplGraphHollow) != 0;

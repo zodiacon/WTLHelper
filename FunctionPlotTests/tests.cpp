@@ -5117,6 +5117,120 @@ TEST(QIsTheta) {
 	CHECK(one.graphs[0].text == L"r = 2 + cos 3q");
 }
 
+TEST(Transitions) {
+	// the easing: the ends exact, always on the way, slow at both ends
+	CHECK_NEAR(FplEase(0), 0.0);
+	CHECK_NEAR(FplEase(1), 1.0);
+	CHECK_NEAR(FplEase(0.5), 0.5);
+	CHECK_NEAR(FplEase(-1), 0.0);
+	CHECK_NEAR(FplEase(2), 1.0);
+	CHECK(FplEase(0.1) < 0.1);
+	CHECK(FplEase(0.9) > 0.9);
+	for (double t = 0.05; t < 1; t += 0.05)
+		CHECK(FplEase(t) > FplEase(t - 0.05));
+
+	// a range: the ends exact; the same width, a straight line; zooming, geometric
+	double lo, hi;
+	FplInterpolateRange(-10, 10, 2, 3, 0, lo, hi);
+	CHECK(lo == -10 && hi == 10);
+	FplInterpolateRange(-10, 10, 2, 3, 1, lo, hi);
+	CHECK(lo == 2 && hi == 3);
+	FplInterpolateRange(0, 10, 10, 20, 0.25, lo, hi);
+	CHECK_NEAR(lo, 2.5);
+	CHECK_NEAR(hi, 12.5);
+	FplInterpolateRange(0, 1000, 0, 1, 0.5, lo, hi);
+	CHECK_NEAR(hi - lo, std::sqrt(1000.0));
+	// about a fixed point: going from 0..10 to 2..3 the point at 20/9 stays at the same fraction of the range
+	FplInterpolateRange(0, 10, 2, 3, 0.5, lo, hi);
+	CHECK_NEAR((20.0 / 9 - lo) / (hi - lo), 2.0 / 9);
+	CHECK(lo > 0 && hi < 10);
+	CHECK(lo < 2 && hi > 3);
+	// always nested on the way in, whatever the step
+	double lastLo = 0, lastHi = 10;
+	for (double t = 0.1; t < 1; t += 0.1) {
+		FplInterpolateRange(0, 10, 2, 3, t, lo, hi);
+		CHECK(lo > lastLo && hi < lastHi);
+		lastLo = lo, lastHi = hi;
+	}
+	// no width to go by
+	FplInterpolateRange(5, 5, 0, 1, 0.5, lo, hi);
+	CHECK_NEAR(lo, 2.5);
+	CHECK_NEAR(hi, 3.0);
+
+	// a view: exact at the ends, keeping the window's size
+	FplViewport a = View(-10, 10, -8, 8, 1000, 800), b = View(1, 2, 3, 4, 1000, 800);
+	auto at0 = FplInterpolateView(a, b, 0), at1 = FplInterpolateView(a, b, 1);
+	CHECK(at0.xMin == a.xMin && at0.xMax == a.xMax && at0.yMin == a.yMin && at0.yMax == a.yMax);
+	CHECK(at1.xMin == b.xMin && at1.xMax == b.xMax && at1.yMin == b.yMin && at1.yMax == b.yMax);
+	auto mid = FplInterpolateView(a, b, 0.5);
+	CHECK(mid.Valid());
+	CHECK_NEAR(mid.xMax - mid.xMin, std::sqrt(20.0));
+	CHECK_NEAR(mid.yMax - mid.yMin, 4.0);
+	CHECK_INT(mid.width, 1000);
+	// a log axis goes by decades
+	FplViewport la = View(1, 10, 1, 10, 800, 800), lb = View(1, 1000, 1, 10, 800, 800);
+	la.logX = lb.logX = true;
+	auto lm = FplInterpolateView(la, lb, 0.5);
+	CHECK(lm.logX);
+	CHECK_NEAR_TOL(lm.xMin, 1.0, 1e-9);
+	CHECK_NEAR_TOL(lm.xMax, std::pow(10.0, std::sqrt(3.0)), 1e-9);
+	CHECK(lm.Valid());
+	// different axes: straight there
+	auto cross = FplInterpolateView(a, la, 0.5);
+	CHECK(cross.xMin == la.xMin && cross.logX);
+
+	// an angle, the short way round
+	CHECK_NEAR_TOL(FplInterpolateAngle(0.1f, 0.3f, 0.5), 0.2f, 1e-6);
+	CHECK_NEAR_TOL(FplInterpolateAngle(0.1f, -0.1f, 0.5), 0.0f, 1e-6);
+	const float nearly = static_cast<float>(2 * Pi) - 0.1f;
+	CHECK_NEAR_TOL(FplInterpolateAngle(0.1f, nearly, 0.5), 0.0f, 1e-5);
+	CHECK(FplInterpolateAngle(0.1f, nearly, 0) == 0.1f);
+	CHECK(FplInterpolateAngle(0.1f, nearly, 1) == nearly);
+}
+
+TEST(StretchingDrawings) {
+	FplViewMap map;
+	// the same view: nothing moves
+	FplViewport v = View(-10, 10, -8, 8, 1000, 800);
+	CHECK(FplMapBetween(v, v, map));
+	CHECK_NEAR(map.sx, 1.0);
+	CHECK_NEAR(map.tx, 0.0);
+	CHECK_NEAR(map.ty, 0.0);
+	// any move: a point on the plane lands where the new view draws it
+	auto check = [&](const FplViewport& from, const FplViewport& to) {
+		FplViewMap m;
+		CHECK(FplMapBetween(from, to, m));
+		for (auto& [x, y] : { std::pair{ 1.5, 2.5 }, std::pair{ 3.0, 4.0 }, std::pair{ 2.0, 7.0 } }) {
+			const FplPoint old = { from.ToScreenX(x), from.ToScreenY(y) };
+			const FplPoint moved = m.Apply(old);
+			CHECK_NEAR_TOL(moved.x, to.ToScreenX(x), 1e-7);
+			CHECK_NEAR_TOL(moved.y, to.ToScreenY(y), 1e-7);
+		}
+	};
+	check(v, View(-8, 12, -8, 8, 1000, 800));		// panned
+	check(v, View(-8, 12, -5, 11, 1000, 800));
+	check(v, View(-5, 5, -4, 4, 1000, 800));		// zoomed in
+	check(v, View(-20, 20, -16, 16, 1000, 800));	// out
+	check(v, View(-10, 10, -2, 2, 1000, 800));		// one axis
+	check(v, View(-10, 10, -8, 8, 500, 400));		// the window's size
+	// on log axes, by decades
+	FplViewport la = View(1, 100, 1, 100, 800, 800), lb = View(1, 10, 2, 50, 800, 800);
+	la.logX = la.logY = lb.logX = lb.logY = true;
+	check(la, lb);
+	// nothing to gain from: too far zoomed, no overlap, other axes, no view
+	CHECK(!FplMapBetween(v, View(-1, 1, -8, 8, 1000, 800), map));
+	CHECK(!FplMapBetween(v, View(-100, 100, -8, 8, 1000, 800), map));
+	CHECK(FplMapBetween(v, View(-5, 5, -8, 8, 1000, 800), map, 3));
+	CHECK(!FplMapBetween(v, View(-1, 1, -8, 8, 1000, 800), map, 3));
+	CHECK(!FplMapBetween(v, View(100, 120, -8, 8, 1000, 800), map));
+	CHECK(!FplMapBetween(v, View(-10, 10, 100, 116, 1000, 800), map));
+	CHECK(!FplMapBetween(v, la, map));
+	FplViewport none = v;
+	none.width = 0;
+	CHECK(!FplMapBetween(none, v, map));
+	CHECK(!FplMapBetween(v, none, map));
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -5201,6 +5315,8 @@ int wmain() {
 	Run_Fields3D();
 	Run_HiddenPoints3D();
 	Run_QIsTheta();
+	Run_Transitions();
+	Run_StretchingDrawings();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

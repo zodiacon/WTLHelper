@@ -86,6 +86,7 @@ enum {
 	ID_DEMO_COPY,
 	ID_DEMO_PRINT,
 	ID_DEMO_POLARGRID,
+	ID_DEMO_ANIMATE,
 };
 
 // ---- Examples -------------------------------------------------------------------
@@ -686,6 +687,7 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_EQUAL, s & FPLS_EQUALSCALE);
 	check(ID_DEMO_PITICKS, s & FPLS_PITICKS);
 	check(ID_DEMO_POLARGRID, s & FPLS_POLARGRID);
+	check(ID_DEMO_ANIMATE, !(s & FPLS_NOANIMATION));
 	check(ID_DEMO_DEGREES, g_plot.GetDegrees() != FALSE);
 	check(ID_DEMO_LEGEND, !(s & FPLS_NOLEGEND));
 	check(ID_DEMO_SLIDERS, !(s & FPLS_NOSLIDERS));
@@ -899,9 +901,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_EXIT: ::DestroyWindow(hwnd); break;
 		case ID_DEMO_HOME:
 			if (g_plot.GetMode() == FPLM_3D)
-				g_plot.ResetView3D();
+				g_plot.ResetView3D(TRUE);
 			else
-				g_plot.ResetView();
+				g_plot.ResetView(TRUE);
 			ShowView();
 			break;
 		case ID_DEMO_ZOOMIN: g_plot.Zoom(1.5); ShowView(); break;
@@ -916,7 +918,8 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_AXES: ToggleStyle(FPLS_NOAXES); break;
 		case ID_DEMO_TRACE: ToggleStyle(FPLS_NOTRACE); break;
 		case ID_DEMO_TANGENT: ToggleStyle(FPLS_TANGENT); break;
-		case ID_DEMO_FIT: g_plot.ZoomToFit(); ShowView(); break;
+		case ID_DEMO_FIT: g_plot.ZoomToFit(TRUE); ShowView(); break;
+		case ID_DEMO_ANIMATE: ToggleStyle(FPLS_NOANIMATION | FPLS_ALWAYSANIMATE); break;
 		case ID_DEMO_LOGX: g_plot.SetLogAxes(!g_plot.IsLogX(), g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_LOGY: g_plot.SetLogAxes(g_plot.IsLogX(), !g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_COPY:
@@ -1114,7 +1117,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			::SetWindowSubclass(g_edit, EditProc, 1, 0);
 			MakeEditFont(hwnd);
 			SetEditMargins(hwnd);
-			g_plot.Create(g_splitter, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | FPLS_EQUALSCALE,
+			g_plot.Create(g_splitter, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | FPLS_EQUALSCALE | FPLS_ALWAYSANIMATE,
 				0, IDC_PLOT);
 			g_splitter.SetSplitterPanes(g_edit, g_plot);
 			::SetWindowSubclass(g_plot, PlotSizeProc, 1, 0);
@@ -1270,6 +1273,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AXES, L"A&xes");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_PITICKS, L"&Pi Ticks");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_POLARGRID, L"Pola&r Grid");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_ANIMATE, L"Animate Transitions");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TRACE, L"&Tracing");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TANGENT, L"Ta&ngent Line");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_DEGREES, L"&Degrees");

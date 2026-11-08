@@ -70,6 +70,8 @@ LRESULT CFunctionPlotCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(AnimationTimer);
+	KillTimer(TransitionTimer);
+	m_State->transition.active = false;
 	m_State->worker.reset();
 	DiscardTarget();
 	m_State->gpu.clear();
@@ -94,6 +96,7 @@ float CFunctionPlotCtrl::ToDips(int pixels) const {
 }
 
 LRESULT CFunctionPlotCtrl::OnSize(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	EndTransition();
 	auto& s = *m_State;
 	s.client = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	if (s.target)
@@ -415,6 +418,7 @@ BOOL CFunctionPlotCtrl::ShowGraph(UINT id, BOOL show) {
 // ---- Parameters ----------------------------------------------------------------------
 
 BOOL CFunctionPlotCtrl::SetParameter(const FPLPARAM& param) {
+	EndTransition();
 	if (!param.pszName || !*param.pszName)
 		return FALSE;
 	auto& plot = m_State->plot;
@@ -549,6 +553,7 @@ BOOL CFunctionPlotCtrl::GetDegrees() const {
 
 void CFunctionPlotCtrl::Rebuild() {
 	auto& s = *m_State;
+	EndTransition();
 	// the graphs change: what's being sampled for the old ones isn't wanted
 	if (s.worker)
 		s.worker->Cancel();
@@ -596,6 +601,8 @@ void CFunctionPlotCtrl::ValuesChanged() {
 void CFunctionPlotCtrl::Resample() {
 	auto& s = *m_State;
 	const bool async = s.worker && !s.syncSampling;
+	const bool viewOnly = s.viewOnly;
+	s.viewOnly = false;
 	s.generations.resize(s.plot.graphs.size(), 0);
 	// a heavy graph: a coarse version now, the full one from the thread (each job numbered, so only the latest's
 	// result is taken)
@@ -632,6 +639,18 @@ void CFunctionPlotCtrl::Resample() {
 	coarse.cellSize = 16;
 	coarse.cellDepth = 1;
 	coarse.heatCell = 12;
+	// the view moved: what a heavy graph last showed in full can stretch to it until its new full version comes
+	std::vector<std::shared_ptr<FplGraphPaths>> stale(s.plot.graphs.size());
+	if (async && viewOnly)
+		for (size_t i = 0; i < s.plot.graphs.size() && i < s.paths.size(); i++) {
+			if (!s.plot.IsHeavy((int)i, false))
+				continue;
+			if (s.paths[i].stale)
+				stale[i] = std::move(s.paths[i].stale);
+			else if (s.paths[i].full)
+				stale[i] = std::make_shared<FplGraphPaths>(std::move(s.paths[i]));
+		}
+	std::vector<bool> full(s.plot.graphs.size());
 	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
 		if (async && s.plot.IsHeavy((int)i, false)) {
 			s.plot.SampleGraph((int)i, s.view, coarse);
@@ -640,11 +659,32 @@ void CFunctionPlotCtrl::Resample() {
 		else {
 			s.generations[i] = 0;
 			s.plot.SampleGraph((int)i, s.view);
+			full[i] = true;
 		}
 	}
 	if (s.featuresGraph >= 0 && !(GetStyle() & FPLS_NOTRACE))
 		s.plot.FindFeatures(s.featuresGraph, s.view);
 	BuildGeometries();
+	for (size_t i = 0; i < s.paths.size(); i++) {
+		auto& p = s.paths[i];
+		p.full = full[i];
+		p.view = s.view;
+		if (!stale[i] || !FplMapBetween(stale[i]->view, s.view, p.staleMap))
+			continue;
+		p.stale = std::move(stale[i]);
+		const FplPoint a = p.staleMap.Apply({ 0, 0 }), b = p.staleMap.Apply({ p.stale->view.width, p.stale->view.height });
+		p.staleRect = D2D1::RectF((float)a.x, (float)a.y, (float)b.x, (float)b.y);
+		const auto matrix = D2D1::Matrix3x2F((float)p.staleMap.sx, 0, 0, (float)p.staleMap.sy, (float)p.staleMap.tx, (float)p.staleMap.ty);
+		auto transform = [&](ID2D1PathGeometry* path, ComPtr<ID2D1Geometry>& out) {
+			ComPtr<ID2D1TransformedGeometry> moved;
+			if (path && SUCCEEDED(FplD2DFactory()->CreateTransformedGeometry(path, matrix, moved.GetAddressOf())))
+				out = moved;
+		};
+		// (a stroke's width isn't stretched with a transformed geometry)
+		transform(p.stale->lines.Get(), p.staleLines);
+		transform(p.stale->fills.Get(), p.staleFills);
+		transform(p.stale->contours.Get(), p.staleContours);
+	}
 	NoteIncomplete();
 }
 
@@ -665,6 +705,7 @@ void CFunctionPlotCtrl::NoteIncomplete() {
 }
 
 void CFunctionPlotCtrl::ViewChanged(bool notify) {
+	m_State->viewOnly = true;
 	Resample();
 	if (IsWindow())
 		Invalidate();
@@ -690,6 +731,7 @@ void CFunctionPlotCtrl::SetViewport(double xMin, double xMax, double yMin, doubl
 }
 
 void CFunctionPlotCtrl::SetView(const FPLVIEW& view) {
+	EndTransition();
 	SetViewport(view.xMin, view.xMax, view.yMin, view.yMax);
 	ViewChanged(false);
 }
@@ -701,6 +743,7 @@ FPLVIEW CFunctionPlotCtrl::GetView() const {
 
 void CFunctionPlotCtrl::SetLogAxes(BOOL logX, BOOL logY) {
 	auto& s = *m_State;
+	EndTransition();
 	if (s.view.logX == (logX != FALSE) && s.view.logY == (logY != FALSE))
 		return;
 	s.view.logX = logX != FALSE;
@@ -729,8 +772,10 @@ void CFunctionPlotCtrl::SetHomeView(const FPLVIEW* view) {
 		m_State->home = *view;
 }
 
-void CFunctionPlotCtrl::ResetView() {
+void CFunctionPlotCtrl::ResetView(BOOL animate) {
 	auto& s = *m_State;
+	EndTransition();
+	const FplEnds from = CaptureEnds();
 	if (s.homeSet) {
 		SetViewport(s.home.xMin, s.home.xMax, s.home.yMin, s.home.yMax);
 	}
@@ -739,10 +784,17 @@ void CFunctionPlotCtrl::ResetView() {
 		double half = 10 * s.view.height / std::max(s.view.width, 1.0);
 		SetViewport(-10, 10, -half, half);
 	}
-	ViewChanged(false);
+	if (animate) {
+		s.transition.notifyView = true;
+		if (BeginTransition(from))
+			return;
+		s.transition.notifyView = false;
+	}
+	ViewChanged(animate != FALSE);
 }
 
 void CFunctionPlotCtrl::Zoom(double factor) {
+	EndTransition();
 	auto& v = m_State->view;
 	if (!(factor > 0))
 		return;
@@ -778,6 +830,7 @@ void CFunctionPlotCtrl::NotifyView() {
 // ---- 3D --------------------------------------------------------------------------------
 
 BOOL CFunctionPlotCtrl::SetMode(FPLMODE mode) {
+	EndTransition();
 	auto& s = *m_State;
 	const bool to3D = mode == FPLM_3D;
 	if (to3D == s.mode3D)
@@ -840,7 +893,11 @@ LRESULT CFunctionPlotCtrl::OnSampled(UINT, WPARAM, LPARAM, BOOL&) {
 		}
 		else {
 			s.plot.graphs[r.graph].geometry = std::move(r.geometry);
+			if (r.graph < (int)s.paths.size())
+				s.paths[r.graph] = {};
 			BuildGeometry(r.graph);
+			s.paths[r.graph].full = true;
+			s.paths[r.graph].view = r.view;
 		}
 	}
 	if (changed) {
@@ -864,6 +921,7 @@ FPLMODE CFunctionPlotCtrl::GetMode() const {
 
 void CFunctionPlotCtrl::SetView3D(const FPLVIEW3D& view) {
 	auto& s = *m_State;
+	EndTransition();
 	FplBox3 box{ view.xMin, view.xMax, view.yMin, view.yMax, view.zMin, view.zMax };
 	if (!box.Valid())
 		return;
@@ -883,10 +941,20 @@ FPLVIEW3D CFunctionPlotCtrl::GetView3D() const {
 	return { s.box.xMin, s.box.xMax, s.box.yMin, s.box.yMax, s.box.zMin, s.box.zMax, s.camera.yaw, s.camera.pitch };
 }
 
-void CFunctionPlotCtrl::ResetView3D() {
+void CFunctionPlotCtrl::ResetView3D(BOOL animate) {
 	auto& s = *m_State;
+	EndTransition();
+	const FplEnds from = CaptureEnds();
 	s.box = {};
 	s.camera = {};
+	if (animate) {
+		s.transition.notify3D = true;
+		if (BeginTransition(from))
+			return;
+		s.transition.notify3D = false;
+		if (s.mode3D)
+			NotifyView3D();
+	}
 	if (s.mode3D) {
 		Resample();
 		if (IsWindow())
@@ -909,12 +977,20 @@ void CFunctionPlotCtrl::NotifyView3D() {
 
 // ---- Fitting, undo, axis titles ---------------------------------------------------------
 
-BOOL CFunctionPlotCtrl::ZoomToFit() {
+BOOL CFunctionPlotCtrl::ZoomToFit(BOOL animate) {
 	auto& s = *m_State;
+	EndTransition();
 	double x0, x1, y0, y1;
 	if (s.mode3D || !s.view.Valid() || !s.plot.FitBounds(s.view, x0, x1, y0, y1))
 		return FALSE;
+	const FplEnds from = CaptureEnds();
 	SetViewport(x0, x1, y0, y1);
+	if (animate) {
+		s.transition.notifyView = true;
+		if (BeginTransition(from))
+			return TRUE;
+		s.transition.notifyView = false;
+	}
 	ViewChanged(true);
 	return TRUE;
 }
@@ -944,9 +1020,126 @@ void CFunctionPlotCtrl::Remember(int kind) {
 	s.lastTime = now;
 }
 
+FplEnds CFunctionPlotCtrl::CaptureEnds() const {
+	auto& s = *m_State;
+	FplEnds ends;
+	ends.view = s.view;
+	ends.box = s.box;
+	ends.yaw = s.camera.yaw;
+	ends.pitch = s.camera.pitch;
+	ends.params.reserve(s.plot.params.size());
+	for (auto& p : s.plot.params)
+		ends.params.push_back({ p.name, p.value });
+	return ends;
+}
+
+bool CFunctionPlotCtrl::BeginTransition(const FplEnds& from) {
+	auto& s = *m_State;
+	auto& t = s.transition;
+	if ((GetStyle() & FPLS_NOANIMATION) || s.syncSampling || !s.viewSet || !IsWindowVisible())
+		return false;
+	BOOL animations = TRUE;
+	if (!(GetStyle() & FPLS_ALWAYSANIMATE) && ::SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0) && !animations)
+		return false;
+	FplEnds to = CaptureEnds();
+	t.moveView = !s.mode3D && (from.view.xMin != to.view.xMin || from.view.xMax != to.view.xMax ||
+		from.view.yMin != to.view.yMin || from.view.yMax != to.view.yMax);
+	t.moveBox = s.mode3D && std::memcmp(&from.box, &to.box, sizeof(to.box)) != 0;
+	t.moveCamera = s.mode3D && (from.yaw != to.yaw || from.pitch != to.pitch);
+	// a parameter playing keeps playing
+	std::vector<std::pair<std::wstring, double>> params;
+	for (auto& [name, value] : from.params) {
+		const int i = s.plot.FindParam(name);
+		if (i >= 0 && !s.plot.params[i].animating && s.plot.params[i].value != value)
+			params.push_back({ name, value });
+	}
+	if (!t.moveView && !t.moveBox && !t.moveCamera && params.empty())
+		return false;
+	t.from = from;
+	t.from.params = std::move(params);
+	t.to = std::move(to);
+	t.active = true;
+	t.start = ::GetTickCount64();
+	SetTimer(TransitionTimer, 16);
+	ApplyTransition(0);
+	return true;
+}
+
+void CFunctionPlotCtrl::ApplyTransition(double e) {
+	auto& s = *m_State;
+	auto& t = s.transition;
+	if (t.moveView)
+		s.view = FplInterpolateView(t.from.view, t.to.view, e);
+	if (t.moveBox) {
+		FplInterpolateRange(t.from.box.xMin, t.from.box.xMax, t.to.box.xMin, t.to.box.xMax, e, s.box.xMin, s.box.xMax);
+		FplInterpolateRange(t.from.box.yMin, t.from.box.yMax, t.to.box.yMin, t.to.box.yMax, e, s.box.yMin, s.box.yMax);
+		FplInterpolateRange(t.from.box.zMin, t.from.box.zMax, t.to.box.zMin, t.to.box.zMax, e, s.box.zMin, s.box.zMax);
+	}
+	if (t.moveCamera) {
+		s.camera.yaw = FplInterpolateAngle(t.from.yaw, t.to.yaw, e);
+		s.camera.pitch = FplInterpolateAngle(t.from.pitch, t.to.pitch, e);
+	}
+	bool values = false;
+	for (auto& [name, value] : t.from.params) {
+		const int i = s.plot.FindParam(name);
+		if (i < 0)
+			continue;
+		double end = value;
+		for (auto& [toName, toValue] : t.to.params)
+			if (toName == name)
+				end = toValue;
+		s.plot.params[i].value = e >= 1 ? end : value + (end - value) * e;
+		values = true;
+	}
+	if (values)
+		ValuesChanged();
+	else if (t.moveView)
+		ViewChanged(false);
+	else if (t.moveBox) {
+		Resample();
+		Invalidate();
+	}
+	else
+		Invalidate();
+}
+
+void CFunctionPlotCtrl::EndTransition() {
+	auto& t = m_State->transition;
+	if (!t.active)
+		return;
+	t.active = false;
+	KillTimer(TransitionTimer);
+	ApplyTransition(1);
+	NotifyTransition();
+}
+
+void CFunctionPlotCtrl::NotifyTransition() {
+	auto& s = *m_State;
+	auto& t = s.transition;
+	const std::vector<std::wstring> names = std::move(t.notifyParams);
+	const bool view = t.notifyView, view3D = t.notify3D;
+	t.notifyParams.clear();
+	t.notifyView = t.notify3D = false;
+	for (auto& name : names) {
+		const int i = s.plot.FindParam(name);
+		if (i < 0)
+			continue;
+		NMFPLPARAM nm{};
+		nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_PARAMCHANGED };
+		nm.pszName = s.plot.params[i].name.c_str();
+		nm.value = s.plot.params[i].value;
+		::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+	}
+	if (view)
+		NotifyView();
+	if (view3D)
+		NotifyView3D();
+}
+
 void CFunctionPlotCtrl::Restore(const FplSnapshot& snap) {
 	auto& s = *m_State;
 	s.lastKind = -1;
+	const FplEnds from = CaptureEnds();
 	// the parameters by name: each that moves is notified
 	std::vector<int> moved;
 	for (auto& [name, value] : snap.params) {
@@ -980,17 +1173,22 @@ void CFunctionPlotCtrl::Restore(const FplSnapshot& snap) {
 	ClearTrace();
 	if (!toggled.empty())
 		Rebuild();
-	else if (!moved.empty())
-		ValuesChanged();
-	else
-		Resample();
-	Invalidate();
-	for (int i : moved) {
-		NMFPLPARAM nm{};
-		nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_PARAMCHANGED };
-		nm.pszName = s.plot.params[i].name.c_str();
-		nm.value = s.plot.params[i].value;
-		::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+	// the parameters, the view and the camera glide there; what's shown or hidden changes at once
+	auto& t = s.transition;
+	t.notifyParams.clear();
+	for (int i : moved)
+		t.notifyParams.push_back(s.plot.params[i].name);
+	t.notifyView = viewMoved;
+	t.notify3D = box3D || camera;
+	const bool gliding = BeginTransition(from);
+	if (!gliding) {
+		if (toggled.empty() && !moved.empty())
+			ValuesChanged();
+		else if (toggled.empty()) {
+			s.viewOnly = moved.empty();
+			Resample();
+		}
+		Invalidate();
 	}
 	for (unsigned id : toggled) {
 		NMFPLGRAPH nm{};
@@ -1000,13 +1198,12 @@ void CFunctionPlotCtrl::Restore(const FplSnapshot& snap) {
 		nm.hidden = i >= 0 && (s.plot.graphs[i].flags & FplGraphHidden);
 		::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
 	}
-	if (viewMoved)
-		NotifyView();
-	if (box3D || camera)
-		NotifyView3D();
+	if (!gliding)
+		NotifyTransition();
 }
 
 BOOL CFunctionPlotCtrl::Undo() {
+	EndTransition();
 	FplSnapshot to;
 	if (!m_State->history.Undo(TakeSnapshot(), to))
 		return FALSE;
@@ -1015,6 +1212,7 @@ BOOL CFunctionPlotCtrl::Undo() {
 }
 
 BOOL CFunctionPlotCtrl::Redo() {
+	EndTransition();
 	FplSnapshot to;
 	if (!m_State->history.Redo(TakeSnapshot(), to))
 		return FALSE;
@@ -1320,6 +1518,7 @@ int CFunctionPlotCtrl::NextSlider(bool back) const {
 // ---- Animation -------------------------------------------------------------------------
 
 BOOL CFunctionPlotCtrl::AnimateParameter(LPCWSTR pszName, BOOL play) {
+	EndTransition();
 	auto& s = *m_State;
 	int i = pszName ? s.plot.FindParam(pszName) : -1;
 	if (i < 0)
@@ -1347,6 +1546,15 @@ BOOL CFunctionPlotCtrl::IsParameterAnimating(LPCWSTR pszName) const {
 
 LRESULT CFunctionPlotCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& s = *m_State;
+	if (wParam == TransitionTimer) {
+		auto& t = s.transition;
+		const double f = t.active ? static_cast<double>(::GetTickCount64() - t.start) / FplTransitionMs : 1;
+		if (f >= 1)
+			EndTransition();
+		else
+			ApplyTransition(FplEase(f));
+		return 0;
+	}
 	if (wParam != AnimationTimer) {
 		bHandled = FALSE;
 		return 0;
@@ -1381,6 +1589,7 @@ LRESULT CFunctionPlotCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) 
 // ---- State -----------------------------------------------------------------------------
 
 CString CFunctionPlotCtrl::GetState() const {
+	const_cast<CFunctionPlotCtrl*>(this)->EndTransition();
 	auto& s = *m_State;
 	FplSavedState st;
 	st.graphs.reserve(s.plot.graphs.size());
@@ -1415,6 +1624,7 @@ CString CFunctionPlotCtrl::GetState() const {
 }
 
 BOOL CFunctionPlotCtrl::SetState(LPCWSTR pszState) {
+	EndTransition();
 	auto& s = *m_State;
 	FplSavedState st;
 	if (!pszState || !FplLoadState(pszState, st))
@@ -1509,6 +1719,7 @@ HGLOBAL ToGlobal(const void* data, size_t size) {
 }  // namespace
 
 bool CFunctionPlotCtrl::RenderImage(float scale, std::vector<uint32_t>& pixels, UINT& width, UINT& height) {
+	EndTransition();
 	auto& s = *m_State;
 	if (!s.view.Valid())
 		return false;
@@ -1598,6 +1809,7 @@ BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
 }
 
 BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
+	EndTransition();
 	auto& s = *m_State;
 	if (!pszPath || !s.view.Valid() || s.mode3D)
 		return FALSE;
@@ -1611,6 +1823,7 @@ BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
 }
 
 BOOL CFunctionPlotCtrl::Copy() {
+	EndTransition();
 	auto& s = *m_State;
 	// at the screen's resolution, so it pastes as sharp as it's shown
 	std::vector<uint32_t> pixels;
@@ -1709,6 +1922,7 @@ LRESULT CFunctionPlotCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	EndTransition();
 	auto& s = *m_State;
 	if (::GetKeyState(VK_CONTROL) < 0 && (wParam == 'C' || wParam == VK_INSERT)) {
 		Copy();
@@ -1755,7 +1969,7 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 	const bool canMove = !(GetStyle() & FPLS_NOPANZOOM);
 	if (wParam == 'F' && canMove && !s.mode3D) {
 		Remember(-1);
-		ZoomToFit();
+		ZoomToFit(TRUE);
 		return 0;
 	}
 	switch (wParam) {
@@ -1786,8 +2000,7 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 				NotifyView3D();
 				return 0;
 			case VK_HOME:
-				ResetView3D();
-				NotifyView3D();
+				ResetView3D(TRUE);
 				return 0;
 		}
 		bHandled = FALSE;
@@ -1811,8 +2024,7 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 		case VK_HOME:
 			if (!canMove)
 				break;
-			ResetView();
-			NotifyView();
+			ResetView(TRUE);
 			return 0;
 		case VK_ESCAPE:
 			if (s.drag != FplDrag::None)
@@ -1825,6 +2037,7 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 }
 
 LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	EndTransition();
 	auto& s = *m_State;
 	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	SetFocus();
@@ -1947,6 +2160,7 @@ LRESULT CFunctionPlotCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
 }
 
 LRESULT CFunctionPlotCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
+	EndTransition();
 	auto& s = *m_State;
 	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	if (s.mode3D || s.drag != FplDrag::None || (GetStyle() & FPLS_NOPANZOOM) || HitPanel(pt).part != FplPanelPart::None) {
@@ -1986,8 +2200,13 @@ void CFunctionPlotCtrl::EndBox(POINT pt) {
 	s.boxShown = false;
 	FplViewport v = s.view;
 	if (v.ZoomTo({ ToDips(s.boxStart.x), ToDips(s.boxStart.y) }, { ToDips(pt.x), ToDips(pt.y) })) {
+		const FplEnds from = CaptureEnds();
 		SetViewport(v.xMin, v.xMax, v.yMin, v.yMax);
-		ViewChanged(true);
+		s.transition.notifyView = true;
+		if (!BeginTransition(from)) {
+			s.transition.notifyView = false;
+			ViewChanged(true);
+		}
 	}
 	Invalidate();
 }
@@ -2163,6 +2382,7 @@ LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 }
 
 LRESULT CFunctionPlotCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
+	EndTransition();
 	auto& s = *m_State;
 	if (GetStyle() & FPLS_NOPANZOOM)
 		return 0;

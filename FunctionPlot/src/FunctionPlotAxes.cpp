@@ -522,3 +522,72 @@ bool FplArrowHead(const FplArrow& a, FplPoint& left, FplPoint& right) {
 	right = { a.to.x - head * (ux * c + uy * s), a.to.y - head * (uy * c - ux * s) };
 	return true;
 }
+
+double FplEase(double t) {
+	t = std::clamp(t, 0.0, 1.0);
+	return t * t * (3 - 2 * t);
+}
+
+void FplInterpolateRange(double lo0, double hi0, double lo1, double hi1, double t, double& lo, double& hi) {
+	if (t <= 0) {
+		lo = lo0, hi = hi0;
+		return;
+	}
+	if (t >= 1) {
+		lo = lo1, hi = hi1;
+		return;
+	}
+	const double w0 = hi0 - lo0, w1 = hi1 - lo1;
+	if (!(w0 > 0) || !(w1 > 0) || std::abs(w1 / w0 - 1) < 1e-6) {
+		lo = lo0 + (lo1 - lo0) * t;
+		hi = hi0 + (hi1 - hi0) * t;
+		return;
+	}
+	const double width = w0 * std::pow(w1 / w0, t);
+	const double f = (width - w0) / (w1 - w0);
+	lo = lo0 + (lo1 - lo0) * f;
+	hi = lo + width;
+}
+
+FplViewport FplInterpolateView(const FplViewport& from, const FplViewport& to, double t) {
+	if (from.logX != to.logX || from.logY != to.logY)
+		return to;
+	if (t >= 1)
+		return to;
+	FplViewport v = to;
+	if (t <= 0) {
+		v.xMin = from.xMin, v.xMax = from.xMax, v.yMin = from.yMin, v.yMax = from.yMax;
+		return v;
+	}
+	double lo, hi;
+	FplInterpolateRange(from.AxisX(from.xMin), from.AxisX(from.xMax), to.AxisX(to.xMin), to.AxisX(to.xMax), t, lo, hi);
+	v.xMin = to.FromAxisX(lo);
+	v.xMax = to.FromAxisX(hi);
+	FplInterpolateRange(from.AxisY(from.yMin), from.AxisY(from.yMax), to.AxisY(to.yMin), to.AxisY(to.yMax), t, lo, hi);
+	v.yMin = to.FromAxisY(lo);
+	v.yMax = to.FromAxisY(hi);
+	return v;
+}
+
+float FplInterpolateAngle(float from, float to, double t) {
+	if (t <= 0)
+		return from;
+	if (t >= 1)
+		return to;
+	const double turn = std::remainder(static_cast<double>(to) - from, 2 * std::numbers::pi);
+	return static_cast<float>(from + turn * t);
+}
+
+bool FplMapBetween(const FplViewport& from, const FplViewport& to, FplViewMap& map, double maxZoom) {
+	if (!from.Valid() || !to.Valid() || from.logX != to.logX || from.logY != to.logY)
+		return false;
+	map.sx = to.ScaleX() / from.ScaleX();
+	map.sy = to.ScaleY() / from.ScaleY();
+	if (map.sx > maxZoom || map.sx < 1 / maxZoom || map.sy > maxZoom || map.sy < 1 / maxZoom)
+		return false;
+	map.tx = (from.AxisX(from.xMin) - to.AxisX(to.xMin)) * to.ScaleX();
+	map.ty = (to.AxisY(to.yMax) - from.AxisY(from.yMax)) * to.ScaleY();
+	// where the old view's corners land
+	const double left = map.tx, right = from.width * map.sx + map.tx, top = map.ty, bottom = from.height * map.sy + map.ty;
+	return right > 0 && left < to.width && bottom > 0 && top < to.height;
+}

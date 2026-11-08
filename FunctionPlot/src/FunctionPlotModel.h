@@ -62,6 +62,27 @@ struct FplViewport {
 	bool ZoomTo(FplPoint a, FplPoint b);
 };
 
+// ---- Going between views ---------------------------------------------------------------------------------------------
+
+// Slow at both ends: 0 to 1 over 0 to 1.
+double FplEase(double t);
+// A range on its way to another: its width changes geometrically, so a big zoom looks steady, and its edges move in straight
+// lines, as zooming about a fixed point does. t = 0 and 1 give the ends exactly.
+void FplInterpolateRange(double lo0, double hi0, double lo1, double hi1, double t, double& lo, double& hi);
+// A view on its way to another, in axis units (so by decades on a log axis). Views with different axes go straight to it.
+FplViewport FplInterpolateView(const FplViewport& from, const FplViewport& to, double t);
+// An angle on its way to another, the short way round; t = 1 gives to exactly.
+float FplInterpolateAngle(float from, float to, double t);
+
+// What a drawing made for one view needs to show in another: screen' = s * screen + t on each axis.
+struct FplViewMap {
+	double sx = 1, tx = 0, sy = 1, ty = 0;
+	FplPoint Apply(FplPoint p) const { return { p.x * sx + tx, p.y * sy + ty }; }
+};
+// false when there's nothing to gain from stretching: different axes, the scale changed by more than maxZoom on an axis, or
+// the views no longer overlap.
+bool FplMapBetween(const FplViewport& from, const FplViewport& to, FplViewMap& map, double maxZoom = 8);
+
 // ---- Axis ticks ------------------------------------------------------------------------------------------------------
 
 struct FplTicks {
