@@ -23,6 +23,8 @@ enum : unsigned {
 	FplGraphNoDrag = 0x0040,		// a point the user can't drag
 	FplGraphDotted = 0x0080,		// a dotted line
 	FplGraphHollow = 0x0100,		// points as rings
+	FplGraphMeshLines = 0x0200,		// 3D: lines on a surface (its grid, or the box's ticks)
+	FplGraphLevelLines = 0x0400,	// 3D: lines on a surface at heights
 };
 
 struct FplGraph {
@@ -180,9 +182,14 @@ public:
 	// the 2D curves on the z = 0 plane), points as spheres. Implicit curves, regions and vector fields have none.
 	void Build3D(const FplBox3& box);
 	void Build3DGraph(int graph, const FplBox3& box, int implicitCells = 48);
+	// The lines a surface has by its flags: z = F(x, y) in x and y at the box's ticks, a parametric surface along its u
+	// and v, an implicit one in x, y and z. Other kinds have none.
+	FplLineGrid LineGridOf(int graph, const FplBox3& box) const;
 
 	// Roots, extrema and the y intercept of a function graph over the view, and where it meets the other drawable
-	// functions (Intersection), into its features. Others get none.
+	// functions (Intersection), into its features. Any graph with a curve (x = f(y), polar, parametric, implicit, an
+	// ODE's solutions, regions' boundaries) also gets where it meets the others' curves in the view, from what was
+	// sampled last. Others get none.
 	void FindFeatures(int graph, const FplViewport& view);
 
 	// y = f(x) or x = f(y) of a function graph (NaN for other kinds).
@@ -199,8 +206,10 @@ public:
 	// Keyboard tracing: the point dips DIPs further along the graph from a plane point (negative: back), a function by
 	// its x (y for x = f(y)), past where it's undefined, other kinds along their polylines (stopping at their ends).
 	FplTraceHit Step(int graph, FplPoint plane, double dips, const FplViewport& view) const;
-	// The graph's next feature (FindFeatures') past x, dir +1 or -1; none if there isn't one.
-	FplTraceHit NextFeature(int graph, double x, int dir, const FplViewport& view) const;
+	// The graph's next feature (FindFeatures') past x, dir +1 or -1; none if there isn't one. Features are in order of x
+	// then y: at the same x, the one past y (a vertical line through a circle has two).
+	FplTraceHit NextFeature(int graph, double x, int dir, const FplViewport& view,
+		double y = std::numeric_limits<double>::quiet_NaN()) const;
 	// The next drawable, traceable function graph after graph (dir +1 or -1, going round) defined at x, at x.
 	FplTraceHit NextGraphAt(int graph, double x, int dir, const FplViewport& view) const;
 	// dy/dx of y = f(x) (dx/dy of x = f(y)) at v: the derivative's program, else differences; NaN for other kinds.
@@ -223,6 +232,8 @@ private:
 	void Fit(FplGraph& g);
 	void SetElement(std::vector<double>& slots, const FplGraph& g, size_t i) const;
 	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
+	void FindCurveMeetings(int graph, const FplViewport& view);
+	static void SortFeatures(FplGraph& g);
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;
 	void SnapToFeature(FplTraceHit& hit, FplPoint screen, const FplViewport& view, double snapDistance,
 		bool alongOnly) const;

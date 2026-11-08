@@ -694,6 +694,22 @@ void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 	m_Slots = std::move(saved);
 }
 
+FplLineGrid FplPlot::LineGridOf(int graph, const FplBox3& box) const {
+	auto& g = graphs[graph];
+	const bool mesh = (g.flags & FplGraphMeshLines) != 0, levels = (g.flags & FplGraphLevelLines) != 0;
+	switch (g.expr.kind) {
+		case FplKind::Surface:
+			return FplMakeLineGrid(box, mesh, mesh, false, levels);
+		case FplKind::ParametricSurface:
+			// 16 lines each way, on its 64 cells
+			return FplMakeLineGrid(box, false, false, false, levels, mesh ? 4.0f : 0.0f);
+		case FplKind::ImplicitSurface:
+			return FplMakeLineGrid(box, mesh, mesh, mesh, levels);
+		default:
+			return {};
+	}
+}
+
 FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells) {
 	constexpr double TwoPi = 6.283185307179586;
 	double* s = m_Slots.data();
@@ -789,9 +805,14 @@ double FplPlot::Eval(int graph, double v) const {
 void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 	auto& g = graphs[graph];
 	g.features.clear();
-	if (!g.Drawable() || g.expr.kind != FplKind::Function || (g.flags & FplGraphNoFeatures) || !view.Valid() ||
-		g.Listed())
+	if (!g.Drawable() || (g.flags & FplGraphNoFeatures) || !view.Valid() || g.Listed())
 		return;
+	FindCurveMeetings(graph, view);
+	if (g.expr.kind != FplKind::Function) {
+		SortFeatures(g);
+		return;
+	}
+	std::vector<FplFeature> meetings = std::move(g.features);
 	std::function<double(double)> f = [this, graph](double x) { return Eval(graph, x); };
 	std::function<double(double)> df;
 	if (!g.expr.df.Empty()) {
@@ -818,6 +839,7 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 		}
 	}
 	g.features = FplFindFeatures(f, df, a, b, samples, yTolerance);
+	g.features.insert(g.features.end(), meetings.begin(), meetings.end());
 	for (size_t h = 0; h < graphs.size(); h++) {
 		auto& other = graphs[h];
 		if (static_cast<int>(h) == graph || !other.Drawable() || other.expr.kind != FplKind::Function || other.Listed())
@@ -835,11 +857,89 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 	if (view.logY)
 		g.features.erase(std::remove_if(g.features.begin(), g.features.end(),
 			[](const FplFeature& feature) { return !(feature.y > 0); }), g.features.end());
+	SortFeatures(g);
+}
+
+void FplPlot::SortFeatures(FplGraph& g) {
 	std::stable_sort(g.features.begin(), g.features.end(), [](const FplFeature& a, const FplFeature& b) {
-		return a.x < b.x;
+		return a.x != b.x ? a.x < b.x : a.y < b.y;
 	});
 	if (g.features.size() > 1000)
 		g.features.resize(1000);
+}
+
+// Where the graph's curve meets the other graphs', except that two y = f(x) meet by their formulas (FindFeatures).
+void FplPlot::FindCurveMeetings(int graph, const FplViewport& view) {
+	auto hasCurve = [](const FplGraph& g) {
+		if (!g.Drawable() || g.Listed() || g.geometry.lines.empty())
+			return false;
+		switch (g.expr.kind) {
+			case FplKind::Function: case FplKind::FunctionOfY: case FplKind::Polar: case FplKind::Parametric:
+			case FplKind::Implicit: case FplKind::SlopeField:
+				return true;
+			default:
+				return false;
+		}
+	};
+	auto& g = graphs[graph];
+	if (!hasCurve(g))
+		return;
+	std::vector<double> slots = m_Slots;
+	double* s = slots.data();
+	auto curveOf = [&](const FplGraph& c) {
+		FplCurve curve;
+		curve.lines = &c.geometry.lines;
+		const FplExpression* e = &c.expr;
+		switch (c.expr.kind) {
+			case FplKind::Function:
+				curve.G = [s, e](double x, double y) {
+					s[FplSlotX] = x;
+					return y - e->f.Eval(s);
+				};
+				break;
+			case FplKind::FunctionOfY:
+				curve.G = [s, e](double x, double y) {
+					s[FplSlotY] = y;
+					return x - e->f.Eval(s);
+				};
+				break;
+			case FplKind::Implicit:
+				curve.G = [s, e](double x, double y) {
+					s[FplSlotX] = x;
+					s[FplSlotY] = y;
+					return e->f.Eval(s);
+				};
+				break;
+			case FplKind::Parametric:
+				curve.C = [s, e](double t) {
+					s[FplSlotT] = t;
+					return FplPoint{ e->f.Eval(s), e->g.Eval(s) };
+				};
+				break;
+			case FplKind::Polar:
+				curve.C = [s, e](double theta) {
+					s[FplSlotTheta] = theta;
+					const double r = e->f.Eval(s);
+					return FplPoint{ r * std::cos(theta), r * std::sin(theta) };
+				};
+				break;
+			default:
+				break;		// an ODE's solutions: the lines alone
+		}
+		const FplSampleOptions o = OptionsFor(static_cast<int>(&c - graphs.data()), {});
+		curve.t0 = c.expr.kind == FplKind::Polar ? o.thetaMin : o.tMin;
+		curve.t1 = c.expr.kind == FplKind::Polar ? o.thetaMax : o.tMax;
+		return curve;
+	};
+	const FplCurve mine = curveOf(g);
+	for (size_t h = 0; h < graphs.size(); h++) {
+		auto& other = graphs[h];
+		if (static_cast<int>(h) == graph || !hasCurve(other) ||
+			(g.expr.kind == FplKind::Function && other.expr.kind == FplKind::Function))
+			continue;
+		auto meets = FplFindCurveIntersections(mine, curveOf(other), view);
+		g.features.insert(g.features.end(), meets.begin(), meets.end());
+	}
 }
 
 FplTraceHit FplPlot::OnGraph(int graph, FplPoint screen, const FplViewport& view) const {
@@ -1026,7 +1126,7 @@ FplTraceHit FplPlot::Step(int graph, FplPoint plane, double dips, const FplViewp
 	return hit;
 }
 
-FplTraceHit FplPlot::NextFeature(int graph, double x, int dir, const FplViewport& view) const {
+FplTraceHit FplPlot::NextFeature(int graph, double x, int dir, const FplViewport& view, double y) const {
 	FplTraceHit hit;
 	if (graph < 0 || graph >= static_cast<int>(graphs.size()))
 		return hit;
@@ -1034,11 +1134,12 @@ FplTraceHit FplPlot::NextFeature(int graph, double x, int dir, const FplViewport
 	const double eps = 1e-9 * (view.xMax - view.xMin);
 	int found = -1;
 	for (size_t i = 0; i < fs.size(); i++) {
-		if (dir > 0 && fs[i].x > x + eps) {
+		const bool sameX = std::abs(fs[i].x - x) <= eps;
+		if (dir > 0 && (fs[i].x > x + eps || (sameX && fs[i].y > y + eps))) {
 			found = static_cast<int>(i);
 			break;
 		}
-		if (dir < 0 && fs[i].x < x - eps)
+		if (dir < 0 && (fs[i].x < x - eps || (sameX && fs[i].y < y - eps)))
 			found = static_cast<int>(i);
 	}
 	if (found < 0)

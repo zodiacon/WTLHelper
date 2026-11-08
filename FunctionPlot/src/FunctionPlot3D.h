@@ -63,6 +63,7 @@ struct FplVertex3 {
 	FplVec3 pos;							// in the cube
 	FplVec3 normal;
 	float value = 0;						// 0 to 1: its height in the box, for a heat coloring
+	float u = 0, v = 0;						// its place on a grid mesh, in cells
 };
 
 struct FplMesh {
@@ -105,6 +106,18 @@ struct FplTick3 {
 	bool name = false;						// "x", "y", "z"
 };
 std::vector<FplTick3> FplBoxTicks(const FplBox3& box, const FplCamera& camera);
+
+// The lines drawn on a surface by the pixel shader. Along an axis, t = (cube + 1) * scale + offset is an integer on a
+// line (scale 0: none on that axis), so they fall on nice values of the box's ranges; along the mesh's grid, every
+// `cells` cells (0: none).
+struct FplLineGrid {
+	float scale[3] = { 0, 0, 0 };
+	float offset[3] = { 0, 0, 0 };
+	float cells = 0;
+	bool Any() const { return scale[0] != 0 || scale[1] != 0 || scale[2] != 0 || cells != 0; }
+};
+// x, y, z: at the box's ticks; levels: z at a closer step, for height lines (over z).
+FplLineGrid FplMakeLineGrid(const FplBox3& box, bool x, bool y, bool z, bool levels, float cells = 0);
 
 // The nearest of the mesh's triangles the ray meets inside the cube (what's outside it isn't drawn): its distance
 // along the ray. false if none.

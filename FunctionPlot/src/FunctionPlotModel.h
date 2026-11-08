@@ -228,3 +228,20 @@ std::vector<FplFeature> FplFindFeatures(const std::function<double(double)>& f, 
 // Where y = f(x) and y = g(x) meet over [x0, x1] (crossing or touching), as Intersection features.
 std::vector<FplFeature> FplFindIntersections(const std::function<double(double)>& f,
 	const std::function<double(double)>& g, double x0, double x1, int samples, double yTolerance);
+
+// A curve as FplFindCurveIntersections takes it: its sampled lines (screen coordinates), and what it can be refined by:
+// G(x, y) = 0 where it's an equation, or C(t) over [t0, t1] where it's a parametric curve; neither (an ODE's solution):
+// the lines alone.
+struct FplCurve {
+	const std::vector<FplPolyline>* lines = nullptr;
+	std::function<double(double, double)> G;
+	std::function<FplPoint(double)> C;
+	double t0 = 0, t1 = 0;
+};
+
+// Where two curves of any kind meet in the view, as Intersection features sorted by x then y. Their lines' crossings
+// are found through a grid of the view, then refined on the curves themselves by Newton's method (kept only if that
+// stays within a few DIPs, else the lines' crossing stands). Touching without crossing: the lines coming within a third
+// of a DIP for a short stretch, at its middle, so to about a DIP (the view's own precision); a longer stretch is two
+// curves running together, not a point.
+std::vector<FplFeature> FplFindCurveIntersections(const FplCurve& a, const FplCurve& b, const FplViewport& view);

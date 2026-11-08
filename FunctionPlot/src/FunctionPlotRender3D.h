@@ -17,6 +17,17 @@ struct FplGpuMesh {
 	explicit operator bool() const { return count > 0; }
 };
 
+// How a mesh is drawn. colormap: by the vertices' heights; lines: a line list, unlit; clip: only what's inside the cube;
+// grid: lines on it; lineColor: theirs (FplNoColor: a darker shade of what's under them).
+inline constexpr COLORREF FplNoColor = 0xFFFFFFFF;
+
+struct FplDrawStyle {
+	COLORREF color = 0;
+	bool colormap = false, lines = false, clip = false;
+	FplLineGrid grid;
+	COLORREF lineColor = FplNoColor;
+};
+
 class FplRenderer3D {
 public:
 	bool Ready() const { return m_Device != nullptr; }
@@ -30,8 +41,12 @@ public:
 	// A frame: clear, draw meshes, then the overlay, then present. false from Present: the device was lost (Reset and
 	// start again).
 	void Begin(COLORREF back, const FplMatrix4& viewProjection, FplVec3 eye);
-	// colormap: by the vertices' heights; lines: a line list, unlit; clip: only what's inside the cube
-	void Draw(const FplGpuMesh& mesh, COLORREF color, bool colormap, bool lines, bool clip);
+	void Draw(const FplGpuMesh& mesh, const FplDrawStyle& style);
+	// After the opaque meshes: see-through ones, in any order (weighted blended order-independent transparency: what's
+	// behind counts by distance rather than by being drawn first). Between Begin and BeginOverlay.
+	bool BeginTranslucent();
+	void DrawTranslucent(const FplGpuMesh& mesh, const FplDrawStyle& style, float opacity);
+	void EndTranslucent();
 	ID2D1DeviceContext* BeginOverlay();	// resolves the scene into the back buffer first
 	void EndOverlay();
 	bool Present();
@@ -41,6 +56,9 @@ public:
 private:
 	bool CreateTargets();
 	void ReleaseTargets();
+	bool EnsureTranslucent();
+	void Submit(const FplGpuMesh& mesh, const FplDrawStyle& style, float opacity);
+	void Composite();
 
 	Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
 	Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
@@ -54,6 +72,16 @@ private:
 	Microsoft::WRL::ComPtr<ID3D11Buffer> m_Constants;
 	Microsoft::WRL::ComPtr<ID3D11RasterizerState> m_Rasterizer;
 	Microsoft::WRL::ComPtr<ID3D11DepthStencilState> m_DepthState;
+	// see-through meshes: made when first needed, the targets with the size
+	Microsoft::WRL::ComPtr<ID3D11PixelShader> m_OitShader, m_CompositeShader;
+	Microsoft::WRL::ComPtr<ID3D11VertexShader> m_FullShader;
+	Microsoft::WRL::ComPtr<ID3D11BlendState> m_OitBlend, m_OverBlend;
+	Microsoft::WRL::ComPtr<ID3D11DepthStencilState> m_ReadDepth, m_NoDepth;
+	Microsoft::WRL::ComPtr<ID3D11Texture2D> m_Accum, m_Reveal, m_AccumResolved, m_RevealResolved;
+	Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_AccumView, m_RevealView, m_BackView;
+	Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_AccumRead, m_RevealRead;
+	bool m_OitUnavailable = false;		// no such blending: plain alpha blending, in the order given
+	bool m_Composite = false;			// this frame has some to put over the scene
 	Microsoft::WRL::ComPtr<ID2D1Device> m_D2DDevice;
 	Microsoft::WRL::ComPtr<ID2D1DeviceContext> m_Overlay;
 	Microsoft::WRL::ComPtr<ID2D1Bitmap1> m_OverlayTarget;
@@ -65,5 +93,8 @@ private:
 		float eye[4];
 		float color[4];
 		float options[4];
+		float gridScale[4];
+		float gridOffset[4];
+		float lineColor[4];
 	} m_Frame{};
 };

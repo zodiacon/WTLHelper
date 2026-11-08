@@ -57,6 +57,9 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
                                     // dragging sets the parameters: FPLN_PARAMCHANGED)
 #define FPLGF_DOTTED       0x0080   // a dotted line
 #define FPLGF_HOLLOW       0x0100   // points as rings
+#define FPLGF_MESHLINES    0x0200   // 3D: lines on a surface: z = F(x, y) in x and y at the box's ticks, a parametric
+                                    // surface along its u and v, an implicit one in x, y and z
+#define FPLGF_LEVELLINES   0x0400   // 3D: lines on a surface at heights
 
 struct FPLGRAPH {
 	UINT     mask;             // FPLGM_*: the members to set, or to fill
@@ -69,8 +72,9 @@ struct FPLGRAPH {
 	LPARAM   lParam;
 	LPCWSTR  pszLabel;         // FPLGM_LABEL: beside its points, or at its curve's right end in the view; {x} and
 	                           // {y} are its coordinates ("A({x}, {y})"); GetGraph: valid until the graph changes
-	float    opacity;          // FPLGM_OPACITY: its lines' and points' (1), and
-	float    fillOpacity;      // its regions' and heat maps' (negative: 0.22, a heat map 0.85); not in 3D
+	float    opacity;          // FPLGM_OPACITY: its lines' and points' (1); in 3D the whole graph's, drawn see-through
+	                           // in any order; and
+	float    fillOpacity;      // its regions' and heat maps' (negative: 0.22, a heat map 0.85); 2D only
 };
 
 // What a graph is, once the control has read it.

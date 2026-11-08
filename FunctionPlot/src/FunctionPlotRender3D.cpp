@@ -22,13 +22,17 @@ cbuffer Frame : register(b0) {
 	row_major float4x4 viewProjection;
 	float4 eye;
 	float4 color;
-	float4 options;		// x: colormap, y: unlit, z: clip to the cube
+	float4 options;		// x: colormap, y: unlit, z: clip to the cube, w: opacity
+	float4 gridScale;	// x, y, z: lines at integers of (world + 1) * scale + offset; w: along the grid, per cells
+	float4 gridOffset;
+	float4 lineColor;	// w: use it, else a darker shade
 };
 
 struct VSIn {
 	float3 pos : POSITION;
 	float3 normal : NORMAL;
 	float value : VALUE;
+	float2 grid : GRID;
 };
 
 struct VSOut {
@@ -36,6 +40,7 @@ struct VSOut {
 	float3 world : WORLD;
 	float3 normal : NORMAL;
 	float value : VALUE;
+	float2 grid : GRID;
 };
 
 VSOut VS(VSIn i) {
@@ -44,6 +49,7 @@ VSOut VS(VSIn i) {
 	o.world = i.pos;
 	o.normal = i.normal;
 	o.value = i.value;
+	o.grid = i.grid;
 	return o;
 }
 
@@ -59,12 +65,31 @@ float3 Viridis(float t) {
 	return c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6)))));
 }
 
-float4 PS(VSOut i) : SV_TARGET {
+// How much of a line is at t: a pixel and a bit wide, fading out where they'd crowd (under 4 pixels apart)
+float Line(float t) {
+	float w = fwidth(t);
+	if (w <= 0)
+		return 0;
+	float d = abs(frac(t - 0.5) - 0.5) / w;
+	return (1 - saturate(d - 0.35)) * saturate((0.5 - w) / 0.25);
+}
+
+float3 Shade(VSOut i) {
+	// before anything's discarded: lines need their neighbors' values
+	float onLine = 0;
+	if (gridScale.x > 0)
+		onLine = max(onLine, Line((i.world.x + 1) * gridScale.x + gridOffset.x));
+	if (gridScale.y > 0)
+		onLine = max(onLine, Line((i.world.y + 1) * gridScale.y + gridOffset.y));
+	if (gridScale.z > 0)
+		onLine = max(onLine, Line((i.world.z + 1) * gridScale.z + gridOffset.z));
+	if (gridScale.w > 0)
+		onLine = max(onLine, max(Line(i.grid.x * gridScale.w), Line(i.grid.y * gridScale.w)));
 	if (options.z > 0 && any(abs(i.world) > 1.0005))
 		discard;
 	float3 base = options.x > 0 ? Viridis(saturate(i.value)) : color.rgb;
 	if (options.y > 0)
-		return float4(base, 1);
+		return base;
 	// both sides lit: the normal turned toward the eye; a light a little above and beside it
 	float3 v = normalize(eye.xyz - i.world);
 	float3 n = normalize(i.normal);
@@ -74,7 +99,44 @@ float4 PS(VSOut i) : SV_TARGET {
 	float diffuse = saturate(dot(n, l));
 	float3 h = normalize(l + v);
 	float specular = pow(saturate(dot(n, h)), 32) * 0.12;
-	return float4(base * (0.32 + 0.68 * diffuse) + specular, 1);
+	float3 lit = base * (0.32 + 0.68 * diffuse) + specular;
+	return lerp(lit, lineColor.w > 0 ? lineColor.rgb : lit * 0.3, onLine * 0.85);
+}
+
+float4 PS(VSOut i) : SV_TARGET {
+	return float4(Shade(i), options.w);
+}
+
+// Weighted blended order-independent transparency (McGuire and Bavoil): each fragment adds its color weighted by its
+// opacity and nearness, and multiplies down how much of the background is left.
+struct OitOut {
+	float4 accum : SV_TARGET0;
+	float4 reveal : SV_TARGET1;
+};
+
+OitOut PSOit(VSOut i) {
+	float3 rgb = Shade(i);
+	float a = options.w;
+	float z = length(eye.xyz - i.world);
+	float weight = a * clamp(10 / (1e-5 + pow(z / 5, 2) + pow(z / 200, 6)), 1e-2, 3e3);
+	OitOut o;
+	o.accum = float4(rgb * a, a) * weight;
+	o.reveal = float4(a, 0, 0, 0);
+	return o;
+}
+
+float4 VSFull(uint id : SV_VertexID) : SV_POSITION {
+	return float4(id == 1 ? 3 : -1, id == 2 ? 3 : -1, 0, 1);
+}
+
+Texture2D Accum : register(t0);
+Texture2D Reveal : register(t1);
+
+float4 PSComposite(float4 pos : SV_POSITION) : SV_TARGET {
+	int3 at = int3(pos.xy, 0);
+	float4 accum = Accum.Load(at);
+	float left = Reveal.Load(at).r;
+	return float4(accum.rgb / clamp(accum.a, 1e-5, 5e4), 1 - left);
 }
 )";
 
@@ -162,6 +224,7 @@ bool FplRenderer3D::Init(HWND hwnd, UINT width, UINT height, float dpi) {
 		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(FplVertex3, pos), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(FplVertex3, normal), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "VALUE", 0, DXGI_FORMAT_R32_FLOAT, 0, offsetof(FplVertex3, value), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "GRID", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(FplVertex3, u), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	};
 	D3D11_BUFFER_DESC cb{ sizeof(Frame), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER };
 	D3D11_RASTERIZER_DESC raster{};
@@ -195,6 +258,15 @@ bool FplRenderer3D::Init(HWND hwnd, UINT width, UINT height, float dpi) {
 
 void FplRenderer3D::Reset() {
 	ReleaseTargets();
+	m_OitShader.Reset();
+	m_CompositeShader.Reset();
+	m_FullShader.Reset();
+	m_OitBlend.Reset();
+	m_OverBlend.Reset();
+	m_ReadDepth.Reset();
+	m_NoDepth.Reset();
+	m_OitUnavailable = false;
+	m_Composite = false;
 	m_Overlay.Reset();
 	m_D2DDevice.Reset();
 	m_SwapChain.Reset();
@@ -244,6 +316,15 @@ void FplRenderer3D::ReleaseTargets() {
 	if (m_Overlay)
 		m_Overlay->SetTarget(nullptr);
 	m_OverlayTarget.Reset();
+	m_AccumView.Reset();
+	m_RevealView.Reset();
+	m_BackView.Reset();
+	m_AccumRead.Reset();
+	m_RevealRead.Reset();
+	m_Accum.Reset();
+	m_Reveal.Reset();
+	m_AccumResolved.Reset();
+	m_RevealResolved.Reset();
 	m_ColorView.Reset();
 	m_DepthView.Reset();
 	m_Color.Reset();
@@ -292,6 +373,8 @@ void FplRenderer3D::Begin(COLORREF back, const FplMatrix4& viewProjection, FplVe
 	m_Context->RSSetViewports(1, &vp);
 	m_Context->RSSetState(m_Rasterizer.Get());
 	m_Context->OMSetDepthStencilState(m_DepthState.Get(), 0);
+	m_Context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+	m_Composite = false;
 	m_Context->IASetInputLayout(m_Layout.Get());
 	m_Context->VSSetShader(m_VertexShader.Get(), nullptr, 0);
 	m_Context->PSSetShader(m_PixelShader.Get(), nullptr, 0);
@@ -303,19 +386,197 @@ void FplRenderer3D::Begin(COLORREF back, const FplMatrix4& viewProjection, FplVe
 	m_Frame.eye[2] = eye.z;
 }
 
-void FplRenderer3D::Draw(const FplGpuMesh& mesh, COLORREF color, bool colormap, bool lines, bool clip) {
+void FplRenderer3D::Submit(const FplGpuMesh& mesh, const FplDrawStyle& style, float opacity) {
 	if (!mesh)
 		return;
-	SetColor(m_Frame.color, color);
-	m_Frame.options[0] = colormap ? 1.0f : 0.0f;
-	m_Frame.options[1] = lines ? 1.0f : 0.0f;
-	m_Frame.options[2] = clip ? 1.0f : 0.0f;
+	SetColor(m_Frame.color, style.color);
+	m_Frame.options[0] = style.colormap ? 1.0f : 0.0f;
+	m_Frame.options[1] = style.lines ? 1.0f : 0.0f;
+	m_Frame.options[2] = style.clip ? 1.0f : 0.0f;
+	m_Frame.options[3] = opacity;
+	for (int k = 0; k < 3; k++) {
+		m_Frame.gridScale[k] = style.grid.scale[k];
+		m_Frame.gridOffset[k] = style.grid.offset[k];
+	}
+	m_Frame.gridScale[3] = style.grid.cells > 0 ? 1 / style.grid.cells : 0;
+	m_Frame.gridOffset[3] = 0;
+	SetColor(m_Frame.lineColor, style.lineColor == FplNoColor ? 0 : style.lineColor);
+	m_Frame.lineColor[3] = style.lineColor == FplNoColor ? 0.0f : 1.0f;
 	m_Context->UpdateSubresource(m_Constants.Get(), 0, nullptr, &m_Frame, 0, 0);
 	UINT stride = sizeof(FplVertex3), offset = 0;
 	m_Context->IASetVertexBuffers(0, 1, mesh.vertices.GetAddressOf(), &stride, &offset);
 	m_Context->IASetIndexBuffer(mesh.indices.Get(), DXGI_FORMAT_R32_UINT, 0);
-	m_Context->IASetPrimitiveTopology(lines ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_Context->IASetPrimitiveTopology(style.lines ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_Context->DrawIndexed(mesh.count, 0, 0);
+}
+
+void FplRenderer3D::Draw(const FplGpuMesh& mesh, const FplDrawStyle& style) {
+	Submit(mesh, style, 1);
+}
+
+// The shaders and states once; the targets with the window's size. They're big (64 bits a pixel and more, times the
+// samples), so a plot with nothing see-through never has them.
+bool FplRenderer3D::EnsureTranslucent() {
+	if (m_OitUnavailable)
+		return false;
+	auto give_up = [&] {
+		m_OitUnavailable = true;
+		return false;
+	};
+	// different blending per target
+	if (m_Device->GetFeatureLevel() < D3D_FEATURE_LEVEL_10_1)
+		return give_up();
+	const DXGI_FORMAT AccumFormat = DXGI_FORMAT_R16G16B16A16_FLOAT, RevealFormat = DXGI_FORMAT_R16_FLOAT;
+	if (!m_OitShader) {
+		auto oit = Compile("PSOit", "ps_4_0"), composite = Compile("PSComposite", "ps_4_0"), full = Compile("VSFull", "vs_4_0");
+		D3D11_BLEND_DESC oitBlend{};
+		oitBlend.IndependentBlendEnable = TRUE;
+		auto& accum = oitBlend.RenderTarget[0];
+		accum.BlendEnable = TRUE;
+		accum.SrcBlend = accum.DestBlend = accum.SrcBlendAlpha = accum.DestBlendAlpha = D3D11_BLEND_ONE;
+		accum.BlendOp = accum.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+		accum.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		auto& reveal = oitBlend.RenderTarget[1];
+		reveal.BlendEnable = TRUE;
+		reveal.SrcBlend = reveal.SrcBlendAlpha = D3D11_BLEND_ZERO;
+		reveal.DestBlend = D3D11_BLEND_INV_SRC_COLOR;
+		reveal.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+		reveal.BlendOp = reveal.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+		reveal.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		D3D11_BLEND_DESC overBlend{};
+		auto& over = overBlend.RenderTarget[0];
+		over.BlendEnable = TRUE;
+		over.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+		over.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+		over.SrcBlendAlpha = D3D11_BLEND_ZERO;
+		over.DestBlendAlpha = D3D11_BLEND_ONE;
+		over.BlendOp = over.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+		over.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		D3D11_DEPTH_STENCIL_DESC read{};
+		read.DepthEnable = TRUE;
+		read.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		read.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+		D3D11_DEPTH_STENCIL_DESC none{};
+		if (!oit || !composite || !full ||
+			FAILED(m_Device->CreatePixelShader(oit->GetBufferPointer(), oit->GetBufferSize(), nullptr, m_OitShader.GetAddressOf())) ||
+			FAILED(m_Device->CreatePixelShader(composite->GetBufferPointer(), composite->GetBufferSize(), nullptr, m_CompositeShader.GetAddressOf())) ||
+			FAILED(m_Device->CreateVertexShader(full->GetBufferPointer(), full->GetBufferSize(), nullptr, m_FullShader.GetAddressOf())) ||
+			FAILED(m_Device->CreateBlendState(&oitBlend, m_OitBlend.GetAddressOf())) ||
+			FAILED(m_Device->CreateBlendState(&overBlend, m_OverBlend.GetAddressOf())) ||
+			FAILED(m_Device->CreateDepthStencilState(&read, m_ReadDepth.GetAddressOf())) ||
+			FAILED(m_Device->CreateDepthStencilState(&none, m_NoDepth.GetAddressOf()))) {
+			m_OitShader.Reset();
+			return give_up();
+		}
+	}
+	if (m_Accum)
+		return true;
+	// as many samples as the scene, since they share its depth buffer
+	UINT accumQuality = 0, revealQuality = 0;
+	if (m_Samples > 1 && (FAILED(m_Device->CheckMultisampleQualityLevels(AccumFormat, m_Samples, &accumQuality)) || !accumQuality ||
+		FAILED(m_Device->CheckMultisampleQualityLevels(RevealFormat, m_Samples, &revealQuality)) || !revealQuality))
+		return give_up();
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = m_Width;
+	desc.Height = m_Height;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.SampleDesc.Count = m_Samples;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+	D3D11_TEXTURE2D_DESC resolved = desc;
+	resolved.SampleDesc.Count = 1;
+	resolved.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	auto make = [&](DXGI_FORMAT format, ComPtr<ID3D11Texture2D>& target, ComPtr<ID3D11RenderTargetView>& view,
+		ComPtr<ID3D11Texture2D>& read, ComPtr<ID3D11ShaderResourceView>& srv) {
+		desc.Format = resolved.Format = format;
+		return SUCCEEDED(m_Device->CreateTexture2D(&desc, nullptr, target.GetAddressOf())) &&
+			SUCCEEDED(m_Device->CreateRenderTargetView(target.Get(), nullptr, view.GetAddressOf())) &&
+			SUCCEEDED(m_Device->CreateTexture2D(&resolved, nullptr, read.GetAddressOf())) &&
+			SUCCEEDED(m_Device->CreateShaderResourceView(read.Get(), nullptr, srv.GetAddressOf()));
+	};
+	ComPtr<ID3D11Texture2D> back;
+	if (!make(AccumFormat, m_Accum, m_AccumView, m_AccumResolved, m_AccumRead) ||
+		!make(RevealFormat, m_Reveal, m_RevealView, m_RevealResolved, m_RevealRead) ||
+		FAILED(m_SwapChain->GetBuffer(0, IID_PPV_ARGS(back.GetAddressOf()))) ||
+		FAILED(m_Device->CreateRenderTargetView(back.Get(), nullptr, m_BackView.GetAddressOf()))) {
+		m_Accum.Reset();
+		return give_up();
+	}
+	return true;
+}
+
+bool FplRenderer3D::BeginTranslucent() {
+	if (EnsureTranslucent()) {
+		const float none[4] = { 0, 0, 0, 0 }, all[4] = { 1, 1, 1, 1 };
+		m_Context->ClearRenderTargetView(m_AccumView.Get(), none);
+		m_Context->ClearRenderTargetView(m_RevealView.Get(), all);
+		ID3D11RenderTargetView* views[] = { m_AccumView.Get(), m_RevealView.Get() };
+		m_Context->OMSetRenderTargets(2, views, m_DepthView.Get());
+		m_Context->OMSetBlendState(m_OitBlend.Get(), nullptr, 0xFFFFFFFF);
+		m_Context->OMSetDepthStencilState(m_ReadDepth.Get(), 0);
+		m_Context->PSSetShader(m_OitShader.Get(), nullptr, 0);
+		m_Composite = true;
+		return true;
+	}
+	// plain blending over the scene, in the order drawn
+	D3D11_BLEND_DESC blend{};
+	auto& over = blend.RenderTarget[0];
+	over.BlendEnable = TRUE;
+	over.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+	over.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+	over.SrcBlendAlpha = D3D11_BLEND_ZERO;
+	over.DestBlendAlpha = D3D11_BLEND_ONE;
+	over.BlendOp = over.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+	over.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+	D3D11_DEPTH_STENCIL_DESC read{};
+	read.DepthEnable = TRUE;
+	read.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+	read.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+	ComPtr<ID3D11BlendState> state;
+	ComPtr<ID3D11DepthStencilState> depth;
+	if (FAILED(m_Device->CreateBlendState(&blend, state.GetAddressOf())) ||
+		FAILED(m_Device->CreateDepthStencilState(&read, depth.GetAddressOf())))
+		return false;
+	m_Context->OMSetBlendState(state.Get(), nullptr, 0xFFFFFFFF);
+	m_Context->OMSetDepthStencilState(depth.Get(), 0);
+	return true;
+}
+
+void FplRenderer3D::DrawTranslucent(const FplGpuMesh& mesh, const FplDrawStyle& style, float opacity) {
+	Submit(mesh, style, opacity);
+}
+
+void FplRenderer3D::EndTranslucent() {
+	m_Context->OMSetRenderTargets(1, m_ColorView.GetAddressOf(), m_DepthView.Get());
+	m_Context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+	m_Context->OMSetDepthStencilState(m_DepthState.Get(), 0);
+	m_Context->PSSetShader(m_PixelShader.Get(), nullptr, 0);
+}
+
+// The see-through part over the resolved scene.
+void FplRenderer3D::Composite() {
+	if (m_Samples > 1) {
+		m_Context->ResolveSubresource(m_AccumResolved.Get(), 0, m_Accum.Get(), 0, DXGI_FORMAT_R16G16B16A16_FLOAT);
+		m_Context->ResolveSubresource(m_RevealResolved.Get(), 0, m_Reveal.Get(), 0, DXGI_FORMAT_R16_FLOAT);
+	}
+	else {
+		m_Context->CopyResource(m_AccumResolved.Get(), m_Accum.Get());
+		m_Context->CopyResource(m_RevealResolved.Get(), m_Reveal.Get());
+	}
+	m_Context->OMSetRenderTargets(1, m_BackView.GetAddressOf(), nullptr);
+	m_Context->OMSetBlendState(m_OverBlend.Get(), nullptr, 0xFFFFFFFF);
+	m_Context->OMSetDepthStencilState(m_NoDepth.Get(), 0);
+	m_Context->IASetInputLayout(nullptr);
+	m_Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_Context->VSSetShader(m_FullShader.Get(), nullptr, 0);
+	m_Context->PSSetShader(m_CompositeShader.Get(), nullptr, 0);
+	ID3D11ShaderResourceView* read[] = { m_AccumRead.Get(), m_RevealRead.Get() };
+	m_Context->PSSetShaderResources(0, 2, read);
+	m_Context->Draw(3, 0);
+	ID3D11ShaderResourceView* none[] = { nullptr, nullptr };
+	m_Context->PSSetShaderResources(0, 2, none);
+	m_Context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
 }
 
 ID2D1DeviceContext* FplRenderer3D::BeginOverlay() {
@@ -327,6 +588,10 @@ ID2D1DeviceContext* FplRenderer3D::BeginOverlay() {
 		m_Context->ResolveSubresource(back.Get(), 0, m_Color.Get(), 0, DXGI_FORMAT_B8G8R8A8_UNORM);
 	else
 		m_Context->CopyResource(back.Get(), m_Color.Get());
+	if (m_Composite) {
+		Composite();
+		m_Composite = false;
+	}
 	m_Context->OMSetRenderTargets(0, nullptr, nullptr);
 	m_Overlay->SetTarget(m_OverlayTarget.Get());
 	m_Overlay->BeginDraw();

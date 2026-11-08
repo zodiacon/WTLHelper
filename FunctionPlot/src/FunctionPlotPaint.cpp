@@ -977,16 +977,40 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 	auto& r = s.renderer;
 	r.Begin(c.crBack, s.camera.ViewProjection(w / std::max(h, 1.0f)), s.camera.Eye());
 	if (!(GetStyle() & FPLS_NOGRID))
-		r.Draw(s.floorGrid, c.crGrid, false, true, false);
+		r.Draw(s.floorGrid, { c.crGrid, false, true, false });
 	if (!(GetStyle() & FPLS_NOAXES))
-		r.Draw(s.boxEdges, c.crAxis, false, true, false);
+		r.Draw(s.boxEdges, { c.crAxis, false, true, false });
+	auto styleOf = [&](size_t i) {
+		auto& g = s.plot.graphs[i];
+		const bool surface = g.expr.kind == FplKind::Surface || g.expr.kind == FplKind::ParametricSurface ||
+			g.expr.kind == FplKind::ImplicitSurface;
+		FplDrawStyle style;
+		style.color = GraphColor((int)i);
+		style.colormap = surface && (g.flags & FplGraphHeatmap);
+		style.clip = true;
+		style.grid = s.plot.LineGridOf((int)i, s.box);
+		if (IsHighContrast())
+			style.lineColor = c.crLabel;
+		return style;
+	};
+	// what's solid first: the see-through graphs are seen against it and behind it
+	bool translucent = false;
 	for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpu.size(); i++) {
 		auto& g = s.plot.graphs[i];
 		if (!g.Drawable())
 			continue;
-		bool surface = g.expr.kind == FplKind::Surface || g.expr.kind == FplKind::ParametricSurface ||
-			g.expr.kind == FplKind::ImplicitSurface;
-		r.Draw(s.gpu[i], GraphColor((int)i), surface && (g.flags & FplGraphHeatmap), false, true);
+		if (g.opacity < 1)
+			translucent = translucent || s.gpu[i];
+		else
+			r.Draw(s.gpu[i], styleOf(i));
+	}
+	if (translucent && r.BeginTranslucent()) {
+		for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpu.size(); i++) {
+			auto& g = s.plot.graphs[i];
+			if (g.Drawable() && g.opacity < 1 && g.opacity > 0)
+				r.DrawTranslucent(s.gpu[i], styleOf(i), g.opacity);
+		}
+		r.EndTranslucent();
 	}
 	if (auto* dc = r.BeginOverlay()) {
 		s.rt = dc;

@@ -69,6 +69,8 @@ FplMesh GridMesh(const std::vector<FplVec3>& p, const std::vector<char>& ok, int
 			auto& v = mesh.vertices[k];
 			v.pos = p[k];
 			v.value = std::clamp((p[k].z + 1) / 2, 0.0f, 1.0f);
+			v.u = static_cast<float>(i);
+			v.v = static_cast<float>(j);
 			if (!ok[k])
 				continue;
 			// tangents by the neighbors on each side (one side at an edge or an undefined neighbor)
@@ -619,4 +621,30 @@ void FplAppend(FplMesh& a, const FplMesh& b) {
 	a.indices.reserve(a.indices.size() + b.indices.size());
 	for (uint32_t i : b.indices)
 		a.indices.push_back(base + i);
+}
+
+FplLineGrid FplMakeLineGrid(const FplBox3& box, bool x, bool y, bool z, bool levels, float cells) {
+	FplLineGrid grid;
+	grid.cells = cells;
+	if (!box.Valid())
+		return grid;
+	auto axis = [&](int k, double lo, double hi, double spacing) {
+		// as FplBoxTicks' 320 DIPs an axis
+		const double step = FplMakeTicks(lo, hi, 320, spacing).step;
+		if (!(step > 0))
+			return;
+		grid.scale[k] = static_cast<float>((hi - lo) / (2 * step));
+		// only its fraction, so a far off range keeps its precision in floats
+		const double at = lo / step;
+		grid.offset[k] = static_cast<float>(at - std::floor(at));
+	};
+	if (x)
+		axis(0, box.xMin, box.xMax, 64);
+	if (y)
+		axis(1, box.yMin, box.yMax, 64);
+	if (z)
+		axis(2, box.zMin, box.zMax, 64);
+	if (levels)
+		axis(2, box.zMin, box.zMax, 24);
+	return grid;
 }

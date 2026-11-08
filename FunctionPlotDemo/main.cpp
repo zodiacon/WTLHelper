@@ -74,6 +74,9 @@ enum {
 	ID_DEMO_FIT,
 	ID_DEMO_UNDO,
 	ID_DEMO_REDO,
+	ID_DEMO_MESHLINES,
+	ID_DEMO_LEVELLINES,
+	ID_DEMO_SEETHROUGH,
 	ID_DEMO_LOGX,
 	ID_DEMO_LOGY,
 	ID_DEMO_COPY,
@@ -82,7 +85,7 @@ enum {
 
 // ---- Examples -------------------------------------------------------------------
 
-enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode };
+enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode, Glass };
 
 struct Example {
 	const wchar_t* name;
@@ -108,6 +111,7 @@ static const Example g_Examples[] = {
 	{ L"D&ata and Regression", L"(x1, y1)\r\ny1 ~ a e^(k x1)\r\ny = a e^(k x)\r\ny = mean(y1)", false, false,
 		Setup::Data },
 	{ L"&Lists", L"L = [1, 2, 3, 4, 5]\r\ny = 3sin(x L/2)/L\r\n(L, mean(L))", false },
+	{ L"In&tersections", L"x^2 + y^2 = 16\r\nr = 2 + 2cos \x03B8\r\n(4cos t + 1, 2sin t)\r\nx = y^2/2 - 3\r\ny = x/2\r\ny' = -y/2, y(-6) = 5", false },
 	{ L"&ODEs and Slope Fields", L"y' = x - y, y(a) = b, y(0) = -2, y(-3) = 4", false, false, Setup::Ode },
 	{ L"Logistic Gro&wth", L"dy/dx = k y(1 - y/4), y(-6) = 0.2, y(-6) = 6, y(0) = 2", false },
 	{ L"Lo&g Scales", L"y = x^2\r\ny = 2^x\r\ny = 1000/x\r\ny = 50 log x\r\n(10, 100)\r\ny' = y/x, y(1) = 3", false, false, Setup::Log },
@@ -120,6 +124,7 @@ static const Example g_Examples[] = {
 	{ L"3D: &Implicit Surfaces", L"(sqrt(x^2 + y^2) - 6)^2 + z^2 = 4\r\nx^2 + y^2 + (z - 5)^2 = 9\r\n"
 		L"x^2 + y^2 - z^2/4 = 1", false, true },
 	{ L"3D: &Gyroid", L"sin(x/2)cos(y/2) + sin(y/2)cos(z/2) + sin(z/2)cos(x/2) = 0", false, true },
+	{ L"3D: See-&Through", L"x^2 + y^2 + z^2 = 36\r\nz = (x^2 - y^2)/12\r\n((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(5cos 4t, 5sin 4t, 3t - 9)", false, true, Setup::Glass },
 	{ L"3D: Animated &Wave", L"z = 3sin(sqrt(x^2 + y^2) - 2p)/(1 + sqrt(x^2 + y^2)/4)", false, true, Setup::Animate },
 };
 
@@ -132,6 +137,7 @@ static CFont g_editFont;
 static HWND g_main;
 static bool g_autoSliders = true;
 static bool g_heatmaps = true;
+static bool g_meshLines = false, g_levelLines = false, g_seeThrough = false;
 // FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg; .bmp: printed onto
 // a 1600 x 1200 bitmap page), then exit;
 // /open plot.fplot starts with a saved plot (File > Save Plot)
@@ -216,9 +222,22 @@ static void SyncGraphs() {
 		FPLGRAPH g{ FPLGM_FLAGS, g_plot.GetGraphId(i) };
 		g_plot.GetGraph(g);
 		UINT flags = g_heatmaps ? g.flags | FPLGF_HEATMAP : g.flags & ~FPLGF_HEATMAP;
+		flags = g_meshLines ? flags | FPLGF_MESHLINES : flags & ~FPLGF_MESHLINES;
+		flags = g_levelLines ? flags | FPLGF_LEVELLINES : flags & ~FPLGF_LEVELLINES;
+		// the surfaces see-through (View > See-Through Surfaces), a curve in them stays solid
+		FPLGRAPHINFO info;
+		const bool surface = g_plot.GetGraphInfo(g.id, info) && (info.kind == FPLK_SURFACE || info.kind == FPLK_PARAMSURFACE ||
+			info.kind == FPLK_IMPLICITSURFACE);
+		FPLGRAPH o{ FPLGM_OPACITY, g.id };
+		g_plot.GetGraph(o);
+		const float opacity = g_seeThrough && surface ? 0.45f : 1.0f;
 		if (flags != g.flags) {
 			g.flags = flags;
 			g_plot.SetGraph(g);
+		}
+		if (opacity != o.opacity) {
+			o.opacity = opacity;
+			g_plot.SetGraph(o);
 		}
 	}
 	// and none for a name no longer used (or now defined by a line)
@@ -321,6 +340,13 @@ static void LoadExample(int index) {
 		g_plot.RemoveList(g_plot.GetListName(0));
 	g_plot.SetAxisTitles(nullptr, nullptr, nullptr);
 	g_plot.SetLogAxes(e.setup == Setup::Log, e.setup == Setup::Log);
+	// on for the example that shows them, off again after it
+	static bool glass = false;
+	if (e.setup == Setup::Glass || glass) {
+		glass = e.setup == Setup::Glass;
+		g_seeThrough = g_meshLines = glass;
+		g_heatmaps = !glass;
+	}
 	// a table's columns before the text that uses them
 	if (e.setup == Setup::Data) {
 		// a table: growth with noise, as if measured
@@ -406,6 +432,9 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_COLLAPSE, g_plot.IsPanelCollapsed() != FALSE);
 	check(ID_DEMO_3D, g_plot.GetMode() == FPLM_3D);
 	check(ID_DEMO_TANGENT, s & FPLS_TANGENT);
+	check(ID_DEMO_MESHLINES, g_meshLines);
+	check(ID_DEMO_LEVELLINES, g_levelLines);
+	check(ID_DEMO_SEETHROUGH, g_seeThrough);
 	check(ID_DEMO_LOGX, g_plot.IsLogX() != FALSE);
 	check(ID_DEMO_LOGY, g_plot.IsLogY() != FALSE);
 	::EnableMenuItem(menu, ID_DEMO_UNDO, MF_BYCOMMAND | (g_plot.CanUndo() ? MF_ENABLED : MF_GRAYED));
@@ -421,11 +450,12 @@ static void ShowFeatures() {
 	UINT id = g_plot.GetTrace(t) ? t.id : 0;
 	for (int i = 0; !id && i < g_plot.GetGraphCount(); i++) {
 		FPLGRAPHINFO info;
-		if (g_plot.GetGraphInfo(g_plot.GetGraphId(i), info) && info.kind == FPLK_FUNCTION && info.error == FPLE_NONE)
+		if (g_plot.GetGraphInfo(g_plot.GetGraphId(i), info) && info.error == FPLE_NONE &&
+			info.kind != FPLK_DEFINITION && info.kind != FPLK_POINT)
 			id = g_plot.GetGraphId(i);
 	}
 	if (!id) {
-		::MessageBoxW(g_main, L"There's no function to look at.", L"Features", MB_ICONINFORMATION);
+		::MessageBoxW(g_main, L"There's no curve to look at.", L"Features", MB_ICONINFORMATION);
 		return;
 	}
 	int n = g_plot.GetFeatures(id, nullptr, 0);
@@ -634,6 +664,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_SAVE: SaveOrOpen(true); break;
 		case ID_DEMO_EXPORTSVG: Export(true); break;
 		case ID_DEMO_HEATMAPS: g_heatmaps = !g_heatmaps; SyncGraphs(); break;
+		case ID_DEMO_MESHLINES: g_meshLines = !g_meshLines; SyncGraphs(); break;
+		case ID_DEMO_LEVELLINES: g_levelLines = !g_levelLines; SyncGraphs(); break;
+		case ID_DEMO_SEETHROUGH: g_seeThrough = !g_seeThrough; SyncGraphs(); break;
 		case ID_DEMO_COLLAPSE: g_plot.SetPanelCollapsed(!g_plot.IsPanelCollapsed()); break;
 		case ID_DEMO_3D:
 			if (!g_plot.SetMode(g_plot.GetMode() == FPLM_3D ? FPLM_2D : FPLM_3D))
@@ -814,6 +847,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_SLIDERS, L"&Sliders");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_COLLAPSE, L"&Collapse Panel\tCtrl+L");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_HEATMAPS, L"&Heat Maps");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_MESHLINES, L"3D: &Mesh Lines");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_LEVELLINES, L"3D: Height Li&nes");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_SEETHROUGH, L"3D: See-Th&rough Surfaces");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AUTOSLIDERS, L"&Automatic Sliders");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_GRID, L"&Grid");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AXES, L"A&xes");

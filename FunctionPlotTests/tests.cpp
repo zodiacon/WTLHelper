@@ -8,8 +8,8 @@
 // control's graphs (definitions, sampling, features, tracing, coordinates), user functions
 // and d/dx, surfaces (heat maps, contours), vector fields and the SVG export, and 3D (the
 // box, the camera, meshes, tubes and the graphs' meshes), tracing by keys, draggable points, integrals, lists and
-// regressions, the saved state, fitting the view, labels, styles, undo, the sampling thread, log axes and
-// ODEs.
+// regressions, the saved state, fitting the view, labels, styles, undo, the sampling thread, log axes,
+// ODEs, curves' intersections and surfaces' line grids.
 
 #include "FunctionPlotExpr.h"
 #include "FunctionPlot3D.h"
@@ -1441,7 +1441,7 @@ TEST(GraphSampling) {
 
 TEST(GraphFeatures) {
 	auto v = View();
-	auto plot = MakePlot({ L"y = x^2 - 1", L"y = x", L"y = 2 +", L"(cos t, sin t)" });
+	auto plot = MakePlot({ L"y = x^2 - 1", L"y = x", L"y = 2 +", L"(3, 3)" });
 	plot.Sample(v);
 	plot.FindFeatures(0, v);
 	auto& fs = plot.graphs[0].features;
@@ -1453,7 +1453,7 @@ TEST(GraphFeatures) {
 	CHECK(Has(fs, K::Intersection, (1 - std::sqrt(5.0)) / 2, NaN, 1e-12));
 	CHECK(Has(fs, K::Intersection, (1 + std::sqrt(5.0)) / 2, NaN, 1e-12));
 	CHECK_INT(fs.size(), 6);
-	// only functions have them
+	// what has no curve has none
 	plot.FindFeatures(3, v);
 	CHECK(plot.graphs[3].features.empty());
 	plot.graphs[0].flags = FplGraphNoFeatures;
@@ -3060,6 +3060,205 @@ TEST(Odes) {
 	CHECK(!plot.graphs[1].expr.error && plot.graphs[1].definition);
 }
 
+TEST(CurveIntersections) {
+	FplViewport v = View(-10, 10, -10, 10, 800, 800);
+	auto meetings = [&](FplPlot& plot, int graph) {
+		plot.Sample(v);
+		plot.FindFeatures(graph, v);
+		std::vector<FplFeature> out;
+		for (auto& f : plot.graphs[graph].features)
+			if (f.kind == FplFeatureKind::Intersection)
+				out.push_back(f);
+		return out;
+	};
+	const double r3 = std::sqrt(3.0), r8 = std::sqrt(8.0);
+
+	// two equations, to the numbers
+	auto plot = MakePlot({ L"x^2 + y^2 = 16", L"x^2 - y^2 = 8" });
+	auto m = meetings(plot, 0);
+	CHECK_INT(m.size(), 4);
+	// x^2 = 12, y^2 = 4
+	for (auto& f : m) {
+		CHECK_NEAR_TOL(std::abs(f.x), 2 * r3, 1e-9);
+		CHECK_NEAR_TOL(std::abs(f.y), 2, 1e-9);
+	}
+	CHECK(m[0].x < 0 && m[0].y < m[1].y && m[3].x > 0 && m[2].y < m[3].y);
+	// the other graph has them too
+	CHECK_INT(meetings(plot, 1).size(), 4);
+
+	// a function and a circle, on the function too
+	plot = MakePlot({ L"y = x", L"x^2 + y^2 = 8" });
+	m = meetings(plot, 0);
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Intersection, 2, 2, 1e-9));
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Intersection, -2, -2, 1e-9));
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Root, 0, 0, 1e-9));
+	m = meetings(plot, 1);
+	CHECK_INT(m.size(), 2);
+	// x = f(y) against y = f(x)
+	plot = MakePlot({ L"x = y^2", L"y = x - 2" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 2);
+	CHECK(Has(m, FplFeatureKind::Intersection, 1, -1, 1e-9));
+	CHECK(Has(m, FplFeatureKind::Intersection, 4, 2, 1e-9));
+	// parametric against an equation, polar against a function
+	plot = MakePlot({ L"(3cos t, 3sin t)", L"y = 0" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 2);
+	CHECK(Has(m, FplFeatureKind::Intersection, -3, 0, 1e-9));
+	CHECK(Has(m, FplFeatureKind::Intersection, 3, 0, 1e-9));
+	plot = MakePlot({ L"r = 4", L"x = 2" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 2);
+	CHECK(Has(m, FplFeatureKind::Intersection, 2, 2 * r3, 1e-9));
+	CHECK(Has(m, FplFeatureKind::Intersection, 2, -2 * r3, 1e-9));
+	// two parametric curves, each with its own parameter
+	plot = MakePlot({ L"(4cos t, 4sin t)", L"(t - 3, t - 3)" });
+	plot.graphs[1].hasRange = true;
+	plot.graphs[1].tMin = -5;
+	plot.graphs[1].tMax = 10;
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 2);
+	CHECK(Has(m, FplFeatureKind::Intersection, r8, r8, 1e-9));
+	CHECK(Has(m, FplFeatureKind::Intersection, -r8, -r8, 1e-9));
+	// an ODE's solution by its lines: y = 2 e^(-x) meets y = 1 at ln 2
+	plot = MakePlot({ L"y' = -y, y(0) = 2", L"y = 1" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 1);
+	CHECK_NEAR_TOL(m[0].x, std::log(2.0), 1e-3);
+	CHECK_NEAR_TOL(m[0].y, 1, 1e-3);
+	CHECK_INT(meetings(plot, 1).size(), 1);
+	// regions' boundaries count
+	plot = MakePlot({ L"x^2 + y^2 < 16", L"y = 0" });
+	CHECK_INT(meetings(plot, 0).size(), 2);
+
+	// touching without crossing, to about a DIP (40 DIPs a unit here)
+	plot = MakePlot({ L"x^2 + y^2 = 4", L"y = 2" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 1);
+	if (!m.empty()) {
+		CHECK_NEAR_TOL(m[0].x, 0, 0.05);
+		CHECK_NEAR_TOL(m[0].y, 2, 0.05);
+	}
+	// a near miss isn't a meeting; nor one out of the view; nor the same curve twice
+	plot = MakePlot({ L"x^2 + y^2 = 4", L"y = 2.1" });
+	CHECK_INT(meetings(plot, 0).size(), 0);
+	plot = MakePlot({ L"(x - 20)^2 + y^2 = 16", L"y = 0" });
+	CHECK_INT(meetings(plot, 0).size(), 0);
+	plot = MakePlot({ L"x^2 + y^2 = 16", L"r = 4" });
+	CHECK_INT(meetings(plot, 0).size(), 0);
+	// two lines at a shallow angle do meet, though they run close for hundreds of DIPs
+	plot = MakePlot({ L"y = x/1000 + 0.001", L"x = 1000y" });
+	m = meetings(plot, 1);
+	CHECK(m.empty());		// parallel: within a third of a DIP all along, no crossing
+	plot = MakePlot({ L"x/1000 - y = 0", L"y = 0" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 1);
+	if (!m.empty())
+		CHECK_NEAR_TOL(m[0].x, 0, 1e-6);
+
+	// a vertical line through a circle: Ctrl+arrows go between the two at one x
+	plot = MakePlot({ L"x^2 + y^2 = 16", L"x = 0" });
+	m = meetings(plot, 0);
+	CHECK_INT(m.size(), 2);
+	auto hit = plot.NextFeature(0, -5, 1, v);
+	CHECK(hit && hit.plane.y < 0);
+	hit = plot.NextFeature(0, hit.plane.x, 1, v, hit.plane.y);
+	CHECK(hit && hit.plane.y > 0);
+	CHECK(!plot.NextFeature(0, hit.plane.x, 1, v, hit.plane.y));
+	CHECK(plot.NextFeature(0, hit.plane.x, -1, v, hit.plane.y).plane.y < 0);
+
+	// flags: none asked for, a hidden one, a listed one
+	plot = MakePlot({ L"x^2 + y^2 = 16", L"y = 0" });
+	plot.graphs[0].flags |= FplGraphNoFeatures;
+	CHECK_INT(meetings(plot, 0).size(), 0);
+	plot = MakePlot({ L"x^2 + y^2 = 16", L"y = 0" });
+	plot.graphs[1].flags |= FplGraphHidden;
+	CHECK_INT(meetings(plot, 0).size(), 0);
+	// on log axes
+	FplViewport lv = View(0.1, 100, 0.1, 100, 600, 600);
+	lv.logX = lv.logY = true;
+	plot = MakePlot({ L"x y = 10", L"y = x" });
+	plot.Sample(lv);
+	plot.FindFeatures(0, lv);
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Intersection, std::sqrt(10.0), std::sqrt(10.0), 1e-9));
+	// many curves stay cheap, and a busy pair isn't lost
+	plot = MakePlot({ L"sin x + cos y = 0.5", L"x^2 + y^2 = 16" });
+	CHECK(meetings(plot, 1).size() >= 2);
+}
+
+TEST(SurfaceLines) {
+	FplBox3 box{ -10, 10, -10, 10, -5, 5 };
+	// at the ticks: an integer at each tick's place in the cube, none between
+	auto grid = FplMakeLineGrid(box, true, true, true, false);
+	CHECK(grid.Any());
+	auto t = [&](int k, float cube) { return (cube + 1) * grid.scale[k] + grid.offset[k]; };
+	auto ticks = FplMakeTicks(box.xMin, box.xMax, 320, 64);
+	CHECK(!ticks.major.empty());
+	bool onLines = true;
+	for (double x : ticks.major) {
+		const float v = t(0, box.ToBox(x, 0, 0).x);
+		onLines = onLines && std::abs(v - std::round(v)) < 1e-4f;
+	}
+	CHECK(onLines);
+	const float between = t(0, box.ToBox(ticks.major[0] + ticks.step / 2, 0, 0).x);
+	CHECK_NEAR_TOL(std::abs(between - std::floor(between)), 0.5, 1e-4);
+	// a far off range keeps its precision: the offset is only a fraction
+	FplBox3 far2{ 1e6 + 0.25, 1e6 + 10.25, -1, 1, -1, 1 };
+	grid = FplMakeLineGrid(far2, true, false, false, false);
+	CHECK(grid.offset[0] >= 0 && grid.offset[0] < 1);
+	CHECK(grid.scale[0] > 0 && grid.scale[0] < 100);
+	CHECK(grid.scale[1] == 0 && grid.scale[2] == 0);
+	// height lines: closer than the z ticks
+	auto mesh = FplMakeLineGrid(box, false, false, true, false);
+	auto levels = FplMakeLineGrid(box, false, false, false, true);
+	CHECK(levels.scale[2] > mesh.scale[2]);
+	CHECK(levels.scale[0] == 0);
+	CHECK(!FplLineGrid{}.Any());
+	CHECK(!FplMakeLineGrid(FplBox3{ 1, 1, 0, 1, 0, 1 }, true, true, true, true).Any());
+
+	// a grid mesh's vertices know their cells
+	auto m = FplSurfaceMesh([](double x, double y) { return x + y; }, box, 8);
+	CHECK_INT(m.vertices.size(), 81);
+	CHECK_NEAR(m.vertices[0].u, 0.f);
+	CHECK_NEAR(m.vertices[8].u, 8.f);
+	CHECK_NEAR(m.vertices[9].v, 1.f);
+	CHECK_NEAR(m.vertices[80].v, 8.f);
+
+	// by the graphs' flags and kinds
+	auto plot = MakePlot({ L"z = x y", L"(cos u, sin u, v)", L"x^2 + y^2 + z^2 = 9", L"y = x", L"(t, t, t)" });
+	for (int i = 0; i < 5; i++)
+		CHECK(!plot.LineGridOf(i, box).Any());
+	for (auto& g : plot.graphs)
+		g.flags |= FplGraphMeshLines;
+	auto surface = plot.LineGridOf(0, box);
+	CHECK(surface.scale[0] > 0 && surface.scale[1] > 0 && surface.scale[2] == 0 && surface.cells == 0);
+	auto parametric = plot.LineGridOf(1, box);
+	CHECK(parametric.cells > 0 && parametric.scale[0] == 0);
+	auto implicit = plot.LineGridOf(2, box);
+	CHECK(implicit.scale[0] > 0 && implicit.scale[1] > 0 && implicit.scale[2] > 0);
+	CHECK(!plot.LineGridOf(3, box).Any());
+	CHECK(!plot.LineGridOf(4, box).Any());
+	for (auto& g : plot.graphs)
+		g.flags = FplGraphLevelLines;
+	surface = plot.LineGridOf(0, box);
+	CHECK(surface.scale[2] > 0 && surface.scale[0] == 0);
+	CHECK(plot.LineGridOf(1, box).scale[2] > 0 && plot.LineGridOf(1, box).cells == 0);
+
+	// the flags and the opacity are kept by the saved state
+	FplSavedState st;
+	FplGraph g;
+	g.id = 1;
+	g.text = L"z = x y";
+	g.flags = FplGraphMeshLines | FplGraphLevelLines;
+	g.opacity = 0.5f;
+	st.graphs.push_back(g);
+	FplSavedState back;
+	CHECK(FplLoadState(FplSaveState(st), back));
+	CHECK_INT(back.graphs.size(), 1);
+	CHECK_INT(back.graphs[0].flags, FplGraphMeshLines | FplGraphLevelLines);
+	CHECK_NEAR_TOL(back.graphs[0].opacity, 0.5, 1e-6);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -3123,6 +3322,8 @@ int wmain() {
 	Run_Worker();
 	Run_LogAxes();
 	Run_Odes();
+	Run_CurveIntersections();
+	Run_SurfaceLines();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

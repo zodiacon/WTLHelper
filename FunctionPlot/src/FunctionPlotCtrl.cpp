@@ -17,7 +17,8 @@
 
 static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed && FPLGF_NOTRACE == FplGraphNoTrace &&
 	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours &&
-	FPLGF_NODRAG == FplGraphNoDrag && FPLGF_DOTTED == FplGraphDotted && FPLGF_HOLLOW == FplGraphHollow);
+	FPLGF_NODRAG == FplGraphNoDrag && FPLGF_DOTTED == FplGraphDotted && FPLGF_HOLLOW == FplGraphHollow &&
+	FPLGF_MESHLINES == FplGraphMeshLines && FPLGF_LEVELLINES == FplGraphLevelLines);
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
 	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
@@ -816,8 +817,12 @@ LRESULT CFunctionPlotCtrl::OnSampled(UINT, WPARAM, LPARAM, BOOL&) {
 			BuildGeometry(r.graph);
 		}
 	}
-	if (changed)
+	if (changed) {
+		// the features come from what was sampled: now the full version
+		if (!s.mode3D && s.featuresGraph >= 0 && s.featuresGraph < (int)s.plot.graphs.size())
+			s.plot.FindFeatures(s.featuresGraph, s.view);
 		Invalidate();
+	}
 	return 0;
 }
 
@@ -1155,7 +1160,7 @@ bool CFunctionPlotCtrl::TraceKey(UINT vk) {
 		case VK_LEFT: case VK_RIGHT: {
 			const int dir = vk == VK_RIGHT ? 1 : -1;
 			if (ctrl)
-				hit = s.plot.NextFeature(s.traceGraph, s.traceX, dir, s.view);
+				hit = s.plot.NextFeature(s.traceGraph, s.traceX, dir, s.view, s.traceY);
 			else
 				hit = s.plot.Step(s.traceGraph, at, dir * (shift ? 1.0 : 4.0), s.view);
 			break;
