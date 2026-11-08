@@ -121,7 +121,7 @@ void FplPlot::Build() {
 		for (size_t i = 0; i < graphs.size(); i++) {
 			auto& g = graphs[i];
 			if (g.definition || g.listDefinition || g.function >= 0 || g.expr.error.code == FplErrorCode::Redefined ||
-				!g.fitted.empty() || g.text.find(L'~') != std::wstring::npos)
+				!g.fitted.empty() || g.text.find(L'~') != std::wstring::npos || FplSplitOde(g.text).isOde)
 				continue;
 			options.parameters = &m_Names;
 			auto fd = FplParseFunction(g.text, options);
@@ -244,7 +244,7 @@ void FplPlot::Build() {
 			}
 			else {
 				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames);
-				if (!g.expr.error && g.expr.kind == FplKind::Point)
+				if (!g.expr.error && (g.expr.kind == FplKind::Point || g.expr.kind == FplKind::SlopeField))
 					FindDragged(g, options);
 				// a regression with nothing to fit
 				if (!g.expr.error && g.expr.kind == FplKind::Regression)
@@ -254,7 +254,8 @@ void FplPlot::Build() {
 			if (!g.expr.error)
 				for (auto& l : m_Lists)
 					if (g.expr.f.Reads(l.slot) || g.expr.g.Reads(l.slot) || g.expr.h.Reads(l.slot) ||
-						g.expr.value.Reads(l.slot))
+						g.expr.value.Reads(l.slot) || std::any_of(g.expr.starts.begin(), g.expr.starts.end(),
+							[&](const FplProgram& p) { return p.Reads(l.slot); }))
 						g.listSlots.push_back(l.slot);
 			if (!g.listSlots.empty())
 				g.dragX = g.dragY = -1;
@@ -468,8 +469,24 @@ void FplPlot::Fit(FplGraph& g) {
 }
 
 void FplPlot::FindDragged(FplGraph& g, FplParseOptions options) {
-	// a coordinate that is an app's parameter alone: (a, b), (a, 2), (a, f(a))
+	// a coordinate that is an app's parameter alone: (a, b), (a, 2), (a, f(a)); an ODE's y(a) = b
 	options.parameters = &m_Names;
+	auto paramOf = [&](std::wstring_view text) {
+		auto part = FplParse(text, options);
+		if (part.error)
+			return -1;
+		auto& n = part.ast[part.root];
+		return n.op == FplOp::Var ? FindParam(n.name) : -1;
+	};
+	if (auto ode = FplSplitOde(g.text); ode.isOde) {
+		// the first condition's point
+		if (!ode.starts.empty() && ode.errorAt == std::wstring_view::npos) {
+			std::wstring_view text = g.text;
+			g.dragX = paramOf(text.substr(ode.starts[0].a, ode.starts[0].aLen));
+			g.dragY = paramOf(text.substr(ode.starts[0].b, ode.starts[0].bLen));
+		}
+		return;
+	}
 	auto r = FplParse(g.text, options);
 	if (r.error)
 		return;
@@ -646,6 +663,7 @@ void FplPlot::SampleGraph(int graph, const FplViewport& view, const FplSampleOpt
 		all.points.insert(all.points.end(), one.points.begin(), one.points.end());
 		all.contours.insert(all.contours.end(), one.contours.begin(), one.contours.end());
 		all.arrows.insert(all.arrows.end(), one.arrows.begin(), one.arrows.end());
+		all.marks.insert(all.marks.end(), one.marks.begin(), one.marks.end());
 		all.dashed = one.dashed;
 		all.evals += one.evals;
 	}
@@ -785,15 +803,38 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 	}
 	int samples = std::max(50, static_cast<int>(view.width / 3));
 	double yTolerance = (view.yMax - view.yMin) * 1e-9;
-	g.features = FplFindFeatures(f, df, view.xMin, view.xMax, samples, yTolerance);
+	double a = view.xMin, b = view.xMax;
+	if (view.logX) {
+		// in the logarithm of x, so the samples are even on the screen (d/du f(10^u) has f''s sign)
+		a = std::log10(a), b = std::log10(b);
+		auto fx = f;
+		f = [fx](double u) { return fx(std::pow(10.0, u)); };
+		if (df) {
+			auto dfx = df;
+			df = [dfx](double u) {
+				double x = std::pow(10.0, u);
+				return dfx(x) * x * 2.302585092994046;
+			};
+		}
+	}
+	g.features = FplFindFeatures(f, df, a, b, samples, yTolerance);
 	for (size_t h = 0; h < graphs.size(); h++) {
 		auto& other = graphs[h];
 		if (static_cast<int>(h) == graph || !other.Drawable() || other.expr.kind != FplKind::Function || other.Listed())
 			continue;
 		std::function<double(double)> fo = [this, h](double x) { return Eval(static_cast<int>(h), x); };
-		auto meets = FplFindIntersections(f, fo, view.xMin, view.xMax, samples, yTolerance);
+		if (view.logX)
+			fo = [this, h](double u) { return Eval(static_cast<int>(h), std::pow(10.0, u)); };
+		auto meets = FplFindIntersections(f, fo, a, b, samples, yTolerance);
 		g.features.insert(g.features.end(), meets.begin(), meets.end());
 	}
+	if (view.logX)
+		for (auto& feature : g.features)
+			feature.x = std::pow(10.0, feature.x);
+	// what a log y axis can't show (roots, where y is 0)
+	if (view.logY)
+		g.features.erase(std::remove_if(g.features.begin(), g.features.end(),
+			[](const FplFeature& feature) { return !(feature.y > 0); }), g.features.end());
 	std::stable_sort(g.features.begin(), g.features.end(), [](const FplFeature& a, const FplFeature& b) {
 		return a.x < b.x;
 	});
@@ -917,10 +958,14 @@ FplTraceHit FplPlot::Step(int graph, FplPoint plane, double dips, const FplViewp
 	if ((g.expr.kind == FplKind::Function || g.expr.kind == FplKind::FunctionOfY) && !g.Listed()) {
 		const bool ofX = g.expr.kind == FplKind::Function;
 		const double unit = ofX ? 1 / view.ScaleX() : 1 / view.ScaleY();
-		double v = ofX ? plane.x : plane.y;
-		// on past an undefined stretch, up to a view's width of tries
+		const bool log = ofX ? view.logX : view.logY;
+		double v = ofX ? view.AxisX(plane.x) : view.AxisY(plane.y);
+		// on past an undefined stretch, up to a view's width of tries (in axis units: a log axis's logarithm)
 		for (int k = 1; k <= 4000; k++) {
-			double next = v + dips * k * unit, w = Eval(graph, next);
+			double next = v + dips * k * unit;
+			if (log)
+				next = std::pow(10.0, next);
+			double w = Eval(graph, next);
 			if (std::isfinite(w)) {
 				hit.graph = graph;
 				hit.plane = ofX ? FplPoint{ next, w } : FplPoint{ w, next };
@@ -1234,9 +1279,10 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 				case FplKind::Function: case FplKind::FunctionOfY: {
 					// the view's x (y), its values fitted
 					const bool ofX = e.kind == FplKind::Function;
-					const double a = ofX ? view.xMin : view.yMin, b = ofX ? view.xMax : view.yMax;
+					const double a = ofX ? view.AxisX(view.xMin) : view.AxisY(view.yMin);
+					const double b = ofX ? view.AxisX(view.xMax) : view.AxisY(view.yMax);
 					for (int k = 0; k <= n; k++) {
-						double v = a + (b - a) * k / n;
+						double v = ofX ? view.FromAxisX(a + (b - a) * k / n) : view.FromAxisY(a + (b - a) * k / n);
 						s[ofX ? FplSlotX : FplSlotY] = v;
 						double w = e.f.Eval(s);
 						if (!std::isfinite(w))
@@ -1267,7 +1313,8 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 					int slot = FplStandardSlot(e.name);
 					if (!std::isfinite(lo) || !std::isfinite(hi) || slot < 0)
 						break;
-					ys.push_back(0);
+					if (!view.logY)
+						ys.push_back(0);
 					for (int k = 0; k <= n; k++) {
 						double t = lo + (hi - lo) * k / n;
 						s[slot] = t;
@@ -1276,8 +1323,8 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 					}
 					break;
 				}
-				case FplKind::Implicit:
-					// what was sampled (the view grown by its size)
+				case FplKind::Implicit: case FplKind::SlopeField:
+					// what was sampled (the view grown by its size; an ODE's solution)
 					for (auto& line : g.geometry.lines)
 						for (auto& p : line) {
 							FplPoint q = view.ToPlane(p);
@@ -1289,6 +1336,13 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 					break;
 			}
 		}
+		// on log axes in their logarithms (what isn't positive drops out as NaN)
+		if (view.logX)
+			for (auto& x : xs)
+				x = view.AxisX(x);
+		if (view.logY)
+			for (auto& y : ys)
+				y = view.AxisY(y);
 		if (e.kind == FplKind::Point) {
 			// points exactly
 			double a, b, c, d;
@@ -1323,7 +1377,7 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 	};
 	widen(x0, x1);
 	widen(y0, y1);
-	xMin = x0, xMax = x1, yMin = y0, yMax = y1;
+	xMin = view.FromAxisX(x0), xMax = view.FromAxisX(x1), yMin = view.FromAxisY(y0), yMax = view.FromAxisY(y1);
 	return true;
 }
 
@@ -1349,7 +1403,8 @@ std::wstring FplFormatLabel(std::wstring_view label, double x, double y, double 
 
 std::vector<FplLabelPlace> FplPlot::LabelPlaces(const FplViewport& view) const {
 	std::vector<FplLabelPlace> places;
-	const double units = std::min(1 / view.ScaleX(), 1 / view.ScaleY());
+	// a DIP's worth of the plane where the label is (log axes differ from place to place)
+	auto units = [&](FplPoint q) { return std::min(1 / view.DipsPerUnitX(q.x), 1 / view.DipsPerUnitY(q.y)); };
 	for (size_t i = 0; i < graphs.size(); i++) {
 		auto& g = graphs[i];
 		if (!g.Drawable() || g.label.empty())
@@ -1360,7 +1415,7 @@ std::vector<FplLabelPlace> FplPlot::LabelPlaces(const FplViewport& view) const {
 				if (!inside(p))
 					continue;
 				FplPoint q = view.ToPlane(p);
-				places.push_back({ static_cast<int>(i), p, FplFormatLabel(g.label, q.x, q.y, units) });
+				places.push_back({ static_cast<int>(i), p, FplFormatLabel(g.label, q.x, q.y, units(q)) });
 				if (places.size() > 2000)
 					return places;
 			}
@@ -1377,7 +1432,7 @@ std::vector<FplLabelPlace> FplPlot::LabelPlaces(const FplViewport& view) const {
 				}
 		if (found) {
 			FplPoint q = view.ToPlane(best);
-			places.push_back({ static_cast<int>(i), best, FplFormatLabel(g.label, q.x, q.y, units) });
+			places.push_back({ static_cast<int>(i), best, FplFormatLabel(g.label, q.x, q.y, units(q)) });
 		}
 	}
 	return places;

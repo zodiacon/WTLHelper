@@ -8,7 +8,8 @@
 // control's graphs (definitions, sampling, features, tracing, coordinates), user functions
 // and d/dx, surfaces (heat maps, contours), vector fields and the SVG export, and 3D (the
 // box, the camera, meshes, tubes and the graphs' meshes), tracing by keys, draggable points, integrals, lists and
-// regressions, the saved state, fitting the view, labels, styles, undo, and the sampling thread.
+// regressions, the saved state, fitting the view, labels, styles, undo, the sampling thread, log axes and
+// ODEs.
 
 #include "FunctionPlotExpr.h"
 #include "FunctionPlot3D.h"
@@ -18,6 +19,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -2771,6 +2773,293 @@ TEST(Worker) {
 	CHECK(worker.Take().empty());
 }
 
+TEST(LogAxes) {
+	// the mapping: a decade per 100 DIPs
+	FplViewport v = View(1, 1000, 0.01, 100, 300, 400);
+	v.logX = v.logY = true;
+	CHECK(v.Valid());
+	CHECK_NEAR_TOL(v.ToScreenX(10), 100, 1e-9);
+	CHECK_NEAR_TOL(v.ToPlaneX(200), 100, 1e-9);
+	CHECK_NEAR_TOL(v.ToScreenY(1), 200, 1e-9);
+	CHECK_NEAR_TOL(v.ToPlaneY(100), 10, 1e-9);
+	CHECK(std::isnan(v.ToScreenX(-1)));
+	CHECK(std::isnan(v.ToScreenX(0)));
+	CHECK_NEAR_TOL(v.DipsPerUnitX(10), 100 / (10 * std::log(10.0)), 1e-9);
+	// panning and zooming by decades
+	FplViewport p = v;
+	p.Pan(100, 0);
+	CHECK_NEAR_TOL(p.xMin, 0.1, 1e-12);
+	CHECK_NEAR_TOL(p.xMax, 100, 1e-9);
+	p = v;
+	p.Zoom(3, 1, { 150, 200 });
+	CHECK_NEAR_TOL(std::log10(p.xMax / p.xMin), 1, 1e-9);
+	CHECK_NEAR_TOL(p.ToScreenX(std::pow(10.0, 1.5)), 150, 1e-9);
+	p = v;
+	p.Resize(600, 400);
+	CHECK_NEAR_TOL(std::log10(p.xMin), -1.5, 1e-9);		// the center (10^1.5) and a decade per 100 DIPs
+	CHECK_NEAR_TOL(std::log10(p.xMax / p.xMin), 6, 1e-9);
+	p = v;
+	p.EqualScale();
+	CHECK_NEAR(p.xMin, 1.0);
+	CHECK(p.ZoomTo({ 100, 100 }, { 200, 300 }));
+	CHECK_NEAR_TOL(p.xMin, 10, 1e-9);
+	CHECK_NEAR_TOL(p.xMax, 100, 1e-9);
+	CHECK_NEAR_TOL(p.yMin, 0.1, 1e-12);
+	CHECK_NEAR_TOL(p.yMax, 10, 1e-9);
+	// ranges that aren't positive
+	FplViewport f = View(-10, 10, -5, 5);
+	f.logX = true;
+	CHECK(!f.Valid());
+	f.FixLogRanges();
+	CHECK(f.Valid());
+	CHECK_NEAR_TOL(f.xMin, 0.01, 1e-15);
+	CHECK_NEAR(f.xMax, 10.0);
+	CHECK_NEAR(f.yMin, -5.0);
+	f = View(-10, -1);
+	f.logY = true;
+	f.FixLogRanges();
+	CHECK(f.Valid());
+	CHECK(f.yMax > f.yMin && f.yMin > 0);
+
+	// ticks
+	FplTicks t = FplMakeLogTicks(1, 1e6, 600, 90);
+	CHECK(t.log);
+	CHECK_INT(t.major.size(), 7);
+	CHECK_INT(t.minor.size(), 48);
+	CHECK_STR(FplFormatTick(1, t), L"1");
+	CHECK_STR(FplFormatTick(1000, t), L"1000");
+	CHECK_STR(FplFormatTick(1e5, t), std::wstring(L"10") + wchar_t(0x2075));
+	t = FplMakeLogTicks(1e-10, 1e10, 600, 90);
+	CHECK_INT(t.major.size(), 5);		// every 5 decades
+	CHECK_NEAR(t.major[1], 1e-5);
+	CHECK_STR(FplFormatTick(0.01, FplMakeLogTicks(0.001, 1, 300, 60)), L"0.01");
+	CHECK_STR(FplFormatTick(1e-5, t), std::wstring(L"10") + wchar_t(0x207B) + wchar_t(0x2075));
+	CHECK_INT(t.minor.size(), 16);	// the other decades
+	t = FplMakeLogTicks(2, 5, 600, 90);	// under a decade: linear
+	CHECK(!t.log);
+	CHECK(!t.major.empty());
+	CHECK(std::is_sorted(t.major.begin(), t.major.end()));
+	CHECK(FplMakeTicksX(v, 90).log);
+	CHECK(!FplMakeTicksX(View(), 90).log);
+
+	// y = x^2 on log-log is a straight line, y = log x on log x too
+	auto plot = MakePlot({ L"y = x^2", L"y = log x", L"y = (x - 10)^2 - 1", L"y = 1/x {0 < x}" });
+	FplViewport ll = View(0.1, 100, 0.01, 1e4, 600, 600);
+	ll.logX = ll.logY = true;
+	plot.Sample(ll);
+	auto& lines = plot.graphs[0].geometry.lines;
+	CHECK_INT(lines.size(), 1);
+	double worst = 0;
+	for (auto& q : lines[0]) {
+		// screen y = 600 - (log10 x^2 + 2) * 100, screen x = (log10 x + 1) * 200
+		double expect = 600 - (2 * (q.x / 200 - 1) + 2) * 100;
+		worst = std::max(worst, std::abs(q.y - expect));
+	}
+	CHECK(worst < 1e-6);
+	FplViewport lx = View(0.1, 1000, -3, 5, 800, 400);
+	lx.logX = true;
+	plot.Sample(lx);
+	worst = 0;
+	for (auto& q : plot.graphs[1].geometry.lines[0]) {
+		double expect = lx.ToScreenY((q.x / 200) - 1);
+		worst = std::max(worst, std::abs(q.y - expect));
+	}
+	CHECK(worst < 1e-6);
+	// features in log x: the roots at 9 and 11, the minimum at 10
+	plot.FindFeatures(2, lx);
+	CHECK(Has(plot.graphs[2].features, FplFeatureKind::Root, 9, 0, 1e-9));
+	CHECK(Has(plot.graphs[2].features, FplFeatureKind::Root, 11, 0, 1e-9));
+	CHECK(Has(plot.graphs[2].features, FplFeatureKind::Minimum, 10, -1, 1e-6));
+	// a log y axis can't show roots
+	FplViewport ly = lx;
+	ly.logY = true;
+	ly.yMin = 0.01, ly.yMax = 1e4;
+	plot.FindFeatures(2, ly);
+	CHECK(!Has(plot.graphs[2].features, FplFeatureKind::Root, 9, 0, 1e-9));
+	CHECK(Has(plot.graphs[2].features, FplFeatureKind::Minimum, 10, -1, 1e-6) == false);
+	// stepping goes by the screen
+	auto hit = plot.Step(1, { 10, 1 }, 100, ll);
+	CHECK_NEAR_TOL(hit.plane.x, std::pow(10.0, 1.5), 1e-9);
+
+	// fitting the view on log axes: in decades, positive
+	auto pts = MakePlot({ L"(1, 10)", L"(100, 1000)", L"(-5, 3)" });
+	pts.Sample(ll);
+	double x0, x1, y0, y1;
+	CHECK(pts.FitBounds(ll, x0, x1, y0, y1));
+	CHECK(x0 > 0 && x0 < 1 && x1 > 100);
+	CHECK(y0 > 0 && y0 < 10 && y1 > 1000);
+	CHECK_NEAR_TOL(std::log10(x1) - 2, -std::log10(x0), 1e-9);	// as much room on either side
+
+	// a field's arrows on log axes stay finite
+	auto field = MakePlot({ L"(x, y)" });
+	field.Sample(ll);
+	CHECK(!field.graphs[0].geometry.arrows.empty());
+	bool finite = true;
+	for (auto& a : field.graphs[0].geometry.arrows)
+		finite = finite && std::isfinite(a.from.x) && std::isfinite(a.from.y) && std::isfinite(a.to.x) && std::isfinite(a.to.y);
+	CHECK(finite);
+
+	// the saved state keeps the scales
+	FplSavedState st;
+	st.view = ll;
+	FplSavedState back;
+	CHECK(FplLoadState(FplSaveState(st), back));
+	CHECK(back.view.logX && back.view.logY);
+	CHECK_NEAR_TOL(back.view.xMin, 0.1, 1e-15);
+	CHECK_NEAR_TOL(back.view.yMax, 1e4, 1e-9);
+	st.view = View();
+	CHECK(FplLoadState(FplSaveState(st), back));
+	CHECK(!back.view.logX && !back.view.logY);
+	CHECK(FplSaveState(st).find(L"log ") == std::wstring::npos);
+}
+
+TEST(Odes) {
+	// the text
+	std::wstring_view text = L"y' = x - y, y(0) = 1";
+	auto o = FplSplitOde(text);
+	CHECK(o.isOde);
+	CHECK_INT(o.starts.size(), 1);
+	CHECK(text.substr(o.rhs, o.rhsLen) == L" x - y");
+	CHECK(text.substr(o.starts[0].a, o.starts[0].aLen) == L"0");
+	CHECK(text.substr(o.starts[0].b, o.starts[0].bLen) == L" 1");
+	text = L"y' = y, y(0) = 1, y(f(2, 3)) = -1";
+	o = FplSplitOde(text);
+	CHECK_INT(o.starts.size(), 2);
+	CHECK(text.substr(o.starts[1].a, o.starts[1].aLen) == L"f(2, 3)");
+	CHECK(text.substr(o.starts[1].b, o.starts[1].bLen) == L" -1");
+	CHECK(text.substr(o.starts[0].b, o.starts[0].bLen) == L" 1");
+	CHECK(o.errorAt == std::wstring_view::npos);
+	CHECK(FplSplitOde(L"dy/dx = y").isOde);
+	CHECK(FplSplitOde(std::wstring(L"y") + wchar_t(0x2032) + L" = y").isOde);
+	CHECK(!FplSplitOde(L"y = x").isOde);
+	CHECK(!FplSplitOde(L"y' x").isOde);
+	o = FplSplitOde(L"y' = {x < 0: 1, 2}");
+	CHECK(o.isOde && o.starts.empty());
+	CHECK_INT(o.rhsLen, 14);
+	CHECK(FplSplitOde(L"y' = x, z").errorAt == 8);
+	o = FplSplitOde(L"y' = x, y(0 = 1");
+	CHECK(o.missingClose);
+
+	// building: errors in their places
+	std::vector<std::wstring> params = { L"a", L"b" };
+	auto e = FplBuild(L"y' = x - y, y(a) = b", params);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::SlopeField);
+	CHECK(!e.f.Empty());
+	CHECK_INT(e.starts.size(), 2);
+	e = FplBuild(L"y' = y", params);
+	CHECK(!e.error && e.starts.empty());
+	e = FplBuild(L"y' = y, y(0) = 1, y(0) = -1, y(1) = a", params);
+	CHECK(!e.error);
+	CHECK_INT(e.starts.size(), 6);
+	e = FplBuild(L"y' = y, y(0) = 1, y(t) = 2", params);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	CHECK_INT(e.error.pos, 20);
+	CHECK(e.starts.empty());
+	e = FplBuild(L"y' = t", params);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	CHECK_INT(e.error.pos, 5);
+	CHECK(e.error.name == L"t");
+	e = FplBuild(L"y' = x, y(x) = 1", params);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	CHECK_INT(e.error.pos, 10);
+	e = FplBuild(L"y' = x + q", params);
+	CHECK(e.error.code == FplErrorCode::UnknownName);
+	CHECK_INT(e.error.pos, 9);
+	CHECK(e.error.name == L"q");
+	e = FplBuild(L"y' = x = 2", params);
+	CHECK(e.error.code == FplErrorCode::MisplacedRelation);
+	e = FplBuild(L"y' = x, w", params);
+	CHECK(e.error.code == FplErrorCode::UnexpectedToken);
+	CHECK_INT(e.error.pos, 8);
+
+	// solutions against the exact ones
+	auto worst = [](const FplPolyline& line, const FplViewport& v, auto exact) {
+		double w = 0;
+		for (auto& p : line) {
+			FplPoint q = v.ToPlane(p);
+			w = std::max(w, std::abs(q.y - exact(q.x)));
+		}
+		return w;
+	};
+	FplViewport v = View(-2, 3, -1, 25, 500, 500);
+	std::function<double(double, double)> grow = [](double, double y) { return y; };
+	auto line = FplSolveOde(grow, 0, 1, v);
+	CHECK(line.size() > 100);
+	CHECK(worst(line, v, [](double x) { return std::exp(x); }) < 1e-4);
+	CHECK(v.ToPlaneX(line.front().x) < -2 && v.ToPlaneX(line.back().x) > 3);
+	std::function<double(double, double)> linear = [](double x, double y) { return x - y; };
+	line = FplSolveOde(linear, 0, 1, v);
+	CHECK(worst(line, v, [](double x) { return x - 1 + 2 * std::exp(-x); }) < 1e-3);
+	// a circle: it stops where the slope is infinite
+	v = View(-3, 3, -3, 3, 600, 600);
+	std::function<double(double, double)> circle = [](double x, double y) { return -x / y; };
+	line = FplSolveOde(circle, 0, 2, v);
+	double reach = 0, off = 0;
+	for (auto& p : line) {
+		FplPoint q = v.ToPlane(p);
+		reach = std::max(reach, std::abs(q.x));
+		off = std::max(off, std::abs(std::hypot(q.x, q.y) - 2));
+	}
+	CHECK(reach > 1.99 && reach < 2.002);		// to a fifth of a DIP
+	CHECK(off < 1e-3);
+	// steps of at most odeStep DIPs in x
+	double longest = 0;
+	for (size_t k = 1; k < line.size(); k++)
+		longest = std::max(longest, std::abs(line[k].x - line[k - 1].x));
+	CHECK(longest <= 2 + 1e-9);
+	// on a log y axis, y' = y is straight
+	FplViewport lv = View(-2, 3, 0.01, 100, 500, 400);
+	lv.logY = true;
+	line = FplSolveOde(grow, 0, 1, lv);
+	double bend = 0;
+	for (auto& p : line)
+		bend = std::max(bend, std::abs(p.y - lv.ToScreenY(std::exp(lv.ToPlaneX(p.x)))));
+	CHECK(bend < 0.05);
+	// nothing where it isn't defined
+	CHECK(FplSolveOde(circle, 0, 0, v).empty());
+
+	// the slopes: y' = 1 at equal scales is 45 degrees
+	std::function<double(double, double)> one = [](double, double) { return 1.0; };
+	auto marks = FplSampleSlopes(one, View(-5, 5, -5, 5, 500, 500));
+	CHECK(marks.size() > 50);
+	bool diagonal = true;
+	for (auto& m : marks)
+		diagonal = diagonal && std::abs((m.to.x - m.from.x) + (m.to.y - m.from.y)) < 1e-9 && m.to.x > m.from.x;
+	CHECK(diagonal);
+
+	// in a plot: the point, its solution, dragging it
+	auto plot = MakePlot({ L"y' = x - y, y(a) = b", L"dy/dx = sin x" }, { Param(L"a", 0), Param(L"b", 1) });
+	CHECK(!plot.graphs[0].expr.error && !plot.graphs[1].expr.error);
+	CHECK(plot.graphs[0].Drawable());
+	CHECK_INT(plot.graphs[0].dragX, 0);
+	CHECK_INT(plot.graphs[0].dragY, 1);
+	CHECK_INT(plot.graphs[1].dragX, -1);
+	v = View(-5, 5, -5, 5, 500, 500);
+	plot.Sample(v);
+	CHECK_INT(plot.graphs[0].geometry.points.size(), 1);
+	CHECK_INT(plot.graphs[0].geometry.lines.size(), 1);
+	CHECK(!plot.graphs[0].geometry.marks.empty());
+	CHECK(plot.graphs[1].geometry.lines.empty() && !plot.graphs[1].geometry.marks.empty());
+	// several solutions of one ODE
+	auto three = MakePlot({ L"y' = x - y, y(0) = 1, y(0) = -1, y(-2) = 3" });
+	three.Sample(v);
+	CHECK_INT(three.graphs[0].geometry.points.size(), 3);
+	CHECK_INT(three.graphs[0].geometry.lines.size(), 3);
+	CHECK_INT(three.graphs[0].dragX, -1);
+	CHECK_INT(plot.DraggableAt(v.ToScreen({ 0, 1 }), 6), 0);
+	// tracing finds the solution
+	auto hit = plot.Nearest(v.ToScreen({ 1, 2 * std::exp(-1.0) }), v, 6, 6);
+	CHECK_INT(hit.graph, 0);
+	double x0, x1, y0, y1;
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x0 < -3 && x1 > 5);		// backward it leaves the screen near -3
+	// a definition by that name isn't taken for one
+	plot = MakePlot({ L"y' = k y, y(0) = 1", L"k = 0.5" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(!plot.graphs[1].expr.error && plot.graphs[1].definition);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -2832,6 +3121,8 @@ int wmain() {
 	Run_History();
 	Run_StylesOut();
 	Run_Worker();
+	Run_LogAxes();
+	Run_Odes();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

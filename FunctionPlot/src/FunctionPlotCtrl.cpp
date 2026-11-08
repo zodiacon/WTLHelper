@@ -23,7 +23,7 @@ static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
 	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D &&
 	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface && FPLK_INTEGRAL == (int)FplKind::Integral &&
-	FPLK_REGRESSION == (int)FplKind::Regression);
+	FPLK_REGRESSION == (int)FplKind::Regression && FPLK_SLOPEFIELD == (int)FplKind::SlopeField);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
@@ -656,6 +656,7 @@ void CFunctionPlotCtrl::SetViewport(double xMin, double xMax, double yMin, doubl
 	next.xMax = xMax;
 	next.yMin = yMin;
 	next.yMax = yMax;
+	next.FixLogRanges();
 	if (!next.Valid())
 		return;
 	if (IsWindow() && (GetStyle() & FPLS_EQUALSCALE))
@@ -671,6 +672,30 @@ void CFunctionPlotCtrl::SetView(const FPLVIEW& view) {
 FPLVIEW CFunctionPlotCtrl::GetView() const {
 	auto& v = m_State->view;
 	return { v.xMin, v.xMax, v.yMin, v.yMax };
+}
+
+void CFunctionPlotCtrl::SetLogAxes(BOOL logX, BOOL logY) {
+	auto& s = *m_State;
+	if (s.view.logX == (logX != FALSE) && s.view.logY == (logY != FALSE))
+		return;
+	s.view.logX = logX != FALSE;
+	s.view.logY = logY != FALSE;
+	s.view.FixLogRanges();
+	if (!s.view.logX && !s.view.logY && IsWindow() && (GetStyle() & FPLS_EQUALSCALE))
+		s.view.EqualScale();
+	ClearTrace();
+	s.featuresGraph = -1;
+	s.history.Clear();		// the snapshots' ranges were for the other scales
+	if (IsWindow() && s.viewSet)
+		ViewChanged(true);
+}
+
+BOOL CFunctionPlotCtrl::IsLogX() const {
+	return m_State->view.logX;
+}
+
+BOOL CFunctionPlotCtrl::IsLogY() const {
+	return m_State->view.logY;
 }
 
 void CFunctionPlotCtrl::SetHomeView(const FPLVIEW* view) {
@@ -1379,6 +1404,8 @@ BOOL CFunctionPlotCtrl::SetState(LPCWSTR pszState) {
 	s.camera.pitch = 0;
 	s.camera.Orbit(st.yaw, st.pitch);
 	s.featuresGraph = -1;
+	s.view.logX = st.view.logX;
+	s.view.logY = st.view.logY;
 	if (s.viewSet)
 		SetViewport(st.view.xMin, st.view.xMax, st.view.yMin, st.view.yMax);
 	else {
@@ -1411,32 +1438,49 @@ BOOL CFunctionPlotCtrl::IsPanelCollapsed() const {
 
 namespace {
 
-bool SavePng(IWICImagingFactory* wic, IWICBitmap* bitmap, LPCWSTR path, UINT width, UINT height) {
-	ComPtr<IWICStream> stream;
+// A PNG of the pixels (premultiplied BGRA) into a stream.
+bool EncodePng(IWICImagingFactory* wic, IStream* stream, const std::vector<uint32_t>& pixels, UINT width, UINT height) {
+	ComPtr<IWICBitmap> bitmap;
 	ComPtr<IWICBitmapEncoder> encoder;
 	ComPtr<IWICBitmapFrameEncode> frame;
-	return SUCCEEDED(wic->CreateStream(stream.GetAddressOf())) &&
-		SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+	return SUCCEEDED(wic->CreateBitmapFromMemory(width, height, GUID_WICPixelFormat32bppPBGRA, width * 4,
+			width * height * 4, (BYTE*)pixels.data(), bitmap.GetAddressOf())) &&
 		SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf())) &&
-		SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+		SUCCEEDED(encoder->Initialize(stream, WICBitmapEncoderNoCache)) &&
 		SUCCEEDED(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr)) &&
 		SUCCEEDED(frame->Initialize(nullptr)) &&
 		SUCCEEDED(frame->SetSize(width, height)) &&
-		SUCCEEDED(frame->WriteSource(bitmap, nullptr)) &&
+		SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) &&
 		SUCCEEDED(frame->Commit()) &&
 		SUCCEEDED(encoder->Commit());
 }
 
+ComPtr<IWICImagingFactory> Wic() {
+	ComPtr<IWICImagingFactory> wic;
+	::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf()));
+	return wic;
+}
+
+// Bytes as a movable global for the clipboard.
+HGLOBAL ToGlobal(const void* data, size_t size) {
+	HGLOBAL h = ::GlobalAlloc(GMEM_MOVEABLE, size);
+	if (!h)
+		return nullptr;
+	if (void* p = ::GlobalLock(h)) {
+		memcpy(p, data, size);
+		::GlobalUnlock(h);
+		return h;
+	}
+	::GlobalFree(h);
+	return nullptr;
+}
+
 }  // namespace
 
-BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
+bool CFunctionPlotCtrl::RenderImage(float scale, std::vector<uint32_t>& pixels, UINT& width, UINT& height) {
 	auto& s = *m_State;
-	if (!pszPath || !s.view.Valid())
-		return FALSE;
-	ComPtr<IWICImagingFactory> wic;
-	ComPtr<IWICBitmap> bitmap;
-	if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf()))))
-		return FALSE;
+	if (!s.view.Valid())
+		return false;
 	// everything at full quality, now: not the coarse versions the thread is refining
 	s.syncSampling = true;
 	Resample();
@@ -1444,31 +1488,31 @@ BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
 
 	if (s.mode3D) {
 		// the frame as it's shown: drawn, and read back before it's presented
-		std::vector<uint32_t> pixels;
-		UINT width = 0, height = 0;
 		Paint3D(false);
 		bool captured = s.renderer.Ready() && s.renderer.Capture(pixels, width, height);
 		if (s.renderer.Ready())
 			s.renderer.Present();
-		return captured &&
-			SUCCEEDED(wic->CreateBitmapFromMemory(width, height, GUID_WICPixelFormat32bppPBGRA, width * 4,
-				width * height * 4, (BYTE*)pixels.data(), bitmap.GetAddressOf())) &&
-			SavePng(wic.Get(), bitmap.Get(), pszPath, width, height);
+		return captured;
 	}
 
+	auto wic = Wic();
+	if (!wic)
+		return false;
 	scale = std::clamp(scale, 0.25f, 8.0f);
-	const UINT width = (UINT)std::ceil(s.view.width * scale), height = (UINT)std::ceil(s.view.height * scale);
+	width = (UINT)std::ceil(s.view.width * scale);
+	height = (UINT)std::ceil(s.view.height * scale);
+	ComPtr<IWICBitmap> bitmap;
 	ComPtr<ID2D1RenderTarget> target;
 	if (FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.GetAddressOf())))
-		return FALSE;
+		return false;
 	const float dpi = 96 * scale;
 	auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
 		D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), dpi, dpi);
 	if (FAILED(FplD2DFactory()->CreateWicBitmapRenderTarget(bitmap.Get(), props, target.GetAddressOf())))
-		return FALSE;
+		return false;
 	// the window's brushes and bitmaps belong to its target: set aside while the export paints
 	if (!CreateTarget())
-		return FALSE;
+		return false;
 	auto brushes = std::move(s.brushes);
 	s.brushes.clear();
 	std::vector<ComPtr<ID2D1Bitmap>> heats;
@@ -1478,13 +1522,13 @@ BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
 	for (size_t i = 0; i < s.paths.size() && i < heats.size(); i++)
 		s.paths[i].heat = std::move(heats[i]);
 	s.brushes = std::move(brushes);
-	return SUCCEEDED(hr) && SavePng(wic.Get(), bitmap.Get(), pszPath, width, height);
+	target.Reset();
+	pixels.resize((size_t)width * height);
+	return SUCCEEDED(hr) && SUCCEEDED(bitmap->CopyPixels(nullptr, width * 4, width * height * 4, (BYTE*)pixels.data()));
 }
 
-BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
+std::string CFunctionPlotCtrl::BuildSvg() {
 	auto& s = *m_State;
-	if (!pszPath || !s.view.Valid() || s.mode3D)
-		return FALSE;
 	s.syncSampling = true;
 	Resample();
 	s.syncSampling = false;
@@ -1505,13 +1549,115 @@ BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
 	svg.showAxes = !(style & FPLS_NOAXES);
 	svg.piTicks = (style & FPLS_PITICKS) != 0;
 	svg.showLegend = !(style & FPLS_NOLEGEND) && !s.collapsed;
-	std::string text = FplWriteSvg(s.plot, s.view, svg);
+	svg.axisTitles[0] = s.axisTitles[0];
+	svg.axisTitles[1] = s.axisTitles[1];
+	return FplWriteSvg(s.plot, s.view, svg);
+}
+
+BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
+	std::vector<uint32_t> pixels;
+	UINT width = 0, height = 0;
+	auto wic = Wic();
+	ComPtr<IWICStream> stream;
+	return pszPath && wic && RenderImage(scale, pixels, width, height) &&
+		SUCCEEDED(wic->CreateStream(stream.GetAddressOf())) &&
+		SUCCEEDED(stream->InitializeFromFilename(pszPath, GENERIC_WRITE)) &&
+		EncodePng(wic.Get(), stream.Get(), pixels, width, height);
+}
+
+BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
+	auto& s = *m_State;
+	if (!pszPath || !s.view.Valid() || s.mode3D)
+		return FALSE;
+	std::string text = BuildSvg();
 	FILE* f = nullptr;
 	if (_wfopen_s(&f, pszPath, L"wb") || !f)
 		return FALSE;
 	bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
 	ok = fclose(f) == 0 && ok;
 	return ok;
+}
+
+BOOL CFunctionPlotCtrl::Copy() {
+	auto& s = *m_State;
+	// at the screen's resolution, so it pastes as sharp as it's shown
+	std::vector<uint32_t> pixels;
+	UINT width = 0, height = 0;
+	if (!RenderImage((float)s.dpi / 96, pixels, width, height) || !width || !height)
+		return FALSE;
+	// a bottom-up DIB, opaque
+	BITMAPINFOHEADER bih{ sizeof(bih), (LONG)width, (LONG)height, 1, 32, BI_RGB };
+	std::vector<BYTE> dib(sizeof(bih) + (size_t)width * height * 4);
+	memcpy(dib.data(), &bih, sizeof(bih));
+	auto* rows = (uint32_t*)(dib.data() + sizeof(bih));
+	for (UINT y = 0; y < height; y++)
+		for (UINT x = 0; x < width; x++)
+			rows[(size_t)(height - 1 - y) * width + x] = pixels[(size_t)y * width + x] | 0xFF000000u;
+	// a PNG too (Office, browsers), the SVG in 2D (vector editors), and the graphs as text
+	std::vector<BYTE> png;
+	if (auto wic = Wic()) {
+		ComPtr<IStream> stream;
+		if (SUCCEEDED(::CreateStreamOnHGlobal(nullptr, TRUE, stream.GetAddressOf())) &&
+			EncodePng(wic.Get(), stream.Get(), pixels, width, height)) {
+			STATSTG st{};
+			if (SUCCEEDED(stream->Stat(&st, STATFLAG_NONAME)) && st.cbSize.QuadPart < (1ull << 31)) {
+				png.resize((size_t)st.cbSize.QuadPart);
+				LARGE_INTEGER zero{};
+				ULONG read = 0;
+				if (FAILED(stream->Seek(zero, STREAM_SEEK_SET, nullptr)) ||
+					FAILED(stream->Read(png.data(), (ULONG)png.size(), &read)) || read != png.size())
+					png.clear();
+			}
+		}
+	}
+	std::string svg = s.mode3D ? std::string() : BuildSvg();
+	std::wstring text;
+	for (auto& g : s.plot.graphs)
+		if (!g.text.empty())
+			text += g.text + L"\r\n";
+	if (!OpenClipboard())
+		return FALSE;
+	::EmptyClipboard();
+	bool ok = false;
+	if (HGLOBAL h = ToGlobal(dib.data(), dib.size()); h && ::SetClipboardData(CF_DIB, h))
+		ok = true;
+	else if (h)
+		::GlobalFree(h);
+	auto put = [](UINT format, const void* data, size_t size) {
+		if (!format || !size)
+			return;
+		if (HGLOBAL h = ToGlobal(data, size); h && !::SetClipboardData(format, h))
+			::GlobalFree(h);
+	};
+	put(::RegisterClipboardFormatW(L"PNG"), png.data(), png.size());
+	put(::RegisterClipboardFormatW(L"image/svg+xml"), svg.data(), svg.size());
+	put(CF_UNICODETEXT, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+	::CloseClipboard();
+	return ok;
+}
+
+BOOL CFunctionPlotCtrl::PrintTo(HDC hdc, const RECT& rc) {
+	auto& s = *m_State;
+	const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+	if (!hdc || w <= 0 || h <= 0 || !s.view.Valid())
+		return FALSE;
+	// the plot's shape, as large as fits in the rectangle (at most 8 times the window's size), centered
+	const double fit = std::min(w / s.view.width, h / s.view.height);
+	std::vector<uint32_t> pixels;
+	UINT width = 0, height = 0;
+	if (!RenderImage((float)std::min(fit, 8.0), pixels, width, height) || !width || !height)
+		return FALSE;
+	const double shown = std::min((double)w / width, (double)h / height);
+	const int outW = (int)std::lround(width * shown), outH = (int)std::lround(height * shown);
+	for (auto& p : pixels)
+		p |= 0xFF000000u;
+	BITMAPINFO bi{};
+	bi.bmiHeader = { sizeof(bi.bmiHeader), (LONG)width, -(LONG)height, 1, 32, BI_RGB };
+	const int x = rc.left + (w - outW) / 2, y = rc.top + (h - outH) / 2;
+	::SetStretchBltMode(hdc, HALFTONE);
+	::SetBrushOrgEx(hdc, 0, 0, nullptr);
+	return ::StretchDIBits(hdc, x, y, outW, outH, 0, 0, width, height, pixels.data(), &bi, DIB_RGB_COLORS,
+		SRCCOPY) != GDI_ERROR;
 }
 
 // ---- Input -----------------------------------------------------------------------------
@@ -1532,6 +1678,10 @@ LRESULT CFunctionPlotCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& s = *m_State;
+	if (::GetKeyState(VK_CONTROL) < 0 && (wParam == 'C' || wParam == VK_INSERT)) {
+		Copy();
+		return 0;
+	}
 	if (::GetKeyState(VK_CONTROL) < 0 && (wParam == 'Z' || wParam == 'Y')) {
 		if (wParam == 'Y' || ::GetKeyState(VK_SHIFT) < 0)
 			Redo();

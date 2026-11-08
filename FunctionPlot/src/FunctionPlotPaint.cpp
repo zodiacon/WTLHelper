@@ -250,6 +250,17 @@ void CFunctionPlotCtrl::BuildGeometry(int graph) {
 		}
 	}
 	// a vector field's arrows
+	if (!geometry.marks.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.marks.GetAddressOf()))) {
+		ComPtr<ID2D1GeometrySink> sink;
+		if (SUCCEEDED(paths.marks->Open(sink.GetAddressOf()))) {
+			for (auto& m : geometry.marks) {
+				sink->BeginFigure(Pt(m.from), D2D1_FIGURE_BEGIN_HOLLOW);
+				sink->AddLine(Pt(m.to));
+				sink->EndFigure(D2D1_FIGURE_END_OPEN);
+			}
+			sink->Close();
+		}
+	}
 	if (!geometry.arrows.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.arrows.GetAddressOf()))) {
 		ComPtr<ID2D1GeometrySink> sink;
 		if (SUCCEEDED(paths.arrows->Open(sink.GetAddressOf()))) {
@@ -438,8 +449,8 @@ void CFunctionPlotCtrl::PaintGrid() {
 	// a line on a pixel's middle, so a one-pixel line is sharp
 	auto snap = [&](double d) { return (float)((std::floor(d / pixel) + 0.5) * pixel); };
 
-	FplTicks tx = FplMakeTicks(v.xMin, v.xMax, v.width, 90, (style & FPLS_PITICKS) != 0);
-	FplTicks ty = FplMakeTicks(v.yMin, v.yMax, v.height, 60);
+	FplTicks tx = FplMakeTicksX(v, 90, (style & FPLS_PITICKS) != 0);
+	FplTicks ty = FplMakeTicksY(v, 60);
 	if (!(style & FPLS_NOGRID)) {
 		auto* minor = s.Brush(c.crGridMinor);
 		auto* major = s.Brush(c.crGrid);
@@ -466,7 +477,7 @@ void CFunctionPlotCtrl::PaintGrid() {
 		return;
 
 	// the axes where they are, or the labels along the edge they're beyond
-	const float ax = (float)v.ToScreenX(0), ay = (float)v.ToScreenY(0);
+	const float ax = (float)v.AxisLineX(), ay = (float)v.AxisLineY();
 	const bool xAxis = ay >= 0 && ay <= h, yAxis = ax >= 0 && ax <= w;
 	auto* axis = s.Brush(c.crAxis);
 	rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
@@ -487,9 +498,9 @@ void CFunctionPlotCtrl::PaintLabels() {
 		return;
 	auto& v = s.view;
 	const float w = (float)v.width, h = (float)v.height;
-	FplTicks tx = FplMakeTicks(v.xMin, v.xMax, v.width, 90, (style & FPLS_PITICKS) != 0);
-	FplTicks ty = FplMakeTicks(v.yMin, v.yMax, v.height, 60);
-	const float ax = (float)v.ToScreenX(0), ay = (float)v.ToScreenY(0);
+	FplTicks tx = FplMakeTicksX(v, 90, (style & FPLS_PITICKS) != 0);
+	FplTicks ty = FplMakeTicksY(v, 60);
+	const float ax = (float)v.AxisLineX(), ay = (float)v.AxisLineY();
 	const bool xAxis = ay >= 0 && ay <= h, yAxis = ax >= 0 && ax <= w;
 	auto* patch = s.Brush(c.crBack);
 	patch->SetOpacity(0.75f);
@@ -553,14 +564,19 @@ void CFunctionPlotCtrl::PaintGraphLabels() {
 		place(p.text, (float)p.at.x + 9, (float)p.at.y - 22, s.Brush(GraphColor(p.graph)));
 	if (GetStyle() & FPLS_NOAXES)
 		return;
-	const float ax = (float)v.ToScreenX(0), ay = (float)v.ToScreenY(0);
+	const float ax = (float)v.AxisLineX(), ay = (float)v.AxisLineY();
 	auto* title = s.Brush(c.crPanelText);
 	if (!s.axisTitles[0].empty()) {
 		const float tw = TextWidth(s.axisTitles[0], s.traceText.Get()) + 6;
 		place(s.axisTitles[0], w - tw - 6, std::clamp(ay, 0.0f, h) - 24, title);
 	}
-	if (!s.axisTitles[1].empty())
-		place(s.axisTitles[1], std::clamp(ax, 0.0f, w) + 8, 6, title);
+	if (!s.axisTitles[1].empty()) {
+		// beside the panel when the axis runs under it
+		float x = std::clamp(ax, 0.0f, w) + 8;
+		if (x < s.panel.right && s.panel.bottom > 6)
+			x = s.panel.right + 40;
+		place(s.axisTitles[1], x, 6, title);
+	}
 }
 
 // The rectangle being dragged to zoom to.
@@ -609,6 +625,12 @@ void CFunctionPlotCtrl::PaintGraphs() {
 		brush->SetOpacity(g.opacity);
 		if (s.paths[i].arrows)
 			rt->DrawGeometry(s.paths[i].arrows.Get(), brush, 1.5f, s.roundStroke.Get());
+		if (s.paths[i].marks) {
+			// fainter under a solution
+			brush->SetOpacity(g.opacity * (g.geometry.lines.empty() ? 0.75f : 0.4f));
+			rt->DrawGeometry(s.paths[i].marks.Get(), brush, 1.25f, s.roundStroke.Get());
+			brush->SetOpacity(g.opacity);
+		}
 		float width = g.width;
 		if ((int)i == s.traceGraph && s.traceValid)
 			width += 1;
@@ -622,6 +644,8 @@ void CFunctionPlotCtrl::PaintGraphs() {
 		const bool hollow = (g.flags & FplGraphHollow) != 0;
 		auto* back = s.Brush(GetColors().crBack);
 		for (auto& p : g.geometry.points) {
+			if (!std::isfinite(p.x) || !std::isfinite(p.y))
+				continue;
 			D2D1_ELLIPSE dot = D2D1::Ellipse(Pt(p), 2.5f + width, 2.5f + width);
 			brush->SetOpacity(g.opacity);
 			if (hollow) {
@@ -631,8 +655,8 @@ void CFunctionPlotCtrl::PaintGraphs() {
 			else
 				rt->FillEllipse(dot, brush);
 			brush->SetOpacity(1);
-			// a draggable point: a ring around it, stronger under the mouse
-			if (draggable) {
+			// a draggable point (the first: an ODE's others aren't): a ring around it, stronger under the mouse
+			if (draggable && &p == &g.geometry.points[0]) {
 				const float ring = 6.5f + width + ((int)i == s.hotPoint ? 2 : 0);
 				brush->SetOpacity((int)i == s.hotPoint ? 0.55f : 0.3f);
 				rt->DrawEllipse(D2D1::Ellipse(Pt(p), ring, ring), brush, 2);
@@ -673,7 +697,7 @@ void CFunctionPlotCtrl::PaintTrace() {
 	auto* color = s.Brush(GraphColor(s.traceGraph));
 	// the tangent through it, across the view
 	double slope = std::numeric_limits<double>::quiet_NaN();
-	if (!s.mode3D && (GetStyle() & FPLS_TANGENT)) {
+	if (!s.mode3D && !v.logX && !v.logY && (GetStyle() & FPLS_TANGENT)) {
 		auto kind = s.plot.graphs[s.traceGraph].expr.kind;
 		slope = s.plot.Slope(s.traceGraph, kind == FplKind::FunctionOfY ? s.traceY : s.traceX);
 		if (std::isfinite(slope)) {
@@ -700,7 +724,7 @@ void CFunctionPlotCtrl::PaintTrace() {
 	rt->DrawEllipse(dot, s.Brush(c.crBack), 2);
 
 	// the label: the feature's name, then the point
-	const double unitsX = 1 / v.ScaleX(), unitsY = 1 / v.ScaleY();
+	const double unitsX = 1 / v.DipsPerUnitX(s.traceX), unitsY = 1 / v.DipsPerUnitY(s.traceY);
 	std::wstring text;
 	auto& g = s.plot.graphs[s.traceGraph];
 	if (s.traceFeature >= 0 && s.traceFeature < (int)g.features.size())

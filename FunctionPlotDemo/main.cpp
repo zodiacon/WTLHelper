@@ -74,11 +74,15 @@ enum {
 	ID_DEMO_FIT,
 	ID_DEMO_UNDO,
 	ID_DEMO_REDO,
+	ID_DEMO_LOGX,
+	ID_DEMO_LOGY,
+	ID_DEMO_COPY,
+	ID_DEMO_PRINT,
 };
 
 // ---- Examples -------------------------------------------------------------------
 
-enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles };
+enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode };
 
 struct Example {
 	const wchar_t* name;
@@ -104,6 +108,9 @@ static const Example g_Examples[] = {
 	{ L"D&ata and Regression", L"(x1, y1)\r\ny1 ~ a e^(k x1)\r\ny = a e^(k x)\r\ny = mean(y1)", false, false,
 		Setup::Data },
 	{ L"&Lists", L"L = [1, 2, 3, 4, 5]\r\ny = 3sin(x L/2)/L\r\n(L, mean(L))", false },
+	{ L"&ODEs and Slope Fields", L"y' = x - y, y(a) = b, y(0) = -2, y(-3) = 4", false, false, Setup::Ode },
+	{ L"Logistic Gro&wth", L"dy/dx = k y(1 - y/4), y(-6) = 0.2, y(-6) = 6, y(0) = 2", false },
+	{ L"Lo&g Scales", L"y = x^2\r\ny = 2^x\r\ny = 1000/x\r\ny = 50 log x\r\n(10, 100)\r\ny' = y/x, y(1) = 3", false, false, Setup::Log },
 	{ L"La&bels and Styles", L"(2, 3)\r\n(a, 1)\r\ny = x^2/4\r\ny = 2sin x\r\nx^2 + y^2 < 9", false, false, Setup::Styles },
 	{ L"&Draggable Points", L"(a, b)\r\ny = (x - a)^2/2 + b\r\n(c, 3sin c)\r\ny = 3sin x", false },
 	{ L"&Errors", L"y = 2 +\r\ny = sin(x\r\nx = y = 1\r\ny = sin()\r\ny = 2 * * 3", false },
@@ -125,7 +132,8 @@ static CFont g_editFont;
 static HWND g_main;
 static bool g_autoSliders = true;
 static bool g_heatmaps = true;
-// FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg), then exit;
+// FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg; .bmp: printed onto
+// a 1600 x 1200 bitmap page), then exit;
 // /open plot.fplot starts with a saved plot (File > Save Plot)
 static int g_startExample = 0;
 static std::wstring g_exportPath;
@@ -312,6 +320,7 @@ static void LoadExample(int index) {
 	while (g_plot.GetListCount() > 0)
 		g_plot.RemoveList(g_plot.GetListName(0));
 	g_plot.SetAxisTitles(nullptr, nullptr, nullptr);
+	g_plot.SetLogAxes(e.setup == Setup::Log, e.setup == Setup::Log);
 	// a table's columns before the text that uses them
 	if (e.setup == Setup::Data) {
 		// a table: growth with noise, as if measured
@@ -365,7 +374,18 @@ static void LoadExample(int index) {
 		FPLPARAM c{ L"c", 0.5, -1, 3, 0.05, 0 };
 		g_plot.SetParameter(c);
 	}
+	else if (e.setup == Setup::Ode) {
+		// the first solution's point: drag it
+		FPLPARAM a{ L"a", 1, -8, 8, 0.1, 0 }, b{ L"b", 3, -6, 6, 0.1, 0 };
+		g_plot.SetParameter(a);
+		g_plot.SetParameter(b);
+	}
 	g_plot.ResetView();
+	if (e.setup == Setup::Log) {
+		FPLVIEW v{ 0.1, 1000, 0.01, 1e5 };
+		g_plot.SetView(v);
+		g_plot.SetAxisTitles(L"x (log)", L"y (log)");
+	}
 	ShowView();
 }
 
@@ -386,6 +406,8 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_COLLAPSE, g_plot.IsPanelCollapsed() != FALSE);
 	check(ID_DEMO_3D, g_plot.GetMode() == FPLM_3D);
 	check(ID_DEMO_TANGENT, s & FPLS_TANGENT);
+	check(ID_DEMO_LOGX, g_plot.IsLogX() != FALSE);
+	check(ID_DEMO_LOGY, g_plot.IsLogY() != FALSE);
 	::EnableMenuItem(menu, ID_DEMO_UNDO, MF_BYCOMMAND | (g_plot.CanUndo() ? MF_ENABLED : MF_GRAYED));
 	::EnableMenuItem(menu, ID_DEMO_REDO, MF_BYCOMMAND | (g_plot.CanRedo() ? MF_ENABLED : MF_GRAYED));
 #ifdef DEMO_WTLHELPER
@@ -505,6 +527,70 @@ static void Export(bool svg) {
 		::MessageBoxW(g_main, L"The file couldn't be written.", L"Export", MB_ICONERROR);
 }
 
+// The plot on a page: as large as fits inside half-inch margins.
+static void PrintPlot() {
+	PRINTDLGW pd{ sizeof(pd) };
+	pd.hwndOwner = g_main;
+	pd.Flags = PD_RETURNDC | PD_NOPAGENUMS | PD_NOSELECTION | PD_USEDEVMODECOPIESANDCOLLATE;
+	if (!::PrintDlgW(&pd) || !pd.hDC)
+		return;
+	DOCINFOW di{ sizeof(di), L"FunctionPlot" };
+	bool ok = false;
+	if (::StartDocW(pd.hDC, &di) > 0) {
+		if (::StartPage(pd.hDC) > 0) {
+			const int dpiX = ::GetDeviceCaps(pd.hDC, LOGPIXELSX), dpiY = ::GetDeviceCaps(pd.hDC, LOGPIXELSY);
+			const int offX = ::GetDeviceCaps(pd.hDC, PHYSICALOFFSETX), offY = ::GetDeviceCaps(pd.hDC, PHYSICALOFFSETY);
+			const int pageW = ::GetDeviceCaps(pd.hDC, PHYSICALWIDTH), pageH = ::GetDeviceCaps(pd.hDC, PHYSICALHEIGHT);
+			RECT rc = { dpiX / 2 - offX, dpiY / 2 - offY, pageW - dpiX / 2 - offX, pageH - dpiY / 2 - offY };
+			ok = g_plot.PrintTo(pd.hDC, rc) != FALSE;
+			ok = ::EndPage(pd.hDC) > 0 && ok;
+		}
+		ok = ::EndDoc(pd.hDC) > 0 && ok;
+	}
+	::DeleteDC(pd.hDC);
+	if (pd.hDevMode)
+		::GlobalFree(pd.hDevMode);
+	if (pd.hDevNames)
+		::GlobalFree(pd.hDevNames);
+	if (!ok)
+		::MessageBoxW(g_main, L"The plot couldn't be printed.", L"Print", MB_ICONERROR);
+}
+
+// What PrintTo draws, into a bitmap file instead of a page (/export file.bmp): a 1600 x 1200 page with the plot in it.
+static bool PrintToBitmap(const wchar_t* path) {
+	const int w = 1600, h = 1200;
+	BITMAPINFO bi{};
+	bi.bmiHeader = { sizeof(bi.bmiHeader), w, h, 1, 24, BI_RGB };
+	void* bits = nullptr;
+	HDC dc = ::CreateCompatibleDC(nullptr);
+	HBITMAP bmp = ::CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+	if (!bmp) {
+		::DeleteDC(dc);
+		return false;
+	}
+	auto old = ::SelectObject(dc, bmp);
+	RECT page = { 0, 0, w, h };
+	::FillRect(dc, &page, (HBRUSH)::GetStockObject(GRAY_BRUSH));
+	RECT rc = { 50, 50, w - 50, h - 50 };
+	bool ok = g_plot.PrintTo(dc, rc) != FALSE;
+	::GdiFlush();
+	::SelectObject(dc, old);
+	::DeleteDC(dc);
+	const DWORD stride = (w * 3 + 3) & ~3u, size = stride * h;
+	const DWORD headers = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+	BITMAPFILEHEADER fh{ 0x4D42, headers + size, 0, 0, headers };
+	FILE* f = nullptr;
+	if (ok && !_wfopen_s(&f, path, L"wb") && f) {
+		ok = fwrite(&fh, sizeof(fh), 1, f) == 1 && fwrite(&bi.bmiHeader, sizeof(bi.bmiHeader), 1, f) == 1 &&
+			fwrite(bits, size, 1, f) == 1;
+		ok = fclose(f) == 0 && ok;
+	}
+	else
+		ok = false;
+	::DeleteObject(bmp);
+	return ok;
+}
+
 static void OnCommand(HWND hwnd, UINT id) {
 	if (id >= ID_EXAMPLE_FIRST && id < ID_EXAMPLE_FIRST + std::size(g_Examples)) {
 		LoadExample(id - ID_EXAMPLE_FIRST);
@@ -531,6 +617,13 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_TRACE: ToggleStyle(FPLS_NOTRACE); break;
 		case ID_DEMO_TANGENT: ToggleStyle(FPLS_TANGENT); break;
 		case ID_DEMO_FIT: g_plot.ZoomToFit(); ShowView(); break;
+		case ID_DEMO_LOGX: g_plot.SetLogAxes(!g_plot.IsLogX(), g_plot.IsLogY()); ShowView(); break;
+		case ID_DEMO_LOGY: g_plot.SetLogAxes(g_plot.IsLogX(), !g_plot.IsLogY()); ShowView(); break;
+		case ID_DEMO_COPY:
+			if (!g_plot.Copy())
+				::MessageBoxW(hwnd, L"The plot couldn't be copied.", L"Copy", MB_ICONERROR);
+			break;
+		case ID_DEMO_PRINT: PrintPlot(); break;
 		case ID_DEMO_UNDO: g_plot.Undo(); ShowView(); break;
 		case ID_DEMO_REDO: g_plot.Redo(); ShowView(); break;
 		case ID_DEMO_AUTOSLIDERS: g_autoSliders = !g_autoSliders; SyncGraphs(); break;
@@ -599,8 +692,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			if (!g_openPath.empty() && !OpenPlot(g_openPath.c_str()))
 				g_exitCode = 2;
 			if (!g_exportPath.empty()) {
-				bool svg = g_exportPath.size() > 4 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 4, L".svg") == 0;
-				BOOL ok = svg ? g_plot.ExportSvg(g_exportPath.c_str()) : g_plot.ExportPng(g_exportPath.c_str(), 1);
+				auto is = [](LPCWSTR ext) {
+					return g_exportPath.size() > 4 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 4, ext) == 0;
+				};
+				BOOL ok = is(L".svg") ? g_plot.ExportSvg(g_exportPath.c_str())
+					: is(L".bmp") ? PrintToBitmap(g_exportPath.c_str())
+					: g_plot.ExportPng(g_exportPath.c_str(), 1);
 				// a quit posted while the window is being made is lost: close it once the loop runs
 				g_exitCode = ok ? 0 : 1;
 				::PostMessage(hwnd, WM_CLOSE, 0, 0);
@@ -695,6 +792,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTPNG, L"Export &PNG...");
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTSVG, L"Export &SVG...");
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_COPY, L"&Copy Plot\tCtrl+Shift+C");
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_PRINT, L"P&rint...\tCtrl+P");
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXIT, L"E&xit");
 
@@ -708,6 +807,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_UNDO, L"&Undo Plot Change");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_REDO, L"Red&o Plot Change");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_EQUAL, L"&Equal Scales");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_LOGX, L"Lo&g X Axis");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_LOGY, L"Log &Y Axis");
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_LEGEND, L"&Legend");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_SLIDERS, L"&Sliders");
@@ -745,6 +846,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, '3', ID_DEMO_3D },
 		{ FVIRTKEY | FCONTROL, 'O', ID_DEMO_OPEN },
 		{ FVIRTKEY | FCONTROL, 'F', ID_DEMO_FIT },
+		{ FVIRTKEY | FCONTROL | FSHIFT, 'C', ID_DEMO_COPY },
+		{ FVIRTKEY | FCONTROL, 'P', ID_DEMO_PRINT },
 		{ FVIRTKEY | FCONTROL, 'S', ID_DEMO_SAVE },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));

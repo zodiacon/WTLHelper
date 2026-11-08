@@ -601,6 +601,124 @@ double FplProgram::Eval(const double* slots) const {
 
 // ---- All of it -------------------------------------------------------------------------------------------------------
 
+FplOdeText FplSplitOde(std::wstring_view text) {
+	FplOdeText o;
+	const size_t n = text.size();
+	size_t i = 0;
+	auto spaces = [&] {
+		while (i < n && (text[i] == L' ' || text[i] == L'\t'))
+			i++;
+	};
+	auto take = [&](wchar_t c) {
+		spaces();
+		if (i < n && text[i] == c) {
+			i++;
+			return true;
+		}
+		return false;
+	};
+	spaces();
+	const size_t start = i;
+	if (!(take(L'y') && (take(L'\'') || take(wchar_t(0x2032))))) {
+		i = start;
+		if (!(take(L'd') && i < n && text[i] == L'y' && take(L'y') && take(L'/') && take(L'd') && i < n &&
+			text[i] == L'x' && take(L'x')))
+			return o;
+	}
+	if (!take(L'='))
+		return o;
+	o.isOde = true;
+	o.rhs = i;
+	// the commas at the top: F, then each y(a) = b
+	auto nextComma = [&](size_t from) {
+		int depth = 0;
+		for (size_t k = from; k < n; k++) {
+			wchar_t c = text[k];
+			if (c == L'(' || c == L'[' || c == L'{')
+				depth++;
+			else if (c == L')' || c == L']' || c == L'}')
+				depth--;
+			else if (c == L',' && depth == 0)
+				return k;
+		}
+		return n;
+	};
+	size_t comma = nextComma(i);
+	o.rhsLen = comma - o.rhs;
+	while (comma < n) {
+		i = comma + 1;
+		spaces();
+		if (!take(L'y') || !take(L'(')) {
+			spaces();
+			o.errorAt = i;
+			return o;
+		}
+		FplOdeStart st;
+		st.a = i;
+		int depth = 1;
+		size_t close = std::wstring_view::npos;
+		for (size_t k = i; k < n; k++) {
+			if (text[k] == L'(')
+				depth++;
+			else if (text[k] == L')' && --depth == 0) {
+				close = k;
+				break;
+			}
+		}
+		if (close == std::wstring_view::npos) {
+			o.errorAt = n;
+			o.missingClose = true;
+			return o;
+		}
+		st.aLen = close - st.a;
+		i = close + 1;
+		if (!take(L'=')) {
+			spaces();
+			o.errorAt = i;
+			return o;
+		}
+		st.b = i;
+		comma = nextComma(i);
+		st.bLen = comma - i;
+		o.starts.push_back(st);
+	}
+	return o;
+}
+
+namespace {
+
+// An ODE's part: a value (no relation, point or list), with no variables but those allowed; errors at their places in
+// the whole text.
+void BuildOdePart(std::wstring_view text, size_t at, size_t len, unsigned allowed, const FplParseOptions& options,
+	const std::vector<std::wstring>& parameters, FplProgram& out, FplError& error) {
+	auto r = FplParse(text.substr(at, len), options);
+	FplError err = r.error;
+	if (!err) {
+		auto& root = r.ast[r.root];
+		if (root.op == FplOp::Cmp || root.op == FplOp::And)
+			err = { FplErrorCode::MisplacedRelation, root.pos, root.len };
+		else if (root.op == FplOp::Tuple)
+			err = { FplErrorCode::MisplacedPoint, root.pos, root.len };
+		else if (root.op == FplOp::List)
+			err = { FplErrorCode::ListNotAllowed, root.pos, root.len };
+		else if (unsigned extra = FplVariablesOf(r.ast, r.root) & ~allowed) {
+			const wchar_t* name = (extra & FplVarX) ? L"x" : (extra & FplVarY) ? L"y" : (extra & FplVarT) ? L"t"
+				: (extra & FplVarTheta) ? FplTheta : (extra & FplVarR) ? L"r" : (extra & FplVarZ) ? L"z"
+				: (extra & FplVarU) ? L"u" : L"v";
+			err = { FplErrorCode::VariableNotAllowed, root.pos, root.len, name };
+		}
+	}
+	if (!err)
+		out = FplCompile(r.ast, r.root, parameters, &err);
+	if (err) {
+		err.pos += static_cast<int>(at);
+		error = err;
+		out = {};
+	}
+}
+
+} // namespace
+
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
 	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists) {
 	FplExpression e;
@@ -609,6 +727,34 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 	options.degrees = degrees;
 	options.functions = functions;
 	options.lists = lists;
+	if (auto ode = FplSplitOde(text); ode.isOde) {
+		e.kind = FplKind::SlopeField;
+		BuildOdePart(text, ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, e.f, e.error);
+		if (!e.error && ode.errorAt != std::wstring_view::npos) {
+			e.error = { ode.missingClose ? FplErrorCode::MissingClose : FplErrorCode::UnexpectedToken,
+				static_cast<int>(std::min(ode.errorAt, text.size())), ode.errorAt < text.size() ? 1 : 0,
+				ode.missingClose ? L")" : L"" };
+			e.f = {};
+		}
+		else if (!e.error) {
+			// each y(a) = b: a and b one after the other
+			for (auto& st : ode.starts) {
+				FplProgram a, b;
+				BuildOdePart(text, st.a, st.aLen, 0, options, parameters, a, e.error);
+				if (!e.error)
+					BuildOdePart(text, st.b, st.bLen, 0, options, parameters, b, e.error);
+				if (e.error)
+					break;
+				e.starts.push_back(std::move(a));
+				e.starts.push_back(std::move(b));
+			}
+			if (e.error) {
+				e.f = {};
+				e.starts.clear();
+			}
+		}
+		return e;
+	}
 	auto parsed = FplParse(text, options);
 	if (parsed.error) {
 		e.error = parsed.error;

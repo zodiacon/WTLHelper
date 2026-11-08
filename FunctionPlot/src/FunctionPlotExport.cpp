@@ -95,8 +95,8 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 		Num(w) + " " + Num(h) + "\" font-family=\"Segoe UI, sans-serif\">\n";
 	svg += "<rect width=\"100%\" height=\"100%\" fill=\"" + Color(style.back) + "\"/>\n";
 
-	FplTicks tx = FplMakeTicks(view.xMin, view.xMax, view.width, 90, style.piTicks);
-	FplTicks ty = FplMakeTicks(view.yMin, view.yMax, view.height, 60);
+	FplTicks tx = FplMakeTicksX(view, 90, style.piTicks);
+	FplTicks ty = FplMakeTicksY(view, 60);
 	auto gridPath = [&](const std::vector<double>& xs, const std::vector<double>& ys, uint32_t color) {
 		std::string d;
 		for (double x : xs)
@@ -110,7 +110,7 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 		gridPath(tx.minor, ty.minor, style.gridMinor);
 		gridPath(tx.major, ty.major, style.grid);
 	}
-	const double ax = view.ToScreenX(0), ay = view.ToScreenY(0);
+	const double ax = view.AxisLineX(), ay = view.AxisLineY();
 	const bool xAxis = ay >= 0 && ay <= h, yAxis = ax >= 0 && ax <= w;
 	if (style.showAxes) {
 		std::string d;
@@ -158,6 +158,13 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(g.width) +
 				"\" stroke-linecap=\"round\" stroke-linejoin=\"round\"" + dashes + opacity + "/>\n";
 		}
+		if (!g.geometry.marks.empty()) {
+			std::string d;
+			for (auto& m : g.geometry.marks)
+				AddPolyline(d, { m.from, m.to }, false);
+			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"1.25\" stroke-linecap=\"round\"" +
+				" stroke-opacity=\"" + Num(g.opacity * (g.geometry.lines.empty() ? 0.75 : 0.4)) + "\"/>\n";
+		}
 		if (!g.geometry.arrows.empty()) {
 			std::string d;
 			for (auto& a : g.geometry.arrows) {
@@ -175,6 +182,8 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 				"\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n";
 		}
 		for (auto& p : g.geometry.points) {
+			if (!std::isfinite(p.x) || !std::isfinite(p.y))
+				continue;
 			if (g.flags & FplGraphHollow)
 				svg += "<circle cx=\"" + Num(p.x) + "\" cy=\"" + Num(p.y) + "\" r=\"" + Num(2.5 + g.width) + "\" fill=\"" +
 					Color(style.back) + "\" stroke=\"" + color + "\" stroke-width=\"2\"" + opacity + "/>\n";

@@ -190,6 +190,8 @@ enum class FplKind : uint8_t {
 	Integral,		// integral(f, var, lo, hi) alone, with no free variables: its area; expr[0] f (in the variable,
 					// the def's name), expr[1] lo, expr[2] hi
 	Regression,		// lhs ~ rhs: the unknown names in it fitted over lists; expr[0] lhs - rhs, expr[1] lhs
+	SlopeField,		// y' = F(x, y) (FplBuild only, from FplSplitOde): its slopes, and with ", y(a) = b" (any number)
+					// the solutions through (a, b); FplExpression's f is F, its starts a and b of each
 };
 
 struct FplPlotDef {
@@ -295,10 +297,28 @@ struct FplExpression {
 	FplProgram h;				// the 3D kinds' z
 	FplProgram value;			// Integral's: its value
 	FplProgram df;				// Function's df/dx, FunctionOfY's df/dy (empty if it can't be derived)
+	std::vector<FplProgram> starts;	// SlopeField's initial conditions: a and b of each y(a) = b
 	std::wstring name;			// Definition's
 	FplError error;
 };
 
-// Parses, classifies and compiles text; the slots are as for FplCompile with the same parameters.
+// "y' = F" (or U+2032 for the prime, or "dy/dx = F"), with ", y(a) = b" after it (any number of them) for the
+// solutions through (a, b): the
+// parts' places in the text. A comma inside ( ) [ ] { } is the expression's. errorAt: where a condition after the
+// comma stopped making sense (npos when it's fine).
+struct FplOdeStart {
+	size_t a = 0, aLen = 0, b = 0, bLen = 0;	// y(a) = b
+};
+struct FplOdeText {
+	bool isOde = false;
+	size_t rhs = 0, rhsLen = 0;
+	std::vector<FplOdeStart> starts;			// any number, comma-separated
+	size_t errorAt = std::wstring_view::npos;
+	bool missingClose = false;
+};
+FplOdeText FplSplitOde(std::wstring_view text);
+
+// Parses, classifies and compiles text; the slots are as for FplCompile with the same parameters. An ODE (FplSplitOde)
+// is a SlopeField: F may use x, y and the parameters, a and b only the parameters.
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees = false,
 	const std::vector<FplUserFunction>* functions = nullptr, const std::vector<std::wstring>* lists = nullptr);

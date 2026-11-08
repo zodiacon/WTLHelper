@@ -14,6 +14,8 @@
 
 #include <limits>
 #include <memory>
+#include <string>
+#include <vector>
 
 struct ID2D1RenderTarget;
 
@@ -88,6 +90,8 @@ enum FPLKIND {
 	FPLK_IMPLICITSURFACE,      // F(x, y, z) = 0 ("x^2 + y^2 + z^2 = 25"): 3D only
 	FPLK_INTEGRAL,             // integral(f, lo, hi) alone: the area shaded, its value (FPLGRAPHINFO::value)
 	FPLK_REGRESSION,           // y1 ~ m x1 + b: m and b fitted to lists (GetValue); FPLGRAPHINFO::value is R squared
+	FPLK_SLOPEFIELD,           // y' = F(x, y): its slopes; with ", y(a) = b" the solution through (a, b) too (a and b
+	                           // parameters alone: the point can be dragged)
 };
 
 // 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D
@@ -249,6 +253,7 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnRButtonDown)
+		MESSAGE_HANDLER(WM_COPY, OnCopy)
 		MESSAGE_HANDLER(WM_RBUTTONUP, OnRButtonUp)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
@@ -315,6 +320,11 @@ public:
 	// ---- The view ----
 	void SetView(const FPLVIEW& view);         // with FPLS_EQUALSCALE, grown to equal scales
 	FPLVIEW GetView() const;
+	// Log scales (base 10) on x and y: ranges that aren't positive become 3 decades under their top (or 0.1 to 100).
+	// Not in 3D; no equal scales on a log axis.
+	void SetLogAxes(BOOL logX, BOOL logY);
+	BOOL IsLogX() const;
+	BOOL IsLogY() const;
 	void SetHomeView(const FPLVIEW* view);     // where ResetView (and Home) goes; null: x -10 to 10, y to match
 	void ResetView();
 	void Zoom(double factor);                  // about the center; > 1 zooms in
@@ -374,6 +384,12 @@ public:
 	BOOL ExportPng(LPCWSTR pszPath, float scale = 1);
 	// The view as SVG: the grid, the axes and their labels, the graphs (not heat maps) and the legend. 2D only.
 	BOOL ExportSvg(LPCWSTR pszPath);
+	// The plot on the clipboard (Ctrl+C, WM_COPY): a bitmap at the screen's resolution (CF_DIB), a "PNG", in 2D the
+	// SVG ("image/svg+xml"), and the graphs' texts a line each (CF_UNICODETEXT). COM must be up.
+	BOOL Copy();
+	// The plot drawn into a printer's (or any) DC, as large as fits in rc keeping its shape, centered: an image at the
+	// device's resolution up to 8 times the window's size, stretched with HALFTONE past that. COM must be up.
+	BOOL PrintTo(HDC hdc, const RECT& rc);
 
 	// ---- Look ----
 	void SetColors(const FPLCOLORS* colors);   // null: back to the system's (and the dark mode's)
@@ -395,6 +411,7 @@ private:
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnRButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCopy(UINT, WPARAM, LPARAM, BOOL&) { Copy(); return 0; }
 	LRESULT OnRButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
@@ -436,6 +453,9 @@ private:
 	// FunctionPlotPaint.cpp
 	void Paint();
 	HRESULT PaintTo(ID2D1RenderTarget* target, float dpi, bool exporting);
+	// the plot as pixels (premultiplied BGRA, top-down) at scale times its size in DIPs (3D: the frame as shown)
+	bool RenderImage(float scale, std::vector<uint32_t>& pixels, UINT& width, UINT& height);
+	std::string BuildSvg();
 	bool CreateTarget();
 	void DiscardTarget();
 	void BuildGeometries();                    // the sampled lines and fills as Direct2D geometries

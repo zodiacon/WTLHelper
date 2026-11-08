@@ -27,6 +27,7 @@ struct FplGraphPaths {
 	ComPtr<ID2D1PathGeometry> fills;
 	ComPtr<ID2D1PathGeometry> contours;
 	ComPtr<ID2D1PathGeometry> arrows;
+	ComPtr<ID2D1PathGeometry> marks;	// a slope field's
 	struct Label {
 		FplPoint at;
 		std::wstring text;

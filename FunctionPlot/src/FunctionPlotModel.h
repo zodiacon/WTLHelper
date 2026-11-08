@@ -9,8 +9,10 @@
 
 #include "FunctionPlotExpr.h"
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -22,17 +24,32 @@ using FplPolygon = std::vector<FplPoint>;
 
 // ---- The view --------------------------------------------------------------------------------------------------------
 
+// An axis is linear or logarithmic. On a log axis the ranges stay in the plane's values (positive), and the mapping,
+// panning and zooming work in their logarithms ("axis units"): a value that isn't positive is NaN on the screen.
 struct FplViewport {
 	double xMin = -10, xMax = 10, yMin = -10, yMax = 10;	// the plane's part shown
 	double width = 800, height = 600;						// on the screen
+	bool logX = false, logY = false;						// log10 scales
 
 	bool Valid() const;
-	double ScaleX() const { return width / (xMax - xMin); }		// DIPs per unit
-	double ScaleY() const { return height / (yMax - yMin); }
-	double ToScreenX(double x) const { return (x - xMin) * ScaleX(); }
-	double ToScreenY(double y) const { return (yMax - y) * ScaleY(); }
-	double ToPlaneX(double sx) const { return xMin + sx / ScaleX(); }
-	double ToPlaneY(double sy) const { return yMax - sy / ScaleY(); }
+	double AxisX(double x) const { return logX ? (x > 0 ? std::log10(x) : std::numeric_limits<double>::quiet_NaN()) : x; }
+	double AxisY(double y) const { return logY ? (y > 0 ? std::log10(y) : std::numeric_limits<double>::quiet_NaN()) : y; }
+	double FromAxisX(double a) const { return logX ? std::pow(10.0, a) : a; }
+	double FromAxisY(double a) const { return logY ? std::pow(10.0, a) : a; }
+	double ScaleX() const { return width / (AxisX(xMax) - AxisX(xMin)); }		// DIPs per axis unit
+	double ScaleY() const { return height / (AxisY(yMax) - AxisY(yMin)); }
+	// DIPs per unit of the plane at a value (the scale on a linear axis)
+	double DipsPerUnitX(double x) const { return logX ? ScaleX() / (x * 2.302585092994046) : ScaleX(); }
+	double DipsPerUnitY(double y) const { return logY ? ScaleY() / (y * 2.302585092994046) : ScaleY(); }
+	double ToScreenX(double x) const { return (AxisX(x) - AxisX(xMin)) * ScaleX(); }
+	double ToScreenY(double y) const { return (AxisY(yMax) - AxisY(y)) * ScaleY(); }
+	double ToPlaneX(double sx) const { return FromAxisX(AxisX(xMin) + sx / ScaleX()); }
+	double ToPlaneY(double sy) const { return FromAxisY(AxisY(yMax) - sy / ScaleY()); }
+	// Where the axes are drawn on the screen: at 0, or (a log axis has none) far off, so labels go along the edge.
+	double AxisLineX() const { return logX ? -1e9 : ToScreenX(0); }		// the y axis's x
+	double AxisLineY() const { return logY ? 1e9 : ToScreenY(0); }		// the x axis's y
+	// Makes the ranges fit the scales: a log axis's range positive (keeping its top, at least 3 decades), clamped.
+	void FixLogRanges();
 	FplPoint ToScreen(FplPoint p) const { return { ToScreenX(p.x), ToScreenY(p.y) }; }
 	FplPoint ToPlane(FplPoint s) const { return { ToPlaneX(s.x), ToPlaneY(s.y) }; }
 
@@ -53,14 +70,22 @@ struct FplTicks {
 	int piNum = 1, piDen = 1;
 	std::vector<double> major;		// in the range, ascending
 	std::vector<double> minor;		// between the majors (not on them)
+	bool log = false;				// powers of 10 on a log axis
 };
 
 // Majors at least minSpacing DIPs apart over [min, max] drawn over pixels DIPs: 1, 2 or 5 times a power of 10, or with pi
 // multiples of pi (pi/12, pi/6, pi/4, pi/2, pi, then 2, 5, 10... times), falling back to decimals below pi/12.
 FplTicks FplMakeTicks(double min, double max, double pixels, double minSpacing, bool pi = false);
 
+// A log axis's ticks over [min, max] (positive): majors at powers of 10 (every 1, 2, 5, 10... decades as there's room),
+// minors at 2 to 9 times them (or the decades between); under a decade, the linear ticks spaced for the range's top.
+FplTicks FplMakeLogTicks(double min, double max, double pixels, double minSpacing);
+// The ticks of the view's x and y axes, linear or log.
+FplTicks FplMakeTicksX(const FplViewport& view, double minSpacing, bool pi = false);
+FplTicks FplMakeTicksY(const FplViewport& view, double minSpacing);
+
 // A tick's label: "-0.5" (with U+2212), "3pi/4" (U+03C0), "2.5x10^6" (U+00D7 and superscript digits) past 1e6 or below
-// 1e-4.
+// 1e-4; on a log axis "0.01" to "1000", else 10 with a superscript power.
 std::wstring FplFormatTick(double value, const FplTicks& ticks);
 
 // ---- Sampling --------------------------------------------------------------------------------------------------------
@@ -83,6 +108,9 @@ struct FplSampleOptions {
 	int contourLevels = 10;			// about this many
 	double heatCell = 4;			// DIPs: the heat map's cells
 	double arrowSpacing = 40;		// DIPs: at least this far apart
+	double slopeSpacing = 26;		// DIPs: a slope field's marks at least this far apart
+	double odeStep = 2;				// DIPs: an ODE's solution's longest step in x
+	double odeTolerance = 0.02;		// DIPs: its error in y a step
 };
 
 // A curve given as t -> a point in the plane (NaN where undefined), sampled over [t0, t1] from samples + 1 first
@@ -157,9 +185,20 @@ struct FplGeometry {
 	std::vector<FplContour> contours;	// Surface (options.contours)
 	FplHeatmap heatmap;					// Surface (options.heatmap)
 	std::vector<FplArrow> arrows;		// VectorField
+	std::vector<FplArrow> marks;		// SlopeField: its slopes, short segments with no heads
 	bool dashed = false;				// a strict inequality's boundary
 	size_t evals = 0;
 };
+
+// A slope field's marks: on the plane's points a nice step apart (as FplSampleField's arrows), each the slope F(x, y)
+// on the screen, 0.7 of the room between them long.
+std::vector<FplArrow> FplSampleSlopes(const std::function<double(double, double)>& F, const FplViewport& view,
+	const FplSampleOptions& options = {}, size_t* evals = nullptr);
+// The solution of y' = F(x, y) through (x0, y0), both ways to the view grown by its size (as lines are clipped), by
+// Dormand-Prince 5(4) with steps of at most odeStep DIPs in x and odeTolerance DIPs of error in y; stopped where it
+// isn't defined, blows up off the screen or the steps get too small. In screen coordinates, not clipped.
+FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x0, double y0, const FplViewport& view,
+	const FplSampleOptions& options = {}, size_t* evals = nullptr);
 
 // Samples a built expression with its parameters' values (slots from FplFirstParam on; the others are set here).
 // Definitions draw nothing.

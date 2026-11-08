@@ -4,6 +4,7 @@
 //	degrees 0
 //	mode 2d
 //	panel 0
+//	log <x> <y>														log scales (1), when either is; before view
 //	view <xMin> <xMax> <yMin> <yMax>
 //	box <xMin> <xMax> <yMin> <yMax> <zMin> <zMax> <yaw> <pitch>
 //	param<TAB>name<TAB>value<TAB>min<TAB>max<TAB>step<TAB>flags
@@ -96,6 +97,8 @@ std::wstring FplSaveState(const FplSavedState& state) {
 	out += L"mode " + std::wstring(state.mode3D ? L"3d" : L"2d") + L"\n";
 	out += L"panel " + std::wstring(state.collapsed ? L"1" : L"0") + L"\n";
 	auto& v = state.view;
+	if (v.logX || v.logY)
+		out += L"log " + std::wstring(v.logX ? L"1" : L"0") + L" " + std::wstring(v.logY ? L"1" : L"0") + L"\n";
 	out += L"view " + Number(v.xMin) + L" " + Number(v.xMax) + L" " + Number(v.yMin) + L" " + Number(v.yMax) + L"\n";
 	auto& b = state.box;
 	out += L"box " + Number(b.xMin) + L" " + Number(b.xMax) + L" " + Number(b.yMin) + L" " + Number(b.yMax) + L" " +
@@ -146,6 +149,11 @@ bool FplLoadState(std::wstring_view text, FplSavedState& state) {
 			s.mode3D = rest == L"3d";
 		else if (key == L"panel")
 			s.collapsed = rest == L"1";
+		else if (key == L"log" && words.size() >= 2) {
+			s.view.logX = words[0] == L"1";
+			s.view.logY = words[1] == L"1";
+			s.view.FixLogRanges();
+		}
 		else if (key == L"view" && words.size() >= 4) {
 			FplViewport v = s.view;
 			v.xMin = ToNumber(words[0]);
