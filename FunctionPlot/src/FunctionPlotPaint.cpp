@@ -1016,6 +1016,7 @@ bool CFunctionPlotCtrl::Ensure3D() {
 	}
 	if (!s.renderer.Ready()) {
 		s.gpu.clear();
+		s.gpuFills.clear();
 		s.boxEdges = s.floorGrid = {};
 		s.brushes.clear();
 		if (!s.renderer.Init(s.view3D, s.client.cx, s.client.cy, (float)s.dpi))
@@ -1032,8 +1033,11 @@ void CFunctionPlotCtrl::Upload3D() {
 	auto& s = *m_State;
 	s.gpuStale = false;
 	s.gpu.assign(s.plot.graphs.size(), {});
-	for (size_t i = 0; i < s.plot.graphs.size(); i++)
+	s.gpuFills.assign(s.plot.graphs.size(), {});
+	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
 		s.gpu[i] = s.renderer.Create(s.plot.graphs[i].mesh);
+		s.gpuFills[i] = s.renderer.Create(s.plot.graphs[i].fillMesh);
+	}
 	s.boxEdges = s.renderer.Create(FplBoxEdges());
 	// the floor's grid at the x and y ticks
 	FplMesh grid;
@@ -1110,11 +1114,26 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		else
 			r.Draw(s.gpu[i], styleOf(i));
 	}
+	// regions are always see-through, as in 2D
+	auto fillOpacity = [&](const FplGraph& g) {
+		return g.fillOpacity >= 0 ? g.fillOpacity : IsHighContrast() ? 0.35f : 0.22f;
+	};
+	for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpuFills.size(); i++) {
+		auto& g = s.plot.graphs[i];
+		translucent = translucent || (g.Drawable() && s.gpuFills[i] && fillOpacity(g) > 0);
+	}
 	if (translucent && r.BeginTranslucent()) {
 		for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpu.size(); i++) {
 			auto& g = s.plot.graphs[i];
 			if (g.Drawable() && g.opacity < 1 && g.opacity > 0)
 				r.DrawTranslucent(s.gpu[i], styleOf(i), g.opacity);
+			if (g.Drawable() && i < s.gpuFills.size() && s.gpuFills[i] && fillOpacity(g) > 0) {
+				FplDrawStyle fill;
+				fill.color = GraphColor((int)i);
+				fill.clip = true;
+				fill.unlit = true;
+				r.DrawTranslucent(s.gpuFills[i], fill, fillOpacity(g));
+			}
 		}
 		r.EndTranslucent();
 	}
@@ -1126,6 +1145,7 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		dc->SetTextAntialiasMode(present ? D2D1_TEXT_ANTIALIAS_MODE_DEFAULT : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 		PaintTicks3D();
 		PaintColorScales();
+		PaintPoints3D();
 		PaintTrace();
 		PaintPanel();
 		r.EndOverlay();
@@ -1137,10 +1157,41 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		// the device was lost: start again on the next paint
 		r.Reset();
 		s.gpu.clear();
+		s.gpuFills.clear();
 		s.brushes.clear();
 		Invalidate();
 	}
 	ValidateRect(nullptr);
+}
+
+// A ring around each point that can be dragged, stronger under the mouse, as in 2D.
+void CFunctionPlotCtrl::PaintPoints3D() {
+	auto& s = *m_State;
+	if (s.exporting)
+		return;
+	auto* rt = s.rt;
+	const float w = ToDips(s.client.cx), h = ToDips(s.client.cy);
+	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
+		auto& g = s.plot.graphs[i];
+		if (!g.Drawable() || (g.flags & FplGraphNoDrag))
+			continue;
+		const auto points = s.plot.Points3D((int)i);
+		for (size_t k = 0; k < points.size(); k++) {
+			const auto [px, py] = g.DragOf(k);
+			if (px < 0 && py < 0 && g.DragZOf(k) < 0)
+				continue;
+			const FplVec3 c = s.box.ToBox(points[k]);
+			FplPoint on;
+			if (!(std::abs(c.x) <= 1 && std::abs(c.y) <= 1 && std::abs(c.z) <= 1) || !s.camera.Project(c, w, h, on))
+				continue;
+			const bool hot = (int)i == s.hotPoint && (int)k == s.hotPointIndex;
+			auto* brush = s.Brush(GraphColor((int)i));
+			brush->SetOpacity(hot ? 0.75f : 0.4f);
+			const float ring = hot ? 10.0f : 8.0f;
+			rt->DrawEllipse(D2D1::Ellipse(Pt(on), ring, ring), brush, 2);
+			brush->SetOpacity(1);
+		}
+	}
 }
 
 void CFunctionPlotCtrl::PaintTicks3D() {

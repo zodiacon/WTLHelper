@@ -4149,7 +4149,7 @@ TEST(Systems3D) {
 	auto oneStart = MakePlot({ L"x' = -y, y' = x, z' = 1, (1, 0, 0)" });
 	oneStart.Build3D(box);
 	CHECK(plot.graphs[0].mesh.indices.size() > oneStart.graphs[0].mesh.indices.size());
-	CHECK(plot.graphs[0].drags.empty());
+	CHECK(plot.graphs[0].DragOf(0).first == -1 && plot.graphs[0].DragOf(0).second == -1 && plot.graphs[0].DragZOf(0) == -1);
 	bool finite = true;
 	for (auto& vertex : plot.graphs[0].mesh.vertices)
 		finite = finite && std::isfinite(vertex.pos.x) && std::isfinite(vertex.normal.x);
@@ -4424,6 +4424,210 @@ TEST(Odes3DAndPicking) {
 	CHECK(!pick(helix, { 5 * std::cos(t), 5 * std::sin(t), t }));
 }
 
+TEST(PrimesOnBuiltIns) {
+	std::vector<std::wstring> none;
+	auto at = [&](const wchar_t* text, double x, bool degrees = false) {
+		auto e = FplBuild(text, none, degrees);
+		CHECK(!e.error);
+		double slots[FplFirstParam] = {};
+		slots[FplSlotX] = x;
+		return e.error ? NaN : e.f.Eval(slots);
+	};
+	CHECK_NEAR_TOL(at(L"y = sin'(x)", 0.7), std::cos(0.7), 1e-12);
+	CHECK_NEAR_TOL(at(L"y = sin''(x)", 0.7), -std::sin(0.7), 1e-12);
+	CHECK_NEAR_TOL(at(L"y = sin'''(x)", 0.7), -std::cos(0.7), 1e-12);
+	CHECK_NEAR_TOL(at(L"cos'(x)", 0.7), -std::sin(0.7), 1e-12);
+	CHECK_NEAR_TOL(at(L"exp'(x)", 0.7), std::exp(0.7), 1e-12);
+	CHECK_NEAR_TOL(at(L"ln'(x)", 2), 0.5, 1e-12);
+	CHECK_NEAR_TOL(at(L"tan'(x)", 0.7), 1 / (std::cos(0.7) * std::cos(0.7)), 1e-12);
+	CHECK_NEAR_TOL(at(std::wstring(L"sin").append(1, wchar_t(0x2032)).append(L"(x)").c_str(), 0.7), std::cos(0.7), 1e-12);
+	// the derivative of the function, at its argument: no chain rule, as f'(2x)
+	CHECK_NEAR_TOL(at(L"sin'(2x)", 0.7), std::cos(1.4), 1e-12);
+	// without parentheses, in products, with a power
+	CHECK_NEAR_TOL(at(L"sin' 2x", 0.7), std::cos(1.4), 1e-12);
+	CHECK_NEAR_TOL(at(L"3sin'(x) + 1", 0.7), 3 * std::cos(0.7) + 1, 1e-12);
+	CHECK_NEAR_TOL(at(L"sin'^2(x)", 0.7), std::cos(0.7) * std::cos(0.7), 1e-12);
+	CHECK_NEAR_TOL(at(L"sin'(x) cos'(x)", 0.7), -std::cos(0.7) * std::sin(0.7), 1e-12);
+	// degrees: as d/dx sees them
+	CHECK_NEAR_TOL(at(L"sin'(x)", 60, true), std::cos(60 * Pi / 180) * Pi / 180, 1e-12);
+	CHECK_NEAR_TOL(at(L"d/dx sin x", 60, true), at(L"sin'(x)", 60, true), 1e-12);
+	// as d/dx does
+	CHECK_NEAR_TOL(at(L"sin''(x)", 1.1), at(L"d/dx d/dx sin x", 1.1), 1e-12);
+	// its argument isn't lost: another name, an expression, a nested one
+	CHECK_NEAR_TOL(at(L"sin'(cos'(x))", 0.7), std::cos(-std::sin(0.7)), 1e-12);
+	// errors
+	CHECK(FplBuild(L"y = min'(x, 2)", none).error.code == FplErrorCode::NotDifferentiable);
+	CHECK(FplBuild(L"y = sin'", none).error.code == FplErrorCode::MissingArgument);
+	CHECK(FplBuild(L"y = x'", none).error.code != FplErrorCode::None);
+	// and an ODE's y' next to them
+	auto e = FplBuild(L"y'' = sin'(y) + y'", none);
+	CHECK(!e.error);
+	double slots[FplFirstParam] = {};
+	slots[FplSlotY] = 0.5;
+	slots[FplSlotT] = 2;
+	CHECK_NEAR_TOL(e.f.Eval(slots), std::cos(0.5) + 2, 1e-12);
+}
+
+TEST(Fills3D) {
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	// the area of a mesh's triangles, in the space's units
+	auto area = [&](const FplMesh& m) {
+		double total = 0;
+		for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+			auto a = box.ToSpace(m.vertices[m.indices[i]].pos), b = box.ToSpace(m.vertices[m.indices[i + 1]].pos),
+				c = box.ToSpace(m.vertices[m.indices[i + 2]].pos);
+			total += std::abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2;
+		}
+		return total;
+	};
+	// a square, whichever way it winds; two apart; two overlapping count once; a hole wound the other way stays out
+	FplPolygon square = { { -2, -2 }, { 2, -2 }, { 2, 2 }, { -2, 2 } };
+	FplPolygon backward(square.rbegin(), square.rend());
+	CHECK_NEAR_TOL(area(FplFillMesh({ square }, box)), 16, 0.5);
+	CHECK_NEAR_TOL(area(FplFillMesh({ backward }, box)), 16, 0.5);
+	FplPolygon far2 = { { 5, 5 }, { 7, 5 }, { 7, 7 }, { 5, 7 } };
+	CHECK_NEAR_TOL(area(FplFillMesh({ square, far2 }, box)), 20, 0.7);
+	FplPolygon over = { { 0, -2 }, { 4, -2 }, { 4, 2 }, { 0, 2 } };
+	CHECK_NEAR_TOL(area(FplFillMesh({ square, over }, box)), 24, 0.7);
+	FplPolygon hole = { { -1, -1 }, { -1, 1 }, { 1, 1 }, { 1, -1 } };
+	CHECK_NEAR_TOL(area(FplFillMesh({ square, hole }, box)), 12, 0.7);
+	// a triangle: the slanted edge counts
+	CHECK_NEAR_TOL(area(FplFillMesh({ { { 0, 0 }, { 6, 0 }, { 0, 6 } } }, box)), 18, 0.5);
+	// cut to the box; flat and on the plane; nothing for nothing
+	FplPolygon large = { { -50, -50 }, { 50, -50 }, { 50, 50 }, { -50, 50 } };
+	auto whole = FplFillMesh({ large }, box);
+	CHECK_NEAR_TOL(area(whole), 400, 1);
+	bool flat = true;
+	for (auto& v : whole.vertices)
+		flat = flat && std::abs(v.pos.z) < 1e-6f && std::abs(v.pos.x) <= 1.0001f && std::abs(v.pos.y) <= 1.0001f && v.normal.z == 1;
+	CHECK(flat);
+	CHECK(FplFillMesh({}, box).Empty());
+	CHECK(FplFillMesh({ { { 1, 1 }, { 2, 1 } } }, box).Empty());
+	CHECK(FplFillMesh({ square }, FplBox3{ 1, 1, 0, 1, 0, 1 }).Empty());
+
+	// regions of every kind, through the graphs, by their true areas
+	const double Pi2 = 3.141592653589793;
+	struct Case { const wchar_t* text; double expected; };
+	const Case cases[] = {
+		{ L"x^2 + y^2 < 16", 16 * Pi2 },			// marching squares' cells
+		{ L"y < 4 - x^2", 0 },						// a function's, checked below
+		{ L"x^2 - 4 < y < 4 - x^2", 64.0 * 2 / 3 },	// what's between two curves: 2 (4 - x^2) over -2..2
+		{ L"1 < x < 3", 40 },						// a band
+		{ L"r < 5", 25 * Pi2 },						// polar
+	};
+	for (auto& c : cases) {
+		auto plot = MakePlot({ c.text });
+		CHECK(!plot.graphs[0].expr.error);
+		plot.Build3D(box);
+		CHECK(!plot.graphs[0].fillMesh.Empty());
+		if (c.expected > 0)
+			CHECK_NEAR_TOL(area(plot.graphs[0].fillMesh), c.expected, c.expected * 0.03);
+	}
+	// no region, no fill; hidden, none; curves keep their tubes beside it
+	auto plain = MakePlot({ L"y = x", L"x^2 + y^2 = 4", L"y' = -y, y(0) = 1", L"(1, 2)" });
+	plain.Build3D(box);
+	for (auto& g : plain.graphs) {
+		CHECK(g.fillMesh.Empty());
+		CHECK(!g.mesh.Empty());
+	}
+	auto region = MakePlot({ L"y < x" });
+	region.Build3D(box);
+	CHECK(!region.graphs[0].mesh.Empty());
+	region.graphs[0].flags |= FplGraphHidden;
+	region.Build3D(box);
+	CHECK(region.graphs[0].fillMesh.Empty());
+	// a listed one's together
+	auto listed = MakePlot({ L"L = [0, 1]", L"(x - 5L)^2 + y^2 < 1" });
+	listed.Build3D(box);
+	CHECK_NEAR_TOL(area(listed.graphs[1].fillMesh), 2 * Pi2, 0.2);
+}
+
+TEST(Dragging3D) {
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	FplCamera cam;
+	const float w = 800, h = 600;
+	auto params = { Param(L"a", 2), Param(L"b", 3), Param(L"c", 4), Param(L"d", -2) };
+	auto plot = MakePlot({ L"(a, b, c)", L"(d, 1)", L"y' = -y, y(a) = b", L"y'' = -y, y(d) = 1, y'(d) = 0",
+		L"x' = -y, y' = x, z' = 0, (a, b, c), (1, 2, 3)", L"(1, 2, 3)", L"(a, a, 2)", L"y = x", L"x^2 + y^2 = 4" }, params);
+	for (auto& g : plot.graphs)
+		CHECK(!g.expr.error);
+	// which points each has, in which order
+	auto near3 = [](FplPoint3 p, double x, double y, double z) {
+		return std::abs(p.x - x) < 1e-12 && std::abs(p.y - y) < 1e-12 && std::abs(p.z - z) < 1e-12;
+	};
+	CHECK_INT(plot.Points3D(0).size(), 1);
+	CHECK(near3(plot.Points3D(0)[0], 2, 3, 4));
+	CHECK(near3(plot.Points3D(1)[0], -2, 1, 0));
+	CHECK(near3(plot.Points3D(2)[0], 2, 3, 0));
+	CHECK(near3(plot.Points3D(3)[0], -2, 1, 0));
+	CHECK_INT(plot.Points3D(4).size(), 2);
+	CHECK(near3(plot.Points3D(4)[1], 1, 2, 3));
+	CHECK(plot.Points3D(7).empty());
+	CHECK(plot.Points3D(8).empty());
+	// what each one sets
+	CHECK_INT(plot.graphs[0].DragOf(0).first, 0);
+	CHECK_INT(plot.graphs[0].DragOf(0).second, 1);
+	CHECK_INT(plot.graphs[0].DragZOf(0), 2);
+	CHECK_INT(plot.graphs[1].DragOf(0).first, 3);
+	CHECK_INT(plot.graphs[1].DragZOf(0), -1);
+	CHECK_INT(plot.graphs[4].DragZOf(0), 2);
+	CHECK_INT(plot.graphs[4].DragZOf(1), -1);
+	CHECK_INT(plot.graphs[4].DragOf(1).first, -1);
+	CHECK_INT(plot.graphs[5].DragOf(0).first, -1);
+	CHECK_INT(plot.graphs[6].DragZOf(0), -1);
+
+	// found by where they show
+	auto only = MakePlot({ L"(a, b, c)", L"(1, 2, 3)", L"(d, 1)" }, params);
+	auto screen = [&](FplPoint3 p) {
+		FplPoint s;
+		CHECK(cam.Project(box.ToBox(p), w, h, s));
+		return s;
+	};
+	int index = -1;
+	CHECK_INT(only.DraggableAt3D(screen({ 2, 3, 4 }), cam, box, w, h, 6, &index), 0);
+	CHECK_INT(index, 0);
+	CHECK_INT(only.DraggableAt3D(screen({ -2, 1, 0 }), cam, box, w, h, 6), 2);
+	CHECK_INT(only.DraggableAt3D(screen({ 1, 2, 3 }), cam, box, w, h, 6), -1);	// no parameters
+	FplPoint far3 = screen({ 2, 3, 4 });
+	far3.x += 40;
+	CHECK_INT(only.DraggableAt3D(far3, cam, box, w, h, 6), -1);
+	// not when it's asked not to be, nor outside the box
+	only.graphs[0].flags |= FplGraphNoDrag;
+	CHECK_INT(only.DraggableAt3D(screen({ 2, 3, 4 }), cam, box, w, h, 6), -1);
+	only.graphs[0].flags = 0;
+	FplBox3 tiny{ -1, 1, -1, 1, -1, 1 };
+	CHECK(only.DraggableAt3D(screen({ 2, 3, 4 }), cam, tiny, w, h, 6) != 0);
+
+	// a ray through a point on the plane comes back as that point
+	auto through = [&](FplPoint3 p, FplVec3& origin, FplVec3& dir) {
+		FplPoint s;
+		cam.Project(box.ToBox(p), w, h, s);
+		cam.Ray(s, w, h, origin, dir);
+	};
+	FplVec3 origin, dir;
+	through({ 5, -3, 2 }, origin, dir);
+	FplPoint3 at;
+	CHECK(FplDragOnPlane(origin, dir, box, 2, at));
+	CHECK_NEAR_TOL(at.x, 5, 1e-3);
+	CHECK_NEAR_TOL(at.y, -3, 1e-3);
+	CHECK_NEAR_TOL(at.z, 2, 1e-12);
+	// the height nearest the ray, on the upright line through it
+	double z = 0;
+	CHECK(FplDragUpright(origin, dir, box, 5, -3, z));
+	CHECK_NEAR_TOL(z, 2, 1e-3);
+	// kept in the box
+	through({ 9, 9, 9 }, origin, dir);
+	CHECK(FplDragOnPlane(origin, dir, box, -9, at));
+	CHECK(std::abs(at.x) <= 10 && std::abs(at.y) <= 10);
+	// a level ray never meets a plane; one pointing away doesn't either; straight down never meets a line's nearest height
+	CHECK(!FplDragOnPlane({ 0, 0, 3 }, { 1, 0, 0 }, box, 2, at));
+	CHECK(!FplDragOnPlane({ 0, 0, 3 }, { 0, 0, 1 }, box, 2, at));
+	CHECK(!FplDragUpright({ 0, 0, 3 }, { 0, 0, -1 }, box, 1, 1, z));
+	FplBox3 bad{ 1, 1, 0, 1, 0, 1 };
+	CHECK(!FplDragOnPlane(origin, dir, bad, 2, at));
+	CHECK(!FplDragUpright(origin, dir, bad, 0, 0, z));
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -4500,6 +4704,9 @@ int wmain() {
 	Run_Systems3D();
 	Run_StiffOdes();
 	Run_Odes3DAndPicking();
+	Run_PrimesOnBuiltIns();
+	Run_Fills3D();
+	Run_Dragging3D();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

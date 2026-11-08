@@ -26,6 +26,7 @@ struct FplDrawStyle {
 	bool colormap = false, lines = false, clip = false;
 	FplLineGrid grid;
 	COLORREF lineColor = FplNoColor;
+	bool unlit = false;			// flat color, as lines are (a region)
 };
 
 class FplRenderer3D {

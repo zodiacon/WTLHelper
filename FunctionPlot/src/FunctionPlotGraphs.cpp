@@ -94,8 +94,9 @@ void FplPlot::Build() {
 		g.r2 = NaN;
 		g.function = -1;
 		g.slot = -1;
-		g.dragX = g.dragY = -1;
+		g.dragX = g.dragY = g.dragZ = -1;
 		g.drags.clear();
+		g.dragsZ.clear();
 		g.geometry = {};
 		g.features.clear();
 	}
@@ -246,7 +247,8 @@ void FplPlot::Build() {
 			else {
 				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames);
 				if (!g.expr.error && (g.expr.kind == FplKind::Point || g.expr.kind == FplKind::SlopeField ||
-					g.expr.kind == FplKind::SecondOrder || g.expr.kind == FplKind::OdeSystem))
+					g.expr.kind == FplKind::SecondOrder || g.expr.kind == FplKind::OdeSystem ||
+					g.expr.kind == FplKind::Point3D || g.expr.kind == FplKind::OdeSystem3D))
 					FindDragged(g, options);
 				// a regression with nothing to fit
 				if (!g.expr.error && g.expr.kind == FplKind::Regression)
@@ -260,8 +262,9 @@ void FplPlot::Build() {
 							[&](const FplProgram& p) { return p.Reads(l.slot); }))
 						g.listSlots.push_back(l.slot);
 			if (!g.listSlots.empty()) {
-				g.dragX = g.dragY = -1;
+				g.dragX = g.dragY = g.dragZ = -1;
 				g.drags.clear();
+				g.dragsZ.clear();
 			}
 			continue;
 		}
@@ -487,8 +490,11 @@ void FplPlot::FindDragged(FplGraph& g, FplParseOptions options) {
 		if (ode.errorAt == std::wstring_view::npos) {
 			std::wstring_view text = g.text;
 			g.drags.reserve(ode.starts.size());
-			for (auto& st : ode.starts)
+			for (auto& st : ode.starts) {
 				g.drags.push_back({ paramOf(text.substr(st.a, st.aLen)), paramOf(text.substr(st.b, st.bLen)) });
+				if (ode.order == FplOdeOrder::System3D && !st.more.empty())
+					g.dragsZ.push_back(paramOf(text.substr(st.more[0].at, st.more[0].len)));
+			}
 			if (!g.drags.empty()) {
 				g.dragX = g.drags[0].first;
 				g.dragY = g.drags[0].second;
@@ -500,7 +506,7 @@ void FplPlot::FindDragged(FplGraph& g, FplParseOptions options) {
 	if (r.error)
 		return;
 	auto def = FplClassify(r.ast, r.root);
-	if (def.error || def.kind != FplKind::Point)
+	if (def.error || (def.kind != FplKind::Point && def.kind != FplKind::Point3D))
 		return;
 	auto param = [&](int node) {
 		auto& n = r.ast[node];
@@ -508,6 +514,74 @@ void FplPlot::FindDragged(FplGraph& g, FplParseOptions options) {
 	};
 	g.dragX = param(def.expr[0]);
 	g.dragY = param(def.expr[1]);
+	if (def.kind == FplKind::Point3D)
+		g.dragZ = param(def.expr[2]);
+}
+
+std::vector<FplPoint3> FplPlot::Points3D(int graph) const {
+	std::vector<FplPoint3> points;
+	auto& g = graphs[graph];
+	if (!g.Drawable() || g.Listed())
+		return points;
+	std::vector<double> slots = m_Slots;
+	const double* s = slots.data();
+	auto& e = g.expr;
+	switch (e.kind) {
+		case FplKind::Point:
+			points.push_back({ e.f.Eval(s), e.g.Eval(s), 0 });
+			break;
+		case FplKind::Point3D:
+			points.push_back({ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) });
+			break;
+		case FplKind::SlopeField: case FplKind::OdeSystem:
+			for (size_t k = 0; k + 1 < e.starts.size(); k += 2)
+				points.push_back({ e.starts[k].Eval(s), e.starts[k + 1].Eval(s), 0 });
+			break;
+		case FplKind::SecondOrder: {
+			const size_t stride = static_cast<size_t>(e.odeOrder) + 1;
+			for (size_t k = 0; k + stride <= e.starts.size(); k += stride)
+				points.push_back({ e.starts[k].Eval(s), e.starts[k + 1].Eval(s), 0 });
+			break;
+		}
+		case FplKind::OdeSystem3D:
+			for (size_t k = 0; k + 2 < e.starts.size(); k += 3)
+				points.push_back({ e.starts[k].Eval(s), e.starts[k + 1].Eval(s), e.starts[k + 2].Eval(s) });
+			break;
+		default:
+			break;
+	}
+	return points;
+}
+
+int FplPlot::DraggableAt3D(FplPoint screen, const FplCamera& camera, const FplBox3& box, float width, float height,
+	double maxDistance, int* point) const {
+	int best = -1;
+	double bestD = maxDistance;
+	for (size_t i = 0; i < graphs.size(); i++) {
+		auto& g = graphs[i];
+		if (!g.Drawable() || (g.flags & FplGraphNoDrag))
+			continue;
+		const auto points = Points3D(static_cast<int>(i));
+		for (size_t k = 0; k < points.size(); k++) {
+			const auto [px, py] = g.DragOf(k);
+			if (px < 0 && py < 0 && g.DragZOf(k) < 0)
+				continue;
+			const FplVec3 c = box.ToBox(points[k]);
+			if (!(std::abs(c.x) <= 1 && std::abs(c.y) <= 1 && std::abs(c.z) <= 1))
+				continue;
+			FplPoint on;
+			if (!camera.Project(c, width, height, on))
+				continue;
+			const double d = std::hypot(on.x - screen.x, on.y - screen.y);
+			if (d <= bestD) {
+				bestD = d;
+				best = static_cast<int>(i);
+				if (point)
+					*point = static_cast<int>(k);
+			}
+		}
+	}
+	return best;
 }
 
 int FplPlot::DraggableAt(FplPoint screen, double maxDistance, int* point) const {
@@ -697,12 +771,15 @@ void FplPlot::Build3D(const FplBox3& box) {
 void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 	auto& g = graphs[graph];
 	g.mesh = {};
+	g.fillMesh = {};
 	g.incomplete3D = false;
 	m_MeshIncomplete = false;
+	m_FillMesh = {};
 	if (!g.Drawable() || !box.Valid())
 		return;
 	if (!g.Listed()) {
 		g.mesh = Mesh3D(g, box, implicitCells);
+		g.fillMesh = std::move(m_FillMesh);
 		g.incomplete3D = m_MeshIncomplete;
 		return;
 	}
@@ -714,6 +791,7 @@ void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 		FplAppend(g.mesh, Mesh3D(g, box, implicitCells));
 	}
 	m_Slots = std::move(saved);
+	g.fillMesh = std::move(m_FillMesh);
 	g.incomplete3D = m_MeshIncomplete;
 }
 
@@ -740,6 +818,22 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 	auto& e = g.expr;
 	const double t0 = g.hasRange ? g.tMin : 0, t1 = g.hasRange ? g.tMax : TwoPi;
 	const float radius = 0.005f * g.width, dot = 0.01f + 0.005f * g.width;
+	// the 2D kinds are sampled as for a view of the box's x and y
+	FplViewport plane;
+	plane.xMin = box.xMin, plane.xMax = box.xMax, plane.yMin = box.yMin, plane.yMax = box.yMax;
+	plane.width = plane.height = 1000;
+	auto addFills = [&](const FplGeometry& flat) {
+		if (flat.fills.empty())
+			return;
+		std::vector<FplPolygon> polygons = flat.fills;
+		for (auto& polygon : polygons)
+			for (auto& p : polygon)
+				p = plane.ToPlane(p);
+		FplAppend(m_FillMesh, FplFillMesh(polygons, box));
+	};
+	// a function or polar curve's region, beside its curve's own tube
+	if ((e.kind == FplKind::Function || e.kind == FplKind::FunctionOfY || e.kind == FplKind::Polar) && e.rel != FplRel::Eq)
+		addFills(FplSample(e, m_Slots, plane, OptionsFor(static_cast<int>(&g - graphs.data()), {})));
 	auto tubes = [&](const std::function<FplPoint3(double)>& f, double a, double b) {
 		mesh = FplTubes(FplSampleCurve3(f, box, a, b, 1024), radius);
 	};
@@ -807,13 +901,11 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 		// the 2D kinds that are curves or points, on the z = 0 plane
 		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem: case FplKind::Implicit:
 		case FplKind::Between: {
-			// their lines as sampled for a view of the box's x and y: an ODE's solutions, an implicit curve or a region's
-			// boundary, what's between two curves' sides. Slopes, arrows and fills stay 2D's.
-			FplViewport plane;
-			plane.xMin = box.xMin, plane.xMax = box.xMax, plane.yMin = box.yMin, plane.yMax = box.yMax;
-			plane.width = plane.height = 1000;
+			// their lines: an ODE's solutions, an implicit curve or a region's boundary, what's between two curves' sides;
+			// and fills. Slopes and arrows stay 2D's.
 			FplGeometry flat = FplSample(e, m_Slots, plane, OptionsFor(static_cast<int>(&g - graphs.data()), {}));
 			m_MeshIncomplete = m_MeshIncomplete || flat.incomplete;
+			addFills(flat);
 			std::vector<std::vector<FplVec3>> lines;
 			lines.reserve(flat.lines.size());
 			for (auto& line : flat.lines) {

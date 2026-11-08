@@ -774,6 +774,10 @@ private:
 	int Function(const Token& name) {
 		FplFunc func = name.func;
 		const auto& info = FplFuncInfoOf(func);
+		// sin'(x), cos''(2x): the derivative of the function itself, at its argument (no chain rule, as f'(2x))
+		int primes = 0;
+		while (IsOp(Peek(), Prime))
+			Next(), primes++;
 		int power = -1;
 		if (Peek().type == Tk::Sup) {
 			auto& s = Next();
@@ -820,6 +824,36 @@ private:
 			m_Error.len = end - name.pos;
 			m_Error.name = finfo.name;
 			throw ParseError();
+		}
+		if (primes > 0) {
+			// derived in a name of its own, then the argument put in
+			if (args.size() != 1) {
+				m_Error = { FplErrorCode::NotDifferentiable, name.pos, end - name.pos, finfo.name };
+				throw ParseError();
+			}
+			const std::wstring place = L"\xE001";
+			int inner = m_Ast.Var(place);
+			if (m_Options.degrees && IsTrig(func))
+				inner = m_Ast.Binary(FplOp::Mul, inner, m_Ast.Num(std::numbers::pi / 180));
+			int body = m_Ast.Call(func, { inner });
+			if (m_Options.degrees && IsInverseTrig(func))
+				body = m_Ast.Binary(FplOp::Mul, body, m_Ast.Num(180 / std::numbers::pi));
+			for (int i = 0; i < primes; i++) {
+				FplError e;
+				body = FplDerive(m_Ast, body, place, &e);
+				if (body < 0 || e) {
+					m_Error = { FplErrorCode::NotDifferentiable, name.pos, end - name.pos, finfo.name };
+					throw ParseError();
+				}
+			}
+			std::unordered_map<std::wstring, int> subst;
+			subst[place] = args[0];
+			body = CopyTree(m_Ast, m_Ast, body, subst);
+			FplNode wrap = m_Ast[body];
+			int call = Make(m_Ast.Add(std::move(wrap)), name.pos, end - name.pos);
+			if (power >= 0)
+				call = Span(m_Ast.Binary(FplOp::Pow, call, power), call, power);
+			return call;
 		}
 		// degrees: a trigonometric function's argument times pi/180, an inverse one's result times 180/pi (now, so a
 		// derivative taken later in the parse sees them)

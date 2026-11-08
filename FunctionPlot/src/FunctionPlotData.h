@@ -59,7 +59,7 @@ struct FplPanelHit {
 	int row = -1;
 };
 
-enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point, Box };
+enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point, Box, Point3D };
 
 // sizes, in DIPs
 constexpr float FplPanelMargin = 10, FplPanelPad = 6, FplGraphRow = 26, FplErrorLine = 16, FplSliderRow = 30;
@@ -131,6 +131,7 @@ struct FplState {
 	FplCamera camera;
 	FplRenderer3D renderer;
 	std::vector<FplGpuMesh> gpu;		// by graph
+	std::vector<FplGpuMesh> gpuFills;	// regions' on the z = 0 plane
 	FplGpuMesh boxEdges, floorGrid;
 	bool gpuStale = true;				// the meshes changed since they were uploaded
 

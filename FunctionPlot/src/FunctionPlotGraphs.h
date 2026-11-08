@@ -51,6 +51,8 @@ struct FplGraph {
 	int dragX = -1, dragY = -1;		// a point whose coordinate is a parameter: the parameter's index (dragging it
 									// sets the parameter)
 	std::vector<std::pair<int, int>> drags;	// an ODE's: each initial point's (the first is also dragX, dragY)
+	int dragZ = -1;					// (a, b, c): c's parameter
+	std::vector<int> dragsZ;		// a 3D system's, by point
 	bool listDefinition = false;	// "L = [1, 2, a]": defines a list (definition is false)
 	std::vector<FplProgram> items;	// its items
 	std::vector<int> listSlots;		// the lists it reads: it's drawn once per element (the shortest's count)
@@ -61,12 +63,18 @@ struct FplGraph {
 	FplMesh mesh;					// from the last Build3D
 	std::vector<FplFeature> features;	// from the last FindFeatures (a function's only)
 	bool incomplete3D = false;			// as geometry.incomplete, for the mesh
+	FplMesh fillMesh;					// a region's, on the z = 0 plane in 3D
 
 	bool Drawable() const {
 		return !definition && !listDefinition && !expr.error && !(flags & FplGraphHidden) &&
 			expr.kind != FplKind::Regression;
 	}
 	bool Listed() const { return !listSlots.empty(); }
+	int DragZOf(size_t point) const {
+		if (!dragsZ.empty())
+			return point < dragsZ.size() ? dragsZ[point] : -1;
+		return point == 0 ? dragZ : -1;
+	}
 	// What dragging its geometry's point sets: x's and y's parameters (-1: none).
 	std::pair<int, int> DragOf(size_t point) const {
 		if (!drags.empty())
@@ -229,6 +237,12 @@ public:
 	// point, the nearest; -1 if none.
 	// point gets which of the graph's points it is.
 	int DraggableAt(FplPoint screen, double maxDistance, int* point = nullptr) const;
+	// The points a graph has in 3D, in the space's coordinates: (a, b, c), a 2D point or an ODE's start (on z = 0), a 3D
+	// system's start. In the order DragOf numbers them.
+	std::vector<FplPoint3> Points3D(int graph) const;
+	// The draggable point at a screen position in 3D (in the box, and with a parameter to set), the graph, or -1.
+	int DraggableAt3D(FplPoint screen, const FplCamera& camera, const FplBox3& box, float width, float height,
+		double maxDistance, int* point = nullptr) const;
 
 	// z = F(x, y) of a surface graph (NaN for other kinds).
 	double EvalSurface(int graph, double x, double y) const;
@@ -244,6 +258,7 @@ private:
 	void SetElement(std::vector<double>& slots, const FplGraph& g, size_t i) const;
 	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
 	bool m_MeshIncomplete = false;
+	FplMesh m_FillMesh;				// what Mesh3D made of a region's fills
 	void FindCurveMeetings(int graph, const FplViewport& view);
 	static void SortFeatures(FplGraph& g);
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;

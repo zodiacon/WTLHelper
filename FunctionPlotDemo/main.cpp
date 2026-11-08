@@ -136,6 +136,7 @@ static const Example g_Examples[] = {
 		L"x^2 + y^2 - z^2/4 = 1", false, true },
 	{ L"3D: &Gyroid", L"sin(x/2)cos(y/2) + sin(y/2)cos(z/2) + sin(z/2)cos(x/2) = 0", false, true },
 	{ L"3D: See-&Through", L"x^2 + y^2 + z^2 = 36\r\nz = (x^2 - y^2)/12\r\n((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(5cos 4t, 5sin 4t, 3t - 9)", false, true, Setup::Glass },
+	{ L"3D: Points and &Regions", L"(a, b, c)\r\nx^2 + y^2 < 25\r\nx^2/4 - 8 < y < -x^2/8 - 1\r\ny = 3sin x\r\nx' = -y + z/10, y' = x, z' = -z/4, (d, 0, 7)", false, true },
 	{ L"3D: &Lorenz Attractor", L"x' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1, 1, 20)\r\nx' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1.01, 1, 20)", false, true, Setup::Lorenz },
 	{ L"3D: Animated &Wave", L"z = 3sin(sqrt(x^2 + y^2) - 2p)/(1 + sqrt(x^2 + y^2)/4)", false, true, Setup::Animate },
 };
@@ -157,7 +158,7 @@ static bool g_autoSliders = true;
 static bool g_heatmaps = true;
 static bool g_meshLines = false, g_levelLines = false, g_seeThrough = false;
 // FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg; .bmp: printed onto
-// a 1600 x 1200 bitmap page), then exit;
+// a 1600 x 1200 bitmap page; .fplot: as File > Save does), then exit;
 // /open plot.fplot starts with a saved plot (File > Save Plot)
 static int g_startExample = 0;
 static std::wstring g_exportPath;
@@ -1072,6 +1073,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				};
 				BOOL ok = is(L".svg") ? g_plot.ExportSvg(g_exportPath.c_str())
 					: is(L".bmp") ? PrintToBitmap(g_exportPath.c_str())
+					: g_exportPath.size() > 6 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 6, L".fplot") == 0 ? SavePlot(g_exportPath.c_str())
 					: g_plot.ExportPng(g_exportPath.c_str(), 1);
 				// a quit posted while the window is being made is lost: close it once the loop runs
 				g_exitCode = ok ? 0 : 1;

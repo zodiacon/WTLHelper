@@ -648,3 +648,95 @@ FplLineGrid FplMakeLineGrid(const FplBox3& box, bool x, bool y, bool z, bool lev
 		axis(2, box.zMin, box.zMax, 24);
 	return grid;
 }
+
+FplMesh FplFillMesh(const std::vector<FplPolygon>& polygons, const FplBox3& box, int rows) {
+	FplMesh mesh;
+	if (!box.Valid() || polygons.empty())
+		return mesh;
+	rows = std::clamp(rows, 2, 4000);
+	struct Crossing {
+		double x;
+		int winding;
+	};
+	const double rowHeight = (box.yMax - box.yMin) / rows;
+	std::vector<std::vector<Crossing>> bands(rows);
+	for (auto& polygon : polygons) {
+		const size_t n = polygon.size();
+		for (size_t i = 0; i < n; i++) {
+			const FplPoint a = polygon[i], b = polygon[(i + 1) % n];
+			if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y) || a.y == b.y)
+				continue;
+			// the rows whose middle this edge crosses
+			const double lo = std::min(a.y, b.y), hi = std::max(a.y, b.y);
+			const int first = std::max(0, static_cast<int>(std::ceil((lo - box.yMin) / rowHeight - 0.5)));
+			const int last = std::min(rows - 1, static_cast<int>(std::floor((hi - box.yMin) / rowHeight - 0.5)));
+			for (int r = first; r <= last; r++) {
+				const double y = box.yMin + (r + 0.5) * rowHeight;
+				if (y < lo || y >= hi)
+					continue;
+				bands[r].push_back({ a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y), b.y > a.y ? 1 : -1 });
+			}
+		}
+	}
+	FplVec3 up{ 0, 0, 1 };
+	auto corner = [&](double x, double y) {
+		FplVertex3 v;
+		v.pos = box.ToBox(x, y, 0);
+		v.normal = up;
+		v.value = std::clamp((v.pos.z + 1) / 2, 0.0f, 1.0f);
+		mesh.vertices.push_back(v);
+	};
+	for (int r = 0; r < rows; r++) {
+		auto& band = bands[r];
+		if (band.size() < 2)
+			continue;
+		std::sort(band.begin(), band.end(), [](const Crossing& p, const Crossing& q) { return p.x < q.x; });
+		const double y0 = box.yMin + r * rowHeight, y1 = y0 + rowHeight;
+		int winding = 0;
+		for (size_t i = 0; i + 1 < band.size(); i++) {
+			winding += band[i].winding;
+			if (winding == 0)
+				continue;
+			const double x0 = std::max(band[i].x, box.xMin), x1 = std::min(band[i + 1].x, box.xMax);
+			if (!(x1 > x0))
+				continue;
+			const uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
+			corner(x0, y0);
+			corner(x1, y0);
+			corner(x1, y1);
+			corner(x0, y1);
+			mesh.indices.insert(mesh.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+		}
+	}
+	return mesh;
+}
+
+bool FplDragOnPlane(FplVec3 origin, FplVec3 dir, const FplBox3& box, double z, FplPoint3& at) {
+	if (!box.Valid() || !std::isfinite(z) || std::abs(dir.z) < 1e-3f)
+		return false;
+	const float cz = box.ToBox(0, 0, z).z;
+	const float t = (cz - origin.z) / dir.z;
+	if (!(t > 0))
+		return false;
+	const FplVec3 hit{ std::clamp(origin.x + dir.x * t, -1.0f, 1.0f), std::clamp(origin.y + dir.y * t, -1.0f, 1.0f), cz };
+	at = box.ToSpace(hit);
+	at.z = z;
+	return true;
+}
+
+bool FplDragUpright(FplVec3 origin, FplVec3 dir, const FplBox3& box, double x, double y, double& z) {
+	if (!box.Valid() || !std::isfinite(x) || !std::isfinite(y))
+		return false;
+	const FplVec3 base = box.ToBox(x, y, 0);
+	// the closest points of the ray and the line through base along z
+	const float wx = origin.x - base.x, wy = origin.y - base.y, wz = origin.z;
+	const float b = dir.z, d = dir.x * wx + dir.y * wy + dir.z * wz;
+	const float denominator = 1 - b * b;
+	if (denominator < 1e-4f)
+		return false;
+	// the ray's parameter there, and so the height on the line
+	const float t = (b * wz - d) / denominator;
+	const float cube = std::clamp(wz + t * b, -1.0f, 1.0f);
+	z = box.ToSpace({ base.x, base.y, cube }).z;
+	return true;
+}

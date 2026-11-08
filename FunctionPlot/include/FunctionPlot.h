@@ -483,6 +483,7 @@ private:
 	void PaintGraphLabels();
 	void PaintBox();
 	void PaintColorScales();
+	void PaintPoints3D();
 	void PaintPanel();
 	void Paint3D(bool present);
 	void PaintTicks3D();

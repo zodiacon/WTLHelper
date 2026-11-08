@@ -107,6 +107,17 @@ struct FplTick3 {
 };
 std::vector<FplTick3> FplBoxTicks(const FplBox3& box, const FplCamera& camera);
 
+// A region of the z = 0 plane as triangles: polygons in the plane's coordinates, filled by the winding rule, a row of spans
+// at a time. So any polygons do (marching squares' cells, a function's region, what's between two curves), and an edge is a
+// staircase rows to the box's height, which the region's boundary tube covers.
+FplMesh FplFillMesh(const std::vector<FplPolygon>& polygons, const FplBox3& box, int rows = 400);
+
+// Where the ray meets the horizontal plane at z, inside the box's x and y: dragging a point on it. false if the ray is too
+// near level, or points away.
+bool FplDragOnPlane(FplVec3 origin, FplVec3 dir, const FplBox3& box, double z, FplPoint3& at);
+// The height on the upright line through (x, y) nearest the ray, inside the box's z: dragging a point up and down.
+bool FplDragUpright(FplVec3 origin, FplVec3 dir, const FplBox3& box, double x, double y, double& z);
+
 // The lines drawn on a surface by the pixel shader. Along an axis, t = (cube + 1) * scale + offset is an integer on a
 // line (scale 0: none on that axis), so they fall on nice values of the box's ranges; along the mesh's grid, every
 // `cells` cells (0: none).

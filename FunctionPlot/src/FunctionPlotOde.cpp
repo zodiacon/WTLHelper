@@ -185,6 +185,10 @@ double Shrink(double ratio) {
 	return std::max(0.9 * ratio, 0.1);
 }
 
+// Steps a solution may take each way in 2D: enough for a view at any explicit stiffness short of turning implicit, while a
+// fast oscillation, which can only run out, costs a redraw little (a solid band of about 700,000 evaluations took 24 ms).
+constexpr int MaxOdeSteps = 30000;
+
 // DIPs per unit where it's defined, else the axis's scale.
 double DipsX(const FplViewport& view, double x) {
 	const double d = view.DipsPerUnitX(std::abs(x));
@@ -227,7 +231,7 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 		double h = dir * maxStep / DipsX(view, x);
 		StiffWatch watch;
 		int steps = 0;
-		for (; steps < 100000 && count < options.maxEvals; steps++) {
+		for (; steps < MaxOdeSteps && count < options.maxEvals; steps++) {
 			const double remaining = end - x;
 			if (!(remaining * dir > 0))
 				break;
@@ -291,7 +295,7 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 				h = dir * 1.01e-4 / dipsX;
 			}
 		}
-		if (ranOut && (steps >= 100000 || count >= options.maxEvals))
+		if (ranOut && (steps >= MaxOdeSteps || count >= options.maxEvals))
 			*ranOut = true;
 	}
 	if (evals)
@@ -355,7 +359,7 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 		double h = dir * maxStep / std::max(speed, 1e-6);
 		StiffWatch watch;
 		int steps = 0;
-		for (; steps < 50000 && count < options.maxEvals && length < budget; steps++) {
+		for (; steps < MaxOdeSteps && count < options.maxEvals && length < budget; steps++) {
 			const double remaining = end - t;
 			if (!(remaining * dir > 0) || std::abs(t) > 1e9)
 				break;
@@ -422,7 +426,7 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 				h = smallest(h, pace, t);
 			}
 		}
-		if (ranOut && (steps >= 50000 || count >= options.maxEvals))
+		if (ranOut && (steps >= MaxOdeSteps || count >= options.maxEvals))
 			*ranOut = true;
 	}
 	if (evals)
@@ -584,7 +588,7 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 		double h = dir * maxStep / view.DipsPerUnitX(x);
 		StiffWatch watch;
 		int steps = 0;
-		for (; steps < 100000 && count < options.maxEvals; steps++) {
+		for (; steps < MaxOdeSteps && count < options.maxEvals; steps++) {
 			const double remaining = end - x;
 			if (!(remaining * dir > 0))
 				break;
@@ -682,7 +686,7 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 				h = dir * 1.01e-4 / view.DipsPerUnitX(x);
 			}
 		}
-		if (ranOut && (steps >= 100000 || count >= options.maxEvals))
+		if (ranOut && (steps >= MaxOdeSteps || count >= options.maxEvals))
 			*ranOut = true;
 	}
 	if (evals)

@@ -249,7 +249,7 @@ void FplRenderer3D::Submit(const FplGpuMesh& mesh, const FplDrawStyle& style, fl
 		return;
 	SetColor(m_Frame.color, style.color);
 	m_Frame.options[0] = style.colormap ? 1.0f : 0.0f;
-	m_Frame.options[1] = style.lines ? 1.0f : 0.0f;
+	m_Frame.options[1] = style.lines || style.unlit ? 1.0f : 0.0f;
 	m_Frame.options[2] = style.clip ? 1.0f : 0.0f;
 	m_Frame.options[3] = opacity;
 	for (int k = 0; k < 3; k++) {

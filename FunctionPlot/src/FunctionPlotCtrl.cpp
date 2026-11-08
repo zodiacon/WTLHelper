@@ -73,6 +73,7 @@ LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	m_State->worker.reset();
 	DiscardTarget();
 	m_State->gpu.clear();
+	m_State->gpuFills.clear();
 	m_State->boxEdges = m_State->floorGrid = {};
 	m_State->renderer.Reset();
 	if (m_State->view3D) {
@@ -795,6 +796,7 @@ BOOL CFunctionPlotCtrl::SetMode(FPLMODE mode) {
 	}
 	else {
 		s.gpu.clear();
+		s.gpuFills.clear();
 		s.boxEdges = s.floorGrid = {};
 		s.renderer.Reset();
 		if (s.view3D) {
@@ -1866,6 +1868,18 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (hit.part == FplPanelPart::Panel)
 		return 0;
 	if (s.mode3D) {
+		// a draggable point: on the level it's at, Ctrl up and down
+		int index3D = 0;
+		const int point3D = s.plot.DraggableAt3D({ ToDips(pt.x), ToDips(pt.y) }, s.camera, s.box, ToDips(s.client.cx),
+			ToDips(s.client.cy), FplTraceDistance, &index3D);
+		if (point3D >= 0) {
+			Remember(-1);
+			s.drag = FplDrag::Point3D;
+			s.dragGraph = point3D;
+			s.dragPoint = index3D;
+			SetCapture();
+			return 0;
+		}
 		// drag to orbit; Shift (or no orbiting wanted) to move the box's x and y
 		Remember(-1);
 		bool pan = (::GetKeyState(VK_SHIFT) < 0) && !(GetStyle() & FPLS_NOPANZOOM);
@@ -2027,6 +2041,35 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 					SetParam(py, p.y, true);
 			}
 			return 0;
+		case FplDrag::Point3D:
+			if (s.dragGraph >= 0 && s.dragGraph < (int)s.plot.graphs.size()) {
+				auto& g = s.plot.graphs[s.dragGraph];
+				const auto points = s.plot.Points3D(s.dragGraph);
+				if (s.dragPoint < (int)points.size()) {
+					const FplPoint3 now = points[s.dragPoint];
+					FplVec3 origin, dir;
+					s.camera.Ray({ ToDips(pt.x), ToDips(pt.y) }, ToDips(s.client.cx), ToDips(s.client.cy), origin, dir);
+					// read them first: setting one samples again
+					const auto [px, py] = g.DragOf(s.dragPoint);
+					const int pz = g.DragZOf(s.dragPoint);
+					const bool upright = pz >= 0 && (::GetKeyState(VK_CONTROL) < 0 || (px < 0 && py < 0));
+					if (upright) {
+						double z;
+						if (FplDragUpright(origin, dir, s.box, now.x, now.y, z))
+							SetParam(pz, z, true);
+					}
+					else {
+						FplPoint3 at;
+						if (FplDragOnPlane(origin, dir, s.box, now.z, at)) {
+							if (px >= 0)
+								SetParam(px, at.x, true);
+							if (py >= 0)
+								SetParam(py, at.y, true);
+						}
+					}
+				}
+			}
+			return 0;
 		case FplDrag::Orbit:
 			if (pt.x != s.dragLast.x || pt.y != s.dragLast.y) {
 				s.camera.Orbit(-0.01f * ToDips(pt.x - s.dragLast.x), 0.01f * ToDips(pt.y - s.dragLast.y));
@@ -2063,8 +2106,10 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		Invalidate();
 	}
 	int hotIndex = 0;
-	int hotPoint = hit.part == FplPanelPart::None && !s.mode3D
-		? s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance, &hotIndex) : -1;
+	int hotPoint = hit.part != FplPanelPart::None ? -1
+		: s.mode3D ? s.plot.DraggableAt3D({ ToDips(pt.x), ToDips(pt.y) }, s.camera, s.box, ToDips(s.client.cx),
+			ToDips(s.client.cy), FplTraceDistance, &hotIndex)
+		: s.plot.DraggableAt({ ToDips(pt.x), ToDips(pt.y) }, FplTraceDistance, &hotIndex);
 	if (hotPoint != s.hotPoint || hotIndex != s.hotPointIndex) {
 		s.hotPoint = hotPoint;
 		s.hotPointIndex = hotIndex;
@@ -2102,7 +2147,7 @@ LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 	LPCWSTR cursor = IDC_ARROW;
 	if (s.drag == FplDrag::Box)
 		cursor = IDC_CROSS;
-	else if (s.drag == FplDrag::Point || (s.drag == FplDrag::None && s.hotPoint >= 0))
+	else if (s.drag == FplDrag::Point || s.drag == FplDrag::Point3D || (s.drag == FplDrag::None && s.hotPoint >= 0))
 		cursor = IDC_SIZEALL;
 	else if (s.drag == FplDrag::Pan || s.drag == FplDrag::Pan3D)
 		cursor = IDC_SIZEALL;
