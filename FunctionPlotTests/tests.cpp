@@ -8,12 +8,13 @@
 // control's graphs (definitions, sampling, features, tracing, coordinates), user functions
 // and d/dx, surfaces (heat maps, contours), vector fields and the SVG export, and 3D (the
 // box, the camera, meshes, tubes and the graphs' meshes), tracing by keys, draggable points, integrals, lists and
-// regressions, and the saved state.
+// regressions, the saved state, fitting the view, labels, styles, undo, and the sampling thread.
 
 #include "FunctionPlotExpr.h"
 #include "FunctionPlot3D.h"
 #include "FunctionPlotGraphs.h"
 #include "FunctionPlotModel.h"
+#include "FunctionPlotWorker.h"
 
 #include <windows.h>
 
@@ -23,6 +24,9 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -2552,6 +2556,221 @@ TEST(SavedState) {
 	CHECK(plot.ListValues(L"x1") != nullptr);
 }
 
+TEST(ZoomAndFit) {
+	// a rectangle on the screen, corners either way round
+	auto v = View();
+	CHECK(v.ZoomTo(v.ToScreen({ 4, -1 }), v.ToScreen({ -2, 3 })));
+	CHECK_NEAR(v.xMin, -2);
+	CHECK_NEAR(v.xMax, 4);
+	CHECK_NEAR(v.yMin, -1);
+	CHECK_NEAR(v.yMax, 3);
+	CHECK(!v.ZoomTo({ 10, 10 }, { 10.5, 200 }));
+	CHECK_NEAR(v.xMin, -2);
+
+	// points exactly, with room around
+	v = View();
+	double x0, x1, y0, y1;
+	auto plot = MakePlot({ L"(1, 2)", L"(3, -4)" });
+	plot.Sample(v);
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x0 < 1 && x0 > 0.5 && x1 > 3 && x1 < 3.5);
+	CHECK(y0 < -4 && y1 > 2);
+	// a curve over its range; a function's values over the view's x, an asymptote not stretching it
+	plot = MakePlot({ L"(30cos t, 2sin t)" });
+	plot.Sample(v);
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x1 > 30 && x1 < 36 && y1 > 2 && y1 < 3);
+	plot = MakePlot({ L"y = 1/x" });
+	plot.Sample(v);
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x0 < -10 && x1 > 10);
+	CHECK(y1 < 50 && y0 > -50);
+	// one point: some size around it; nothing: false
+	plot = MakePlot({ L"(5, 5)" });
+	plot.Sample(v);
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x0 < 5 && x1 > 5 && x1 - x0 >= 2);
+	plot = MakePlot({ L"c = 2", L"y = 2 +" });
+	plot.Sample(v);
+	CHECK(!plot.FitBounds(v, x0, x1, y0, y1));
+	// listed points, all of them
+	plot = MakeDataPlot({ L"(x1, y1)" }, { { L"x1", { 0, 100 } }, { L"y1", { -50, 7 } } });
+	plot.Sample(v);
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x1 > 100 && y0 < -50);
+}
+
+TEST(Labels) {
+	CHECK_STR(FplFormatLabel(L"A({x}, {y})", 1.25, -2, 0.025), L"A(1.25, \x2212" L"2)");
+	CHECK_STR(FplFormatLabel(L"{x}{x} {z}", 2, 0, 1), L"22 {z}");
+	auto v = View();
+	auto plot = MakePlot({ L"(1, 2)", L"y = x/2", L"(30, 1)", L"y = x" });
+	plot.graphs[0].label = L"P {y}";
+	plot.graphs[1].label = L"half";
+	plot.graphs[2].label = L"out of view";
+	plot.Sample(v);
+	auto places = plot.LabelPlaces(v);
+	CHECK_INT(places.size(), 2);
+	CHECK_INT(places[0].graph, 0);
+	CHECK_STR(places[0].text, L"P 2");
+	CHECK_NEAR(places[0].at.x, v.ToScreenX(1));
+	CHECK_INT(places[1].graph, 1);
+	CHECK_NEAR_TOL(places[1].at.x, v.width, 1);		// the curve's right end in the view
+}
+
+TEST(History) {
+	FplSnapshot a, b, c;
+	a.params = { { L"a", 1 } };
+	b.params = { { L"a", 2 } };
+	c.params = { { L"a", 3 } };
+	FplHistory h(3);
+	CHECK(!h.CanUndo());
+	h.Push(a);
+	h.Push(a);		// the same again: one step
+	CHECK_INT(h.Steps(), 1);
+	h.Push(b);
+	FplSnapshot to;
+	CHECK(h.Undo(c, to));
+	CHECK(to == b);
+	CHECK(h.CanRedo());
+	CHECK(h.Undo(b, to));
+	CHECK(to == a);
+	CHECK(!h.Undo(a, to));
+	CHECK(h.Redo(a, to));
+	CHECK(to == b);
+	CHECK(h.Redo(b, to));
+	CHECK(to == c);
+	CHECK(!h.CanRedo());
+	// a new step drops what could be redone
+	h.Undo(c, to);
+	h.Push(a);
+	CHECK(!h.CanRedo());
+	// a step that changed nothing is skipped
+	FplHistory k;
+	k.Push(a);
+	k.Push(b);
+	CHECK(k.Undo(b, to));
+	CHECK(to == a);
+	// the limit
+	FplHistory limited(2);
+	limited.Push(a);
+	limited.Push(b);
+	limited.Push(c);
+	CHECK_INT(limited.Steps(), 2);
+	limited.Clear();
+	CHECK(!limited.CanUndo());
+	FplSnapshot v1, v2;
+	v2.view[0] = 1;
+	CHECK(!(v1 == v2));
+}
+
+TEST(StylesOut) {
+	auto v = View();
+	auto plot = MakePlot({ L"y = x", L"(1, 1)", L"x^2 + y^2 < 4" });
+	plot.graphs[0].flags = FplGraphDotted;
+	plot.graphs[0].opacity = 0.5f;
+	plot.graphs[0].label = L"diagonal";
+	plot.graphs[1].flags = FplGraphHollow;
+	plot.graphs[2].fillOpacity = 0.6f;
+	plot.Sample(v);
+	FplSvgStyle style;
+	style.graphColors = { 0x0000FF, 0x00FF00, 0xFF0000 };
+	style.axisTitles[0] = L"time";
+	style.axisTitles[1] = L"distance";
+	std::string svg = FplWriteSvg(plot, v, style);
+	CHECK(svg.find("stroke-dasharray=\"0 6.25\" stroke-opacity=\"0.5\"") != std::string::npos);
+	CHECK(svg.find("fill=\"#FFFFFF\" stroke=\"#00FF00\" stroke-width=\"2\"") != std::string::npos);
+	CHECK(svg.find("fill-opacity=\"0.6\"") != std::string::npos);
+	CHECK(svg.find(">diagonal</text>") != std::string::npos);
+	CHECK(svg.find(">time</text>") != std::string::npos);
+	CHECK(svg.find(">distance</text>") != std::string::npos);
+
+	// kept in the state; a state without them still loads
+	FplSavedState st;
+	st.graphs = plot.graphs;
+	st.axisTitles[2] = L"height\tz";
+	std::wstring text = FplSaveState(st);
+	FplSavedState back;
+	CHECK(FplLoadState(text, back));
+	CHECK_NEAR_TOL(back.graphs[0].opacity, 0.5, 1e-6);
+	CHECK_STR(back.graphs[0].label, L"diagonal");
+	CHECK_INT(back.graphs[0].flags, FplGraphDotted);
+	CHECK_NEAR_TOL(back.graphs[2].fillOpacity, 0.6, 1e-6);
+	CHECK_NEAR(back.graphs[1].fillOpacity, -1);
+	CHECK_STR(back.axisTitles[2], L"height\tz");
+	CHECK(text.find(L"style\t2") == std::wstring::npos);		// defaults aren't written
+}
+
+TEST(Worker) {
+	auto v = View();
+	auto plot = MakePlot({ L"x^2 + y^2 = 25", L"x^2 + y^2 + z^2 = 25", L"y = x" });
+	CHECK(plot.IsHeavy(0, false));
+	CHECK(!plot.IsHeavy(2, false));
+	CHECK(plot.IsHeavy(1, true));
+	CHECK(!plot.IsHeavy(0, true));
+	auto job = [&](int graph, uint64_t generation, bool mesh) {
+		FplJob j;
+		j.graph = graph;
+		j.generation = generation;
+		j.expr = plot.graphs[graph].expr;
+		j.slots = plot.Slots();
+		j.view = v;
+		j.options = plot.OptionsFor(graph, {});
+		j.mesh = mesh;
+		j.cells = 24;
+		return j;
+	};
+	// directly: what sampling gives
+	auto direct = FplWorker::Run(job(0, 7, false));
+	plot.SampleGraph(0, v);
+	CHECK_INT(direct.generation, 7);
+	CHECK_INT(direct.geometry.lines.size(), plot.graphs[0].geometry.lines.size());
+	CHECK_INT(Points(direct.geometry.lines), Points(plot.graphs[0].geometry.lines));
+
+	// on the thread: told once, results taken
+	std::mutex m;
+	std::condition_variable cv;
+	int told = 0;
+	FplWorker worker([&] {
+		std::lock_guard lock(m);
+		told++;
+		cv.notify_all();
+	});
+	auto waitFor = [&](auto done) {
+		std::unique_lock lock(m);
+		return cv.wait_for(lock, std::chrono::seconds(10), done);
+	};
+	worker.Submit(job(0, 1, false));
+	CHECK(waitFor([&] { return told >= 1; }));
+	auto results = worker.Take();
+	CHECK_INT(results.size(), 1);
+	CHECK_INT(results[0].generation, 1);
+	CHECK(!results[0].geometry.lines.empty());
+	// many for one graph: the latest's result is the one that stays
+	for (uint64_t g = 2; g <= 6; g++)
+		worker.Submit(job(0, g, false));
+	uint64_t latest = 0;
+	for (int tries = 0; tries < 50 && latest != 6; tries++) {
+		waitFor([&] { return told >= 2; });
+		for (auto& r : worker.Take())
+			latest = std::max(latest, r.generation);
+		told = 1;
+		if (latest != 6)
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	CHECK_INT(latest, 6);
+	// a 3D mesh
+	told = 0;
+	worker.Submit(job(1, 9, true));
+	CHECK(waitFor([&] { return told >= 1; }));
+	results = worker.Take();
+	CHECK_INT(results.size(), 1);
+	CHECK(results[0].mesh);
+	CHECK(!results[0].triangles.Empty());
+	worker.Cancel();
+	CHECK(worker.Take().empty());
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -2608,6 +2827,11 @@ int wmain() {
 	Run_Lists();
 	Run_Regression();
 	Run_SavedState();
+	Run_ZoomAndFit();
+	Run_Labels();
+	Run_History();
+	Run_StylesOut();
+	Run_Worker();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

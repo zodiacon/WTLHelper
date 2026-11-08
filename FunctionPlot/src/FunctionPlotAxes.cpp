@@ -79,6 +79,20 @@ void FplViewport::EqualScale() {
 	yMax = cy + height / s / 2;
 }
 
+bool FplViewport::ZoomTo(FplPoint a, FplPoint b) {
+	if (std::abs(a.x - b.x) < 1 || std::abs(a.y - b.y) < 1)
+		return false;
+	FplViewport next = *this;
+	next.xMin = ToPlaneX(std::min(a.x, b.x));
+	next.xMax = ToPlaneX(std::max(a.x, b.x));
+	next.yMin = ToPlaneY(std::max(a.y, b.y));
+	next.yMax = ToPlaneY(std::min(a.y, b.y));
+	if (!next.Valid())
+		return false;
+	*this = next;
+	return true;
+}
+
 // ---- Ticks -----------------------------------------------------------------------------------------------------------
 
 FplTicks FplMakeTicks(double min, double max, double pixels, double minSpacing, bool pi) {

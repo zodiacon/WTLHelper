@@ -71,11 +71,14 @@ enum {
 	ID_DEMO_COLLAPSE,
 	ID_DEMO_3D,
 	ID_DEMO_TANGENT,
+	ID_DEMO_FIT,
+	ID_DEMO_UNDO,
+	ID_DEMO_REDO,
 };
 
 // ---- Examples -------------------------------------------------------------------
 
-enum class Setup { None, FieldSlider, Animate, Bounds, Data };
+enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles };
 
 struct Example {
 	const wchar_t* name;
@@ -101,6 +104,7 @@ static const Example g_Examples[] = {
 	{ L"D&ata and Regression", L"(x1, y1)\r\ny1 ~ a e^(k x1)\r\ny = a e^(k x)\r\ny = mean(y1)", false, false,
 		Setup::Data },
 	{ L"&Lists", L"L = [1, 2, 3, 4, 5]\r\ny = 3sin(x L/2)/L\r\n(L, mean(L))", false },
+	{ L"La&bels and Styles", L"(2, 3)\r\n(a, 1)\r\ny = x^2/4\r\ny = 2sin x\r\nx^2 + y^2 < 9", false, false, Setup::Styles },
 	{ L"&Draggable Points", L"(a, b)\r\ny = (x - a)^2/2 + b\r\n(c, 3sin c)\r\ny = 3sin x", false },
 	{ L"&Errors", L"y = 2 +\r\ny = sin(x\r\nx = y = 1\r\ny = sin()\r\ny = 2 * * 3", false },
 	{ L"3D: Su&rfaces", L"z = 4sin(x/2)cos(y/2)\r\nz = (x^2 - y^2)/20 - 6\r\ny = 6cos(x/2)", false, true },
@@ -307,6 +311,7 @@ static void LoadExample(int index) {
 	g_plot.RemoveAllGraphs();
 	while (g_plot.GetListCount() > 0)
 		g_plot.RemoveList(g_plot.GetListName(0));
+	g_plot.SetAxisTitles(nullptr, nullptr, nullptr);
 	// a table's columns before the text that uses them
 	if (e.setup == Setup::Data) {
 		// a table: growth with noise, as if measured
@@ -324,6 +329,7 @@ static void LoadExample(int index) {
 	g_plot.SetMode(e.is3D ? FPLM_3D : FPLM_2D);
 	if (e.is3D)
 		g_plot.ResetView3D();
+	g_plot.ClearHistory();
 	g_edit.SetWindowText(e.text);   // a multiline edit sends no EN_CHANGE for this
 	SyncGraphs();
 	ShowLineError();
@@ -332,6 +338,23 @@ static void LoadExample(int index) {
 		FPLPARAM p{ L"p", 0, 0, 6.283185307179586, 0, 0 };
 		g_plot.SetParameter(p);
 		g_plot.AnimateParameter(L"p", TRUE);
+	}
+	else if (e.setup == Setup::Styles) {
+		// labels, a dotted line, hollow points, a faint curve, a darker region, the axes' titles
+		auto setStyle = [](UINT id, UINT mask, LPCWSTR label, UINT flags, float opacity = 1, float fill = -1) {
+			FPLGRAPH g{ mask, id };
+			g.pszLabel = label;
+			g.flags = flags;
+			g.opacity = opacity;
+			g.fillOpacity = fill;
+			g_plot.SetGraph(g);
+		};
+		setStyle(1, FPLGM_LABEL | FPLGM_FLAGS, L"A({x}, {y})", FPLGF_HOLLOW);
+		setStyle(2, FPLGM_LABEL, L"B: drag me", 0);
+		setStyle(3, FPLGM_LABEL | FPLGM_FLAGS, L"parabola", FPLGF_DOTTED);
+		setStyle(4, FPLGM_LABEL | FPLGM_OPACITY, L"faint", 0, 0.35f);
+		setStyle(5, FPLGM_OPACITY, nullptr, 0, 1, 0.45f);
+		g_plot.SetAxisTitles(L"time (s)", L"height (m)");
 	}
 	else if (e.setup == Setup::Bounds) {
 		FPLPARAM a{ L"a", -2, -10, 10, 0.1, 0 }, b{ L"b", 4, -10, 10, 0.1, 0 };
@@ -363,6 +386,8 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_COLLAPSE, g_plot.IsPanelCollapsed() != FALSE);
 	check(ID_DEMO_3D, g_plot.GetMode() == FPLM_3D);
 	check(ID_DEMO_TANGENT, s & FPLS_TANGENT);
+	::EnableMenuItem(menu, ID_DEMO_UNDO, MF_BYCOMMAND | (g_plot.CanUndo() ? MF_ENABLED : MF_GRAYED));
+	::EnableMenuItem(menu, ID_DEMO_REDO, MF_BYCOMMAND | (g_plot.CanRedo() ? MF_ENABLED : MF_GRAYED));
 #ifdef DEMO_WTLHELPER
 	check(ID_DEMO_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -505,6 +530,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_AXES: ToggleStyle(FPLS_NOAXES); break;
 		case ID_DEMO_TRACE: ToggleStyle(FPLS_NOTRACE); break;
 		case ID_DEMO_TANGENT: ToggleStyle(FPLS_TANGENT); break;
+		case ID_DEMO_FIT: g_plot.ZoomToFit(); ShowView(); break;
+		case ID_DEMO_UNDO: g_plot.Undo(); ShowView(); break;
+		case ID_DEMO_REDO: g_plot.Redo(); ShowView(); break;
 		case ID_DEMO_AUTOSLIDERS: g_autoSliders = !g_autoSliders; SyncGraphs(); break;
 		case ID_DEMO_HIGHCONTRAST: g_plot.ForceHighContrast(g_plot.IsHighContrast() ? 0 : 1); break;
 		case ID_DEMO_FEATURES: ShowFeatures(); break;
@@ -676,6 +704,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_HOME, L"&Reset View\tCtrl+Home");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ZOOMIN, L"Zoom &In\tCtrl++");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ZOOMOUT, L"Zoom &Out\tCtrl+-");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_FIT, L"Zoom to &Fit\tCtrl+F");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_UNDO, L"&Undo Plot Change");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_REDO, L"Red&o Plot Change");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_EQUAL, L"&Equal Scales");
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_LEGEND, L"&Legend");
@@ -713,6 +744,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, 'L', ID_DEMO_COLLAPSE },
 		{ FVIRTKEY | FCONTROL, '3', ID_DEMO_3D },
 		{ FVIRTKEY | FCONTROL, 'O', ID_DEMO_OPEN },
+		{ FVIRTKEY | FCONTROL, 'F', ID_DEMO_FIT },
 		{ FVIRTKEY | FCONTROL, 'S', ID_DEMO_SAVE },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));

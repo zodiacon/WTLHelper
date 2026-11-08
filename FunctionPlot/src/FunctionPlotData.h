@@ -6,6 +6,7 @@
 #include "FunctionPlot.h"
 #include "FunctionPlotGraphs.h"
 #include "FunctionPlotRender3D.h"
+#include "FunctionPlotWorker.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -56,7 +57,7 @@ struct FplPanelHit {
 	int row = -1;
 };
 
-enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point };
+enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D, Point, Box };
 
 // sizes, in DIPs
 constexpr float FplPanelMargin = 10, FplPanelPad = 6, FplGraphRow = 26, FplErrorLine = 16, FplSliderRow = 30;
@@ -78,7 +79,7 @@ struct FplState {
 	float paintDpi = 96;
 	bool exporting = false;
 	std::unordered_map<COLORREF, ComPtr<ID2D1SolidColorBrush>> brushes;
-	ComPtr<ID2D1StrokeStyle> roundStroke, dashStroke;
+	ComPtr<ID2D1StrokeStyle> roundStroke, dashStroke, dotStroke;
 	ComPtr<IDWriteTextFormat> labelCenter, labelLeft, labelRight, panelText, panelSmall, traceText, icons;
 	std::vector<FplGraphPaths> paths;	// by graph
 
@@ -106,6 +107,14 @@ struct FplState {
 	POINT dragLast{};
 	int dragRow = -1;
 	int dragGraph = -1;					// the point being dragged
+	POINT boxStart{}, boxEnd{};			// a rectangle to zoom to
+	bool boxShown = false;				// it's moved far enough to be one
+
+	// undo
+	FplHistory history;
+	int lastKind = -1;					// the step being made (a burst of wheel notches, slider keys)
+	ULONGLONG lastTime = 0;
+	std::wstring axisTitles[3];
 	int hotPoint = -1;					// the draggable point under the mouse
 	bool trackingLeave = false;
 
@@ -120,6 +129,12 @@ struct FplState {
 	std::vector<FplGpuMesh> gpu;		// by graph
 	FplGpuMesh boxEdges, floorGrid;
 	bool gpuStale = true;				// the meshes changed since they were uploaded
+
+	// sampling the heavy graphs on another thread: a coarse version now, the full one when it comes
+	std::unique_ptr<FplWorker> worker;
+	std::vector<uint64_t> generations;	// by graph: the job whose result is wanted
+	uint64_t nextGeneration = 1;
+	bool syncSampling = false;			// everything at full quality now (exports)
 
 	// look
 	bool customColors = false;

@@ -21,6 +21,8 @@ enum : unsigned {
 	FplGraphHeatmap = 0x0010,		// a surface: a heat map of its values
 	FplGraphNoContours = 0x0020,	// a surface: no contour lines
 	FplGraphNoDrag = 0x0040,		// a point the user can't drag
+	FplGraphDotted = 0x0080,		// a dotted line
+	FplGraphHollow = 0x0100,		// points as rings
 };
 
 struct FplGraph {
@@ -33,6 +35,9 @@ struct FplGraph {
 	bool hasRange = false;			// tMin, tMax for a parametric or polar graph (else 0 to 2 pi)
 	double tMin = 0, tMax = 6.283185307179586;
 	intptr_t lParam = 0;
+	float opacity = 1;				// the lines' and points'
+	float fillOpacity = -1;			// regions' (0.22) and heat maps' (0.85) when negative
+	std::wstring label;				// beside its points or at its curve's end; {x} and {y} its coordinates
 
 	// built
 	FplExpression expr;				// expr.error: why it draws nothing
@@ -75,6 +80,47 @@ struct FplParam {
 	int direction = 1;
 };
 
+// Where a graph's label goes (screen coordinates) and what it says.
+struct FplLabelPlace {
+	int graph = -1;
+	FplPoint at;					// the point it's beside
+	std::wstring text;
+};
+
+// A label's text with {x} and {y} put in, to the precision a DIP needs (unitsPerDip) plus one.
+std::wstring FplFormatLabel(std::wstring_view label, double x, double y, double unitsPerDip);
+
+// What undo brings back: the parameters' values (by name), the graphs' hiding (by id), the 2D view's ranges, the 3D
+// box and camera.
+struct FplSnapshot {
+	std::vector<std::pair<std::wstring, double>> params;
+	std::vector<std::pair<unsigned, bool>> hidden;
+	double view[4] = {};
+	double box[6] = {};
+	float yaw = 0, pitch = 0;
+	bool operator==(const FplSnapshot& other) const;
+};
+
+// The user's steps back and forth.
+class FplHistory {
+public:
+	explicit FplHistory(size_t limit = 200) : m_Limit(limit) {}
+	// Before a step: the state it starts from (the redo steps are gone).
+	void Push(FplSnapshot before);
+	bool CanUndo() const { return !m_Undo.empty(); }
+	bool CanRedo() const { return !m_Redo.empty(); }
+	// The state to go back (or forward) to, given the current one, which the other way keeps; steps that change
+	// nothing are skipped. false if there's none.
+	bool Undo(const FplSnapshot& current, FplSnapshot& to);
+	bool Redo(const FplSnapshot& current, FplSnapshot& to);
+	void Clear();
+	size_t Steps() const { return m_Undo.size(); }
+
+private:
+	std::vector<FplSnapshot> m_Undo, m_Redo;
+	size_t m_Limit;
+};
+
 // What a trace is on: a graph's point, maybe one of its features.
 struct FplTraceHit {
 	int graph = -1;					// -1: nothing
@@ -115,11 +161,25 @@ public:
 	// The lists' count a listed graph is drawn for (0 when it isn't listed or a list is empty).
 	size_t ElementCount(int graph) const;
 
+	// The extent of what the drawable graphs draw (points exactly, curves over their range, a function's values over
+	// the view's x, implicit curves' sampled lines), the 2nd to 98th percentile of a curve's points so an asymptote
+	// doesn't stretch it, and a little room around; false if nothing has an extent.
+	bool FitBounds(const FplViewport& view, double& xMin, double& xMax, double& yMin, double& yMax) const;
+	// Where the labels go, from the last Sample: beside each point, at the right end of a curve's part in the view.
+	std::vector<FplLabelPlace> LabelPlaces(const FplViewport& view) const;
+
 	// Samples every drawable graph; the others' geometry is cleared.
 	void Sample(const FplViewport& view, const FplSampleOptions& options = {});
+	void SampleGraph(int graph, const FplViewport& view, const FplSampleOptions& options = {});
+	// The options a graph is sampled with (its heat map and contours, its range) on top of the base ones.
+	FplSampleOptions OptionsFor(int graph, const FplSampleOptions& base) const;
+	// Worth sampling on another thread: implicit curves and regions and surfaces in 2D, implicit surfaces in 3D (not
+	// listed ones, which go element by element here).
+	bool IsHeavy(int graph, bool in3D) const;
 	// The drawable graphs' meshes for a 3D box: surfaces (z = F(x, y), parametric), curves as tubes (space curves, and
 	// the 2D curves on the z = 0 plane), points as spheres. Implicit curves, regions and vector fields have none.
 	void Build3D(const FplBox3& box);
+	void Build3DGraph(int graph, const FplBox3& box, int implicitCells = 48);
 
 	// Roots, extrema and the y intercept of a function graph over the view, and where it meets the other drawable
 	// functions (Intersection), into its features. Others get none.
@@ -162,7 +222,7 @@ private:
 	bool TryRegression(FplGraph& g, FplParseOptions options);
 	void Fit(FplGraph& g);
 	void SetElement(std::vector<double>& slots, const FplGraph& g, size_t i) const;
-	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box);
+	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;
 	void SnapToFeature(FplTraceHit& hit, FplPoint screen, const FplViewport& view, double snapDistance,
 		bool alongOnly) const;
@@ -193,6 +253,7 @@ struct FplSavedState {
 	FplViewport view;					// its ranges (the size is the window's)
 	FplBox3 box;
 	float yaw = FplCamera{}.yaw, pitch = FplCamera{}.pitch;
+	std::wstring axisTitles[3];
 };
 // As text: a line per setting, tab-separated fields, names and texts escaped (FunctionPlotState.cpp has the format).
 std::wstring FplSaveState(const FplSavedState& state);
@@ -206,6 +267,7 @@ struct FplSvgStyle {
 	uint32_t panelBack = 0xF8F8F8, panelText = 0, panelBorder = 0xCCCCCC;
 	std::vector<uint32_t> graphColors;
 	bool showGrid = true, showAxes = true, piTicks = false, showLegend = true;
+	std::wstring axisTitles[2];			// x, y: at the axes' ends
 };
 std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplSvgStyle& style);
 

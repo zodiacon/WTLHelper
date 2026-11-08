@@ -108,6 +108,11 @@ static void MakeResources(FplState& s) {
 		dash.dashCap = D2D1_CAP_STYLE_FLAT;
 		const float dashes[] = { 3, 2 };
 		FplD2DFactory()->CreateStrokeStyle(dash, dashes, 2, s.dashStroke.GetAddressOf());
+		// dots: no dash, round caps, two and a half widths apart
+		auto dot = round;
+		dot.dashStyle = D2D1_DASH_STYLE_CUSTOM;
+		const float dots[] = { 0, 2.5f };
+		FplD2DFactory()->CreateStrokeStyle(dot, dots, 2, s.dotStroke.GetAddressOf());
 	}
 	if (!s.labelCenter) {
 		s.labelCenter = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -174,92 +179,101 @@ void AddArrow(ID2D1GeometrySink* sink, const FplArrow& a, std::vector<D2D1_POINT
 void CFunctionPlotCtrl::BuildGeometries() {
 	auto& s = *m_State;
 	s.paths.assign(s.plot.graphs.size(), {});
-	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
-		auto& geometry = s.plot.graphs[i].geometry;
-		auto& paths = s.paths[i];
-		if (!geometry.lines.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.lines.GetAddressOf()))) {
-			ComPtr<ID2D1GeometrySink> sink;
-			if (SUCCEEDED(paths.lines->Open(sink.GetAddressOf()))) {
-				std::vector<D2D1_POINT_2F> points;
-				for (auto& line : geometry.lines) {
-					sink->BeginFigure(Pt(line[0]), D2D1_FIGURE_BEGIN_HOLLOW);
-					points.clear();
-					points.reserve(line.size() - 1);
-					for (size_t k = 1; k < line.size(); k++)
-						points.push_back(Pt(line[k]));
-					sink->AddLines(points.data(), (UINT32)points.size());
-					sink->EndFigure(D2D1_FIGURE_END_OPEN);
-				}
-				sink->Close();
+	for (size_t i = 0; i < s.plot.graphs.size(); i++)
+		BuildGeometry((int)i);
+}
+
+void CFunctionPlotCtrl::BuildGeometry(int graph) {
+	auto& s = *m_State;
+	if (graph < 0 || graph >= (int)s.plot.graphs.size())
+		return;
+	if (s.paths.size() < s.plot.graphs.size())
+		s.paths.resize(s.plot.graphs.size());
+	auto& geometry = s.plot.graphs[graph].geometry;
+	auto& paths = s.paths[graph];
+	paths = {};
+	if (!geometry.lines.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.lines.GetAddressOf()))) {
+		ComPtr<ID2D1GeometrySink> sink;
+		if (SUCCEEDED(paths.lines->Open(sink.GetAddressOf()))) {
+			std::vector<D2D1_POINT_2F> points;
+			for (auto& line : geometry.lines) {
+				sink->BeginFigure(Pt(line[0]), D2D1_FIGURE_BEGIN_HOLLOW);
+				points.clear();
+				points.reserve(line.size() - 1);
+				for (size_t k = 1; k < line.size(); k++)
+					points.push_back(Pt(line[k]));
+				sink->AddLines(points.data(), (UINT32)points.size());
+				sink->EndFigure(D2D1_FIGURE_END_OPEN);
 			}
+			sink->Close();
 		}
-		if (!geometry.fills.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.fills.GetAddressOf()))) {
-			ComPtr<ID2D1GeometrySink> sink;
-			if (SUCCEEDED(paths.fills->Open(sink.GetAddressOf()))) {
-				// one geometry: the cells' polygons share edges and fill without seams
-				sink->SetFillMode(D2D1_FILL_MODE_WINDING);
-				std::vector<D2D1_POINT_2F> points;
-				for (auto& poly : geometry.fills) {
-					if (poly.size() < 3)
-						continue;
-					sink->BeginFigure(Pt(poly[0]), D2D1_FIGURE_BEGIN_FILLED);
-					points.clear();
-					points.reserve(poly.size() - 1);
-					for (size_t k = 1; k < poly.size(); k++)
-						points.push_back(Pt(poly[k]));
-					sink->AddLines(points.data(), (UINT32)points.size());
-					sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-				}
-				sink->Close();
-			}
-		}
-		// a surface's contours, with a label at the middle of each level's longest line
-		std::vector<D2D1_POINT_2F> points;
-		if (!geometry.contours.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.contours.GetAddressOf()))) {
-			ComPtr<ID2D1GeometrySink> sink;
-			if (SUCCEEDED(paths.contours->Open(sink.GetAddressOf()))) {
-				for (auto& c : geometry.contours)
-					for (auto& line : c.lines)
-						AddOpen(sink.Get(), line, points);
-				sink->Close();
-			}
-			const double step = geometry.contours.size() > 1
-				? std::abs(geometry.contours[1].level - geometry.contours[0].level) : 1;
-			for (auto& c : geometry.contours) {
-				const FplPolyline* longest = nullptr;
-				for (auto& line : c.lines)
-					if (!longest || line.size() > longest->size())
-						longest = &line;
-				if (longest && longest->size() >= 8)
-					paths.labels.push_back({ (*longest)[longest->size() / 2], FplFormatCoordinate(c.level, step / 100) });
-			}
-		}
-		// a vector field's arrows
-		if (!geometry.arrows.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.arrows.GetAddressOf()))) {
-			ComPtr<ID2D1GeometrySink> sink;
-			if (SUCCEEDED(paths.arrows->Open(sink.GetAddressOf()))) {
-				for (auto& a : geometry.arrows)
-					AddArrow(sink.Get(), a, points);
-				sink->Close();
-			}
-		}
-		// a heat map's pixels: its values on the colormap, transparent where undefined
-		auto& hm = geometry.heatmap;
-		if (!hm.Empty()) {
-			paths.heatCols = hm.cols;
-			paths.heatRows = hm.rows;
-			paths.heatCell = (float)hm.cell;
-			paths.heatPixels.resize(hm.values.size());
-			const double range = hm.hi - hm.lo;
-			for (size_t k = 0; k < hm.values.size(); k++) {
-				float v = hm.values[k];
-				if (!std::isfinite(v)) {
-					paths.heatPixels[k] = 0;
+	}
+	if (!geometry.fills.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.fills.GetAddressOf()))) {
+		ComPtr<ID2D1GeometrySink> sink;
+		if (SUCCEEDED(paths.fills->Open(sink.GetAddressOf()))) {
+			// one geometry: the cells' polygons share edges and fill without seams
+			sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+			std::vector<D2D1_POINT_2F> points;
+			for (auto& poly : geometry.fills) {
+				if (poly.size() < 3)
 					continue;
-				}
-				uint32_t c = FplColormap((v - hm.lo) / range);
-				paths.heatPixels[k] = 0xFF000000u | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+				sink->BeginFigure(Pt(poly[0]), D2D1_FIGURE_BEGIN_FILLED);
+				points.clear();
+				points.reserve(poly.size() - 1);
+				for (size_t k = 1; k < poly.size(); k++)
+					points.push_back(Pt(poly[k]));
+				sink->AddLines(points.data(), (UINT32)points.size());
+				sink->EndFigure(D2D1_FIGURE_END_CLOSED);
 			}
+			sink->Close();
+		}
+	}
+	// a surface's contours, with a label at the middle of each level's longest line
+	std::vector<D2D1_POINT_2F> points;
+	if (!geometry.contours.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.contours.GetAddressOf()))) {
+		ComPtr<ID2D1GeometrySink> sink;
+		if (SUCCEEDED(paths.contours->Open(sink.GetAddressOf()))) {
+			for (auto& c : geometry.contours)
+				for (auto& line : c.lines)
+					AddOpen(sink.Get(), line, points);
+			sink->Close();
+		}
+		const double step = geometry.contours.size() > 1
+			? std::abs(geometry.contours[1].level - geometry.contours[0].level) : 1;
+		for (auto& c : geometry.contours) {
+			const FplPolyline* longest = nullptr;
+			for (auto& line : c.lines)
+				if (!longest || line.size() > longest->size())
+					longest = &line;
+			if (longest && longest->size() >= 8)
+				paths.labels.push_back({ (*longest)[longest->size() / 2], FplFormatCoordinate(c.level, step / 100) });
+		}
+	}
+	// a vector field's arrows
+	if (!geometry.arrows.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.arrows.GetAddressOf()))) {
+		ComPtr<ID2D1GeometrySink> sink;
+		if (SUCCEEDED(paths.arrows->Open(sink.GetAddressOf()))) {
+			for (auto& a : geometry.arrows)
+				AddArrow(sink.Get(), a, points);
+			sink->Close();
+		}
+	}
+	// a heat map's pixels: its values on the colormap, transparent where undefined
+	auto& hm = geometry.heatmap;
+	if (!hm.Empty()) {
+		paths.heatCols = hm.cols;
+		paths.heatRows = hm.rows;
+		paths.heatCell = (float)hm.cell;
+		paths.heatPixels.resize(hm.values.size());
+		const double range = hm.hi - hm.lo;
+		for (size_t k = 0; k < hm.values.size(); k++) {
+			float v = hm.values[k];
+			if (!std::isfinite(v)) {
+				paths.heatPixels[k] = 0;
+				continue;
+			}
+			uint32_t c = FplColormap((v - hm.lo) / range);
+			paths.heatPixels[k] = 0xFF000000u | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
 		}
 	}
 }
@@ -360,7 +374,9 @@ HRESULT CFunctionPlotCtrl::PaintTo(ID2D1RenderTarget* target, float dpi, bool ex
 		PaintGraphs();
 		PaintContourLabels();
 		PaintLabels();
+		PaintGraphLabels();
 		PaintTrace();
+		PaintBox();
 		PaintPanel();
 	}
 	HRESULT hr = target->EndDraw();
@@ -383,7 +399,8 @@ void CFunctionPlotCtrl::PaintHeatmaps() {
 				p.heat.GetAddressOf())))
 				continue;
 		}
-		rt->DrawBitmap(p.heat.Get(), D2D1::RectF(0, 0, p.heatCols * p.heatCell, p.heatRows * p.heatCell), 0.85f,
+		const float opacity = s.plot.graphs[i].fillOpacity >= 0 ? s.plot.graphs[i].fillOpacity : 0.85f;
+		rt->DrawBitmap(p.heat.Get(), D2D1::RectF(0, 0, p.heatCols * p.heatCell, p.heatRows * p.heatCell), opacity,
 			D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 	}
 }
@@ -513,6 +530,55 @@ void CFunctionPlotCtrl::PaintLabels() {
 	patch->SetOpacity(1);
 }
 
+// The graphs' labels beside their points (or their curves' ends), and the axes' titles.
+void CFunctionPlotCtrl::PaintGraphLabels() {
+	auto& s = *m_State;
+	auto* rt = s.rt;
+	const FPLCOLORS c = GetColors();
+	auto& v = s.view;
+	const float w = (float)v.width, h = (float)v.height;
+	auto* patch = s.Brush(c.crBack);
+	auto place = [&](const std::wstring& text, float x, float y, ID2D1Brush* brush) {
+		const float tw = TextWidth(text, s.traceText.Get()) + 6;
+		if (x + tw > w - 4)
+			x -= tw + 18;
+		x = std::max(x, 4.0f);
+		y = std::clamp(y, 2.0f, h - 20);
+		patch->SetOpacity(0.75f);
+		rt->FillRoundedRectangle({ { x, y, x + tw, y + 18 }, 3, 3 }, patch);
+		patch->SetOpacity(1);
+		Text(rt, text, s.traceText.Get(), { x + 3, y, x + tw, y + 18 }, brush);
+	};
+	for (auto& p : s.plot.LabelPlaces(v))
+		place(p.text, (float)p.at.x + 9, (float)p.at.y - 22, s.Brush(GraphColor(p.graph)));
+	if (GetStyle() & FPLS_NOAXES)
+		return;
+	const float ax = (float)v.ToScreenX(0), ay = (float)v.ToScreenY(0);
+	auto* title = s.Brush(c.crPanelText);
+	if (!s.axisTitles[0].empty()) {
+		const float tw = TextWidth(s.axisTitles[0], s.traceText.Get()) + 6;
+		place(s.axisTitles[0], w - tw - 6, std::clamp(ay, 0.0f, h) - 24, title);
+	}
+	if (!s.axisTitles[1].empty())
+		place(s.axisTitles[1], std::clamp(ax, 0.0f, w) + 8, 6, title);
+}
+
+// The rectangle being dragged to zoom to.
+void CFunctionPlotCtrl::PaintBox() {
+	auto& s = *m_State;
+	if (s.drag != FplDrag::Box || !s.boxShown || s.exporting)
+		return;
+	auto* rt = s.rt;
+	const FPLCOLORS c = GetColors();
+	D2D1_RECT_F r = { ToDips(std::min(s.boxStart.x, s.boxEnd.x)), ToDips(std::min(s.boxStart.y, s.boxEnd.y)),
+		ToDips(std::max(s.boxStart.x, s.boxEnd.x)), ToDips(std::max(s.boxStart.y, s.boxEnd.y)) };
+	auto* brush = s.Brush(c.crPalette[1]);
+	brush->SetOpacity(0.12f);
+	rt->FillRectangle(r, brush);
+	brush->SetOpacity(1);
+	rt->DrawRectangle(r, brush, 96.0f / s.paintDpi);
+}
+
 void CFunctionPlotCtrl::PaintGraphs() {
 	auto& s = *m_State;
 	auto* rt = s.rt;
@@ -522,19 +588,25 @@ void CFunctionPlotCtrl::PaintGraphs() {
 		if (!graphs[i].Drawable() || !s.paths[i].fills)
 			continue;
 		auto* brush = s.Brush(GraphColor((int)i));
-		brush->SetOpacity(IsHighContrast() ? 0.35f : 0.22f);
+		const float fill = graphs[i].fillOpacity >= 0 ? graphs[i].fillOpacity : IsHighContrast() ? 0.35f : 0.22f;
+		brush->SetOpacity(fill);
 		rt->FillGeometry(s.paths[i].fills.Get(), brush);
 		brush->SetOpacity(1);
 	}
 	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
-		if (graphs[i].Drawable() && s.paths[i].contours)
-			rt->DrawGeometry(s.paths[i].contours.Get(), s.Brush(GraphColor((int)i)), 1.25f, s.roundStroke.Get());
+		if (graphs[i].Drawable() && s.paths[i].contours) {
+			auto* brush = s.Brush(GraphColor((int)i));
+			brush->SetOpacity(graphs[i].opacity);
+			rt->DrawGeometry(s.paths[i].contours.Get(), brush, 1.25f, s.roundStroke.Get());
+			brush->SetOpacity(1);
+		}
 	}
 	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
 		auto& g = graphs[i];
 		if (!g.Drawable())
 			continue;
 		auto* brush = s.Brush(GraphColor((int)i));
+		brush->SetOpacity(g.opacity);
 		if (s.paths[i].arrows)
 			rt->DrawGeometry(s.paths[i].arrows.Get(), brush, 1.5f, s.roundStroke.Get());
 		float width = g.width;
@@ -542,12 +614,23 @@ void CFunctionPlotCtrl::PaintGraphs() {
 			width += 1;
 		if (s.paths[i].lines) {
 			bool dashed = g.geometry.dashed || (g.flags & FplGraphDashed);
-			rt->DrawGeometry(s.paths[i].lines.Get(), brush, width, dashed ? s.dashStroke.Get() : s.roundStroke.Get());
+			auto* stroke = (g.flags & FplGraphDotted) ? s.dotStroke.Get() : dashed ? s.dashStroke.Get() : s.roundStroke.Get();
+			rt->DrawGeometry(s.paths[i].lines.Get(), brush, width, stroke);
 		}
+		brush->SetOpacity(1);
 		const bool draggable = (g.dragX >= 0 || g.dragY >= 0) && !(g.flags & FplGraphNoDrag);
+		const bool hollow = (g.flags & FplGraphHollow) != 0;
+		auto* back = s.Brush(GetColors().crBack);
 		for (auto& p : g.geometry.points) {
 			D2D1_ELLIPSE dot = D2D1::Ellipse(Pt(p), 2.5f + width, 2.5f + width);
-			rt->FillEllipse(dot, brush);
+			brush->SetOpacity(g.opacity);
+			if (hollow) {
+				rt->FillEllipse(dot, back);
+				rt->DrawEllipse(dot, brush, 2);
+			}
+			else
+				rt->FillEllipse(dot, brush);
+			brush->SetOpacity(1);
 			// a draggable point: a ring around it, stronger under the mouse
 			if (draggable) {
 				const float ring = 6.5f + width + ((int)i == s.hotPoint ? 2 : 0);
@@ -919,6 +1002,12 @@ void CFunctionPlotCtrl::PaintTicks3D() {
 		if (!s.camera.Project(t.at, w, h, p))
 			continue;
 		const float x = (float)p.x, y = (float)p.y;
-		Text(rt, t.text, s.labelCenter.Get(), { x - 60, y - 10, x + 60, y + 10 }, t.name ? name : label);
+		std::wstring text = t.text;
+		if (t.name) {
+			int axis = text == L"x" ? 0 : text == L"y" ? 1 : 2;
+			if (!s.axisTitles[axis].empty())
+				text = s.axisTitles[axis];
+		}
+		Text(rt, text, s.labelCenter.Get(), { x - 80, y - 10, x + 80, y + 10 }, t.name ? name : label);
 	}
 }

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
 #pragma comment(lib, "uxtheme.lib")
@@ -16,7 +17,7 @@
 
 static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed && FPLGF_NOTRACE == FplGraphNoTrace &&
 	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours &&
-	FPLGF_NODRAG == FplGraphNoDrag);
+	FPLGF_NODRAG == FplGraphNoDrag && FPLGF_DOTTED == FplGraphDotted && FPLGF_HOLLOW == FplGraphHollow);
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
 	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
@@ -54,6 +55,9 @@ LRESULT CFunctionPlotCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	RECT rc;
 	GetClientRect(&rc);
 	s.client = { rc.right, rc.bottom };
+	// the sampling thread tells the window (a message posted to a window gone is dropped)
+	HWND hwnd = m_hWnd;
+	s.worker = std::make_unique<FplWorker>([hwnd] { ::PostMessageW(hwnd, WM_FPL_SAMPLED, 0, 0); });
 	Rebuild();
 	BOOL handled;
 	OnSize(0, 0, MAKELPARAM(rc.right, rc.bottom), handled);
@@ -62,6 +66,7 @@ LRESULT CFunctionPlotCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(AnimationTimer);
+	m_State->worker.reset();
 	DiscardTarget();
 	m_State->gpu.clear();
 	m_State->boxEdges = m_State->floorGrid = {};
@@ -259,6 +264,12 @@ void Apply(FplGraph& g, const FPLGRAPH& in, bool& rebuild) {
 	}
 	if (in.mask & FPLGM_LPARAM)
 		g.lParam = in.lParam;
+	if (in.mask & FPLGM_LABEL)
+		g.label = in.pszLabel ? in.pszLabel : L"";
+	if (in.mask & FPLGM_OPACITY) {
+		g.opacity = std::isfinite(in.opacity) ? std::clamp(in.opacity, 0.0f, 1.0f) : 1.0f;
+		g.fillOpacity = std::isfinite(in.fillOpacity) ? std::min(in.fillOpacity, 1.0f) : -1.0f;
+	}
 }
 
 }  // namespace
@@ -313,6 +324,12 @@ BOOL CFunctionPlotCtrl::GetGraph(FPLGRAPH& graph) const {
 	}
 	if (graph.mask & FPLGM_LPARAM)
 		graph.lParam = g.lParam;
+	if (graph.mask & FPLGM_LABEL)
+		graph.pszLabel = g.label.c_str();
+	if (graph.mask & FPLGM_OPACITY) {
+		graph.opacity = g.opacity;
+		graph.fillOpacity = g.fillOpacity;
+	}
 	return TRUE;
 }
 
@@ -525,6 +542,10 @@ BOOL CFunctionPlotCtrl::GetDegrees() const {
 
 void CFunctionPlotCtrl::Rebuild() {
 	auto& s = *m_State;
+	// the graphs change: what's being sampled for the old ones isn't wanted
+	if (s.worker)
+		s.worker->Cancel();
+	s.generations.assign(s.plot.graphs.size(), 0);
 	s.plot.Build();
 	if (s.traceGraph >= (int)s.plot.graphs.size() || s.featuresGraph >= (int)s.plot.graphs.size()) {
 		s.traceGraph = s.featuresGraph = -1;
@@ -567,14 +588,52 @@ void CFunctionPlotCtrl::ValuesChanged() {
 
 void CFunctionPlotCtrl::Resample() {
 	auto& s = *m_State;
+	const bool async = s.worker && !s.syncSampling;
+	s.generations.resize(s.plot.graphs.size(), 0);
+	// a heavy graph: a coarse version now, the full one from the thread (each job numbered, so only the latest's
+	// result is taken)
+	auto submit = [&](int i, bool mesh) {
+		FplJob job;
+		job.graph = i;
+		job.generation = s.generations[i] = s.nextGeneration++;
+		job.expr = s.plot.graphs[i].expr;
+		job.slots = s.plot.Slots();
+		job.view = s.view;
+		job.options = s.plot.OptionsFor(i, {});
+		job.mesh = mesh;
+		job.box = s.box;
+		s.worker->Submit(std::move(job));
+	};
 	if (s.mode3D) {
-		s.plot.Build3D(s.box);
+		for (size_t i = 0; i < s.plot.graphs.size(); i++) {
+			if (async && s.plot.IsHeavy((int)i, true)) {
+				s.plot.Build3DGraph((int)i, s.box, 16);
+				submit((int)i, true);
+			}
+			else {
+				s.generations[i] = 0;
+				s.plot.Build3DGraph((int)i, s.box);
+			}
+		}
 		s.gpuStale = true;
 		return;
 	}
 	if (!s.viewSet)
 		return;
-	s.plot.Sample(s.view);
+	FplSampleOptions coarse;
+	coarse.cellSize = 16;
+	coarse.cellDepth = 1;
+	coarse.heatCell = 12;
+	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
+		if (async && s.plot.IsHeavy((int)i, false)) {
+			s.plot.SampleGraph((int)i, s.view, coarse);
+			submit((int)i, false);
+		}
+		else {
+			s.generations[i] = 0;
+			s.plot.SampleGraph((int)i, s.view);
+		}
+	}
 	if (s.featuresGraph >= 0 && !(GetStyle() & FPLS_NOTRACE))
 		s.plot.FindFeatures(s.featuresGraph, s.view);
 	BuildGeometries();
@@ -710,6 +769,33 @@ BOOL CFunctionPlotCtrl::Invalidate(BOOL bErase) {
 	return CWindow::Invalidate(bErase);
 }
 
+LRESULT CFunctionPlotCtrl::OnSampled(UINT, WPARAM, LPARAM, BOOL&) {
+	auto& s = *m_State;
+	if (!s.worker)
+		return 0;
+	bool changed = false;
+	for (auto& r : s.worker->Take()) {
+		if (r.graph < 0 || r.graph >= (int)s.plot.graphs.size() || r.graph >= (int)s.generations.size() ||
+			s.generations[r.graph] != r.generation || r.mesh != s.mode3D)
+			continue;
+		changed = true;
+		if (r.mesh) {
+			s.plot.graphs[r.graph].mesh = std::move(r.triangles);
+			if (s.renderer.Ready() && r.graph < (int)s.gpu.size() && !s.gpuStale)
+				s.gpu[r.graph] = s.renderer.Create(s.plot.graphs[r.graph].mesh);
+			else
+				s.gpuStale = true;
+		}
+		else {
+			s.plot.graphs[r.graph].geometry = std::move(r.geometry);
+			BuildGeometry(r.graph);
+		}
+	}
+	if (changed)
+		Invalidate();
+	return 0;
+}
+
 LRESULT CFunctionPlotCtrl::OnPaint3D(UINT, WPARAM, LPARAM, BOOL&) {
 	if (m_State->mode3D)
 		Paint3D(true);
@@ -763,6 +849,147 @@ void CFunctionPlotCtrl::NotifyView3D() {
 	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_VIEW3DCHANGED };
 	nm.view = GetView3D();
 	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
+// ---- Fitting, undo, axis titles ---------------------------------------------------------
+
+BOOL CFunctionPlotCtrl::ZoomToFit() {
+	auto& s = *m_State;
+	double x0, x1, y0, y1;
+	if (s.mode3D || !s.view.Valid() || !s.plot.FitBounds(s.view, x0, x1, y0, y1))
+		return FALSE;
+	SetViewport(x0, x1, y0, y1);
+	ViewChanged(true);
+	return TRUE;
+}
+
+FplSnapshot CFunctionPlotCtrl::TakeSnapshot() const {
+	auto& s = *m_State;
+	FplSnapshot snap;
+	for (auto& p : s.plot.params)
+		snap.params.emplace_back(p.name, p.value);
+	for (auto& g : s.plot.graphs)
+		snap.hidden.emplace_back(g.id, (g.flags & FplGraphHidden) != 0);
+	const double view[] = { s.view.xMin, s.view.xMax, s.view.yMin, s.view.yMax };
+	std::copy(std::begin(view), std::end(view), snap.view);
+	const double box[] = { s.box.xMin, s.box.xMax, s.box.yMin, s.box.yMax, s.box.zMin, s.box.zMax };
+	std::copy(std::begin(box), std::end(box), snap.box);
+	snap.yaw = s.camera.yaw;
+	snap.pitch = s.camera.pitch;
+	return snap;
+}
+
+void CFunctionPlotCtrl::Remember(int kind) {
+	auto& s = *m_State;
+	const ULONGLONG now = ::GetTickCount64();
+	if (kind < 0 || kind != s.lastKind || now - s.lastTime > 700)
+		s.history.Push(TakeSnapshot());
+	s.lastKind = kind;
+	s.lastTime = now;
+}
+
+void CFunctionPlotCtrl::Restore(const FplSnapshot& snap) {
+	auto& s = *m_State;
+	s.lastKind = -1;
+	// the parameters by name: each that moves is notified
+	std::vector<int> moved;
+	for (auto& [name, value] : snap.params) {
+		int i = s.plot.FindParam(name);
+		if (i >= 0 && s.plot.params[i].value != value) {
+			s.plot.params[i].value = value;
+			moved.push_back(i);
+		}
+	}
+	// the graphs shown or hidden, by id
+	std::vector<unsigned> toggled;
+	for (auto& [id, hidden] : snap.hidden) {
+		int i = s.plot.FindGraph(id);
+		if (i >= 0 && ((s.plot.graphs[i].flags & FplGraphHidden) != 0) != hidden) {
+			s.plot.graphs[i].flags ^= FplGraphHidden;
+			toggled.push_back(id);
+		}
+	}
+	FplViewport v = s.view;
+	v.xMin = snap.view[0], v.xMax = snap.view[1], v.yMin = snap.view[2], v.yMax = snap.view[3];
+	const bool viewMoved = v.xMin != s.view.xMin || v.xMax != s.view.xMax || v.yMin != s.view.yMin || v.yMax != s.view.yMax;
+	if (v.Valid())
+		s.view = v;
+	FplBox3 box{ snap.box[0], snap.box[1], snap.box[2], snap.box[3], snap.box[4], snap.box[5] };
+	const bool box3D = box.Valid() && std::memcmp(&box, &s.box, sizeof(box)) != 0;
+	const bool camera = snap.yaw != s.camera.yaw || snap.pitch != s.camera.pitch;
+	if (box.Valid())
+		s.box = box;
+	s.camera.yaw = snap.yaw;
+	s.camera.pitch = snap.pitch;
+	ClearTrace();
+	if (!toggled.empty())
+		Rebuild();
+	else if (!moved.empty())
+		ValuesChanged();
+	else
+		Resample();
+	Invalidate();
+	for (int i : moved) {
+		NMFPLPARAM nm{};
+		nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_PARAMCHANGED };
+		nm.pszName = s.plot.params[i].name.c_str();
+		nm.value = s.plot.params[i].value;
+		::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+	}
+	for (unsigned id : toggled) {
+		NMFPLGRAPH nm{};
+		nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_GRAPHTOGGLED };
+		nm.id = id;
+		int i = s.plot.FindGraph(id);
+		nm.hidden = i >= 0 && (s.plot.graphs[i].flags & FplGraphHidden);
+		::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+	}
+	if (viewMoved)
+		NotifyView();
+	if (box3D || camera)
+		NotifyView3D();
+}
+
+BOOL CFunctionPlotCtrl::Undo() {
+	FplSnapshot to;
+	if (!m_State->history.Undo(TakeSnapshot(), to))
+		return FALSE;
+	Restore(to);
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::Redo() {
+	FplSnapshot to;
+	if (!m_State->history.Redo(TakeSnapshot(), to))
+		return FALSE;
+	Restore(to);
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::CanUndo() const {
+	return m_State->history.CanUndo();
+}
+
+BOOL CFunctionPlotCtrl::CanRedo() const {
+	return m_State->history.CanRedo();
+}
+
+void CFunctionPlotCtrl::ClearHistory() {
+	m_State->history.Clear();
+	m_State->lastKind = -1;
+}
+
+void CFunctionPlotCtrl::SetAxisTitles(LPCWSTR pszX, LPCWSTR pszY, LPCWSTR pszZ) {
+	auto& s = *m_State;
+	s.axisTitles[0] = pszX ? pszX : L"";
+	s.axisTitles[1] = pszY ? pszY : L"";
+	s.axisTitles[2] = pszZ ? pszZ : L"";
+	if (IsWindow())
+		Invalidate();
+}
+
+LPCWSTR CFunctionPlotCtrl::GetAxisTitle(int axis) const {
+	return axis >= 0 && axis < 3 ? m_State->axisTitles[axis].c_str() : nullptr;
 }
 
 // ---- Tracing ---------------------------------------------------------------------------
@@ -1112,6 +1339,9 @@ CString CFunctionPlotCtrl::GetState() const {
 		copy.hasRange = g.hasRange;
 		copy.tMin = g.tMin;
 		copy.tMax = g.tMax;
+		copy.opacity = g.opacity;
+		copy.fillOpacity = g.fillOpacity;
+		copy.label = g.label;
 		st.graphs.push_back(std::move(copy));
 	}
 	st.params = s.plot.params;
@@ -1123,6 +1353,8 @@ CString CFunctionPlotCtrl::GetState() const {
 	st.box = s.box;
 	st.yaw = s.camera.yaw;
 	st.pitch = s.camera.pitch;
+	for (int k = 0; k < 3; k++)
+		st.axisTitles[k] = s.axisTitles[k];
 	return FplSaveState(st).c_str();
 }
 
@@ -1139,6 +1371,9 @@ BOOL CFunctionPlotCtrl::SetState(LPCWSTR pszState) {
 	s.plot.lists = std::move(st.lists);
 	s.plot.degrees = st.degrees;
 	s.collapsed = st.collapsed;
+	for (int k = 0; k < 3; k++)
+		s.axisTitles[k] = st.axisTitles[k];
+	s.history.Clear();
 	s.box = st.box;
 	s.camera.yaw = 0;
 	s.camera.pitch = 0;
@@ -1202,6 +1437,10 @@ BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
 	ComPtr<IWICBitmap> bitmap;
 	if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf()))))
 		return FALSE;
+	// everything at full quality, now: not the coarse versions the thread is refining
+	s.syncSampling = true;
+	Resample();
+	s.syncSampling = false;
 
 	if (s.mode3D) {
 		// the frame as it's shown: drawn, and read back before it's presented
@@ -1246,6 +1485,9 @@ BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
 	auto& s = *m_State;
 	if (!pszPath || !s.view.Valid() || s.mode3D)
 		return FALSE;
+	s.syncSampling = true;
+	Resample();
+	s.syncSampling = false;
 	const FPLCOLORS c = GetColors();
 	const DWORD style = GetStyle();
 	FplSvgStyle svg;
@@ -1290,6 +1532,13 @@ LRESULT CFunctionPlotCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& s = *m_State;
+	if (::GetKeyState(VK_CONTROL) < 0 && (wParam == 'Z' || wParam == 'Y')) {
+		if (wParam == 'Y' || ::GetKeyState(VK_SHIFT) < 0)
+			Redo();
+		else
+			Undo();
+		return 0;
+	}
 	if (wParam == VK_TAB) {
 		int next = NextSlider(::GetKeyState(VK_SHIFT) < 0);
 		if (next != -2) {
@@ -1305,6 +1554,8 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 		const int param = s.rows[s.focusRow].index;
 		auto& p = s.plot.params[param];
 		const double step = p.step > 0 ? p.step : (p.max - p.min) / 100;
+		if (wParam != VK_SPACE && wParam != VK_ESCAPE)
+			Remember(1000 + param);
 		switch (wParam) {
 			case VK_LEFT: case VK_DOWN: SetParam(param, p.value - step, true); return 0;
 			case VK_RIGHT: case VK_UP: SetParam(param, p.value + step, true); return 0;
@@ -1320,6 +1571,21 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 	if (TraceKey((UINT)wParam))
 		return 0;
 	const bool canMove = !(GetStyle() & FPLS_NOPANZOOM);
+	if (wParam == 'F' && canMove && !s.mode3D) {
+		Remember(-1);
+		ZoomToFit();
+		return 0;
+	}
+	switch (wParam) {
+		case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN: case VK_ADD: case VK_OEM_PLUS: case VK_SUBTRACT:
+		case VK_OEM_MINUS:
+			if (canMove || s.mode3D)
+				Remember(1);
+			break;
+		case VK_HOME:
+			Remember(-1);
+			break;
+	}
 	if (s.mode3D) {
 		// the arrows orbit, +/- zoom the box, Home starts over
 		switch (wParam) {
@@ -1398,6 +1664,7 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (hit.part == FplPanelPart::Graph) {
 		auto& g = s.plot.graphs[s.rows[hit.row].index];
 		if (!g.definition) {
+			Remember(-1);
 			bool hidden = !(g.flags & FplGraphHidden);
 			ShowGraph(g.id, !hidden);
 			if (s.traceGraph >= 0 && hidden)
@@ -1411,6 +1678,7 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		return 0;
 	}
 	if (hit.part == FplPanelPart::Slider) {
+		Remember(-1);
 		s.focusRow = hit.row;
 		s.drag = FplDrag::Slider;
 		s.dragRow = hit.row;
@@ -1422,6 +1690,7 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		return 0;
 	if (s.mode3D) {
 		// drag to orbit; Shift (or no orbiting wanted) to move the box's x and y
+		Remember(-1);
 		bool pan = (::GetKeyState(VK_SHIFT) < 0) && !(GetStyle() & FPLS_NOPANZOOM);
 		s.drag = pan ? FplDrag::Pan3D : FplDrag::Orbit;
 		s.dragLast = pt;
@@ -1433,6 +1702,7 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (point >= 0) {
 		if (s.traceDragged)
 			ClearTrace();
+		Remember(-1);
 		s.drag = FplDrag::Point;
 		s.dragGraph = point;
 		SetCapture();
@@ -1455,22 +1725,83 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		ClearTrace();
 	}
 	if (!(GetStyle() & FPLS_NOPANZOOM)) {
-		s.drag = FplDrag::Pan;
+		// Shift: a rectangle to zoom to; else pan
+		Remember(-1);
 		s.dragLast = pt;
+		if (::GetKeyState(VK_SHIFT) < 0) {
+			s.drag = FplDrag::Box;
+			s.boxStart = s.boxEnd = pt;
+			s.boxShown = false;
+			SetCapture();
+			return 0;
+		}
+		s.drag = FplDrag::Pan;
 		SetCapture();
 		::SetCursor(::LoadCursor(nullptr, IDC_SIZEALL));
 	}
 	return 0;
 }
 
-LRESULT CFunctionPlotCtrl::OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&) {
+LRESULT CFunctionPlotCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	if (m_State->drag == FplDrag::Box)
+		EndBox({ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
 	if (m_State->drag != FplDrag::None)
 		ReleaseCapture();
 	return 0;
 }
 
+LRESULT CFunctionPlotCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
+	auto& s = *m_State;
+	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+	if (s.mode3D || s.drag != FplDrag::None || (GetStyle() & FPLS_NOPANZOOM) || HitPanel(pt).part != FplPanelPart::None) {
+		bHandled = FALSE;
+		return 0;
+	}
+	// a rectangle to zoom to, if it's dragged far enough (else it's a click: the context menu)
+	SetFocus();
+	s.drag = FplDrag::Box;
+	s.boxStart = s.boxEnd = pt;
+	s.boxShown = false;
+	SetCapture();
+	return 0;
+}
+
+LRESULT CFunctionPlotCtrl::OnRButtonUp(UINT, WPARAM, LPARAM lParam, BOOL& bHandled) {
+	auto& s = *m_State;
+	if (s.drag != FplDrag::Box) {
+		bHandled = FALSE;
+		return 0;
+	}
+	bool shown = s.boxShown;
+	if (shown) {
+		Remember(-1);
+		EndBox({ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) });
+	}
+	ReleaseCapture();
+	// not dragged: a click, whose WM_CONTEXTMENU DefWindowProc makes
+	bHandled = shown ? TRUE : FALSE;
+	return 0;
+}
+
+void CFunctionPlotCtrl::EndBox(POINT pt) {
+	auto& s = *m_State;
+	if (!s.boxShown)
+		return;
+	s.boxShown = false;
+	FplViewport v = s.view;
+	if (v.ZoomTo({ ToDips(s.boxStart.x), ToDips(s.boxStart.y) }, { ToDips(pt.x), ToDips(pt.y) })) {
+		SetViewport(v.xMin, v.xMax, v.yMin, v.yMax);
+		ViewChanged(true);
+	}
+	Invalidate();
+}
+
 LRESULT CFunctionPlotCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& s = *m_State;
+	if (s.drag == FplDrag::Box) {
+		s.boxShown = false;
+		Invalidate();
+	}
 	s.drag = FplDrag::None;
 	s.dragRow = -1;
 	s.dragGraph = -1;
@@ -1497,6 +1828,13 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 			return 0;
 		case FplDrag::Slider:
 			DragSlider(s.dragRow, ToDips(pt.x));
+			return 0;
+		case FplDrag::Box:
+			s.boxEnd = pt;
+			if (!s.boxShown && (std::abs(pt.x - s.boxStart.x) > ::GetSystemMetrics(SM_CXDRAG) ||
+				std::abs(pt.y - s.boxStart.y) > ::GetSystemMetrics(SM_CYDRAG)))
+				s.boxShown = true;
+			Invalidate();
 			return 0;
 		case FplDrag::Point:
 			if (s.dragGraph >= 0 && s.dragGraph < (int)s.plot.graphs.size()) {
@@ -1581,7 +1919,9 @@ LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 	}
 	auto& s = *m_State;
 	LPCWSTR cursor = IDC_ARROW;
-	if (s.drag == FplDrag::Point || (s.drag == FplDrag::None && s.hotPoint >= 0))
+	if (s.drag == FplDrag::Box)
+		cursor = IDC_CROSS;
+	else if (s.drag == FplDrag::Point || (s.drag == FplDrag::None && s.hotPoint >= 0))
 		cursor = IDC_SIZEALL;
 	else if (s.drag == FplDrag::Pan || s.drag == FplDrag::Pan3D)
 		cursor = IDC_SIZEALL;
@@ -1600,6 +1940,7 @@ LRESULT CFunctionPlotCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL
 	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	ScreenToClient(&pt);
 	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	Remember(2);
 	if (s.mode3D) {
 		s.box.Zoom(std::pow(1.2, delta / 120.0));
 		Resample();

@@ -434,10 +434,10 @@ void FplPlot::Fit(FplGraph& g) {
 				p = pTry;
 				r = rTry;
 				// stop once a step gains next to nothing
-				bool small = std::abs(cost - tryCost) <= 1e-15 * std::max(cost, 1e-300);
+				bool negligible = std::abs(cost - tryCost) <= 1e-15 * std::max(cost, 1e-300);
 				cost = tryCost;
 				lambda = std::max(lambda / 10, 1e-12);
-				improved = !small;
+				improved = !negligible;
 				break;
 			}
 			lambda *= 10;
@@ -595,64 +595,88 @@ double FplPlot::IntegralValue(int graph) const {
 }
 
 void FplPlot::Sample(const FplViewport& view, const FplSampleOptions& options) {
-	for (auto& g : graphs) {
-		if (!g.Drawable()) {
-			g.geometry = {};
-			continue;
-		}
-		FplSampleOptions o = options;
-		o.heatmap = (g.flags & FplGraphHeatmap) != 0;
-		o.contours = !(g.flags & FplGraphNoContours);
-		if (g.hasRange) {
-			o.tMin = o.thetaMin = g.tMin;
-			o.tMax = o.thetaMax = g.tMax;
-		}
-		if (!g.Listed()) {
-			g.geometry = FplSample(g.expr, m_Slots, view, o);
-			continue;
-		}
-		// once per element: points for every one, curves for the first 200
-		size_t n = ElementCount(static_cast<int>(&g - graphs.data()));
-		const bool points = g.expr.kind == FplKind::Point;
-		n = std::min(n, points ? size_t(100000) : size_t(200));
-		FplGeometry all;
-		std::vector<double> slots = m_Slots;
-		for (size_t i = 0; i < n; i++) {
-			SetElement(slots, g, i);
-			FplGeometry one = FplSample(g.expr, slots, view, o);
-			all.lines.insert(all.lines.end(), one.lines.begin(), one.lines.end());
-			all.fills.insert(all.fills.end(), one.fills.begin(), one.fills.end());
-			all.points.insert(all.points.end(), one.points.begin(), one.points.end());
-			all.contours.insert(all.contours.end(), one.contours.begin(), one.contours.end());
-			all.arrows.insert(all.arrows.end(), one.arrows.begin(), one.arrows.end());
-			all.dashed = one.dashed;
-			all.evals += one.evals;
-		}
-		g.geometry = std::move(all);
+	for (size_t i = 0; i < graphs.size(); i++)
+		SampleGraph(static_cast<int>(i), view, options);
+}
+
+FplSampleOptions FplPlot::OptionsFor(int graph, const FplSampleOptions& base) const {
+	auto& g = graphs[graph];
+	FplSampleOptions o = base;
+	o.heatmap = (g.flags & FplGraphHeatmap) != 0;
+	o.contours = !(g.flags & FplGraphNoContours);
+	if (g.hasRange) {
+		o.tMin = o.thetaMin = g.tMin;
+		o.tMax = o.thetaMax = g.tMax;
 	}
+	return o;
+}
+
+bool FplPlot::IsHeavy(int graph, bool in3D) const {
+	if (graph < 0 || graph >= static_cast<int>(graphs.size()))
+		return false;
+	auto& g = graphs[graph];
+	if (!g.Drawable() || g.Listed())
+		return false;
+	return in3D ? g.expr.kind == FplKind::ImplicitSurface
+		: g.expr.kind == FplKind::Implicit || g.expr.kind == FplKind::Surface;
+}
+
+void FplPlot::SampleGraph(int graph, const FplViewport& view, const FplSampleOptions& options) {
+	auto& g = graphs[graph];
+	if (!g.Drawable()) {
+		g.geometry = {};
+		return;
+	}
+	FplSampleOptions o = OptionsFor(graph, options);
+	if (!g.Listed()) {
+		g.geometry = FplSample(g.expr, m_Slots, view, o);
+		return;
+	}
+	// once per element: points for every one, curves for the first 200
+	size_t n = ElementCount(graph);
+	const bool points = g.expr.kind == FplKind::Point;
+	n = std::min(n, points ? size_t(100000) : size_t(200));
+	FplGeometry all;
+	std::vector<double> slots = m_Slots;
+	for (size_t i = 0; i < n; i++) {
+		SetElement(slots, g, i);
+		FplGeometry one = FplSample(g.expr, slots, view, o);
+		all.lines.insert(all.lines.end(), one.lines.begin(), one.lines.end());
+		all.fills.insert(all.fills.end(), one.fills.begin(), one.fills.end());
+		all.points.insert(all.points.end(), one.points.begin(), one.points.end());
+		all.contours.insert(all.contours.end(), one.contours.begin(), one.contours.end());
+		all.arrows.insert(all.arrows.end(), one.arrows.begin(), one.arrows.end());
+		all.dashed = one.dashed;
+		all.evals += one.evals;
+	}
+	g.geometry = std::move(all);
 }
 
 void FplPlot::Build3D(const FplBox3& box) {
-	for (auto& g : graphs) {
-		g.mesh = {};
-		if (!g.Drawable() || !box.Valid())
-			continue;
-		if (!g.Listed()) {
-			g.mesh = Mesh3D(g, box);
-			continue;
-		}
-		// once per element (the first 200), the meshes together
-		const size_t n = std::min<size_t>(ElementCount(static_cast<int>(&g - graphs.data())), 200);
-		std::vector<double> saved = m_Slots;
-		for (size_t i = 0; i < n; i++) {
-			SetElement(m_Slots, g, i);
-			FplAppend(g.mesh, Mesh3D(g, box));
-		}
-		m_Slots = std::move(saved);
-	}
+	for (size_t i = 0; i < graphs.size(); i++)
+		Build3DGraph(static_cast<int>(i), box);
 }
 
-FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box) {
+void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
+	auto& g = graphs[graph];
+	g.mesh = {};
+	if (!g.Drawable() || !box.Valid())
+		return;
+	if (!g.Listed()) {
+		g.mesh = Mesh3D(g, box, implicitCells);
+		return;
+	}
+	// once per element (the first 200), the meshes together
+	const size_t n = std::min<size_t>(ElementCount(graph), 200);
+	std::vector<double> saved = m_Slots;
+	for (size_t i = 0; i < n; i++) {
+		SetElement(m_Slots, g, i);
+		FplAppend(g.mesh, Mesh3D(g, box, implicitCells));
+	}
+	m_Slots = std::move(saved);
+}
+
+FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells) {
 	constexpr double TwoPi = 6.283185307179586;
 	double* s = m_Slots.data();
 	FplMesh mesh;
@@ -698,7 +722,7 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box) {
 				s[FplSlotY] = y;
 				s[FplSlotZ] = z;
 				return e.f.Eval(s);
-			}, box, 48);
+			}, box, implicitCells);
 			break;
 		// the 2D kinds that are curves or points, on the z = 0 plane
 		case FplKind::Function:
@@ -1148,4 +1172,257 @@ std::wstring FplFormatCoordinate(double value, double unitsPerDip) {
 	if (value < 0)
 		s.insert(s.begin(), minus);
 	return s;
+}
+
+// ---- Fitting the view --------------------------------------------------------------------------------------------------
+
+namespace {
+
+// The 2nd and 98th percentiles (all of them when there are few).
+bool Robust(std::vector<double>& v, double& lo, double& hi) {
+	v.erase(std::remove_if(v.begin(), v.end(), [](double x) { return !std::isfinite(x); }), v.end());
+	if (v.empty())
+		return false;
+	std::sort(v.begin(), v.end());
+	size_t cut = v.size() >= 50 ? v.size() / 50 : 0;
+	lo = v[cut];
+	hi = v[v.size() - 1 - cut];
+	return true;
+}
+
+} // namespace
+
+bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, double& yMin, double& yMax) const {
+	constexpr double TwoPi = 6.283185307179586;
+	bool any = false;
+	double x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+	auto add = [&](double a, double b, double c, double d) {
+		if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) || !std::isfinite(d))
+			return;
+		if (!any) {
+			x0 = a, x1 = b, y0 = c, y1 = d;
+			any = true;
+		}
+		else {
+			x0 = std::min(x0, a), x1 = std::max(x1, b), y0 = std::min(y0, c), y1 = std::max(y1, d);
+		}
+	};
+	auto addSets = [&](std::vector<double>& xs, std::vector<double>& ys) {
+		double a, b, c, d;
+		if (Robust(xs, a, b) && Robust(ys, c, d))
+			add(a, b, c, d);
+	};
+	std::vector<double> slots = m_Slots;
+	double* s = slots.data();
+	for (size_t i = 0; i < graphs.size(); i++) {
+		auto& g = graphs[i];
+		if (!g.Drawable())
+			continue;
+		auto& e = g.expr;
+		const double t0 = g.hasRange ? g.tMin : 0, t1 = g.hasRange ? g.tMax : TwoPi;
+		const size_t elements = g.Listed() ? std::min<size_t>(ElementCount(static_cast<int>(i)), 100000) : 1;
+		std::vector<double> xs, ys;
+		for (size_t el = 0; el < elements; el++) {
+			if (g.Listed())
+				SetElement(slots, g, el);
+			const int n = g.Listed() ? 100 : 400;
+			switch (e.kind) {
+				case FplKind::Point:
+					xs.push_back(e.f.Eval(s));
+					ys.push_back(e.g.Eval(s));
+					break;
+				case FplKind::Function: case FplKind::FunctionOfY: {
+					// the view's x (y), its values fitted
+					const bool ofX = e.kind == FplKind::Function;
+					const double a = ofX ? view.xMin : view.yMin, b = ofX ? view.xMax : view.yMax;
+					for (int k = 0; k <= n; k++) {
+						double v = a + (b - a) * k / n;
+						s[ofX ? FplSlotX : FplSlotY] = v;
+						double w = e.f.Eval(s);
+						if (!std::isfinite(w))
+							continue;
+						(ofX ? xs : ys).push_back(v);
+						(ofX ? ys : xs).push_back(w);
+					}
+					break;
+				}
+				case FplKind::Parametric: case FplKind::Polar:
+					for (int k = 0; k <= n * 2; k++) {
+						double t = t0 + (t1 - t0) * k / (n * 2);
+						if (e.kind == FplKind::Parametric) {
+							s[FplSlotT] = t;
+							xs.push_back(e.f.Eval(s));
+							ys.push_back(e.g.Eval(s));
+						}
+						else {
+							s[FplSlotTheta] = t;
+							double r = e.f.Eval(s);
+							xs.push_back(r * std::cos(t));
+							ys.push_back(r * std::sin(t));
+						}
+					}
+					break;
+				case FplKind::Integral: {
+					double lo = e.g.Eval(s), hi = e.h.Eval(s);
+					int slot = FplStandardSlot(e.name);
+					if (!std::isfinite(lo) || !std::isfinite(hi) || slot < 0)
+						break;
+					ys.push_back(0);
+					for (int k = 0; k <= n; k++) {
+						double t = lo + (hi - lo) * k / n;
+						s[slot] = t;
+						xs.push_back(t);
+						ys.push_back(e.f.Eval(s));
+					}
+					break;
+				}
+				case FplKind::Implicit:
+					// what was sampled (the view grown by its size)
+					for (auto& line : g.geometry.lines)
+						for (auto& p : line) {
+							FplPoint q = view.ToPlane(p);
+							xs.push_back(q.x);
+							ys.push_back(q.y);
+						}
+					break;
+				default:
+					break;
+			}
+		}
+		if (e.kind == FplKind::Point) {
+			// points exactly
+			double a, b, c, d;
+			std::vector<double> px = xs, py = ys;
+			px.erase(std::remove_if(px.begin(), px.end(), [](double x) { return !std::isfinite(x); }), px.end());
+			py.erase(std::remove_if(py.begin(), py.end(), [](double x) { return !std::isfinite(x); }), py.end());
+			if (!px.empty() && !py.empty()) {
+				a = *std::min_element(px.begin(), px.end());
+				b = *std::max_element(px.begin(), px.end());
+				c = *std::min_element(py.begin(), py.end());
+				d = *std::max_element(py.begin(), py.end());
+				add(a, b, c, d);
+			}
+		}
+		else
+			addSets(xs, ys);
+	}
+	if (!any)
+		return false;
+	// a little room, and some size when it's a point or a line
+	auto widen = [](double& lo, double& hi) {
+		double span = hi - lo;
+		if (!(span > 1e-12 * std::max({ 1.0, std::abs(lo), std::abs(hi) }))) {
+			double half = std::max(1.0, std::abs(lo) * 0.1);
+			lo -= half;
+			hi += half;
+		}
+		else {
+			lo -= span * 0.08;
+			hi += span * 0.08;
+		}
+	};
+	widen(x0, x1);
+	widen(y0, y1);
+	xMin = x0, xMax = x1, yMin = y0, yMax = y1;
+	return true;
+}
+
+// ---- Labels ------------------------------------------------------------------------------------------------------------
+
+std::wstring FplFormatLabel(std::wstring_view label, double x, double y, double unitsPerDip) {
+	std::wstring out;
+	out.reserve(label.size() + 16);
+	for (size_t i = 0; i < label.size(); i++) {
+		if (label.substr(i, 3) == L"{x}") {
+			out += FplFormatCoordinate(x, unitsPerDip);
+			i += 2;
+		}
+		else if (label.substr(i, 3) == L"{y}") {
+			out += FplFormatCoordinate(y, unitsPerDip);
+			i += 2;
+		}
+		else
+			out += label[i];
+	}
+	return out;
+}
+
+std::vector<FplLabelPlace> FplPlot::LabelPlaces(const FplViewport& view) const {
+	std::vector<FplLabelPlace> places;
+	const double units = std::min(1 / view.ScaleX(), 1 / view.ScaleY());
+	for (size_t i = 0; i < graphs.size(); i++) {
+		auto& g = graphs[i];
+		if (!g.Drawable() || g.label.empty())
+			continue;
+		auto inside = [&](FplPoint p) { return p.x >= 0 && p.y >= 0 && p.x <= view.width && p.y <= view.height; };
+		if (!g.geometry.points.empty()) {
+			for (auto& p : g.geometry.points) {
+				if (!inside(p))
+					continue;
+				FplPoint q = view.ToPlane(p);
+				places.push_back({ static_cast<int>(i), p, FplFormatLabel(g.label, q.x, q.y, units) });
+				if (places.size() > 2000)
+					return places;
+			}
+			continue;
+		}
+		// a curve: its rightmost point in the view
+		bool found = false;
+		FplPoint best;
+		for (auto& line : g.geometry.lines)
+			for (auto& p : line)
+				if (inside(p) && (!found || p.x > best.x)) {
+					best = p;
+					found = true;
+				}
+		if (found) {
+			FplPoint q = view.ToPlane(best);
+			places.push_back({ static_cast<int>(i), best, FplFormatLabel(g.label, q.x, q.y, units) });
+		}
+	}
+	return places;
+}
+
+// ---- Undo --------------------------------------------------------------------------------------------------------------
+
+bool FplSnapshot::operator==(const FplSnapshot& o) const {
+	return params == o.params && hidden == o.hidden && std::equal(std::begin(view), std::end(view), std::begin(o.view)) &&
+		std::equal(std::begin(box), std::end(box), std::begin(o.box)) && yaw == o.yaw && pitch == o.pitch;
+}
+
+void FplHistory::Push(FplSnapshot before) {
+	m_Redo.clear();
+	if (!m_Undo.empty() && m_Undo.back() == before)
+		return;
+	m_Undo.push_back(std::move(before));
+	if (m_Undo.size() > m_Limit)
+		m_Undo.erase(m_Undo.begin());
+}
+
+bool FplHistory::Undo(const FplSnapshot& current, FplSnapshot& to) {
+	// a step that ended where it began changed nothing
+	while (!m_Undo.empty() && m_Undo.back() == current)
+		m_Undo.pop_back();
+	if (m_Undo.empty())
+		return false;
+	to = std::move(m_Undo.back());
+	m_Undo.pop_back();
+	m_Redo.push_back(current);
+	return true;
+}
+
+bool FplHistory::Redo(const FplSnapshot& current, FplSnapshot& to) {
+	while (!m_Redo.empty() && m_Redo.back() == current)
+		m_Redo.pop_back();
+	if (m_Redo.empty())
+		return false;
+	to = std::move(m_Redo.back());
+	m_Redo.pop_back();
+	m_Undo.push_back(current);
+	return true;
+}
+
+void FplHistory::Clear() {
+	m_Undo.clear();
+	m_Redo.clear();
 }

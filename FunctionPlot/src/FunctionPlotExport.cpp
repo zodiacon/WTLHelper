@@ -131,13 +131,15 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 		std::string d;
 		for (auto& poly : g.geometry.fills)
 			AddPolyline(d, poly, true);
-		svg += "<path d=\"" + d + "\" fill=\"" + Color(colorOf(i)) + "\" fill-opacity=\"0.22\"/>\n";
+		const double fill = g.fillOpacity >= 0 ? g.fillOpacity : 0.22;
+		svg += "<path d=\"" + d + "\" fill=\"" + Color(colorOf(i)) + "\" fill-opacity=\"" + Num(fill) + "\"/>\n";
 	}
 	for (size_t i = 0; i < plot.graphs.size(); i++) {
 		auto& g = plot.graphs[i];
 		if (!g.Drawable())
 			continue;
 		const std::string color = Color(colorOf(i));
+		const std::string opacity = g.opacity < 1 ? " stroke-opacity=\"" + Num(g.opacity) + "\"" : std::string();
 		if (!g.geometry.contours.empty()) {
 			std::string d;
 			for (auto& c : g.geometry.contours)
@@ -150,9 +152,11 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 			for (auto& line : g.geometry.lines)
 				AddPolyline(d, line, false);
 			bool dashed = g.geometry.dashed || (g.flags & FplGraphDashed);
+			bool dotted = (g.flags & FplGraphDotted) != 0;
+			std::string dashes = dotted ? " stroke-dasharray=\"0 " + Num(2.5 * g.width) + "\""
+				: dashed ? " stroke-dasharray=\"" + Num(3 * g.width) + " " + Num(2 * g.width) + "\"" : std::string();
 			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color + "\" stroke-width=\"" + Num(g.width) +
-				"\" stroke-linecap=\"round\" stroke-linejoin=\"round\"" +
-				(dashed ? " stroke-dasharray=\"" + Num(3 * g.width) + " " + Num(2 * g.width) + "\"" : std::string()) + "/>\n";
+				"\" stroke-linecap=\"round\" stroke-linejoin=\"round\"" + dashes + opacity + "/>\n";
 		}
 		if (!g.geometry.arrows.empty()) {
 			std::string d;
@@ -170,9 +174,14 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 			svg += "<path d=\"" + d + "\" fill=\"none\" stroke=\"" + color +
 				"\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n";
 		}
-		for (auto& p : g.geometry.points)
-			svg += "<circle cx=\"" + Num(p.x) + "\" cy=\"" + Num(p.y) + "\" r=\"" + Num(2.5 + g.width) + "\" fill=\"" +
-				color + "\"/>\n";
+		for (auto& p : g.geometry.points) {
+			if (g.flags & FplGraphHollow)
+				svg += "<circle cx=\"" + Num(p.x) + "\" cy=\"" + Num(p.y) + "\" r=\"" + Num(2.5 + g.width) + "\" fill=\"" +
+					Color(style.back) + "\" stroke=\"" + color + "\" stroke-width=\"2\"" + opacity + "/>\n";
+			else
+				svg += "<circle cx=\"" + Num(p.x) + "\" cy=\"" + Num(p.y) + "\" r=\"" + Num(2.5 + g.width) + "\" fill=\"" +
+					color + "\"" + (g.opacity < 1 ? " fill-opacity=\"" + Num(g.opacity) + "\"" : std::string()) + "/>\n";
+		}
 	}
 
 	// the ticks' numbers
@@ -195,6 +204,16 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 		}
 		if (xAxis && yAxis)
 			Text(svg, ax - 5, ay + 11, "end", style.label, 12, L"0");
+	}
+
+	// the graphs' labels, and the axes' titles
+	for (auto& place : plot.LabelPlaces(view))
+		Text(svg, place.at.x + 9, place.at.y - 11, "start", colorOf(static_cast<size_t>(place.graph)), 13, place.text);
+	if (style.showAxes) {
+		if (!style.axisTitles[0].empty())
+			Text(svg, w - 8, std::clamp(ay - 12, 10.0, h - 10), "end", style.label, 13, style.axisTitles[0]);
+		if (!style.axisTitles[1].empty())
+			Text(svg, std::clamp(ax + 8, 8.0, w - 8), 14, "start", style.label, 13, style.axisTitles[1]);
 	}
 
 	// the legend

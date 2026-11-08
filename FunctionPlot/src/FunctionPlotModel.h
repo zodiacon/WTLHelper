@@ -41,6 +41,8 @@ struct FplViewport {
 	void Pan(double dxScreen, double dyScreen);		// the contents follow the mouse moving by this much
 	void Resize(double newWidth, double newHeight);	// keeps the center and the scales
 	void EqualScale();								// grows the axis with the bigger scale around its center
+	// The ranges of the screen rectangle between two corners (any order); false (unchanged) if it has no area.
+	bool ZoomTo(FplPoint a, FplPoint b);
 };
 
 // ---- Axis ticks ------------------------------------------------------------------------------------------------------

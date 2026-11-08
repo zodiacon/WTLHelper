@@ -102,6 +102,7 @@
     <ClInclude Include="src\FunctionPlotGraphs.h" />
     <ClInclude Include="src\FunctionPlotModel.h" />
     <ClInclude Include="src\FunctionPlotRender3D.h" />
+    <ClInclude Include="src\FunctionPlotWorker.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\FunctionPlot3D.cpp" />
@@ -117,6 +118,7 @@
     <ClCompile Include="src\FunctionPlotRender3D.cpp" />
     <ClCompile Include="src\FunctionPlotSample.cpp" />
     <ClCompile Include="src\FunctionPlotState.cpp" />
+    <ClCompile Include="src\FunctionPlotWorker.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

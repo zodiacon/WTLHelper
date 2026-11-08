@@ -9,12 +9,16 @@
 //	param<TAB>name<TAB>value<TAB>min<TAB>max<TAB>step<TAB>flags
 //	list<TAB>name<TAB>v1 v2 v3 ...
 //	graph<TAB>id<TAB>color (-1: the palette's)<TAB>width<TAB>flags<TAB>range (0 or 1)<TAB>tMin<TAB>tMax<TAB>text
+//	style<TAB>id<TAB>opacity<TAB>fill opacity (-1: the default)		after its graph, when not the default
+//	label<TAB>id<TAB>text												after its graph, when it has one
+//	axes<TAB>x title<TAB>y title<TAB>z title							when there are any
 //
 // Names and texts escape \ tab and line breaks as \\ \t \n \r. Lines it doesn't know are skipped, so a later version's
 // text still loads.
 
 #include "FunctionPlotGraphs.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
@@ -105,10 +109,18 @@ std::wstring FplSaveState(const FplSavedState& state) {
 			out += (i ? L" " : L"") + Number(l.values[i]);
 		out += L"\n";
 	}
-	for (auto& g : state.graphs)
+	for (auto& g : state.graphs) {
 		out += L"graph\t" + std::to_wstring(g.id) + L"\t" + (g.autoColor ? std::wstring(L"-1") : std::to_wstring(g.color)) +
 			L"\t" + Number(g.width) + L"\t" + std::to_wstring(g.flags) + L"\t" + (g.hasRange ? L"1" : L"0") + L"\t" +
 			Number(g.tMin) + L"\t" + Number(g.tMax) + L"\t" + Escape(g.text) + L"\n";
+		if (g.opacity != 1 || g.fillOpacity >= 0)
+			out += L"style\t" + std::to_wstring(g.id) + L"\t" + Number(g.opacity) + L"\t" + Number(g.fillOpacity) + L"\n";
+		if (!g.label.empty())
+			out += L"label\t" + std::to_wstring(g.id) + L"\t" + Escape(g.label) + L"\n";
+	}
+	if (!state.axisTitles[0].empty() || !state.axisTitles[1].empty() || !state.axisTitles[2].empty())
+		out += L"axes\t" + Escape(state.axisTitles[0]) + L"\t" + Escape(state.axisTitles[1]) + L"\t" +
+			Escape(state.axisTitles[2]) + L"\n";
 	return out;
 }
 
@@ -173,6 +185,25 @@ bool FplLoadState(std::wstring_view text, FplSavedState& state) {
 					l.values.push_back(ToNumber(w));
 			if (!l.name.empty())
 				s.lists.push_back(std::move(l));
+		}
+		else if ((key == L"style" || key == L"label") && fields.size() >= 2) {
+			// a graph's, read before it
+			unsigned id = static_cast<unsigned>(ToNumber(fields[0]));
+			for (auto& g : s.graphs) {
+				if (g.id != id)
+					continue;
+				if (key == L"label")
+					g.label = Unescape(fields[1]);
+				else if (fields.size() >= 3) {
+					double o = ToNumber(fields[1]), f = ToNumber(fields[2]);
+					g.opacity = std::isfinite(o) ? static_cast<float>(std::clamp(o, 0.0, 1.0)) : 1.0f;
+					g.fillOpacity = std::isfinite(f) ? static_cast<float>(std::min(f, 1.0)) : -1.0f;
+				}
+			}
+		}
+		else if (key == L"axes") {
+			for (size_t k = 0; k < 3 && k < fields.size(); k++)
+				s.axisTitles[k] = Unescape(fields[k]);
 		}
 		else if (key == L"graph" && fields.size() >= 8) {
 			FplGraph g;

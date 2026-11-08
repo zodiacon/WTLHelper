@@ -41,7 +41,9 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLGM_FLAGS        0x0008
 #define FPLGM_RANGE        0x0010
 #define FPLGM_LPARAM       0x0020
-#define FPLGM_ALL          0x003F
+#define FPLGM_LABEL        0x0040
+#define FPLGM_OPACITY      0x0080
+#define FPLGM_ALL          0x00FF
 
 #define FPLGF_HIDDEN       0x0001   // not drawn (the legend shows it grayed; a click there shows it)
 #define FPLGF_DASHED       0x0002   // dashed (a strict inequality's boundary always is)
@@ -51,6 +53,8 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLGF_NOCONTOURS   0x0020   // a surface: no contour lines
 #define FPLGF_NODRAG       0x0040   // a point like (a, b), a and b parameters, can't be dragged (it can by default;
                                     // dragging sets the parameters: FPLN_PARAMCHANGED)
+#define FPLGF_DOTTED       0x0080   // a dotted line
+#define FPLGF_HOLLOW       0x0100   // points as rings
 
 struct FPLGRAPH {
 	UINT     mask;             // FPLGM_*: the members to set, or to fill
@@ -61,6 +65,10 @@ struct FPLGRAPH {
 	UINT     flags;            // FPLGF_*
 	double   tMin, tMax;       // FPLGM_RANGE: a parametric curve's t or a polar curve's theta (0 to 2 pi)
 	LPARAM   lParam;
+	LPCWSTR  pszLabel;         // FPLGM_LABEL: beside its points, or at its curve's right end in the view; {x} and
+	                           // {y} are its coordinates ("A({x}, {y})"); GetGraph: valid until the graph changes
+	float    opacity;          // FPLGM_OPACITY: its lines' and points' (1), and
+	float    fillOpacity;      // its regions' and heat maps' (negative: 0.22, a heat map 0.85); not in 3D
 };
 
 // What a graph is, once the control has read it.
@@ -240,6 +248,8 @@ public:
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_RBUTTONDOWN, OnRButtonDown)
+		MESSAGE_HANDLER(WM_RBUTTONUP, OnRButtonUp)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
@@ -252,10 +262,14 @@ public:
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_FPL_PAINT3D, OnPaint3D)
+		MESSAGE_HANDLER(WM_FPL_SAMPLED, OnSampled)
 	END_MSG_MAP()
 
 	enum : UINT_PTR { AnimationTimer = 1 };
-	enum : UINT { WM_FPL_PAINT3D = WM_USER + 130 };   // the 3D view's window asks for a frame
+	enum : UINT {
+		WM_FPL_PAINT3D = WM_USER + 130,        // the 3D view's window asks for a frame
+		WM_FPL_SAMPLED = WM_USER + 131,        // the sampling thread has results
+	};
 
 	// in 3D the frames are drawn in a window of their own over the control: invalidating the control redraws it too
 	BOOL Invalidate(BOOL bErase = TRUE);
@@ -315,6 +329,23 @@ public:
 	void ResetView3D();                        // x, y and z from -10 to 10, the camera where it starts
 	BOOL IsSoftwareRendering() const;          // 3D on WARP, the software rasterizer
 
+	// ---- Fitting the view, and undo ----
+	// The view around what the graphs draw (F too; 2D only): points and curves whole, functions' values over the view's
+	// x; FALSE if there's nothing to fit. Right-dragging (or Shift-dragging) a rectangle zooms to it.
+	BOOL ZoomToFit();
+	// The user's changes, a step back or forward (Ctrl+Z, Ctrl+Y): sliders, dragged points, graphs shown or hidden,
+	// the view (2D and 3D). The app's changes aren't steps, and don't end them (names and ids are matched).
+	BOOL Undo();
+	BOOL Redo();
+	BOOL CanUndo() const;
+	BOOL CanRedo() const;
+	void ClearHistory();
+
+	// ---- Axis titles ----
+	// At the x axis's right end, the y axis's top, and in 3D in place of the axes' names; null or "" for none.
+	void SetAxisTitles(LPCWSTR pszX, LPCWSTR pszY, LPCWSTR pszZ = nullptr);
+	LPCWSTR GetAxisTitle(int axis) const;      // 0 x, 1 y, 2 z
+
 	// ---- Tracing and features ----
 	BOOL GetTrace(FPLTRACE& trace) const;
 	void ClearTrace();
@@ -363,6 +394,8 @@ private:
 	LRESULT OnKeyDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonDown(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnLButtonUp(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnRButtonDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnRButtonUp(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseMove(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&);
@@ -373,6 +406,7 @@ private:
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnPaint3D(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnSampled(UINT, WPARAM, LPARAM, BOOL&);
 
 	// FunctionPlotCtrl.cpp
 	void Rebuild();                            // texts, names or the angle unit changed
@@ -381,6 +415,11 @@ private:
 	void Resample();
 	void SetViewport(double xMin, double xMax, double yMin, double yMax);
 	void UpdateTrace(POINT pt, bool dragging);
+	// undo: a step from the state now (a burst of one kind within 0.7 s is one step; kind < 0: always a new one)
+	void Remember(int kind);
+	struct FplSnapshot TakeSnapshot() const;
+	void Restore(const struct FplSnapshot& snapshot);
+	void EndBox(POINT pt);
 	bool TraceKey(UINT vk);                    // the keys of a trace
 	void ApplyTraceHit(const struct FplTraceHit& hit);   // a keyboard's: pinned, kept in view
 	void SetTraceHit(int graph, int feature, double x, double y, bool valid,
@@ -400,6 +439,7 @@ private:
 	bool CreateTarget();
 	void DiscardTarget();
 	void BuildGeometries();                    // the sampled lines and fills as Direct2D geometries
+	void BuildGeometry(int graph);
 	void LayoutPanel();                        // the legend's and sliders' rows
 	void PaintHeatmaps();
 	void PaintGrid();
@@ -407,6 +447,8 @@ private:
 	void PaintContourLabels();
 	void PaintLabels();
 	void PaintTrace();                         // 2D and 3D
+	void PaintGraphLabels();
+	void PaintBox();
 	void PaintPanel();
 	void Paint3D(bool present);
 	void PaintTicks3D();
