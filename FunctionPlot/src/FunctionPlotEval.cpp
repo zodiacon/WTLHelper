@@ -64,6 +64,118 @@ double Max(const double* a, int n) {
 	return m;
 }
 
+double Square(double x) {
+	const double w = x / (2 * std::numbers::pi);
+	if (!std::isfinite(w))
+		return std::numeric_limits<double>::quiet_NaN();
+	return w - std::floor(w) < 0.5 ? 1 : -1;
+}
+
+double Triangle(double x) {
+	return 2 / std::numbers::pi * std::asin(std::sin(x));
+}
+
+double Sawtooth(double x) {
+	const double w = x / (2 * std::numbers::pi);
+	return 2 * (w - std::floor(w + 0.5));
+}
+
+double Step(double x) {
+	return std::isnan(x) ? x : x >= 0 ? 1 : 0;
+}
+
+// sin(x)/x and its derivatives, by their series near 0, where the formulas lose everything to rounding.
+double Sinc(double x) {
+	if (std::abs(x) < 1e-3)
+		return 1 - x * x / 6;
+	return std::sin(x) / x;
+}
+
+double SincD1(double x) {
+	if (std::abs(x) < 0.02)
+		return -x / 3 + x * x * x / 30;
+	return (std::cos(x) - std::sin(x) / x) / x;
+}
+
+double SincD2(double x) {
+	const double x2 = x * x;
+	if (std::abs(x) < 0.1)
+		return -1.0 / 3 + x2 / 10 - x2 * x2 / 168;
+	return -std::sin(x) / x - 2 * SincD1(x) / x;
+}
+
+double Normpdf(double x) {
+	return std::exp(-x * x / 2) / std::sqrt(2 * std::numbers::pi);
+}
+
+double Normcdf(double x) {
+	return std::erfc(-x / std::numbers::sqrt2) / 2;
+}
+
+bool NearInteger(double x) {
+	return std::abs(x - std::round(x)) < 1e-9;
+}
+
+// Gamma(a + 1) / Gamma(b + 1), which overflows only if the answer does.
+double GammaRatio(double a, double b) {
+	if (a < 170 && b < 170 && a > -170 && b > -170)
+		return std::tgamma(a + 1) / std::tgamma(b + 1);
+	return std::exp(std::lgamma(a + 1) - std::lgamma(b + 1));
+}
+
+double NCr(double n, double r) {
+	if (std::isnan(n) || std::isnan(r))
+		return std::numeric_limits<double>::quiet_NaN();
+	if (NearInteger(n) && NearInteger(r) && n >= 0) {
+		n = std::round(n);
+		r = std::round(r);
+		if (r < 0 || r > n)
+			return 0;
+		r = std::min(r, n - r);
+		double value = 1;
+		for (double i = 1; i <= r && std::isfinite(value); i++)
+			value = value * (n - r + i) / i;
+		return std::round(value);
+	}
+	return GammaRatio(n, r) / std::tgamma(n - r + 1);
+}
+
+double NPr(double n, double r) {
+	if (std::isnan(n) || std::isnan(r))
+		return std::numeric_limits<double>::quiet_NaN();
+	if (NearInteger(n) && NearInteger(r) && n >= 0) {
+		n = std::round(n);
+		r = std::round(r);
+		if (r < 0 || r > n)
+			return 0;
+		double value = 1;
+		for (double i = 0; i < r && std::isfinite(value); i++)
+			value *= n - i;
+		return value;
+	}
+	return GammaRatio(n, n - r);
+}
+
+double Gcd(double a, double b) {
+	a = std::abs(std::round(a));
+	b = std::abs(std::round(b));
+	if (!(a < 9e15) || !(b < 9e15))
+		return std::numeric_limits<double>::quiet_NaN();
+	while (b > 0) {
+		const double rest = std::fmod(a, b);
+		a = b;
+		b = rest;
+	}
+	return a;
+}
+
+double Lcm(double a, double b) {
+	const double g = Gcd(a, b);
+	if (std::isnan(g))
+		return g;
+	return g == 0 ? 0 : std::abs(std::round(a)) / g * std::abs(std::round(b));
+}
+
 double (*Func1(FplFunc f))(double) {
 	switch (f) {
 		case FplFunc::Sin: return [](double x) { return std::sin(x); };
@@ -72,6 +184,27 @@ double (*Func1(FplFunc f))(double) {
 		case FplFunc::Sec: return Sec;
 		case FplFunc::Csc: return Csc;
 		case FplFunc::Cot: return Cot;
+		case FplFunc::Square: return Square;
+		case FplFunc::Triangle: return Triangle;
+		case FplFunc::Sawtooth: return Sawtooth;
+		case FplFunc::Asec: return [](double x) { return std::acos(1 / x); };
+		case FplFunc::Acsc: return [](double x) { return std::asin(1 / x); };
+		case FplFunc::Acot: return [](double x) { return std::numbers::pi / 2 - std::atan(x); };
+		case FplFunc::Sech: return [](double x) { return 1 / std::cosh(x); };
+		case FplFunc::Csch: return [](double x) { return 1 / std::sinh(x); };
+		case FplFunc::Coth: return [](double x) { return 1 / std::tanh(x); };
+		case FplFunc::Asech: return [](double x) { return std::acosh(1 / x); };
+		case FplFunc::Acsch: return [](double x) { return std::asinh(1 / x); };
+		case FplFunc::Acoth: return [](double x) { return std::atanh(1 / x); };
+		case FplFunc::Trunc: return [](double x) { return std::trunc(x); };
+		case FplFunc::Lgamma: return [](double x) { return std::lgamma(x); };
+		case FplFunc::Erfc: return [](double x) { return std::erfc(x); };
+		case FplFunc::Step: return Step;
+		case FplFunc::Sinc: return Sinc;
+		case FplFunc::SincD1: return SincD1;
+		case FplFunc::SincD2: return SincD2;
+		case FplFunc::Normpdf: return Normpdf;
+		case FplFunc::Normcdf: return Normcdf;
 		case FplFunc::Asin: return [](double x) { return std::asin(x); };
 		case FplFunc::Acos: return [](double x) { return std::acos(x); };
 		case FplFunc::Atan: return [](double x) { return std::atan(x); };
@@ -105,6 +238,10 @@ double (*Func2(FplFunc f))(double, double) {
 		case FplFunc::Root: return Root;
 		case FplFunc::Mod: return Mod;
 		case FplFunc::Hypot: return Hypot;
+		case FplFunc::NCr: return NCr;
+		case FplFunc::NPr: return NPr;
+		case FplFunc::Gcd: return Gcd;
+		case FplFunc::Lcm: return Lcm;
 		default: return nullptr;
 	}
 }
@@ -919,7 +1056,9 @@ void CollectSingular(const FplAst& ast, int node, unsigned variable, bool guarde
 		switch (n.func) {
 			case FplFunc::Tan: case FplFunc::Sec: factors(n.kids[0], 1); break;
 			case FplFunc::Csc: case FplFunc::Cot: factors(n.kids[0], 2); break;
-			case FplFunc::Ln: case FplFunc::Log: case FplFunc::Log2: factors(n.kids[0], 0); break;
+			case FplFunc::Ln: case FplFunc::Log: case FplFunc::Log2: case FplFunc::Csch: case FplFunc::Coth:
+				factors(n.kids[0], 0);
+				break;
 			default: break;
 		}
 	}

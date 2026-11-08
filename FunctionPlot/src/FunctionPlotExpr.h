@@ -74,13 +74,22 @@ enum class FplRel : uint8_t { Eq, Lt, Le, Gt, Ge, Fit };	// Fit: "~", a regressi
 
 enum class FplFunc : uint8_t {
 	Sin, Cos, Tan, Sec, Csc, Cot,
-	Asin, Acos, Atan, Atan2,
+	Square, Triangle, Sawtooth,	// period 2 pi, as sin: 1 then -1; 0 rising to 1 at pi/2; -1 to 1, 0 at 0
+	Asin, Acos, Atan, Asec, Acsc, Acot, Atan2,	// acot is pi/2 - atan x, continuous, from 0 to pi
 	Sinh, Cosh, Tanh, Asinh, Acosh, Atanh,
-	Exp, Ln, Log, Log2,
+	Sech, Csch, Coth, Asech, Acsch, Acoth,
+	Exp, Ln, Log, Log2,		// log(x, b): to the base b
 	Sqrt, Cbrt, Root,		// root(n, x)
-	Abs, Sign, Floor, Ceil, Round,
+	Abs, Sign, Floor, Ceil, Round, Trunc,
 	Min, Max, Mod, Hypot,
-	Gamma, Digamma, Erf,
+	Gamma, Digamma, Lgamma, Erf, Erfc,
+	NCr, NPr,				// by the gamma function between the integers
+	Gcd, Lcm,				// of their arguments rounded
+	Step,					// 0 below 0, 1 from 0
+	Sinc, SincD1, SincD2,	// sin(x)/x, 1 at 0; its derivatives, which a formula would lose near 0
+	Normpdf, Normcdf,		// the standard normal's: (x, mean, sd) is written in terms of them in the parse
+	// written in terms of others in the parse, never evaluated
+	Frac, Clamp, Deg, Rad,
 	Count
 };
 

@@ -12,13 +12,20 @@ namespace {
 
 const FplFuncInfo g_Funcs[] = {
 	{ L"sin", 1, 1 }, { L"cos", 1, 1 }, { L"tan", 1, 1 }, { L"sec", 1, 1 }, { L"csc", 1, 1 }, { L"cot", 1, 1 },
-	{ L"asin", 1, 1 }, { L"acos", 1, 1 }, { L"atan", 1, 1 }, { L"atan2", 2, 2 },
+	{ L"square", 1, 1 }, { L"triangle", 1, 1 }, { L"sawtooth", 1, 1 },
+	{ L"asin", 1, 1 }, { L"acos", 1, 1 }, { L"atan", 1, 1 }, { L"asec", 1, 1 }, { L"acsc", 1, 1 }, { L"acot", 1, 1 }, { L"atan2", 2, 2 },
 	{ L"sinh", 1, 1 }, { L"cosh", 1, 1 }, { L"tanh", 1, 1 }, { L"asinh", 1, 1 }, { L"acosh", 1, 1 }, { L"atanh", 1, 1 },
-	{ L"exp", 1, 1 }, { L"ln", 1, 1 }, { L"log", 1, 1 }, { L"log2", 1, 1 },
+	{ L"sech", 1, 1 }, { L"csch", 1, 1 }, { L"coth", 1, 1 }, { L"asech", 1, 1 }, { L"acsch", 1, 1 }, { L"acoth", 1, 1 },
+	{ L"exp", 1, 1 }, { L"ln", 1, 1 }, { L"log", 1, 2 }, { L"log2", 1, 1 },
 	{ L"sqrt", 1, 1 }, { L"cbrt", 1, 1 }, { L"root", 2, 2 },
-	{ L"abs", 1, 1 }, { L"sign", 1, 1 }, { L"floor", 1, 1 }, { L"ceil", 1, 1 }, { L"round", 1, 1 },
+	{ L"abs", 1, 1 }, { L"sign", 1, 1 }, { L"floor", 1, 1 }, { L"ceil", 1, 1 }, { L"round", 1, 1 }, { L"trunc", 1, 1 },
 	{ L"min", 1, -1 }, { L"max", 1, -1 }, { L"mod", 2, 2 }, { L"hypot", 2, 2 },
-	{ L"gamma", 1, 1 }, { L"digamma", 1, 1 }, { L"erf", 1, 1 },
+	{ L"gamma", 1, 1 }, { L"digamma", 1, 1 }, { L"lgamma", 1, 1 }, { L"erf", 1, 1 }, { L"erfc", 1, 1 },
+	{ L"nCr", 2, 2 }, { L"nPr", 2, 2 }, { L"gcd", 2, 2 }, { L"lcm", 2, 2 },
+	{ L"step", 1, 1 },
+	{ L"sinc", 1, 1 }, { L"sinc'", 1, 1 }, { L"sinc''", 1, 1 },		// (primes: no name typed is these; printed, they read back)
+	{ L"normpdf", 1, 3 }, { L"normcdf", 1, 3 },
+	{ L"frac", 1, 1 }, { L"clamp", 3, 3 }, { L"deg", 1, 1 }, { L"rad", 1, 1 },
 };
 static_assert(std::size(g_Funcs) == size_t(FplFunc::Count));
 
@@ -30,7 +37,12 @@ const Alias g_Aliases[] = {
 	{ L"arcsin", FplFunc::Asin }, { L"arccos", FplFunc::Acos }, { L"arctan", FplFunc::Atan },
 	{ L"arsinh", FplFunc::Asinh }, { L"arcosh", FplFunc::Acosh }, { L"artanh", FplFunc::Atanh },
 	{ L"arcsinh", FplFunc::Asinh }, { L"arccosh", FplFunc::Acosh }, { L"arctanh", FplFunc::Atanh },
-	{ L"sgn", FplFunc::Sign }, { L"lg", FplFunc::Log },
+	{ L"sgn", FplFunc::Sign }, { L"lg", FplFunc::Log }, { L"log10", FplFunc::Log },
+	{ L"arcsec", FplFunc::Asec }, { L"arccsc", FplFunc::Acsc }, { L"arccot", FplFunc::Acot },
+	{ L"arsech", FplFunc::Asech }, { L"arcsch", FplFunc::Acsch }, { L"arcoth", FplFunc::Acoth },
+	{ L"arcsech", FplFunc::Asech }, { L"arccsch", FplFunc::Acsch }, { L"arccoth", FplFunc::Acoth },
+	{ L"cosec", FplFunc::Csc }, { L"tg", FplFunc::Tan }, { L"ctg", FplFunc::Cot }, { L"arctg", FplFunc::Atan }, { L"arcctg", FplFunc::Acot },
+	{ L"heaviside", FplFunc::Step }, { L"ncr", FplFunc::NCr }, { L"npr", FplFunc::NPr },
 };
 
 constexpr wchar_t Pi[] = L"\x03C0";
@@ -158,6 +170,24 @@ struct Token {
 	int pos = 0, len = 0;
 };
 
+// Names that were free before they were functions, and so may well be someone's own: a parameter or function of that name
+// has it, and a line defining it (step = 2, step(x) = ...) makes it one.
+bool IsYieldingName(std::wstring_view s) {
+	static const std::wstring_view Names[] = {
+		L"square", L"triangle", L"sawtooth", L"asec", L"acsc", L"acot", L"sech", L"csch", L"coth", L"asech", L"acsch", L"acoth",
+		L"trunc", L"lgamma", L"erfc", L"nCr", L"nPr", L"ncr", L"npr", L"gcd", L"lcm", L"step", L"heaviside", L"sinc",
+		L"normpdf", L"normcdf", L"frac", L"clamp", L"deg", L"rad", L"log10", L"arcsec", L"arccsc", L"arccot", L"arsech", L"arcsch",
+		L"arcoth", L"arcsech", L"arccsch", L"arccoth", L"cosec", L"tg", L"ctg", L"arctg", L"arcctg",
+	};
+	return std::find(std::begin(Names), std::end(Names), s) != std::end(Names);
+}
+
+// Short ones that read as products too (tg is t g; (t, tg) was a curve): functions only when called with parentheses.
+bool IsCallOnlyName(std::wstring_view s) {
+	static const std::wstring_view Names[] = { L"tg", L"ctg", L"deg", L"rad", L"gcd", L"lcm", L"ncr", L"npr", L"nCr", L"nPr" };
+	return std::find(std::begin(Names), std::end(Names), s) != std::end(Names);
+}
+
 bool IsLetter(wchar_t c) {
 	return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= 0x391 && c <= 0x3C9 && c != 0x3A2);
 }
@@ -178,6 +208,35 @@ public:
 			i = m_Text.find_first_not_of(L' ', i + 1);
 			m_PlainQ = i != m_Text.npos && m_Text[i] == L'=';
 		}
+		FindOwnName();
+	}
+
+	// "step = 2", "step(x) = ...": a line that defines one of the names that yield.
+	void FindOwnName() {
+		size_t i = m_Text.find_first_not_of(L' ');
+		if (i == m_Text.npos || !IsLetter(m_Text[i]))
+			return;
+		size_t end = i;
+		while (end < m_Text.size() && (IsLetter(m_Text[end]) || IsDigit(m_Text[end])))
+			end++;
+		const std::wstring_view name = m_Text.substr(i, end - i);
+		if (!IsYieldingName(name))
+			return;
+		size_t next = m_Text.find_first_not_of(L' ', end);
+		if (next != m_Text.npos && m_Text[next] == L'(') {
+			int depth = 0;
+			for (; next < m_Text.size(); next++) {
+				if (m_Text[next] == L'(')
+					depth++;
+				else if (m_Text[next] == L')' && --depth == 0)
+					break;
+			}
+			if (next >= m_Text.size())
+				return;
+			next = m_Text.find_first_not_of(L' ', next + 1);
+		}
+		if (next != m_Text.npos && m_Text[next] == L'=')
+			m_OwnName = name;
 	}
 	void PlainQ() { m_PlainQ = true; }
 
@@ -373,7 +432,7 @@ private:
 	}
 
 	// What a whole name is, if it's known.
-	bool Lookup(std::wstring_view s, Token& t) const {
+	bool Lookup(std::wstring_view s, Token& t, bool called = false) const {
 		t.type = Tk::Name;
 		if (s == L"integral") {
 			t.kind = NameKind::Integral;
@@ -386,20 +445,32 @@ private:
 				t.name = s;
 				return true;
 			}
-		for (size_t f = 0; f < std::size(g_Funcs); f++)
-			if (s == g_Funcs[f].name) {
-				t.kind = NameKind::Func;
-				t.func = FplFunc(f);
-				t.name = s;
-				return true;
-			}
-		for (auto& a : g_Aliases)
-			if (s == a.name) {
-				t.kind = NameKind::Func;
-				t.func = a.func;
-				t.name = g_Funcs[size_t(a.func)].name;
-				return true;
-			}
+		// (a name that yields, if it's taken; one that reads as a product too, unless it's called)
+		bool isFunction = !(IsCallOnlyName(s) && !called) && s != m_OwnName;
+		if (isFunction && IsYieldingName(s)) {
+			if (m_Functions)
+				for (auto& f : *m_Functions)
+					isFunction = isFunction && s != f.name;
+			if (m_Params)
+				for (auto& p : *m_Params)
+					isFunction = isFunction && s != p;
+		}
+		if (isFunction) {
+			for (size_t f = 0; f < std::size(g_Funcs); f++)
+				if (s == g_Funcs[f].name) {
+					t.kind = NameKind::Func;
+					t.func = FplFunc(f);
+					t.name = s;
+					return true;
+				}
+			for (auto& a : g_Aliases)
+				if (s == a.name) {
+					t.kind = NameKind::Func;
+					t.func = a.func;
+					t.name = g_Funcs[size_t(a.func)].name;
+					return true;
+				}
+		}
 		if (s == L"pi" || s == Pi) {
 			t.kind = NameKind::Const;
 			t.value = std::numbers::pi;
@@ -459,7 +530,20 @@ private:
 		Token t;
 		t.pos = pos;
 		t.len = int(s.size());
-		if (Lookup(s, t)) {
+		const size_t after = m_Text.find_first_not_of(L' ', pos + s.size());
+		const bool called = after != m_Text.npos && (m_Text[after] == L'(' || m_Text[after] == Prime || m_Text[after] == wchar_t(0x2032));
+		if (Lookup(s, t, called)) {
+			tokens.push_back(std::move(t));
+			return;
+		}
+		// the name this line defines, whole, whatever letters it's made of
+		if (s == m_OwnName) {
+			t.type = Tk::Name;
+			t.kind = NameKind::Unknown;
+			t.name = s;
+			t.hint = s;
+			t.hintPos = pos;
+			t.definable = true;
 			tokens.push_back(std::move(t));
 			return;
 		}
@@ -515,12 +599,13 @@ private:
 
 	std::wstring_view m_Text;
 	bool m_PlainQ = false;
+	std::wstring_view m_OwnName;
 	const std::vector<std::wstring>* m_Params;
 	const std::vector<FplUserFunction>* m_Functions;
 };
 
 bool IsTrig(FplFunc f) {
-	return f >= FplFunc::Sin && f <= FplFunc::Cot;
+	return f >= FplFunc::Sin && f <= FplFunc::Sawtooth;
 }
 
 bool IsInverseTrig(FplFunc f) {
@@ -818,6 +903,42 @@ private:
 
 	// A function name and its argument: "f(a, b)", or "f x" with the implicit product after it, or "f^2 x" ((f x)^2;
 	// "sin^-1 x" is asin x as calculators write it).
+	// A call, in terms of others where it's only a way of writing them.
+	int Expand(FplFunc func, std::vector<int> args) {
+		auto div = [&](int a, int b) { return m_Ast.Binary(FplOp::Div, a, b); };
+		auto sub = [&](int a, int b) { return m_Ast.Binary(FplOp::Sub, a, b); };
+		auto mul = [&](int a, int b) { return m_Ast.Binary(FplOp::Mul, a, b); };
+		switch (func) {
+			case FplFunc::Frac:
+				return sub(args[0], m_Ast.Call(FplFunc::Floor, { args[0] }));
+			case FplFunc::Clamp:
+				return m_Ast.Call(FplFunc::Min, { m_Ast.Call(FplFunc::Max, { args[0], args[1] }), args[2] });
+			case FplFunc::Deg:
+				return mul(args[0], m_Ast.Num(180 / std::numbers::pi));
+			case FplFunc::Rad:
+				return mul(args[0], m_Ast.Num(std::numbers::pi / 180));
+			case FplFunc::Log:
+				if (args.size() == 2)
+					return div(m_Ast.Call(FplFunc::Ln, { args[0] }), m_Ast.Call(FplFunc::Ln, { args[1] }));
+				break;
+			case FplFunc::Normpdf: case FplFunc::Normcdf: {
+				if (args.size() == 1)
+					break;
+				int x = sub(args[0], args[1]);
+				if (args.size() == 2)
+					return m_Ast.Call(func, { x });
+				// a standard deviation that isn't positive is undefined, through the root
+				int root = m_Ast.Call(FplFunc::Sqrt, { args[2] });
+				int sd = mul(root, root);
+				int value = m_Ast.Call(func, { div(x, sd) });
+				return func == FplFunc::Normpdf ? div(value, sd) : value;
+			}
+			default:
+				break;
+		}
+		return m_Ast.Call(func, std::move(args));
+	}
+
 	int Function(const Token& name) {
 		FplFunc func = name.func;
 		const auto& info = FplFuncInfoOf(func);
@@ -882,7 +1003,7 @@ private:
 			int inner = m_Ast.Var(place);
 			if (m_Options.degrees && IsTrig(func))
 				inner = m_Ast.Binary(FplOp::Mul, inner, m_Ast.Num(std::numbers::pi / 180));
-			int body = m_Ast.Call(func, { inner });
+			int body = Expand(func, { inner });
 			if (m_Options.degrees && IsInverseTrig(func))
 				body = m_Ast.Binary(FplOp::Mul, body, m_Ast.Num(180 / std::numbers::pi));
 			for (int i = 0; i < primes; i++) {
@@ -906,7 +1027,7 @@ private:
 		// derivative taken later in the parse sees them)
 		if (m_Options.degrees && IsTrig(func))
 			args[0] = m_Ast.Binary(FplOp::Mul, args[0], m_Ast.Num(std::numbers::pi / 180));
-		int call = Make(m_Ast.Call(func, std::move(args)), name.pos, end - name.pos);
+		int call = Make(Expand(func, std::move(args)), name.pos, end - name.pos);
 		if (m_Options.degrees && IsInverseTrig(func))
 			call = Make(m_Ast.Binary(FplOp::Mul, call, m_Ast.Num(180 / std::numbers::pi)), name.pos, end - name.pos);
 		if (power >= 0)
@@ -1049,6 +1170,12 @@ private:
 			case FplFunc::Sinh: return FplFunc::Asinh;
 			case FplFunc::Cosh: return FplFunc::Acosh;
 			case FplFunc::Tanh: return FplFunc::Atanh;
+			case FplFunc::Sec: return FplFunc::Asec;
+			case FplFunc::Csc: return FplFunc::Acsc;
+			case FplFunc::Cot: return FplFunc::Acot;
+			case FplFunc::Sech: return FplFunc::Asech;
+			case FplFunc::Csch: return FplFunc::Acsch;
+			case FplFunc::Coth: return FplFunc::Acoth;
 			default: return f;
 		}
 	}

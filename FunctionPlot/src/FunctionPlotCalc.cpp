@@ -599,7 +599,42 @@ private:
 			case FplFunc::Floor:
 			case FplFunc::Ceil:
 			case FplFunc::Round:
+			case FplFunc::Trunc:
+			case FplFunc::Step:
+			case FplFunc::Square:
+			case FplFunc::Gcd:
+			case FplFunc::Lcm:
 				return Num(0);
+			case FplFunc::Triangle:
+				return chain(Mul(Num(2 / std::numbers::pi), Call(FplFunc::Square, Add(u, Num(std::numbers::pi / 2)))));
+			case FplFunc::Sawtooth:
+				return chain(Num(1 / std::numbers::pi));
+			case FplFunc::Asec: return Div(D(u), Mul(Call(FplFunc::Abs, u), Call(FplFunc::Sqrt, Sub(Sq(u), Num(1)))));
+			case FplFunc::Acsc: return Neg(Div(D(u), Mul(Call(FplFunc::Abs, u), Call(FplFunc::Sqrt, Sub(Sq(u), Num(1))))));
+			case FplFunc::Acot: return Neg(Div(D(u), Add(Num(1), Sq(u))));
+			case FplFunc::Sech: return chain(Neg(Mul(node, Call(FplFunc::Tanh, u))));
+			case FplFunc::Csch: return chain(Neg(Mul(node, Call(FplFunc::Coth, u))));
+			case FplFunc::Coth: return chain(Neg(Sq(Call(FplFunc::Csch, u))));
+			case FplFunc::Asech: return Neg(Div(D(u), Mul(u, Call(FplFunc::Sqrt, Sub(Num(1), Sq(u))))));
+			case FplFunc::Acsch: return Neg(Div(D(u), Mul(Call(FplFunc::Abs, u), Call(FplFunc::Sqrt, Add(Num(1), Sq(u))))));
+			case FplFunc::Acoth: return Div(D(u), Sub(Num(1), Sq(u)));
+			case FplFunc::Lgamma: return chain(Call(FplFunc::Digamma, u));
+			case FplFunc::Erfc:
+				return chain(Mul(Num(-2 / std::sqrt(std::numbers::pi)), Call(FplFunc::Exp, Neg(Sq(u)))));
+			case FplFunc::NCr: {
+				auto psi = [&](int a) { return Call(FplFunc::Digamma, Add(a, Num(1))); };
+				const int top = k[0], c = k[1], rest = Sub(top, c);
+				return Mul(node, Sub(Sub(Mul(psi(top), D(top)), Mul(psi(c), D(c))), Mul(psi(rest), Sub(D(top), D(c)))));
+			}
+			case FplFunc::NPr: {
+				auto psi = [&](int a) { return Call(FplFunc::Digamma, Add(a, Num(1))); };
+				const int top = k[0], c = k[1], rest = Sub(top, c);
+				return Mul(node, Sub(Mul(psi(top), D(top)), Mul(psi(rest), Sub(D(top), D(c)))));
+			}
+			case FplFunc::Sinc: return chain(Call(FplFunc::SincD1, u));
+			case FplFunc::SincD1: return chain(Call(FplFunc::SincD2, u));
+			case FplFunc::Normpdf: return chain(Neg(Mul(u, node)));
+			case FplFunc::Normcdf: return chain(Call(FplFunc::Normpdf, u));
 			case FplFunc::Min:
 			case FplFunc::Max: {
 				// Folded pairwise: min(a, b) is {a < b: a', b'}.

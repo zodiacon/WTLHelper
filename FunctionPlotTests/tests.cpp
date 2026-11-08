@@ -5231,6 +5231,258 @@ TEST(StretchingDrawings) {
 	CHECK(!FplMapBetween(v, none, map));
 }
 
+TEST(MoreFunctions) {
+	std::vector<std::wstring> none;
+	auto at = [&](const std::wstring& text, double x, bool degrees = false) {
+		auto e = FplBuild(L"y = " + text, none, degrees);
+		CHECK(!e.error);
+		double slots[FplFirstParam] = {};
+		slots[FplSlotX] = x;
+		return e.error ? NaN : e.f.Eval(slots);
+	};
+	const double x = 0.7, big = 2.5;
+	// inverse reciprocals, and their other names
+	CHECK_NEAR(at(L"asec(x)", big), std::acos(1 / big));
+	CHECK_NEAR(at(L"acsc(x)", big), std::asin(1 / big));
+	CHECK_NEAR(at(L"acot(x)", x), Pi / 2 - std::atan(x));
+	CHECK_NEAR(at(L"acot(x)", -x), Pi / 2 + std::atan(x));		// continuous: 0 to pi
+	CHECK_NEAR(at(L"arcsec(x)", big), at(L"asec(x)", big));
+	CHECK_NEAR(at(L"arccsc(x)", big), at(L"acsc(x)", big));
+	CHECK_NEAR(at(L"arccot(x)", x), at(L"acot(x)", x));
+	CHECK_NEAR(at(L"sec^-1(x)", big), at(L"asec(x)", big));
+	CHECK_NEAR(at(L"cot^-1 x", x), at(L"acot(x)", x));
+	CHECK_NEAR(at(L"asec(sec(x))", x), x);
+	CHECK_NEAR(at(L"acsc(csc(x))", x), x);
+	CHECK_NEAR(at(L"acot(cot(x))", x), x);
+	// reciprocal hyperbolic
+	CHECK_NEAR(at(L"sech(x)", x), 1 / std::cosh(x));
+	CHECK_NEAR(at(L"csch(x)", x), 1 / std::sinh(x));
+	CHECK_NEAR(at(L"coth(x)", x), 1 / std::tanh(x));
+	CHECK_NEAR(at(L"asech(sech(x))", x), x);
+	CHECK_NEAR(at(L"acsch(csch(x))", x), x);
+	CHECK_NEAR(at(L"acoth(coth(x))", x), x);
+	CHECK_NEAR(at(L"arsech(x)", 0.5), at(L"arcsech(x)", 0.5));
+	CHECK_NEAR(at(L"arcsch(x)", 0.5), at(L"arccsch(x)", 0.5));
+	CHECK_NEAR(at(L"arcoth(x)", 2), at(L"arccoth(x)", 2));
+	CHECK_NEAR(at(L"coth^-1(x)", 2), at(L"acoth(x)", 2));
+	CHECK_NEAR(at(L"sech^-1(x)", 0.5), at(L"asech(x)", 0.5));
+	CHECK_NEAR(at(L"csch^-1(x)", 0.5), at(L"acsch(x)", 0.5));
+	// logarithms
+	CHECK_NEAR(at(L"log10(x)", 1000), 3);
+	CHECK_NEAR(at(L"log(x)", 1000), 3);
+	CHECK_NEAR(at(L"log(x, 2)", 8), 3);
+	CHECK_NEAR(at(L"log(8, x)", 2), 3);
+	CHECK(FplBuild(L"y = log(x, 2, 3)", none).error.code == FplErrorCode::ArgCount);
+	// rounding
+	CHECK_NEAR(at(L"trunc(x)", 2.7), 2);
+	CHECK_NEAR(at(L"trunc(x)", -2.7), -2);
+	CHECK_NEAR(at(L"frac(x)", 2.75), 0.75);
+	CHECK_NEAR(at(L"frac(x)", -0.25), 0.75);
+	CHECK_NEAR(at(L"clamp(x, 0, 1)", -3), 0);
+	CHECK_NEAR(at(L"clamp(x, 0, 1)", 0.5), 0.5);
+	CHECK_NEAR(at(L"clamp(x, 0, 1)", 3), 1);
+	CHECK(FplBuild(L"y = clamp(x, 1)", none).error.code == FplErrorCode::ArgCount);
+	// error and gamma
+	CHECK_NEAR(at(L"erfc(x)", x), 1 - std::erf(x));
+	CHECK_NEAR_TOL(at(L"erfc(x)", 6), 2.1519736712498913e-17, 1e-28);	// where 1 - erf is 0
+	CHECK_NEAR(at(L"lgamma(x)", 5), std::log(24.0));
+	CHECK_NEAR(at(L"lgamma(x)", 1000), std::lgamma(1000.0));		// gamma overflows
+	// combinatorics: whole numbers exact, smooth between
+	CHECK_NEAR(at(L"nCr(5, 2)", 0), 10);
+	CHECK_NEAR(at(L"nCr(x, 2)", 10), 45);
+	CHECK_NEAR(at(L"nCr(60, 30)", 0), 118264581564861424.0);
+	CHECK_NEAR(at(L"nCr(5, x)", 0), 1);
+	CHECK_NEAR(at(L"nCr(5, x)", 7), 0);
+	CHECK_NEAR(at(L"nCr(5, x)", -1), 0);
+	CHECK_NEAR(at(L"ncr(5, 2)", 0), 10);
+	CHECK_NEAR(at(L"nPr(5, 2)", 0), 20);
+	CHECK_NEAR(at(L"npr(5, 2)", 0), 20);
+	CHECK_NEAR(at(L"nPr(5, 0)", 0), 1);
+	CHECK_NEAR(at(L"nPr(5, 7)", 0), 0);
+	CHECK_NEAR_TOL(at(L"nCr(4.5, x)", 2), std::tgamma(5.5) / (std::tgamma(3.0) * std::tgamma(3.5)), 1e-9);
+	CHECK_NEAR_TOL(at(L"nCr(5, x)", 2.0000001), 10, 1e-4);			// continuous at the integers
+	CHECK_NEAR_TOL(at(L"nPr(5, x)", 2.0000001), 20, 1e-4);
+	CHECK(std::isinf(at(L"nPr(x, 200)", 300)));
+	// rounded arguments
+	CHECK_NEAR(at(L"gcd(12, 18)", 0), 6);
+	CHECK_NEAR(at(L"gcd(-12, 18)", 0), 6);
+	CHECK_NEAR(at(L"gcd(0, 5)", 0), 5);
+	CHECK_NEAR(at(L"gcd(0, 0)", 0), 0);
+	CHECK_NEAR(at(L"gcd(x, 18)", 11.8), 6);
+	CHECK_NEAR(at(L"lcm(4, 6)", 0), 12);
+	CHECK_NEAR(at(L"lcm(0, 6)", 0), 0);
+	CHECK(std::isnan(at(L"gcd(x, 2)", 1e300)));
+	// step and sinc
+	CHECK_NEAR(at(L"step(x)", -0.1), 0);
+	CHECK_NEAR(at(L"step(x)", 0), 1);
+	CHECK_NEAR(at(L"step(x)", 0.1), 1);
+	CHECK_NEAR(at(L"heaviside(x)", 2), 1);
+	CHECK_NEAR(at(L"sinc(x)", 0), 1);
+	CHECK_NEAR(at(L"sinc(x)", x), std::sin(x) / x);
+	CHECK_NEAR_TOL(at(L"sinc(x)", 1e-5), 1, 1e-9);
+	// waves: period 2 pi, as sin
+	CHECK_NEAR(at(L"square(x)", 1), 1);
+	CHECK_NEAR(at(L"square(x)", 4), -1);
+	CHECK_NEAR(at(L"square(x)", 1 + 2 * Pi), 1);
+	CHECK_NEAR(at(L"square(x)", -1), -1);
+	CHECK_NEAR(at(L"triangle(x)", 0), 0);
+	CHECK_NEAR(at(L"triangle(x)", Pi / 2), 1);
+	CHECK_NEAR(at(L"triangle(x)", Pi / 4), 0.5);
+	CHECK_NEAR_TOL(at(L"triangle(x)", Pi), 0, 1e-12);
+	CHECK_NEAR(at(L"triangle(x)", -Pi / 2), -1);
+	CHECK_NEAR(at(L"sawtooth(x)", 0), 0);
+	CHECK_NEAR(at(L"sawtooth(x)", Pi / 2), 0.5);
+	CHECK_NEAR(at(L"sawtooth(x)", 3), 3 / Pi);
+	CHECK_NEAR(at(L"sawtooth(x)", 4), 4 / Pi - 2);
+	CHECK(std::isnan(at(L"square(x)", std::numeric_limits<double>::infinity())));
+	// in degrees: 360 is the period, as sin's
+	CHECK_NEAR(at(L"square(x)", 90, true), 1);
+	CHECK_NEAR(at(L"square(x)", 270, true), -1);
+	CHECK_NEAR(at(L"triangle(x)", 90, true), 1);
+	CHECK_NEAR(at(L"sawtooth(x)", 90, true), 0.5);
+	CHECK_NEAR(at(L"asec(x)", 2, true), 60);
+	CHECK_NEAR(at(L"acot(x)", 1, true), 45);
+	// normal distribution
+	CHECK_NEAR(at(L"normpdf(x)", 0), 1 / std::sqrt(2 * Pi));
+	CHECK_NEAR(at(L"normcdf(x)", 0), 0.5);
+	CHECK_NEAR_TOL(at(L"normcdf(x)", 1.96), 0.9750021048517795, 1e-12);
+	CHECK_NEAR_TOL(at(L"normcdf(x)", -8), 6.22096057427178e-16, 1e-25);	// out in the tail, by erfc
+	CHECK_NEAR(at(L"normpdf(x, 1)", 1), 1 / std::sqrt(2 * Pi));
+	CHECK_NEAR(at(L"normpdf(x, 3, 2)", 3), 1 / (2 * std::sqrt(2 * Pi)));
+	CHECK_NEAR(at(L"normpdf(x, 3, 2)", 5), at(L"normpdf(x)", 1) / 2);
+	CHECK_NEAR(at(L"normcdf(x, 3, 2)", 5), at(L"normcdf(x)", 1));
+	CHECK_NEAR(at(L"normcdf(x, 3, 2)", 3), 0.5);
+	CHECK(std::isnan(at(L"normpdf(x, 0, -1)", 1)));
+	CHECK(std::isnan(at(L"normcdf(x, 0, -1)", 1)));
+	CHECK(!std::isfinite(at(L"normpdf(x, 0, 0)", 1)) || at(L"normpdf(x, 0, 0)", 1) == 0);
+	CHECK(FplBuild(L"y = normpdf(x, 1, 2, 3)", none).error.code == FplErrorCode::ArgCount);
+	// conversions
+	CHECK_NEAR(at(L"deg(x)", Pi), 180);
+	CHECK_NEAR(at(L"rad(x)", 180), Pi);
+	CHECK_NEAR(at(L"sin(rad(x))", 90), 1);
+	// other names
+	CHECK_NEAR(at(L"tg(x)", x), std::tan(x));
+	CHECK_NEAR(at(L"ctg(x)", x), 1 / std::tan(x));
+	CHECK_NEAR(at(L"cosec(x)", x), 1 / std::sin(x));
+	CHECK_NEAR(at(L"arctg(x)", x), std::atan(x));
+	CHECK_NEAR(at(L"arcctg(x)", x), at(L"acot(x)", x));
+
+	// every one: compiled and the slow tree agree, derivatives against differences, printed and read back
+	struct Case { const wchar_t* text; double x; };
+	const Case cases[] = {
+		{ L"asec(x)", 2.5 }, { L"acsc(x)", 2.5 }, { L"acot(x)", 0.7 }, { L"asec(x)", -2.5 }, { L"acsc(x)", -2.5 },
+		{ L"sech(x)", 0.7 }, { L"csch(x)", 0.7 }, { L"coth(x)", 0.7 },
+		{ L"asech(x)", 0.5 }, { L"acsch(x)", 0.5 }, { L"acsch(x)", -0.5 }, { L"acoth(x)", 2 },
+		{ L"log(x, 2)", 3 }, { L"log10(x)", 3 }, { L"erfc(x)", 0.7 }, { L"lgamma(x)", 3.3 },
+		{ L"nCr(x, 2.5)", 6.3 }, { L"nCr(6.3, x)", 2.5 }, { L"nPr(x, 2.5)", 6.3 }, { L"nPr(6.3, x)", 2.5 },
+		{ L"sinc(x)", 0.7 }, { L"sinc(2x)", 3 }, { L"triangle(x)", 0.7 }, { L"triangle(x)", 4 }, { L"sawtooth(2x)", 0.7 },
+		{ L"normpdf(x)", 0.7 }, { L"normcdf(x)", 0.7 }, { L"normpdf(x, 1, 2)", 0.3 }, { L"normcdf(x, 1, 2)", 0.3 },
+		{ L"frac(x)", 2.3 }, { L"clamp(x, 0, 1)", 0.4 }, { L"clamp(2x, 0, 1)", 0.2 }, { L"deg(x)", 1 }, { L"rad(x)", 1 },
+		{ L"trunc(x)", 2.3 }, { L"step(x)", 2.3 }, { L"square(x)", 0.7 }, { L"gcd(x, 6)", 3.2 }, { L"lcm(x, 6)", 3.2 },
+	};
+	for (auto& c : cases) {
+		FplParseOptions options;
+		auto r = FplParse(c.text, options);
+		CHECK(!r.error);
+		if (r.error)
+			continue;
+		std::vector<std::wstring> names;
+		auto program = FplCompile(r.ast, r.root, names);
+		double slots[FplFirstParam] = {};
+		slots[FplSlotX] = c.x;
+		const double value = program.Eval(slots);
+		CHECK_NEAR_TOL(Tree(r.ast, r.root, c.x), value, 1e-9 * (1 + std::abs(value)));
+		// its derivative
+		FplError error;
+		int d = FplDerive(r.ast, r.root, L"x", &error);
+		CHECK(d >= 0);
+		if (d < 0)
+			continue;
+		auto dp = FplCompile(r.ast, d, names);
+		const double h = 1e-5;
+		slots[FplSlotX] = c.x + h;
+		const double up = program.Eval(slots);
+		slots[FplSlotX] = c.x - h;
+		const double down = program.Eval(slots);
+		slots[FplSlotX] = c.x;
+		CHECK_NEAR_TOL(dp.Eval(slots), (up - down) / (2 * h), 1e-5 * (1 + std::abs(value)));
+		// printed, it reads back the same
+		auto again = FplParse(FplToString(r.ast, r.root), options);
+		CHECK(!again.error);
+		if (!again.error)
+			CHECK_NEAR_TOL(FplCompile(again.ast, again.root, names).Eval(slots), value, 1e-9 * (1 + std::abs(value)));
+	}
+	// sinc's derivatives are right through 0, where the formulas aren't, and read back
+	const double near0[] = { 0.0, 1e-9, 1e-6, 1e-3, 0.0199, 0.0201, 0.0999, 0.1001, 0.5, -0.5, 3 };
+	for (double v : near0) {
+		const double d1 = v == 0 ? 0 : (v * v < 1e-6 ? -v / 3 : (std::cos(v) - std::sin(v) / v) / v);
+		CHECK_NEAR_TOL(at(L"sinc'(x)", v), d1, 1e-7);
+		CHECK_NEAR_TOL(at(L"d/dx sinc(x)", v), d1, 1e-7);
+	}
+	CHECK_NEAR_TOL(at(L"sinc''(x)", 0), -1.0 / 3, 1e-12);
+	CHECK_NEAR_TOL(at(L"sinc''(x)", 0.1 - 1e-9), at(L"sinc''(x)", 0.1 + 1e-9), 1e-6);
+	CHECK_NEAR_TOL(at(L"sinc'(x)", 0.02 - 1e-9), at(L"sinc'(x)", 0.02 + 1e-9), 1e-6);
+	CHECK_NEAR_TOL(at(L"d/dx d/dx sinc(x)", 0.5), (at(L"sinc'(x)", 0.5 + 1e-5) - at(L"sinc'(x)", 0.5 - 1e-5)) / 2e-5, 1e-6);
+	CHECK(FplBuild(L"y = sinc'''(x)", none).error.code == FplErrorCode::NotDifferentiable);
+	// primes on those written in terms of others, and error for those of two
+	CHECK_NEAR(at(L"frac'(x)", 2.3), 1);
+	CHECK_NEAR(at(L"deg'(x)", 2.3), 180 / Pi);
+	CHECK_NEAR(at(L"normcdf'(x)", 0.7), at(L"normpdf(x)", 0.7));
+	CHECK(FplBuild(L"y = gcd'(x, 2)", none).error.code == FplErrorCode::NotDifferentiable);
+
+	// what the sampler does with them: the steps break, poles are asymptotes
+	FplViewport v = View(-10, 10, -8, 8, 1000, 800);
+	auto plot = MakePlot({ L"y = step(x)", L"y = square(x)", L"y = sawtooth(x)", L"y = triangle(x)", L"y = coth(x)", L"y = csch(x)", L"y = sinc(x)", L"y = normpdf(x)" });
+	plot.Sample(v);
+	CHECK_INT(plot.graphs[0].geometry.lines.size(), 2);
+	CHECK(plot.graphs[1].geometry.lines.size() >= 6);
+	CHECK(plot.graphs[2].geometry.lines.size() >= 3);
+	CHECK_INT(plot.graphs[3].geometry.lines.size(), 1);
+	CHECK_INT(plot.graphs[4].geometry.asymptotes.size(), 1);
+	CHECK_INT(plot.graphs[5].geometry.asymptotes.size(), 1);
+	CHECK_INT(plot.graphs[6].geometry.lines.size(), 1);
+	CHECK(plot.graphs[6].geometry.holes.empty());
+	CHECK_INT(plot.graphs[7].geometry.lines.size(), 1);
+
+	// the new names give way to the user's
+	auto param = FplBuild(L"y = step x", { L"step" });
+	CHECK(!param.error);
+	double slots[FplFirstParam + 1] = {};
+	slots[FplSlotX] = 3;
+	slots[FplFirstParam] = 2;
+	CHECK_NEAR(param.f.Eval(slots), 6);
+	CHECK_NEAR(FplBuild(L"y = sin x", { L"sin" }).f.Eval(slots), std::sin(3.0));	// not the old ones
+	plot = MakePlot({ L"step = 2", L"y = step x" });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[1].expr.error);
+	auto values = plot.Slots();
+	values[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(values.data()), 6);
+	plot = MakePlot({ L"y = rad x", L"rad = 2" });
+	CHECK(plot.graphs[1].definition);
+	CHECK(!plot.graphs[0].expr.error);
+	plot = MakePlot({ L"square(x) = x^2", L"y = square(x) + 1", L"frac = x - 1", L"y = 2frac" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK(!plot.graphs[3].expr.error);
+	values = plot.Slots();
+	values[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(values.data()), 10);
+	CHECK_NEAR(plot.graphs[3].expr.f.Eval(values.data()), 4);
+	// short ones are functions only when called: products as they were, with a slider for what's missing
+	auto curve = FplBuild(L"(t, tg)", { L"g" });
+	CHECK(!curve.error);
+	CHECK(curve.kind == FplKind::Parametric);
+	CHECK(FplBuild(L"y = rad", none).error.code == FplErrorCode::UnknownName);
+	CHECK(!FplBuild(L"y = x deg", { L"d", L"g" }).error);
+	CHECK(FplBuild(L"y = gcd", none).error.code == FplErrorCode::UnknownName);
+	// others take an argument without parentheses, as sin does
+	CHECK_NEAR(at(L"sech x", x), 1 / std::cosh(x));
+	CHECK_NEAR(at(L"step x", 1), 1);
+	CHECK_NEAR(at(L"3 square 2x", 1), 3);
+	CHECK_NEAR(at(L"sinc^2(x)", x), std::pow(std::sin(x) / x, 2));
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -5317,6 +5569,7 @@ int wmain() {
 	Run_QIsTheta();
 	Run_Transitions();
 	Run_StretchingDrawings();
+	Run_MoreFunctions();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;
