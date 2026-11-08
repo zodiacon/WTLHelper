@@ -112,6 +112,7 @@ struct FplSampleOptions {
 	double odeStep = 2;				// DIPs: an ODE's solution's longest step in x
 	double odeTolerance = 0.02;		// DIPs: its error in y a step
 	bool singularities = true;		// a function's asymptotes and holes
+	bool odeRange = false;			// a system's trajectories only over t in [tMin, tMax], not for as long as they last
 };
 
 // A curve given as t -> a point in the plane (NaN where undefined), sampled over [t0, t1] from samples + 1 first
@@ -211,7 +212,12 @@ std::vector<FplArrow> FplSampleSlopes(const std::function<double(double, double)
 FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x0, double y0, const FplViewport& view,
 	const FplSampleOptions& options = {}, size_t* evals = nullptr);
 
-// y'' = F(x, y, y') through (x0, y0) with slope v0, as FplSolveOde.
+// y^(n) = F(x, y, y', ... y^(n-1)) from y and its derivatives at x0 (y0[0] is y), as FplSolveOde; F is given them the same
+// way. Up to FplMaxOdeOrder.
+inline constexpr int FplMaxOdeOrder = 5;
+FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, int order, double x0, const double* y0,
+	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+// y'' = F(x, y, y') through (x0, y0) with slope v0.
 FplPolyline FplSolveOde2(const std::function<double(double, double, double)>& F, double x0, double y0, double v0,
 	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
 // The trajectory of (x', y') = field(x, y) through (x0, y0), both ways in time, with steps of at most odeStep DIPs on
@@ -219,6 +225,9 @@ FplPolyline FplSolveOde2(const std::function<double(double, double, double)>& F,
 // around the view. A point where the field is zero has no line.
 FplPolyline FplSolveSystem(const std::function<FplPoint(double, double)>& field, double x0, double y0,
 	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+// The same with t in it (field(t, x, y), starting at t = 0): not autonomous, it neither settles nor closes.
+FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)>& field, bool autonomous, double x0,
+	double y0, const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
 
 // Samples a built expression with its parameters' values (slots from FplFirstParam on; the others are set here).
 // Definitions draw nothing.

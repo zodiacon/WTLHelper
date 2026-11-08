@@ -628,29 +628,40 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 			}
 		return true;
 	};
-	auto prime = [&] { return take(L'\'') || take(wchar_t(0x2032)); };
+	// how many primes come next
+	auto primes = [&] {
+		spaces();
+		int count = 0;
+		for (; i < n; i++) {
+			if (text[i] == L'\'' || text[i] == wchar_t(0x2032))
+				count++;
+			else if (text[i] == wchar_t(0x2033))
+				count += 2;
+			else if (text[i] == wchar_t(0x2034))
+				count += 3;
+			else
+				break;
+		}
+		return count;
+	};
 	spaces();
 	const size_t start = i;
 	// what it starts with: the order
-	if (take(L'y') && (word(L"''") || take(wchar_t(0x2033)) || word(L"\x2032\x2032")))
-		o.order = FplOdeOrder::Second;
+	if (take(L'y') && (o.degree = primes()) > 0)
+		o.order = o.degree == 1 ? FplOdeOrder::First : FplOdeOrder::Second;
 	else {
 		i = start;
-		if (take(L'y') && prime())
-			o.order = FplOdeOrder::First;
+		o.degree = 1;
+		if (take(L'x') && primes() == 1)
+			o.order = FplOdeOrder::System;
 		else {
 			i = start;
-			if (take(L'x') && prime())
+			if (word(L"dy/dx"))
+				o.order = FplOdeOrder::First;
+			else if (word(L"dx/dt"))
 				o.order = FplOdeOrder::System;
-			else {
-				i = start;
-				if (word(L"dy/dx"))
-					o.order = FplOdeOrder::First;
-				else if (word(L"dx/dt"))
-					o.order = FplOdeOrder::System;
-				else
-					return o;
-			}
+			else
+				return o;
 		}
 	}
 	if (!take(L'='))
@@ -677,6 +688,11 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 		o.missingClose = missingClose;
 		return o;
 	};
+	if (o.degree > 5) {
+		o.tooHigh = true;
+		i = start;
+		return stop();
+	}
 	// what's inside the parentheses just opened
 	auto inside = [&](size_t& at, size_t& len) {
 		at = i;
@@ -708,37 +724,82 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 			return stop();
 		}
 		i = comma + 1;
-		if (!(take(L'y') && prime()) && !word(L"dy/dt"))
-			return stop();
+		const size_t second = i;
+		if (!(take(L'y') && primes() == 1)) {
+			i = second;
+			if (!word(L"dy/dt"))
+				return stop();
+		}
 		if (!take(L'='))
 			return stop();
 		o.rhs2 = i;
 		comma = nextComma(i);
 		o.rhs2Len = comma - i;
+		// z' = R next makes it 3D
+		if (comma < n) {
+			i = comma + 1;
+			const size_t third = i;
+			if ((take(L'z') && primes() == 1) || ((i = third), word(L"dz/dt"))) {
+				if (!take(L'='))
+					return stop();
+				o.order = FplOdeOrder::System3D;
+				o.rhs3 = i;
+				comma = nextComma(i);
+				o.rhs3Len = comma - i;
+			}
+			else
+				i = third;
+		}
 	}
 	while (comma < n) {
 		i = comma + 1;
 		FplOdeStart st;
-		if (o.order == FplOdeOrder::System) {
-			// (a, b)
+		if (o.order == FplOdeOrder::System || o.order == FplOdeOrder::System3D) {
+			// (a, b), (a, b, c)
 			if (!take(L'('))
 				return stop();
 			size_t at = 0, len = 0;
 			if (!inside(at, len))
 				return stop(true);
-			const size_t mid = nextComma(at);
-			if (mid >= at + len) {
+			const size_t close = at + len, after = i;
+			auto within = [&](size_t from) {
+				// a comma of this point's: nextComma runs past the parenthesis only by depth
+				const size_t k = nextComma(from);
+				return k < close ? k : close;
+			};
+			const size_t mid = within(at);
+			if (mid >= close) {
 				i = at;
 				return stop();
 			}
 			st.a = at;
 			st.aLen = mid - at;
 			st.b = mid + 1;
-			st.bLen = at + len - mid - 1;
+			if (o.order == FplOdeOrder::System3D) {
+				const size_t mid2 = within(mid + 1);
+				if (mid2 >= close) {
+					i = at;
+					return stop();
+				}
+				st.bLen = mid2 - st.b;
+				st.more.push_back({ mid2 + 1, close - mid2 - 1 });
+				if (within(mid2 + 1) < close) {
+					i = at;
+					return stop();
+				}
+			}
+			else {
+				st.bLen = close - st.b;
+				if (within(mid + 1) < close) {
+					i = at;
+					return stop();
+				}
+			}
+			i = after;
 			spaces();
 			if (i < n && text[i] != L',')
 				return stop();
-			comma = nextComma(i);
+			comma = i < n ? i : n;
 		}
 		else {
 			// y(a) = b
@@ -751,8 +812,8 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 			st.b = i;
 			comma = nextComma(i);
 			st.bLen = comma - i;
-			if (o.order == FplOdeOrder::Second) {
-				// y'(a) = c, at the same a
+			// y'(a) = c and on, at the same a
+			for (int k = 1; k < o.degree; k++) {
 				o.badInitial = true;
 				if (comma >= n) {
 					i = n;
@@ -760,7 +821,7 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 				}
 				i = comma + 1;
 				size_t a2 = 0, a2Len = 0;
-				if (!take(L'y') || !prime() || !take(L'('))
+				if (!take(L'y') || primes() != k || !take(L'('))
 					return stop();
 				if (!inside(a2, a2Len)) {
 					o.badInitial = false;
@@ -773,12 +834,13 @@ FplOdeText FplSplitOde(std::wstring_view text) {
 				if (!take(L'='))
 					return stop();
 				o.badInitial = false;
-				st.c = i;
+				FplOdeRange value{ i, 0 };
 				comma = nextComma(i);
-				st.cLen = comma - i;
+				value.len = comma - i;
+				st.more.push_back(value);
 			}
 		}
-		o.starts.push_back(st);
+		o.starts.push_back(std::move(st));
 	}
 	return o;
 }
@@ -876,29 +938,61 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 	options.functions = functions;
 	options.lists = lists;
 	if (auto ode = FplSplitOde(text); ode.isOde) {
-		e.kind = ode.order == FplOdeOrder::First ? FplKind::SlopeField
-			: ode.order == FplOdeOrder::Second ? FplKind::SecondOrder : FplKind::OdeSystem;
+		const bool system = ode.order == FplOdeOrder::System || ode.order == FplOdeOrder::System3D;
+		e.kind = ode.order == FplOdeOrder::First ? FplKind::SlopeField : ode.order == FplOdeOrder::Second ? FplKind::SecondOrder
+			: ode.order == FplOdeOrder::System ? FplKind::OdeSystem : FplKind::OdeSystem3D;
+		e.odeOrder = ode.degree;
+		if (ode.tooHigh) {
+			e.error = { FplErrorCode::OdeOrder, static_cast<int>(ode.errorAt), 1 };
+			return e;
+		}
 		if (ode.order == FplOdeOrder::Second) {
-			// y' in F is the t slot. Written over its own two characters, so errors stay in their places; a t of the
-			// user's own is caught first, with y' as a number.
-			auto withPrime = [&](wchar_t name) {
+			// y', y'' ... in F are the t, u, v and z slots. Written over their own characters, so errors stay in their
+			// places; a t of the user's own is caught first, with them as e (a name: "2y'" as "2 0" wouldn't read). A y
+			// with as many primes as the equation itself, or more, stays as written: an error.
+			static constexpr wchar_t Names[] = { L't', L'u', L'v', L'z' };
+			auto withPrimes = [&](bool stand) {
 				std::wstring copy(text);
-				for (size_t k = ode.rhs; k + 1 < ode.rhs + ode.rhsLen; k++)
-					if (copy[k] == L'y' && (copy[k + 1] == L'\'' || copy[k + 1] == wchar_t(0x2032))) {
-						copy[k] = L' ';
-						copy[k + 1] = name;
+				const size_t end = ode.rhs + ode.rhsLen;
+				for (size_t k = ode.rhs; k + 1 < end; k++) {
+					if (copy[k] != L'y')
+						continue;
+					size_t last = k;
+					int count = 0;
+					for (size_t j = k + 1; j < end; j++) {
+						const wchar_t c = copy[j];
+						const int more = c == L'\'' || c == wchar_t(0x2032) ? 1 : c == wchar_t(0x2033) ? 2 : c == wchar_t(0x2034) ? 3 : 0;
+						if (!more)
+							break;
+						count += more;
+						last = j;
 					}
+					if (count < 1 || count >= ode.degree)
+						continue;
+					for (size_t j = k; j < last; j++)
+						copy[j] = L' ';
+					copy[last] = stand ? L'e' : Names[count - 1];
+				}
 				return copy;
 			};
+			unsigned allowed = FplVarX | FplVarY;
+			static constexpr unsigned Bits[] = { FplVarT, FplVarU, FplVarV, FplVarZ };
+			for (int k = 0; k + 1 < ode.degree; k++)
+				allowed |= Bits[k];
 			FplProgram check;
-			BuildOdePart(withPrime(L'0'), ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, check, e.error);
+			BuildOdePart(withPrimes(true), ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, check, e.error);
 			if (!e.error)
-				BuildOdePart(withPrime(L't'), ode.rhs, ode.rhsLen, FplVarX | FplVarY | FplVarT, options, parameters, e.f, e.error);
+				BuildOdePart(withPrimes(false), ode.rhs, ode.rhsLen, allowed, options, parameters, e.f, e.error);
 		}
-		else
-			BuildOdePart(text, ode.rhs, ode.rhsLen, FplVarX | FplVarY, options, parameters, e.f, e.error);
-		if (!e.error && ode.order == FplOdeOrder::System)
-			BuildOdePart(text, ode.rhs2, ode.rhs2Len, FplVarX | FplVarY, options, parameters, e.g, e.error);
+		else {
+			const unsigned allowed = !system ? FplVarX | FplVarY : ode.order == FplOdeOrder::System ? FplVarX | FplVarY | FplVarT
+				: FplVarX | FplVarY | FplVarZ | FplVarT;
+			BuildOdePart(text, ode.rhs, ode.rhsLen, allowed, options, parameters, e.f, e.error);
+			if (!e.error && system && ode.rhs2Len)
+				BuildOdePart(text, ode.rhs2, ode.rhs2Len, allowed, options, parameters, e.g, e.error);
+			if (!e.error && ode.order == FplOdeOrder::System3D)
+				BuildOdePart(text, ode.rhs3, ode.rhs3Len, allowed, options, parameters, e.h, e.error);
+		}
 		if (!e.error && ode.errorAt != std::wstring_view::npos) {
 			e.error = { ode.badInitial ? FplErrorCode::BadInitial
 				: ode.missingClose ? FplErrorCode::MissingClose : FplErrorCode::UnexpectedToken,
@@ -908,23 +1002,29 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 		else if (!e.error) {
 			// each condition's values, one after the other
 			for (auto& st : ode.starts) {
-				FplProgram a, b, c;
+				FplProgram a, b;
 				BuildOdePart(text, st.a, st.aLen, 0, options, parameters, a, e.error);
 				if (!e.error)
 					BuildOdePart(text, st.b, st.bLen, 0, options, parameters, b, e.error);
-				if (!e.error && ode.order == FplOdeOrder::Second)
-					BuildOdePart(text, st.c, st.cLen, 0, options, parameters, c, e.error);
 				if (e.error)
 					break;
 				e.starts.push_back(std::move(a));
 				e.starts.push_back(std::move(b));
-				if (ode.order == FplOdeOrder::Second)
+				for (auto& value : st.more) {
+					FplProgram c;
+					BuildOdePart(text, value.at, value.len, 0, options, parameters, c, e.error);
+					if (e.error)
+						break;
 					e.starts.push_back(std::move(c));
+				}
+				if (e.error)
+					break;
 			}
 		}
 		if (e.error) {
 			e.f = {};
 			e.g = {};
+			e.h = {};
 			e.starts.clear();
 		}
 		return e;

@@ -3553,7 +3553,7 @@ TEST(HigherOdes) {
 	CHECK(o.isOde);
 	CHECK(o.order == FplOdeOrder::Second);
 	CHECK_INT(o.starts.size(), 2);
-	CHECK(text.substr(o.starts[0].c, o.starts[0].cLen) == L" 2");
+	CHECK(text.substr(o.starts[0].more[0].at, o.starts[0].more[0].len) == L" 2");
 	CHECK(text.substr(o.starts[1].b, o.starts[1].bLen) == L" a");
 	CHECK(FplSplitOde(std::wstring(L"y") + wchar_t(0x2033) + L" = y").order == FplOdeOrder::Second);
 	text = L"x' = y, y' = -x, (1, f(2, 3)), (0, 1)";
@@ -3588,7 +3588,7 @@ TEST(HigherOdes) {
 	CHECK(e.error.code == FplErrorCode::BadInitial);
 	e = FplBuild(L"x' = y", params);
 	CHECK(e.error.code != FplErrorCode::None);
-	e = FplBuild(L"x' = t, y' = 1", params);
+	e = FplBuild(L"x' = z, y' = 1", params);
 	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
 	e = FplBuild(L"x' = y, y' = -x, (1)", params);
 	CHECK(e.error.code != FplErrorCode::None);
@@ -3862,6 +3862,305 @@ TEST(Singularities) {
 	CHECK(svg.find("\"nan") == std::string::npos && svg.find("\"-nan") == std::string::npos);
 }
 
+TEST(OdesOfAnyOrder) {
+	// the text
+	std::wstring_view text = L"y''' = y'' - y, y(0) = 1, y'(0) = 2, y''(0) = 3";
+	auto o = FplSplitOde(text);
+	CHECK(o.isOde && o.order == FplOdeOrder::Second);
+	CHECK_INT(o.degree, 3);
+	CHECK_INT(o.starts.size(), 1);
+	CHECK_INT(o.starts[0].more.size(), 2);
+	CHECK(text.substr(o.starts[0].more[1].at, o.starts[0].more[1].len) == L" 3");
+	CHECK_INT(FplSplitOde(std::wstring(L"y") + wchar_t(0x2034) + L" = y").degree, 3);
+	CHECK_INT(FplSplitOde(std::wstring(L"y") + wchar_t(0x2033) + wchar_t(0x2033) + L" = y").degree, 4);
+	CHECK(FplSplitOde(L"y''''''= y").tooHigh);
+
+	std::vector<std::wstring> none;
+	auto e = FplBuild(L"y''' = y'' - y' + y - x, y(0) = 1, y'(0) = 2, y''(0) = 3", none);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::SecondOrder);
+	CHECK_INT(e.odeOrder, 3);
+	CHECK_INT(e.starts.size(), 4);
+	// its derivatives are in their slots, however they're written
+	double slots[FplFirstParam] = {};
+	slots[FplSlotX] = 1, slots[FplSlotY] = 2, slots[FplSlotT] = 4, slots[FplSlotU] = 8;
+	CHECK_NEAR(e.f.Eval(slots), 8.0 - 4 + 2 - 1);
+	e = FplBuild(L"y'''' = 2y''' + y'y'' + xy", none);
+	CHECK(!e.error);
+	slots[FplSlotV] = 16;
+	CHECK_NEAR(e.f.Eval(slots), 32.0 + 32 + 2);
+	// products with them read, at the second order too
+	e = FplBuild(L"y'' = 2y' + y' y + 3y'", none);
+	CHECK(!e.error);
+	slots[FplSlotX] = 1, slots[FplSlotY] = 2, slots[FplSlotT] = 4;
+	CHECK_NEAR(e.f.Eval(slots), 8.0 + 8 + 12);
+	e = FplBuild(L"y'' = x y'", none);
+	CHECK(!e.error);
+	CHECK_NEAR(e.f.Eval(slots), 4.0);
+	e = FplBuild(std::wstring(L"y''' = y") + wchar_t(0x2033) + L" + y" + wchar_t(0x2032), none);
+	CHECK(!e.error);
+	CHECK_NEAR(e.f.Eval(slots), 12.0);
+	// errors
+	e = FplBuild(L"y'''''' = y", none);
+	CHECK(e.error.code == FplErrorCode::OdeOrder);
+	CHECK(!e.error.Message().empty());
+	e = FplBuild(L"y''' = y'''", none);			// itself
+	CHECK(e.error.code != FplErrorCode::None);
+	e = FplBuild(L"y'' = y''", none);
+	CHECK(e.error.code != FplErrorCode::None);
+	for (const wchar_t* letter : { L"y''' = t", L"y''' = u", L"y''' = v", L"y''' = z", L"y'''' = t", L"y' = u" }) {
+		e = FplBuild(letter, none);
+		CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	}
+	e = FplBuild(L"y''' = t", none);
+	CHECK_INT(e.error.pos, 7);
+	e = FplBuild(L"y''' = y'' + q", none);
+	CHECK(e.error.code == FplErrorCode::UnknownName);
+	CHECK_INT(e.error.pos, 13);
+	e = FplBuild(L"y''' = y, y(0) = 1, y'(0) = 2", none);		// one short
+	CHECK(e.error.code == FplErrorCode::BadInitial);
+	e = FplBuild(L"y''' = y, y(0) = 1, y''(0) = 2, y'(0) = 3", none);	// out of order
+	CHECK(e.error.code == FplErrorCode::BadInitial);
+	e = FplBuild(L"y''' = y, y(0) = 1, y'(0) = 2, y''(1) = 3", none);	// another a
+	CHECK(e.error.code == FplErrorCode::BadInitial);
+
+	// against the exact: y''' = 0 a parabola, y''' = y e^x, y'''' = -4y e^-x cos x, y''''' = 0 a quartic
+	FplViewport v = View(-4, 4, -8, 8, 800, 800);
+	auto worst = [&](const FplPolyline& line, auto exact) {
+		double w = 0;
+		for (auto& p : line) {
+			FplPoint q = v.ToPlane(p);
+			w = std::max(w, std::abs(q.y - exact(q.x)));
+		}
+		return w;
+	};
+	std::function<double(double, const double*)> zero = [](double, const double*) { return 0.0; };
+	const double parabola[] = { 1, 2, 4 };
+	auto line = FplSolveOdeN(zero, 3, 0, parabola, v);
+	CHECK(line.size() > 100);
+	CHECK(worst(line, [](double x) { return 1 + 2 * x + 2 * x * x; }) < 1e-4);
+	std::function<double(double, const double*)> same = [](double, const double* y) { return y[0]; };
+	const double exp1[] = { 1, 1, 1 };
+	line = FplSolveOdeN(same, 3, 0, exp1, v);
+	CHECK(worst(line, [](double x) { return std::exp(x); }) < 1e-3);
+	std::function<double(double, const double*)> fourth = [](double, const double* y) { return -4 * y[0]; };
+	const double damped[] = { 1, -1, 0, 2 };
+	line = FplSolveOdeN(fourth, 4, 0, damped, v);
+	CHECK(line.size() > 10);
+	CHECK(worst(line, [](double x) { return std::exp(-x) * std::cos(x); }) < 1e-3);
+	const double quartic[] = { 0, 0, 0, 0, 24 };
+	line = FplSolveOdeN(zero, 5, 0, quartic, v);
+	CHECK(worst(line, [](double x) { return x * x * x * x; }) < 1e-3);
+	// out of the solver's range, or not numbers
+	CHECK(FplSolveOdeN(zero, 6, 0, quartic, v).empty());
+	CHECK(FplSolveOdeN(zero, 0, 0, quartic, v).empty());
+	const double bad[] = { 1, NaN };
+	CHECK(FplSolveOdeN(zero, 2, 0, bad, v).empty());
+	// a blow-up ends, rather than running forever
+	std::function<double(double, const double*)> blow = [](double, const double* y) { return y[0] * y[0] * y[0]; };
+	const double high[] = { 1, 5, 5 };
+	size_t used = 0;
+	line = FplSolveOdeN(blow, 3, 0, high, v, {}, &used);
+	CHECK(line.size() > 1);
+	CHECK(used < 2000000);
+	// the older one is the same thing
+	std::function<double(double, double, double)> spring = [](double, double y, double) { return -y; };
+	CHECK(worst(FplSolveOde2(spring, 0, 1, 0, v), [](double x) { return std::cos(x); }) < 1e-3);
+
+	// in a plot: one solution per group, each point dragged by its parameters
+	auto plot = MakePlot({ L"y''' = -y', y(a) = b, y'(a) = 0, y''(a) = 1, y(1) = 2, y'(1) = 0, y''(1) = 0" },
+		{ Param(L"a", 0), Param(L"b", 1) });
+	CHECK(!plot.graphs[0].expr.error);
+	plot.Sample(v);
+	CHECK_INT(plot.graphs[0].geometry.points.size(), 2);
+	CHECK_INT(plot.graphs[0].geometry.lines.size(), 2);
+	CHECK_INT(plot.graphs[0].DragOf(0).first, 0);
+	CHECK_INT(plot.graphs[0].DragOf(0).second, 1);
+	CHECK(plot.graphs[0].DragOf(1).first == -1);
+	// y''' = -y' with y(0) = 1, y'(0) = 0, y''(0) = 1: 2 - cos x
+	FplPoint q = v.ToPlane(plot.graphs[0].geometry.lines[0][plot.graphs[0].geometry.lines[0].size() / 2]);
+	CHECK_NEAR_TOL(q.y, 2 - std::cos(q.x), 1e-3);
+	auto traced = plot.Nearest(v.ToScreen({ 1.5, 2 - std::cos(1.5) }), v, 6, 6);
+	CHECK_INT(traced.graph, 0);
+}
+
+TEST(SystemsWithTime) {
+	std::vector<std::wstring> none;
+	auto e = FplBuild(L"x' = y, y' = -x + cos(t), (1, 0)", none);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::OdeSystem);
+	CHECK(e.g.Reads(FplSlotT));
+	CHECK(!e.f.Reads(FplSlotT));
+	CHECK(FplBuild(L"x' = y, y' = -x, (1, 2, 3)", none).error.code != FplErrorCode::None);
+
+	// x' = 1, y' = cos t from the origin is y = sin x
+	FplViewport v = View(-10, 10, -10, 10, 800, 800);
+	std::function<FplPoint(double, double, double)> wave = [](double t, double, double) { return FplPoint{ 1, std::cos(t) }; };
+	auto line = FplSolveSystemT(wave, false, 0, 0, v);
+	CHECK(line.size() > 100);
+	double off = 0, reach = 0;
+	for (auto& p : line) {
+		FplPoint q = v.ToPlane(p);
+		off = std::max(off, std::abs(q.y - std::sin(q.x)));
+		reach = std::max(reach, q.x);
+	}
+	CHECK(off < 1e-3);
+	CHECK(reach > 10);
+	// over a range of t only
+	FplSampleOptions o;
+	o.odeRange = true;
+	o.tMin = 0;
+	o.tMax = 2;
+	line = FplSolveSystemT(wave, false, 0, 0, v, o);
+	CHECK_NEAR_TOL(v.ToPlaneX(line.back().x), 2, 1e-6);
+	CHECK_NEAR_TOL(v.ToPlaneX(line.front().x), 0, 1e-9);
+	// it doesn't stop at a pause: x' = sin t is at rest at t = 0, and moves after
+	std::function<FplPoint(double, double, double)> pause = [](double t, double, double) { return FplPoint{ std::sin(t), 0 }; };
+	line = FplSolveSystemT(pause, false, 0, 0, v, o);
+	CHECK(v.ToPlaneX(line.back().x) > 1);
+	// nor close: x' = -sin t, y' = cos t comes back round, and carries on
+	std::function<FplPoint(double, double, double)> loop = [](double t, double, double) { return FplPoint{ -3 * std::sin(t), 3 * std::cos(t) }; };
+	size_t once = 0, around = 0;
+	o.tMin = 0, o.tMax = 12.5;
+	around = FplSolveSystemT(loop, false, 3, 0, v, o).size();
+	o.tMax = 6.28;
+	once = FplSolveSystemT(loop, false, 3, 0, v, o).size();
+	CHECK(around > once * 3 / 2);
+
+	// no arrows with t in it, as they'd only be true of one moment
+	auto plot = MakePlot({ L"x' = y, y' = -x + cos(t), (1, 0)", L"x' = y, y' = -x, (1, 0)" });
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.arrows.empty());
+	CHECK_INT(plot.graphs[0].geometry.lines.size(), 1);
+	CHECK(!plot.graphs[1].geometry.arrows.empty());
+	// FPLGM_RANGE reaches it
+	plot.graphs[0].hasRange = true;
+	plot.graphs[0].tMin = 0;
+	plot.graphs[0].tMax = 1;
+	CHECK(plot.OptionsFor(0, {}).odeRange);
+	CHECK(!plot.OptionsFor(1, {}).odeRange);
+}
+
+TEST(Systems3D) {
+	// the text
+	std::wstring_view text = L"x' = y, y' = -x, z' = 1, (1, f(2, 3), 0), (0, 1, 2)";
+	auto o = FplSplitOde(text);
+	CHECK(o.isOde && o.order == FplOdeOrder::System3D);
+	CHECK(text.substr(o.rhs3, o.rhs3Len) == L" 1");
+	CHECK_INT(o.starts.size(), 2);
+	CHECK(text.substr(o.starts[0].b, o.starts[0].bLen) == L" f(2, 3)");
+	CHECK(text.substr(o.starts[0].more[0].at, o.starts[0].more[0].len) == L" 0");
+	CHECK(FplSplitOde(L"dx/dt = y, dy/dt = -x, dz/dt = 1").order == FplOdeOrder::System3D);
+	CHECK(FplSplitOde(L"x' = y, y' = -x, (1, 2)").order == FplOdeOrder::System);
+
+	std::vector<std::wstring> params = { L"a" };
+	auto e = FplBuild(L"x' = y z, y' = -x + t, z' = a, (1, 0, a)", params);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::OdeSystem3D);
+	CHECK_INT(e.starts.size(), 3);
+	CHECK(!e.h.Empty());
+	// errors
+	CHECK(FplBuild(L"x' = y, y' = -x, z' = 1, (1, 2)", params).error.code != FplErrorCode::None);
+	CHECK(FplBuild(L"x' = y, y' = -x, z' = 1, (1, 2, 3, 4)", params).error.code != FplErrorCode::None);
+	CHECK(FplBuild(L"x' = u, y' = -x, z' = 1", params).error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(FplBuild(L"x' = y, y' = -x, z' = 1, (x, 2, 3)", params).error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(FplBuild(L"x' = y, y' = -x, z' = q", params).error.code == FplErrorCode::UnknownName);
+	CHECK(FplBuild(L"x' = y, y' = -x, z' = 1, (1, 2, 3", params).error.code == FplErrorCode::MissingClose);
+
+	FplBox3 box{ -5, 5, -5, 5, -5, 5 };
+	auto plane = [&](FplVec3 c) { return FplPoint3{ -5 + (c.x + 1) * 5.0, -5 + (c.y + 1) * 5.0, -5 + (c.z + 1) * 5.0 }; };
+	// a helix: x = cos t, y = sin t, z = t, exact, and out of the box's reach it ends
+	std::function<FplPoint3(double, double, double, double)> helix = [](double, double x, double y, double) {
+		return FplPoint3{ -y, x, 1 };
+	};
+	auto line = FplSolveSystem3(helix, true, { 1, 0, 0 }, box);
+	CHECK(line.size() > 100);
+	double off = 0;
+	for (auto& p : line) {
+		FplPoint3 q = plane(p);
+		off = std::max({ off, std::abs(q.x - std::cos(q.z)), std::abs(q.y - std::sin(q.z)) });
+	}
+	CHECK(off < 1e-3);
+	CHECK(std::abs(line.front().z) > 3.8 && std::abs(line.back().z) > 3.8);	// each way, to the cube's far limit
+	// steps of at most about 0.02 of the cube
+	double longest = 0;
+	for (size_t k = 1; k < line.size(); k++) {
+		const double dx = line[k].x - line[k - 1].x, dy = line[k].y - line[k - 1].y, dz = line[k].z - line[k - 1].z;
+		longest = std::max(longest, std::sqrt(dx * dx + dy * dy + dz * dz));
+	}
+	CHECK(longest < 0.05);
+	// a closed one stops where it began
+	std::function<FplPoint3(double, double, double, double)> circle = [](double, double x, double y, double) {
+		return FplPoint3{ -y, x, 0 };
+	};
+	line = FplSolveSystem3(circle, true, { 3, 0, 1 }, box);
+	CHECK(line.size() > 50);
+	CHECK(line.size() < 400);	// once around
+	// settles; a rest point has no line; not a number has none
+	std::function<FplPoint3(double, double, double, double)> sink = [](double, double x, double y, double z) {
+		return FplPoint3{ -x, -y, -z };
+	};
+	line = FplSolveSystem3(sink, true, { 2, 2, 2 }, box);
+	CHECK(line.size() > 10);
+	CHECK(std::abs(line.back().x) < 0.05);
+	CHECK(FplSolveSystem3(sink, true, { 0, 0, 0 }, box).empty());
+	CHECK(FplSolveSystem3(sink, true, { NaN, 0, 0 }, box).empty());
+	// a range of t
+	FplSampleOptions ranged;
+	ranged.odeRange = true;
+	ranged.tMin = 0;
+	ranged.tMax = 2;
+	line = FplSolveSystem3(helix, true, { 1, 0, 0 }, box, ranged);
+	CHECK_NEAR_TOL(plane(line.back()).z, 2, 1e-3);
+	CHECK_NEAR_TOL(plane(line.front()).z, 0, 1e-3);
+	// t in it: z' = t is z = t^2/2, and it doesn't stop for the pause at t = 0
+	std::function<FplPoint3(double, double, double, double)> timed = [](double t, double, double, double) {
+		return FplPoint3{ 0, 0, t };
+	};
+	line = FplSolveSystem3(timed, false, { 0, 0, 0 }, box, ranged);
+	CHECK_NEAR_TOL(plane(line.back()).z, 2, 1e-3);
+	// Lorenz's never ends by itself: the budget does, and it stays on its attractor, in the box
+	FplBox3 big{ -25, 25, -30, 30, 0, 55 };
+	std::function<FplPoint3(double, double, double, double)> lorenz = [](double, double x, double y, double z) {
+		return FplPoint3{ 10 * (y - x), x * (28 - z) - y, x * y - 8 * z / 3 };
+	};
+	size_t used = 0;
+	FplSampleOptions plain;
+	plain.odeRange = true;
+	plain.tMin = 0;
+	plain.tMax = 1e6;
+	line = FplSolveSystem3(lorenz, true, { 1, 1, 20 }, big, plain, &used);
+	CHECK(line.size() > 1000);
+	CHECK(line.size() < 40000);
+	CHECK(used < 500000);
+	bool inside = true;
+	for (auto& p : line)
+		inside = inside && std::abs(p.x) <= 1.2 && std::abs(p.y) <= 1.2 && std::abs(p.z) <= 1.2;
+	CHECK(inside);
+
+	// in a plot: tubes in 3D, nothing in 2D, not draggable
+	auto plot = MakePlot({ L"x' = -y, y' = x, z' = 1, (1, 0, 0), (2, 0, 0)" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(plot.graphs[0].Drawable());
+	plot.Sample(View());
+	CHECK(plot.graphs[0].geometry.lines.empty() && plot.graphs[0].geometry.points.empty());
+	plot.Build3D(box);
+	CHECK(!plot.graphs[0].mesh.Empty());
+	auto oneStart = MakePlot({ L"x' = -y, y' = x, z' = 1, (1, 0, 0)" });
+	oneStart.Build3D(box);
+	CHECK(plot.graphs[0].mesh.indices.size() > oneStart.graphs[0].mesh.indices.size());
+	CHECK(plot.graphs[0].drags.empty());
+	bool finite = true;
+	for (auto& vertex : plot.graphs[0].mesh.vertices)
+		finite = finite && std::isfinite(vertex.pos.x) && std::isfinite(vertex.normal.x);
+	CHECK(finite);
+	// no starting points: nothing to draw, and no error
+	auto bare = MakePlot({ L"x' = -y, y' = x, z' = 1" });
+	CHECK(!bare.graphs[0].expr.error);
+	bare.Build3D(box);
+	CHECK(bare.graphs[0].mesh.Empty());
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -3933,6 +4232,9 @@ int wmain() {
 	Run_ColorScale();
 	Run_HigherOdes();
 	Run_Singularities();
+	Run_OdesOfAnyOrder();
+	Run_SystemsWithTime();
+	Run_Systems3D();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

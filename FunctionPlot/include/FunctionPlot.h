@@ -99,8 +99,10 @@ enum FPLKIND {
 	FPLK_BETWEEN,              // f(x) < y < g(x) or f(y) < x < g(y): the region between two curves
 	FPLK_SLOPEFIELD,           // y' = F(x, y): its slopes; with ", y(a) = b" (any number) the solutions through (a, b) too
 	                           // (a and b parameters alone: the point can be dragged)
-	FPLK_SECONDORDER,          // y'' = F(x, y, y'), ", y(a) = b, y'(a) = c" (any number): the solutions
-	FPLK_ODESYSTEM,            // x' = P(x, y), y' = Q(x, y), ", (a, b)" (any number): arrows, and trajectories through them
+	FPLK_SECONDORDER,          // y'' = F(x, y, y') and on to y''''', ", y(a) = b, y'(a) = c ..." (any number): the solutions
+	FPLK_ODESYSTEM,            // x' = P, y' = Q (of x, y, t), ", (a, b)" (any number): without t arrows, and trajectories
+	                           // through the points from t = 0 (FPLGM_RANGE: only over that t)
+	FPLK_ODESYSTEM3D,          // x' = P, y' = Q, z' = R (of x, y, z, t), ", (a, b, c)": trajectories as tubes: 3D only
 };
 
 // 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D
@@ -121,7 +123,7 @@ enum FPLERROR {
 	FPLE_NONE, FPLE_EMPTY, FPLE_UNEXPECTEDCHAR, FPLE_BADNUMBER, FPLE_UNEXPECTEDTOKEN, FPLE_UNEXPECTEDEND,
 	FPLE_MISSINGCLOSE, FPLE_UNKNOWNNAME, FPLE_ARGCOUNT, FPLE_MISSINGARGUMENT, FPLE_TOOMANYRELATIONS,
 	FPLE_MISPLACEDRELATION, FPLE_MISPLACEDPOINT, FPLE_MISPLACEDCONDITION, FPLE_VARIABLENOTALLOWED, FPLE_NOTAPLOT,
-	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_BADINITIAL, FPLE_INTERNAL,
+	FPLE_BADPOINT, FPLE_NOTDIFFERENTIABLE, FPLE_REDEFINED, FPLE_LISTNOTALLOWED, FPLE_NOTALIST, FPLE_BADINITIAL, FPLE_ODEORDER, FPLE_INTERNAL,
 };
 
 struct FPLGRAPHINFO {

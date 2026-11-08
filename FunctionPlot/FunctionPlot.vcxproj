@@ -118,6 +118,7 @@
     <ClCompile Include="src\FunctionPlotParse.cpp" />
     <ClCompile Include="src\FunctionPlotRender3D.cpp" />
     <ClCompile Include="src\FunctionPlotSample.cpp" />
+    <ClCompile Include="src\FunctionPlotOde.cpp" />
     <ClCompile Include="src\FunctionPlotShaders.cpp" />
     <ClCompile Include="src\FunctionPlotState.cpp" />
     <ClCompile Include="src\FunctionPlotWorker.cpp" />

@@ -638,6 +638,7 @@ FplSampleOptions FplPlot::OptionsFor(int graph, const FplSampleOptions& base) co
 	o.heatmap = (g.flags & FplGraphHeatmap) != 0;
 	o.contours = !(g.flags & FplGraphNoContours);
 	o.singularities = !(g.flags & FplGraphNoSingular);
+	o.odeRange = g.hasRange;
 	if (g.hasRange) {
 		o.tMin = o.thetaMin = g.tMin;
 		o.tMax = o.thetaMax = g.tMax;
@@ -767,6 +768,29 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 		case FplKind::Point3D:
 			sphere({ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) });
 			break;
+		case FplKind::OdeSystem3D: {
+			std::function<FplPoint3(double, double, double, double)> field = [&](double t, double x, double y, double z) {
+				s[FplSlotT] = t;
+				s[FplSlotX] = x;
+				s[FplSlotY] = y;
+				s[FplSlotZ] = z;
+				return FplPoint3{ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) };
+			};
+			const bool autonomous = !e.f.Reads(FplSlotT) && !e.g.Reads(FplSlotT) && !e.h.Reads(FplSlotT);
+			const FplSampleOptions options = OptionsFor(static_cast<int>(&g - graphs.data()), {});
+			for (size_t k = 0; k + 2 < e.starts.size(); k += 3) {
+				const FplPoint3 p0{ e.starts[k].Eval(s), e.starts[k + 1].Eval(s), e.starts[k + 2].Eval(s) };
+				auto line = FplSolveSystem3(field, autonomous, p0, box, options);
+				if (!line.empty())
+					FplAppend(mesh, FplTubes({ std::move(line) }, radius));
+				// a dot where it starts, in the box
+				FplVec3 c = box.ToBox(p0);
+				if (std::isfinite(c.x) && std::isfinite(c.y) && std::isfinite(c.z) && std::abs(c.x) <= 1 &&
+					std::abs(c.y) <= 1 && std::abs(c.z) <= 1)
+					FplAppend(mesh, FplSphere(c, dot));
+			}
+			break;
+		}
 		case FplKind::ImplicitSurface:
 			mesh = FplImplicitMesh([&](double x, double y, double z) {
 				s[FplSlotX] = x;

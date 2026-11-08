@@ -37,7 +37,8 @@ enum class FplErrorCode : uint8_t {
 	Redefined,			// a name defined twice, or a definition of a parameter the app has; name is the name
 	ListNotAllowed,		// a list ([1, 2, 3]) anywhere but as a definition's value, or a list used where one number is
 	NotAList,			// mean(3): name is the function
-	BadInitial,			// a second-order ODE's conditions aren't y(a) = b, y'(a) = c at one a
+	BadInitial,			// a higher-order ODE's conditions aren't y(a) = b, y'(a) = c ... at one a
+	OdeOrder,			// y'''''' = ...: past the fifth order
 	Internal,
 };
 
@@ -195,10 +196,12 @@ enum class FplKind : uint8_t {
 					// rel Lt if both are strict, else Le
 	SlopeField,		// y' = F(x, y) (FplBuild only, from FplSplitOde): its slopes, and with ", y(a) = b" (any number)
 					// the solutions through (a, b); FplExpression's f is F, its starts a and b of each
-	SecondOrder,	// y'' = F(x, y, y') with "y(a) = b, y'(a) = c" pairs: the solutions; f is F (y' in the t slot),
-					// its starts a, b and c of each
-	OdeSystem,		// x' = P(x, y), y' = Q(x, y) with "(a, b)" points: the field's arrows and the trajectories through
-					// them; f is P, g is Q, its starts a and b of each
+	SecondOrder,	// y'' = F(x, y, y') and on to y''''' with "y(a) = b, y'(a) = c ..." groups: the solutions; f is F
+					// (y', y'', y''', y'''' in the t, u, v and z slots), its starts a, then y and its derivatives
+	OdeSystem,		// x' = P, y' = Q (of x, y and t) with "(a, b)" points: without t the field's arrows, and the
+					// trajectories through them from t = 0; f is P, g is Q, its starts a and b of each
+	OdeSystem3D,	// x' = P, y' = Q, z' = R (of x, y, z and t) with "(a, b, c)" points: the trajectories as tubes; f,
+					// g and h, its starts a, b and c of each (3D)
 };
 
 struct FplPlotDef {
@@ -304,7 +307,8 @@ struct FplExpression {
 	FplProgram h;				// the 3D kinds' z
 	FplProgram value;			// Integral's: its value
 	FplProgram df;				// Function's df/dx, FunctionOfY's df/dy (empty if it can't be derived)
-	std::vector<FplProgram> starts;	// an ODE's initial conditions: a and b of each (SecondOrder: a, b and c)
+	std::vector<FplProgram> starts;	// an ODE's initial conditions: a and b of each (SecondOrder: a, y and its derivatives)
+	int odeOrder = 1;			// SecondOrder: its order
 	// y = f(x), x = f(y): what's zero where it may be singular (a denominator, a logarithm's argument, tan's and the
 	// like's); wrap 1: cos of it, 2: sin of it. FplSample tells what each zero is by the limits on its two sides.
 	struct Singular {
@@ -318,20 +322,27 @@ struct FplExpression {
 };
 
 // "y' = F" (or U+2032 for the prime, or "dy/dx = F"), with ", y(a) = b" after it (any number of them) for the
-// solutions through (a, b); "y'' = F" (or U+2033), with ", y(a) = b, y'(a) = c" pairs; "x' = P, y' = Q" (or dx/dt, dy/dt),
-// with ", (a, b)" points: the
+// solutions through (a, b); "y'' = F" and on to "y''''' = F" (U+2033 and U+2034 count), with ", y(a) = b, y'(a) = c ..."
+// groups; "x' = P, y' = Q" (or dx/dt, dy/dt), with ", (a, b)" points, and with "z' = R" and ", (a, b, c)" points: the
 // parts' places in the text. A comma inside ( ) [ ] { } is the expression's. errorAt: where a condition after the
 // comma stopped making sense (npos when it's fine).
+struct FplOdeRange {
+	size_t at = 0, len = 0;
+};
 struct FplOdeStart {
 	size_t a = 0, aLen = 0, b = 0, bLen = 0;	// y(a) = b, or the point (a, b)
-	size_t c = 0, cLen = 0;						// y'(a) = c
+	std::vector<FplOdeRange> more;				// y'(a) = c, y''(a) = d ... , or a 3D point's third
 };
-enum class FplOdeOrder : uint8_t { First, Second, System };
+// Second: the second order and up (degree says which)
+enum class FplOdeOrder : uint8_t { First, Second, System, System3D };
 struct FplOdeText {
 	bool isOde = false;
 	FplOdeOrder order = FplOdeOrder::First;
+	int degree = 1;								// how many primes
+	bool tooHigh = false;						// past FplMaxOdeOrder
 	size_t rhs = 0, rhsLen = 0;
 	size_t rhs2 = 0, rhs2Len = 0;				// a system's y' = Q
+	size_t rhs3 = 0, rhs3Len = 0;				// z' = R
 	std::vector<FplOdeStart> starts;			// any number, comma-separated
 	size_t errorAt = std::wstring_view::npos;
 	bool missingClose = false;

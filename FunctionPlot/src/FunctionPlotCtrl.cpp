@@ -27,7 +27,7 @@ static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int
 	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface && FPLK_INTEGRAL == (int)FplKind::Integral &&
 	FPLK_REGRESSION == (int)FplKind::Regression && FPLK_BETWEEN == (int)FplKind::Between &&
 	FPLK_SLOPEFIELD == (int)FplKind::SlopeField && FPLK_SECONDORDER == (int)FplKind::SecondOrder &&
-	FPLK_ODESYSTEM == (int)FplKind::OdeSystem);
+	FPLK_ODESYSTEM == (int)FplKind::OdeSystem && FPLK_ODESYSTEM3D == (int)FplKind::OdeSystem3D);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 

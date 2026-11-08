@@ -1081,20 +1081,28 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 		break;
 	}
 	case FplKind::SecondOrder: {
-		std::function<double(double, double, double)> F = [&](double x, double y, double v) {
+		// y, y', y'' ... : y' and on in the slots FplBuild gave them
+		const int order = std::clamp(e.odeOrder, 2, FplMaxOdeOrder);
+		static constexpr int DerivativeSlot[] = { FplSlotT, FplSlotU, FplSlotV, FplSlotZ };
+		std::function<double(double, const double*)> F = [&](double x, const double* state) {
 			s[FplSlotX] = x;
-			s[FplSlotY] = y;
-			s[FplSlotT] = v;
+			s[FplSlotY] = state[0];
+			for (int k = 1; k < order; k++)
+				s[DerivativeSlot[k - 1]] = state[k];
 			return e.f.Eval(s);
 		};
 		std::vector<FplPolyline> solutions;
-		for (size_t k = 0; k + 2 < e.starts.size(); k += 3) {
-			const double a = e.starts[k].Eval(s), b = e.starts[k + 1].Eval(s), c = e.starts[k + 2].Eval(s);
-			FplPoint start = view.ToScreen({ a, b });
+		const size_t stride = static_cast<size_t>(order) + 1;
+		for (size_t k = 0; k + stride <= e.starts.size(); k += stride) {
+			const double a = e.starts[k].Eval(s);
+			double state[FplMaxOdeOrder] = {};
+			for (int j = 0; j < order; j++)
+				state[j] = e.starts[k + 1 + j].Eval(s);
+			FplPoint start = view.ToScreen({ a, state[0] });
 			g.points.push_back(start);
 			if (!Finite(start))
 				continue;
-			FplPolyline solution = FplSolveOde2(F, a, b, c, view, options, &g.evals);
+			FplPolyline solution = FplSolveOdeN(F, order, a, state, view, options, &g.evals);
 			if (solution.size() > 1)
 				solutions.push_back(std::move(solution));
 		}
@@ -1103,12 +1111,18 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 		break;
 	}
 	case FplKind::OdeSystem: {
-		std::function<FplPoint(double, double)> field = [&](double x, double y) {
+		std::function<FplPoint(double, double, double)> field = [&](double t, double x, double y) {
+			s[FplSlotT] = t;
 			s[FplSlotX] = x;
 			s[FplSlotY] = y;
 			return FplPoint{ e.f.Eval(s), e.g.Eval(s) };
 		};
-		g.arrows = FplSampleField(field, view, options, &g.evals);
+		// with t in it the arrows would only be true of one moment
+		const bool autonomous = !e.f.Reads(FplSlotT) && !e.g.Reads(FplSlotT);
+		if (autonomous) {
+			std::function<FplPoint(double, double)> still = [&](double x, double y) { return field(0, x, y); };
+			g.arrows = FplSampleField(still, view, options, &g.evals);
+		}
 		std::vector<FplPolyline> paths;
 		for (size_t k = 0; k + 1 < e.starts.size(); k += 2) {
 			const double a = e.starts[k].Eval(s), b = e.starts[k + 1].Eval(s);
@@ -1116,7 +1130,7 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 			g.points.push_back(start);
 			if (!Finite(start))
 				continue;
-			FplPolyline path = FplSolveSystem(field, a, b, view, options, &g.evals);
+			FplPolyline path = FplSolveSystemT(field, autonomous, a, b, view, options, &g.evals);
 			if (path.size() > 1)
 				paths.push_back(std::move(path));
 		}
@@ -1328,334 +1342,6 @@ std::vector<FplArrow> FplSampleSlopes(const std::function<double(double, double)
 	if (evals)
 		*evals += tx.major.size() * ty.major.size();
 	return marks;
-}
-
-namespace {
-
-// Dormand-Prince 5(4)
-constexpr double C[] = { 0, 1.0 / 5, 3.0 / 10, 4.0 / 5, 8.0 / 9, 1, 1 };
-constexpr double A[7][6] = {
-	{},
-	{ 1.0 / 5 },
-	{ 3.0 / 40, 9.0 / 40 },
-	{ 44.0 / 45, -56.0 / 15, 32.0 / 9 },
-	{ 19372.0 / 6561, -25360.0 / 2187, 64448.0 / 6561, -212.0 / 729 },
-	{ 9017.0 / 3168, -355.0 / 33, 46732.0 / 5247, 49.0 / 176, -5103.0 / 18656 },
-	{ 35.0 / 384, 0, 500.0 / 1113, 125.0 / 192, -2187.0 / 6784, 11.0 / 84 },
-};
-constexpr double B5[] = { 35.0 / 384, 0, 500.0 / 1113, 125.0 / 192, -2187.0 / 6784, 11.0 / 84, 0 };
-constexpr double B4[] = { 5179.0 / 57600, 0, 7571.0 / 16695, 393.0 / 640, -92097.0 / 339200, 187.0 / 2100,
-	1.0 / 40 };
-
-// A step for two values: f gives their rates at (s, a, b). The 5th order result and each one's error; false if something
-// wasn't a number.
-template<typename D>
-bool Step2(D f, double s, double a, double b, double h, double& a5, double& b5, double& ea, double& eb) {
-	double ka[7], kb[7];
-	for (int st = 0; st < 7; st++) {
-		double aa = a, bb = b;
-		for (int j = 0; j < st; j++) {
-			aa += h * A[st][j] * ka[j];
-			bb += h * A[st][j] * kb[j];
-		}
-		f(s + C[st] * h, aa, bb, ka[st], kb[st]);
-		if (!std::isfinite(ka[st]) || !std::isfinite(kb[st]))
-			return false;
-	}
-	double a4 = a, b4 = b;
-	a5 = a;
-	b5 = b;
-	for (int st = 0; st < 7; st++) {
-		a5 += h * B5[st] * ka[st];
-		b5 += h * B5[st] * kb[st];
-		a4 += h * B4[st] * ka[st];
-		b4 += h * B4[st] * kb[st];
-	}
-	ea = std::abs(a5 - a4);
-	eb = std::abs(b5 - b4);
-	return std::isfinite(a5) && std::isfinite(b5);
-}
-
-// DIPs per unit where it's defined, else the axis's scale.
-double DipsX(const FplViewport& view, double x) {
-	const double d = view.DipsPerUnitX(std::abs(x));
-	return std::isfinite(d) && d > 0 ? d : view.ScaleX();
-}
-
-double DipsY(const FplViewport& view, double y) {
-	const double d = view.DipsPerUnitY(std::abs(y));
-	return std::isfinite(d) && d > 0 ? d : view.ScaleY();
-}
-
-} // namespace
-
-FplPolyline FplSolveOde2(const std::function<double(double, double, double)>& F, double x0, double y0, double v0,
-	const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
-	FplPolyline result;
-	if (!view.Valid() || !std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(v0) || !std::isfinite(F(x0, y0, v0)))
-		return result;
-	size_t count = 1;
-	auto rates = [&](double x, double y, double v, double& dy, double& dv) {
-		dy = v;
-		dv = F(x, y, v);
-	};
-	const double maxStep = std::max(options.odeStep, 0.1), tolerance = std::max(options.odeTolerance, 1e-6);
-	const double chord = std::max(options.maxChord / 2, 0.5);
-	FplPolyline sides[2];
-	for (int side = 0; side < 2; side++) {
-		const double dir = side ? 1 : -1;
-		const double end = view.ToPlaneX(side ? 2 * view.width : -view.width);
-		auto& line = sides[side];
-		double x = x0, y = y0, v = v0;
-		line.push_back(view.ToScreen({ x, y }));
-		double h = dir * maxStep / DipsX(view, x);
-		for (int steps = 0; steps < 100000 && count < options.maxEvals; steps++) {
-			const double remaining = end - x;
-			if (!(remaining * dir > 0))
-				break;
-			const double dipsX = DipsX(view, x), longest = maxStep / dipsX;
-			if (std::abs(h) > longest)
-				h = dir * longest;
-			if (std::abs(h) > std::abs(remaining))
-				h = remaining;
-			double y5 = y, v5 = v, ey = 0, ev = 0;
-			const bool finite = Step2(rates, x, y, v, h, y5, v5, ey, ev);
-			count += 7;
-			if (!finite) {
-				h /= 4;
-				if (std::abs(h) * dipsX < 1e-4)
-					break;
-				continue;
-			}
-			const double dips = DipsY(view, y5);
-			// upright on the screen: it's gone (a blow-up, a vertical tangent)
-			if (std::abs(v) * dips > 1000 * dipsX)
-				break;
-			const double rise = std::abs(y5 - y) * dips;
-			if (rise > chord) {
-				h *= 0.9 * chord / rise;
-				if (std::abs(h) * dipsX < 1e-4)
-					break;
-				continue;
-			}
-			// the slope's error counts by what it does to y over the step
-			const double err = std::max(ey, ev * std::abs(h)) * dips;
-			if (err <= tolerance) {
-				x += h;
-				y = y5;
-				v = v5;
-				FplPoint p = view.ToScreen({ x, y });
-				if (!Finite(p))
-					break;
-				line.push_back(p);
-				if (p.y < -11 * view.height || p.y > 12 * view.height)
-					break;
-			}
-			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
-			h *= std::clamp(factor, 0.2, 5.0);
-			if (std::abs(h) * dipsX < 1e-4)
-				break;
-		}
-	}
-	if (evals)
-		*evals += count;
-	result.reserve(sides[0].size() + sides[1].size());
-	result.assign(sides[0].rbegin(), sides[0].rend());
-	result.insert(result.end(), sides[1].begin() + 1, sides[1].end());
-	return result;
-}
-
-FplPolyline FplSolveSystem(const std::function<FplPoint(double, double)>& field, double x0, double y0,
-	const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
-	FplPolyline result;
-	if (!view.Valid() || !std::isfinite(x0) || !std::isfinite(y0))
-		return result;
-	size_t count = 0;
-	auto rates = [&](double, double x, double y, double& dx, double& dy) {
-		const FplPoint d = field(x, y);
-		dx = d.x;
-		dy = d.y;
-	};
-	auto speedAt = [&](double x, double y) {
-		const FplPoint d = field(x, y);
-		count++;
-		return std::hypot(d.x * DipsX(view, x), d.y * DipsY(view, y));
-	};
-	const double maxStep = std::max(options.odeStep, 0.1), tolerance = std::max(options.odeTolerance, 1e-6);
-	const double chord = std::max(options.maxChord / 2, 0.5);
-	const double budget = 8 * (view.width + view.height);
-	const FplPoint start = view.ToScreen({ x0, y0 });
-	if (!Finite(start))
-		return result;
-	FplPolyline sides[2];
-	bool closed = false;
-	for (int side = 1; side >= 0 && !closed; side--) {
-		const double dir = side ? 1 : -1;
-		auto& line = sides[side];
-		line.push_back(start);
-		double x = x0, y = y0, length = 0;
-		double speed = speedAt(x, y);
-		if (!std::isfinite(speed) || speed < 1e-9)
-			continue;
-		double h = dir * maxStep / speed;
-		for (int steps = 0; steps < 50000 && count < options.maxEvals && length < budget; steps++) {
-			speed = speedAt(x, y);
-			// it's settled on a point
-			if (!std::isfinite(speed) || speed < 1e-6)
-				break;
-			const double longest = maxStep / speed;
-			if (std::abs(h) > longest)
-				h = dir * longest;
-			double x5 = x, y5 = y, ex = 0, ey = 0;
-			const bool finite = Step2(rates, 0.0, x, y, h, x5, y5, ex, ey);
-			count += 7;
-			if (!finite) {
-				h /= 4;
-				if (std::abs(h) * speed < 1e-4)
-					break;
-				continue;
-			}
-			FplPoint p = view.ToScreen({ x5, y5 });
-			if (!Finite(p)) {
-				h /= 4;
-				if (std::abs(h) * speed < 1e-4)
-					break;
-				continue;
-			}
-			const double move = std::hypot(p.x - line.back().x, p.y - line.back().y);
-			if (move > chord) {
-				h *= 0.9 * chord / move;
-				continue;
-			}
-			const double err = std::max(ex * DipsX(view, x5), ey * DipsY(view, y5));
-			if (err <= tolerance) {
-				x = x5;
-				y = y5;
-				line.push_back(p);
-				length += move;
-				if (p.x < -view.width || p.x > 2 * view.width || p.y < -view.height || p.y > 2 * view.height)
-					break;
-				// back where it began: an orbit, and the other way is the same
-				if (length > 20 && std::hypot(p.x - start.x, p.y - start.y) < 1.5) {
-					line.push_back(start);
-					closed = true;
-					break;
-				}
-			}
-			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
-			h *= std::clamp(factor, 0.2, 5.0);
-			if (std::abs(h) * speed < 1e-4)
-				break;
-		}
-	}
-	if (evals)
-		*evals += count;
-	if (sides[0].empty())
-		return sides[1].size() > 1 ? sides[1] : result;
-	result.reserve(sides[0].size() + sides[1].size());
-	result.assign(sides[0].rbegin(), sides[0].rend());
-	result.insert(result.end(), sides[1].begin() + 1, sides[1].end());
-	return result.size() > 1 ? result : FplPolyline{};
-}
-
-FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x0, double y0, const FplViewport& view,
-	const FplSampleOptions& options, size_t* evals) {
-	FplPolyline result;
-	if (!view.Valid() || !std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(F(x0, y0)))
-		return result;
-	size_t count = 1;
-	const double maxStep = std::max(options.odeStep, 0.1), tolerance = std::max(options.odeTolerance, 1e-6);
-	const double top = -view.height, bottom = 2 * view.height;
-	FplPolyline sides[2];
-	for (int side = 0; side < 2; side++) {
-		const double dir = side ? 1 : -1;
-		// to the view grown by its width
-		const double end = view.ToPlaneX(side ? 2 * view.width : -view.width);
-		auto& line = sides[side];
-		double x = x0, y = y0;
-		line.push_back(view.ToScreen({ x, y }));
-		double h = dir * maxStep / view.DipsPerUnitX(x);
-		for (int steps = 0; steps < 100000 && count < options.maxEvals; steps++) {
-			const double remaining = end - x;
-			if (!(remaining * dir > 0))
-				break;
-			const double longest = maxStep / view.DipsPerUnitX(x);
-			if (std::abs(h) > longest)
-				h = dir * longest;
-			if (std::abs(h) > std::abs(remaining))
-				h = remaining;
-			double k[7];
-			bool finite = true;
-			for (int st = 0; st < 7 && finite; st++) {
-				double yy = y;
-				for (int j = 0; j < st; j++)
-					yy += h * A[st][j] * k[j];
-				k[st] = F(x + C[st] * h, yy);
-				finite = std::isfinite(k[st]);
-			}
-			count += 7;
-			double y5 = y, y4 = y;
-			if (finite)
-				for (int st = 0; st < 7; st++) {
-					y5 += h * B5[st] * k[st];
-					y4 += h * B4[st] * k[st];
-				}
-			// the error in DIPs on the screen (a log axis's at the value, or its scale where it has none)
-			double dips = view.DipsPerUnitY(std::abs(y5));
-			if (!std::isfinite(dips) || dips <= 0)
-				dips = view.ScaleY();
-			// upright on the screen: a vertical tangent, where the solution ends (past it, steps only chatter across)
-			if (std::isfinite(k[0]) && std::abs(k[0]) * dips > 1000 * view.DipsPerUnitX(x))
-				break;
-			// a steep slope turning right around over the step (k[6] is the slope at its end): it went through a vertical
-			// tangent; closer steps, up to it
-			const double steep = 10 * view.DipsPerUnitX(x) / dips;
-			if (finite && k[0] * k[6] < 0 && std::abs(k[0]) > steep && std::abs(k[6]) > steep) {
-				h /= 4;
-				if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-					break;
-				continue;
-			}
-			const double err = std::abs(y5 - y4) * dips;
-			if (!finite || !std::isfinite(y5)) {
-				// undefined ahead: closer steps up to its edge
-				h /= 4;
-				if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-					break;
-				continue;
-			}
-			// a chord no longer than maxChord/2 on the screen: smooth, and it stops at a vertical tangent instead of
-			// going through it
-			const double rise = std::abs(y5 - y) * dips, chord = std::max(options.maxChord / 2, 0.5);
-			if (rise > chord) {
-				h *= 0.9 * chord / rise;
-				if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-					break;
-				continue;
-			}
-			if (err <= tolerance) {
-				x += h;
-				y = y5;
-				FplPoint p = view.ToScreen({ x, y });
-				if (!Finite(p))
-					break;
-				line.push_back(p);
-				// gone off the screen for good
-				if (p.y < top - 10 * view.height || p.y > bottom + 10 * view.height)
-					break;
-			}
-			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
-			h *= std::clamp(factor, 0.2, 5.0);
-			if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-				break;
-		}
-	}
-	if (evals)
-		*evals += count;
-	result.reserve(sides[0].size() + sides[1].size());
-	result.assign(sides[0].rbegin(), sides[0].rend());
-	result.insert(result.end(), sides[1].begin() + 1, sides[1].end());
-	return result;
 }
 
 std::vector<FplArrow> FplSampleField(const std::function<FplPoint(double, double)>& field, const FplViewport& view,

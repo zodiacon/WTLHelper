@@ -85,7 +85,7 @@ enum {
 
 // ---- Examples -------------------------------------------------------------------
 
-enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode, Glass };
+enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode, Glass, Lorenz };
 
 struct Example {
 	const wchar_t* name;
@@ -115,6 +115,8 @@ static const Example g_Examples[] = {
 	{ L"In&tersections", L"x^2 + y^2 = 16\r\nr = 2 + 2cos \x03B8\r\n(4cos t + 1, 2sin t)\r\nx = y^2/2 - 3\r\ny = x/2\r\ny' = -y/2, y(-6) = 5", false },
 	{ L"&ODEs and Slope Fields", L"y' = x - y, y(0) = -2, y(a) = b, y(-3) = 4", false, false, Setup::Ode },
 	{ L"Second-Order OD&Es", L"y'' = -y - y'/4, y(0) = a, y'(0) = 0, y(0) = -3, y'(0) = 3", false },
+	{ L"Higher-Order ODEs", L"y''' = -y' - y''/5, y(0) = a, y'(0) = 0, y''(0) = 1\r\ny'''' = -y/4, y(0) = -2, y'(0) = 1, y''(0) = 0, y'''(0) = 0", false },
+	{ L"Forced Oscillator", L"x' = y, y' = -x - y/5 + cos(t), (2, 0)", false },
 	{ L"Phase Plane", L"x' = y, y' = -sin x - y/5, (a, b), (-6, 3), (1, 0)", false, false, Setup::Ode },
 	{ L"As&ymptotes and Holes", L"y = tan x\r\ny = (x^2 - 1)/(x - 1) + 3\r\ny = 1/(x + 5) - 4\r\ny = sin(x)/x - 5\r\ny = ln(x - 7)", false },
 	{ L"Logistic Gro&wth", L"dy/dx = k y(1 - y/4), y(-6) = 0.2, y(-6) = 6, y(0) = 2", false },
@@ -129,6 +131,7 @@ static const Example g_Examples[] = {
 		L"x^2 + y^2 - z^2/4 = 1", false, true },
 	{ L"3D: &Gyroid", L"sin(x/2)cos(y/2) + sin(y/2)cos(z/2) + sin(z/2)cos(x/2) = 0", false, true },
 	{ L"3D: See-&Through", L"x^2 + y^2 + z^2 = 36\r\nz = (x^2 - y^2)/12\r\n((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(5cos 4t, 5sin 4t, 3t - 9)", false, true, Setup::Glass },
+	{ L"3D: &Lorenz Attractor", L"x' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1, 1, 20)\r\nx' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1.01, 1, 20)", false, true, Setup::Lorenz },
 	{ L"3D: Animated &Wave", L"z = 3sin(sqrt(x^2 + y^2) - 2p)/(1 + sqrt(x^2 + y^2)/4)", false, true, Setup::Animate },
 };
 
@@ -411,6 +414,11 @@ static void LoadExample(int index) {
 		g_plot.SetParameter(b);
 	}
 	g_plot.ResetView();
+	if (e.setup == Setup::Lorenz) {
+		FPLVIEW3D v = g_plot.GetView3D();
+		v.xMin = -25, v.xMax = 25, v.yMin = -30, v.yMax = 30, v.zMin = 0, v.zMax = 55;
+		g_plot.SetView3D(v);
+	}
 	if (e.setup == Setup::Log) {
 		FPLVIEW v{ 0.1, 1000, 0.01, 1e5 };
 		g_plot.SetView(v);
