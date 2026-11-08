@@ -2129,6 +2129,87 @@ TEST(ImplicitSurfaces) {
 	CHECK(plot.graphs[0].geometry.lines.empty());		// nothing in 2D
 }
 
+TEST(TraceSurfaces) {
+	auto v = View();
+	auto plot = MakePlot({ L"z = x + 2y", L"y = 1" });
+	plot.Sample(v);
+	// away from the line: the surface under the point, with its value
+	auto hit = plot.Nearest(v.ToScreen({ 3, -4 }), v, 10, 8, true);
+	CHECK_INT(hit.graph, 0);
+	CHECK_NEAR_TOL(hit.plane.x, 3, 1e-9);
+	CHECK_NEAR_TOL(hit.z, 3 - 8, 1e-9);
+	// not without asking (a click pans)
+	CHECK(!plot.Nearest(v.ToScreen({ 3, -4 }), v, 10, 8));
+	// a curve near wins, and has no z
+	hit = plot.Nearest(v.ToScreen({ 3, 1.05 }), v, 10, 8, true);
+	CHECK_INT(hit.graph, 1);
+	CHECK(std::isnan(hit.z));
+	// following it by the mouse
+	hit = plot.TraceAt(0, v.ToScreen({ -2, 2 }), v, 8);
+	CHECK_NEAR_TOL(hit.z, 2, 1e-9);
+	CHECK_NEAR(plot.EvalSurface(0, 1, 1), 3);
+	CHECK(std::isnan(plot.EvalSurface(1, 1, 1)));
+	// the topmost surface; none where it's undefined
+	plot = MakePlot({ L"z = 1", L"z = sqrt(x)" });
+	plot.Sample(v);
+	CHECK_INT(plot.Nearest(v.ToScreen({ 4, 0 }), v, 10, 8, true).graph, 1);
+	CHECK_INT(plot.Nearest(v.ToScreen({ -4, 0 }), v, 10, 8, true).graph, 0);
+	plot.graphs[0].flags = FplGraphNoTrace;
+	plot.Sample(v);
+	CHECK(!plot.Nearest(v.ToScreen({ -4, 0 }), v, 10, 8, true));
+}
+
+TEST(Trace3D) {
+	FplCamera cam;
+	FplVec3 origin, dir;
+	// the screen's middle looks at the cube's center
+	cam.Ray({ 400, 300 }, 800, 600, origin, dir);
+	auto eye = cam.Eye();
+	CHECK_NEAR_TOL(origin.x, eye.x, 1e-6);
+	CHECK_NEAR_TOL(dir.x, -eye.x / cam.distance, 1e-5);
+	CHECK_NEAR_TOL(dir.z, -eye.z / cam.distance, 1e-5);
+	// a ray through a point's projection passes through the point
+	FplVec3 target = { 0.3f, -0.5f, 0.2f };
+	FplPoint s;
+	CHECK(cam.Project(target, 800, 600, s));
+	cam.Ray(s, 800, 600, origin, dir);
+	FplVec3 to = { target.x - origin.x, target.y - origin.y, target.z - origin.z };
+	float along = to.x * dir.x + to.y * dir.y + to.z * dir.z;
+	FplVec3 off = { to.x - dir.x * along, to.y - dir.y * along, to.z - dir.z * along };
+	CHECK(std::sqrt(off.x * off.x + off.y * off.y + off.z * off.z) < 1e-4f);
+
+	// a flat surface hit from above; the nearer of two; nothing outside the cube
+	FplBox3 box;
+	auto plane = FplSurfaceMesh([](double, double) { return 5.0; }, box, 8);
+	float t;
+	CHECK(FplIntersect(plane, { 0.2f, 0.1f, 3 }, { 0, 0, -1 }, t));
+	CHECK_NEAR_TOL(t, 2.5, 1e-5);
+	CHECK(!FplIntersect(plane, { 0.2f, 0.1f, 3 }, { 0, 0, 1 }, t));
+	CHECK(!FplIntersect(plane, { 1.5f, 0.1f, 3 }, { 0, 0, -1 }, t));
+	auto high = FplSurfaceMesh([](double, double) { return 50.0; }, box, 8);		// clamped outside the cube
+	CHECK(!FplIntersect(high, { 0.2f, 0.1f, 3 }, { 0, 0, -1 }, t));
+
+	auto plot = MakePlot({ L"z = x y / 10", L"x^2 + y^2 + z^2 = 25", L"(1, 2, 8)" });
+	plot.Build3D(box);
+	// straight down onto the surface: on it exactly
+	auto hit = plot.Pick3D({ 0.6f, -0.3f, 3 }, { 0, 0, -1 }, box);
+	CHECK_INT(hit.graph, 0);
+	CHECK_NEAR_TOL(hit.z, hit.plane.x * hit.plane.y / 10, 1e-9);
+	CHECK_NEAR_TOL(hit.plane.x, 6, 1e-4);
+	// the sphere's top before the surface under it
+	hit = plot.Pick3D({ 0, 0, 3 }, { 0, 0, -1 }, box);
+	CHECK_INT(hit.graph, 1);
+	CHECK_NEAR_TOL(hit.z, 5, 0.05);
+	// a point at its own place
+	FplVec3 p = box.ToBox(1, 2, 8);
+	hit = plot.Pick3D({ p.x, p.y, 3 }, { 0, 0, -1 }, box);
+	CHECK_INT(hit.graph, 2);
+	CHECK_NEAR(hit.z, 8);
+	CHECK_NEAR(hit.plane.y, 2);
+	// past everything
+	CHECK(!plot.Pick3D({ 0.9f, 0.9f, 3 }, { 0, 0, 1 }, box));
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -2177,6 +2258,8 @@ int wmain() {
 	Run_Meshes3D();
 	Run_Graphs3D();
 	Run_ImplicitSurfaces();
+	Run_TraceSurfaces();
+	Run_Trace3D();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

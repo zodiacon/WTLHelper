@@ -8,6 +8,7 @@
 #include "FunctionPlotModel.h"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,7 @@ struct FplTraceHit {
 	int feature = -1;				// in the graph's features
 	FplPoint plane;
 	FplPoint screen;
+	double z = std::numeric_limits<double>::quiet_NaN();	// a surface's value there (2D), the point's z (3D)
 	double distance = 0;			// DIPs from where it was asked
 	explicit operator bool() const { return graph >= 0; }
 };
@@ -98,10 +100,17 @@ public:
 
 	// The drawable, traceable graph nearest a screen point, within maxDistance DIPs; on a feature within
 	// snapDistance of it. A function's point is exact (on the curve at the x found), others' on their polylines.
-	FplTraceHit Nearest(FplPoint screen, const FplViewport& view, double maxDistance, double snapDistance) const;
+	// With surfaces, when no curve is near, the topmost surface (z = F(x, y)) at the point itself, with its value.
+	FplTraceHit Nearest(FplPoint screen, const FplViewport& view, double maxDistance, double snapDistance,
+		bool surfaces = false) const;
 	// Following one graph while the mouse drags: a function at the mouse's x (y for x = f(y)), snapping to a feature
 	// within snapDistance in that direction; other kinds the nearest point on their polylines.
 	FplTraceHit TraceAt(int graph, FplPoint screen, const FplViewport& view, double snapDistance) const;
+	// z = F(x, y) of a surface graph (NaN for other kinds).
+	double EvalSurface(int graph, double x, double y) const;
+	// 3D: the nearest graph the ray (in the cube) meets, by its mesh (Build3D's): the point in space (plane and z),
+	// exactly on the surface for z = F(x, y) and at a point's own place.
+	FplTraceHit Pick3D(FplVec3 origin, FplVec3 dir, const FplBox3& box) const;
 
 private:
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;

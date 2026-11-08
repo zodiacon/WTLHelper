@@ -482,10 +482,15 @@ void CFunctionPlotCtrl::ValuesChanged() {
 	auto& s = *m_State;
 	s.plot.UpdateValues();
 	Resample();
-	// the traced point follows its function
-	if (s.traceValid && s.traceGraph >= 0 && s.traceFeature < 0) {
+	// the traced point follows its function (in 3D it's let go: the surface moved under it)
+	if (s.traceValid && s.mode3D) {
+		s.traceValid = false;
+	}
+	else if (s.traceValid && s.traceGraph >= 0 && s.traceFeature < 0) {
 		auto kind = s.plot.graphs[s.traceGraph].expr.kind;
-		if (kind == FplKind::Function)
+		if (kind == FplKind::Surface)
+			s.traceZ = s.plot.EvalSurface(s.traceGraph, s.traceX, s.traceY);
+		else if (kind == FplKind::Function)
 			s.traceY = s.plot.Eval(s.traceGraph, s.traceX);
 		else if (kind == FplKind::FunctionOfY)
 			s.traceX = s.plot.Eval(s.traceGraph, s.traceY);
@@ -715,6 +720,8 @@ BOOL CFunctionPlotCtrl::GetTrace(FPLTRACE& trace) const {
 	trace.valid = TRUE;
 	trace.x = s.traceX;
 	trace.y = s.traceY;
+	trace.hasZ = std::isfinite(s.traceZ);
+	trace.z = trace.hasZ ? s.traceZ : 0;
 	if (s.traceFeature >= 0 && s.traceFeature < (int)g.features.size())
 		trace.feature = (FPLFEATUREKIND)g.features[s.traceFeature].kind;
 	return TRUE;
@@ -751,14 +758,17 @@ int CFunctionPlotCtrl::GetFeatures(UINT id, FPLFEATURE* features, int max) const
 	return n;
 }
 
-void CFunctionPlotCtrl::SetTraceHit(int graph, int feature, double x, double y, bool valid) {
+void CFunctionPlotCtrl::SetTraceHit(int graph, int feature, double x, double y, bool valid, double z) {
 	auto& s = *m_State;
-	if (s.traceGraph == graph && s.traceFeature == feature && s.traceValid == valid && (!valid || (s.traceX == x && s.traceY == y)))
+	auto same = [](double a, double b) { return a == b || (std::isnan(a) && std::isnan(b)); };
+	if (s.traceGraph == graph && s.traceFeature == feature && s.traceValid == valid &&
+		(!valid || (s.traceX == x && s.traceY == y && same(s.traceZ, z))))
 		return;
 	s.traceGraph = graph;
 	s.traceFeature = feature;
 	s.traceX = x;
 	s.traceY = y;
+	s.traceZ = z;
 	s.traceValid = valid;
 	NotifyTrace();
 	if (IsWindow())
@@ -776,14 +786,25 @@ void CFunctionPlotCtrl::NotifyTrace() {
 
 void CFunctionPlotCtrl::UpdateTrace(POINT pt, bool dragging) {
 	auto& s = *m_State;
-	if ((GetStyle() & FPLS_NOTRACE) || s.mode3D)
+	if (GetStyle() & FPLS_NOTRACE)
 		return;
 	FplPoint p = { ToDips(pt.x), ToDips(pt.y) };
+	if (s.mode3D) {
+		// what the ray through the mouse meets first
+		FplVec3 origin, dir;
+		s.camera.Ray(p, ToDips(s.client.cx), ToDips(s.client.cy), origin, dir);
+		FplTraceHit hit = s.plot.Pick3D(origin, dir, s.box);
+		if (hit)
+			SetTraceHit(hit.graph, -1, hit.plane.x, hit.plane.y, true, hit.z);
+		else
+			SetTraceHit(-1, -1, 0, 0, false);
+		return;
+	}
 	FplTraceHit hit;
 	if (dragging)
 		hit = s.plot.TraceAt(s.traceGraph, p, s.view, FplSnapDistance);
 	else
-		hit = s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance);
+		hit = s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance, true);
 	if (hit && hit.graph != s.featuresGraph) {
 		// a new graph: its features found, the last one's dropped
 		if (s.featuresGraph >= 0 && s.featuresGraph < (int)s.plot.graphs.size())
@@ -791,11 +812,11 @@ void CFunctionPlotCtrl::UpdateTrace(POINT pt, bool dragging) {
 		s.featuresGraph = hit.graph;
 		s.plot.FindFeatures(hit.graph, s.view);
 		hit = dragging ? s.plot.TraceAt(hit.graph, p, s.view, FplSnapDistance)
-			: s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance);
+			: s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance, true);
 		Invalidate();
 	}
 	if (hit)
-		SetTraceHit(hit.graph, hit.feature, hit.plane.x, hit.plane.y, true);
+		SetTraceHit(hit.graph, hit.feature, hit.plane.x, hit.plane.y, true, hit.z);
 	else if (!dragging && !s.traceDragged) {
 		if (s.featuresGraph >= 0) {
 			s.plot.graphs[s.featuresGraph].features.clear();

@@ -55,6 +55,8 @@ struct FplCamera {
 	void Orbit(float dYaw, float dPitch);	// pitch kept short of straight up or down
 	// A cube point on a width by height screen (DIPs, y down); false behind the camera.
 	bool Project(FplVec3 p, float width, float height, FplPoint& screen) const;
+	// The ray from the eye through a screen point (dir unit length).
+	void Ray(FplPoint screen, float width, float height, FplVec3& origin, FplVec3& dir) const;
 };
 
 struct FplVertex3 {
@@ -103,6 +105,10 @@ struct FplTick3 {
 	bool name = false;						// "x", "y", "z"
 };
 std::vector<FplTick3> FplBoxTicks(const FplBox3& box, const FplCamera& camera);
+
+// The nearest of the mesh's triangles the ray meets inside the cube (what's outside it isn't drawn): its distance
+// along the ray. false if none.
+bool FplIntersect(const FplMesh& mesh, FplVec3 origin, FplVec3 dir, float& t);
 
 // Appends b's vertices and triangles to a.
 void FplAppend(FplMesh& a, const FplMesh& b);

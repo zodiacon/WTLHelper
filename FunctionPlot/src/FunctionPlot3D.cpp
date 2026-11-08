@@ -221,6 +221,53 @@ bool FplCamera::Project(FplVec3 p, float width, float height, FplPoint& screen) 
 	return true;
 }
 
+void FplCamera::Ray(FplPoint screen, float width, float height, FplVec3& origin, FplVec3& dir) const {
+	// the view's axes, as View() makes them; the camera looks down -z
+	FplVec3 eye = Eye();
+	FplVec3 zaxis = Normalize(eye);
+	FplVec3 xaxis = Normalize(Cross({ 0, 0, 1 }, zaxis), { 1, 0, 0 });
+	FplVec3 yaxis = Cross(zaxis, xaxis);
+	const float aspect = width / std::max(height, 1.0f), tanHalf = std::tan(fov / 2);
+	const float nx = static_cast<float>(screen.x / width * 2 - 1), ny = static_cast<float>(1 - screen.y / height * 2);
+	origin = eye;
+	dir = Normalize(Add(Add(Scale(xaxis, nx * tanHalf * aspect), Scale(yaxis, ny * tanHalf)), Scale(zaxis, -1)));
+}
+
+bool FplIntersect(const FplMesh& mesh, FplVec3 origin, FplVec3 dir, float& t) {
+	bool found = false;
+	float best = 0;
+	for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+		// Moller and Trumbore
+		const FplVec3 a = mesh.vertices[mesh.indices[i]].pos, b = mesh.vertices[mesh.indices[i + 1]].pos,
+			c = mesh.vertices[mesh.indices[i + 2]].pos;
+		FplVec3 e1 = Sub(b, a), e2 = Sub(c, a);
+		FplVec3 p = Cross(dir, e2);
+		float det = Dot(e1, p);
+		if (std::abs(det) < 1e-12f)
+			continue;
+		float inv = 1 / det;
+		FplVec3 s0 = Sub(origin, a);
+		float u = Dot(s0, p) * inv;
+		if (u < 0 || u > 1)
+			continue;
+		FplVec3 q = Cross(s0, e1);
+		float v = Dot(dir, q) * inv;
+		if (v < 0 || u + v > 1)
+			continue;
+		float d = Dot(e2, q) * inv;
+		if (d <= 0 || (found && d >= best))
+			continue;
+		FplVec3 at = Add(origin, Scale(dir, d));
+		if (std::abs(at.x) > 1.001f || std::abs(at.y) > 1.001f || std::abs(at.z) > 1.001f)
+			continue;
+		best = d;
+		found = true;
+	}
+	if (found)
+		t = best;
+	return found;
+}
+
 // ---- Meshes ----------------------------------------------------------------------------------------------------------
 
 FplMesh FplSurfaceMesh(const std::function<double(double, double)>& F, const FplBox3& box, int n) {

@@ -570,6 +570,11 @@ void CFunctionPlotCtrl::PaintTrace() {
 	if (!s.traceValid || s.traceGraph < 0 || s.traceGraph >= (int)s.plot.graphs.size())
 		return;
 	FplPoint p = v.ToScreen({ s.traceX, s.traceY });
+	if (s.mode3D) {
+		FplVec3 at = s.box.ToBox(s.traceX, s.traceY, s.traceZ);
+		if (!s.camera.Project(at, (float)v.width, (float)v.height, p))
+			return;
+	}
 	if (!std::isfinite(p.x) || !std::isfinite(p.y))
 		return;
 	auto* color = s.Brush(GraphColor(s.traceGraph));
@@ -583,8 +588,20 @@ void CFunctionPlotCtrl::PaintTrace() {
 	auto& g = s.plot.graphs[s.traceGraph];
 	if (s.traceFeature >= 0 && s.traceFeature < (int)g.features.size())
 		text = std::wstring(FeatureName(g.features[s.traceFeature].kind)) + L"  ";
-	text += L"(" + FplFormatCoordinate(s.traceX, s.traceFeature >= 0 ? 1e-6 : unitsX) + L", " +
-		FplFormatCoordinate(s.traceY, s.traceFeature >= 0 ? 1e-6 : unitsY) + L")";
+	if (s.mode3D) {
+		// to a 400th of each range
+		auto& b = s.box;
+		text += L"(" + FplFormatCoordinate(s.traceX, (b.xMax - b.xMin) / 4000) + L", " +
+			FplFormatCoordinate(s.traceY, (b.yMax - b.yMin) / 4000) + L", " +
+			FplFormatCoordinate(s.traceZ, (b.zMax - b.zMin) / 4000) + L")";
+	}
+	else {
+		text += L"(" + FplFormatCoordinate(s.traceX, s.traceFeature >= 0 ? 1e-6 : unitsX) + L", " +
+			FplFormatCoordinate(s.traceY, s.traceFeature >= 0 ? 1e-6 : unitsY) + L")";
+		// a surface's value: to about five figures
+		if (std::isfinite(s.traceZ))
+			text += L"   z = " + FplFormatCoordinate(s.traceZ, std::max(std::abs(s.traceZ), 1.0) * 1e-5);
+	}
 	const float tw = TextWidth(text, s.traceText.Get()) + 14, th = 24;
 	float x = (float)p.x + 10, y = (float)p.y - th - 10;
 	if (x + tw > v.width - 4)
@@ -816,6 +833,7 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		// an exported frame's text without ClearType's colored fringes
 		dc->SetTextAntialiasMode(present ? D2D1_TEXT_ANTIALIAS_MODE_DEFAULT : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 		PaintTicks3D();
+		PaintTrace();
 		PaintPanel();
 		r.EndOverlay();
 		s.rt = nullptr;

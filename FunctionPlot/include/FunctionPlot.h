@@ -12,6 +12,7 @@
 #include <atlwin.h>
 #include <atlstr.h>
 
+#include <limits>
 #include <memory>
 
 struct ID2D1RenderTarget;
@@ -164,6 +165,8 @@ struct FPLTRACE {
 	BOOL           valid;
 	double         x, y;
 	FPLFEATUREKIND feature;        // the point is one of the graph's features, else FPLF_NONE
+	BOOL           hasZ;           // z is: a surface's value under the mouse (2D), the point's z (3D)
+	double         z;
 };
 
 // ---- Notifications --------------------------------------------------------------------
@@ -348,7 +351,8 @@ private:
 	void Resample();
 	void SetViewport(double xMin, double xMax, double yMin, double yMax);
 	void UpdateTrace(POINT pt, bool dragging);
-	void SetTraceHit(int graph, int feature, double x, double y, bool valid);
+	void SetTraceHit(int graph, int feature, double x, double y, bool valid,
+		double z = std::numeric_limits<double>::quiet_NaN());
 	void NotifyTrace();
 	void NotifyView();
 	float ToDips(int pixels) const;
@@ -370,7 +374,7 @@ private:
 	void PaintGraphs();
 	void PaintContourLabels();
 	void PaintLabels();
-	void PaintTrace();
+	void PaintTrace();                         // 2D and 3D
 	void PaintPanel();
 	void Paint3D(bool present);
 	void PaintTicks3D();

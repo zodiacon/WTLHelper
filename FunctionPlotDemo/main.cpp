@@ -248,11 +248,16 @@ static void ShowView() {
 
 static void ShowTrace(const FPLTRACE& t) {
 	if (!t.valid) {
-		g_status.SetText(0, L"Drag to pan, wheel to zoom (Ctrl: x only, Shift: y only), point at a graph to trace it");
+		g_status.SetText(0, g_plot.GetMode() == FPLM_3D
+			? L"Drag to orbit (Shift: move), wheel to zoom, point at a graph to trace it"
+			: L"Drag to pan, wheel to zoom (Ctrl: x only, Shift: y only), point at a graph to trace it");
 		return;
 	}
 	static const wchar_t* Kinds[] = { L"root", L"minimum", L"maximum", L"intersection", L"y-intercept" };
-	std::wstring text = L"Line " + std::to_wstring(t.id) + L":  (" + Number(t.x) + L", " + Number(t.y) + L")";
+	std::wstring text = L"Line " + std::to_wstring(t.id) + L":  (" + Number(t.x) + L", " + Number(t.y) +
+		(t.hasZ && g_plot.GetMode() == FPLM_3D ? L", " + Number(t.z) + L")" : L")");
+	if (t.hasZ && g_plot.GetMode() != FPLM_3D)
+		text += L"  z = " + Number(t.z);
 	if (t.feature != FPLF_NONE)
 		text += std::wstring(L"  ") + Kinds[t.feature];
 	g_status.SetText(0, text.c_str());

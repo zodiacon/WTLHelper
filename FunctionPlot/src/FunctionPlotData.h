@@ -94,6 +94,7 @@ struct FplState {
 	int traceGraph = -1;
 	int traceFeature = -1;
 	double traceX = 0, traceY = 0;
+	double traceZ = std::numeric_limits<double>::quiet_NaN();	// a surface's value, or 3D's z
 	bool traceValid = false;
 	bool traceDragged = false;			// stays while the mouse is away (until a click elsewhere or Escape)
 	int featuresGraph = -1;				// the graph whose features are found and shown

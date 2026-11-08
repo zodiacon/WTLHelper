@@ -409,7 +409,7 @@ void FplPlot::SnapToFeature(FplTraceHit& hit, FplPoint screen, const FplViewport
 }
 
 FplTraceHit FplPlot::Nearest(FplPoint screen, const FplViewport& view, double maxDistance,
-	double snapDistance) const {
+	double snapDistance, bool surfaces) const {
 	FplTraceHit best;
 	// a feature near the point first: they're what a user aims at
 	for (size_t g = 0; g < graphs.size(); g++) {
@@ -432,7 +432,74 @@ FplTraceHit FplPlot::Nearest(FplPoint screen, const FplViewport& view, double ma
 		if (hit && hit.distance <= maxDistance && (!best || hit.distance < best.distance))
 			best = hit;
 	}
+	if (best || !surfaces)
+		return best;
+	// no curve near: the surface under the point, the last drawn (it's on top)
+	for (size_t g = graphs.size(); g-- > 0;) {
+		auto& graph = graphs[g];
+		if (!graph.Drawable() || (graph.flags & FplGraphNoTrace) || graph.expr.kind != FplKind::Surface)
+			continue;
+		FplPoint p = view.ToPlane(screen);
+		double z = EvalSurface(static_cast<int>(g), p.x, p.y);
+		if (!std::isfinite(z))
+			continue;
+		best.graph = static_cast<int>(g);
+		best.plane = p;
+		best.screen = screen;
+		best.z = z;
+		return best;
+	}
 	return best;
+}
+
+double FplPlot::EvalSurface(int graph, double x, double y) const {
+	auto& g = graphs[graph];
+	if (g.expr.error || g.expr.kind != FplKind::Surface)
+		return NaN;
+	auto& slots = const_cast<std::vector<double>&>(m_Slots);
+	slots[FplSlotX] = x;
+	slots[FplSlotY] = y;
+	return g.expr.f.Eval(slots.data());
+}
+
+FplTraceHit FplPlot::Pick3D(FplVec3 origin, FplVec3 dir, const FplBox3& box) const {
+	FplTraceHit hit;
+	float best = 0;
+	for (size_t g = 0; g < graphs.size(); g++) {
+		auto& graph = graphs[g];
+		if (!graph.Drawable() || (graph.flags & FplGraphNoTrace) || graph.mesh.Empty())
+			continue;
+		float t;
+		if (FplIntersect(graph.mesh, origin, dir, t) && (!hit || t < best)) {
+			best = t;
+			hit.graph = static_cast<int>(g);
+		}
+	}
+	if (!hit)
+		return hit;
+	FplVec3 at = { origin.x + dir.x * best, origin.y + dir.y * best, origin.z + dir.z * best };
+	FplPoint3 p = box.ToSpace(at);
+	auto& graph = graphs[hit.graph];
+	auto& slots = const_cast<std::vector<double>&>(m_Slots);
+	switch (graph.expr.kind) {
+		case FplKind::Surface: {
+			double z = EvalSurface(hit.graph, p.x, p.y);
+			if (std::isfinite(z))
+				p.z = z;
+			break;
+		}
+		case FplKind::Point3D:
+			p = { graph.expr.f.Eval(slots.data()), graph.expr.g.Eval(slots.data()), graph.expr.h.Eval(slots.data()) };
+			break;
+		case FplKind::Point:
+			p = { graph.expr.f.Eval(slots.data()), graph.expr.g.Eval(slots.data()), 0 };
+			break;
+		default:
+			break;
+	}
+	hit.plane = { p.x, p.y };
+	hit.z = p.z;
+	return hit;
 }
 
 FplTraceHit FplPlot::TraceAt(int graph, FplPoint screen, const FplViewport& view, double snapDistance) const {
@@ -451,6 +518,18 @@ FplTraceHit FplPlot::TraceAt(int graph, FplPoint screen, const FplViewport& view
 			hit.screen = view.ToScreen(hit.plane);
 			hit.distance = Dist(hit.screen, screen);
 		}
+	}
+	if (!hit && g.expr.kind == FplKind::Surface) {
+		// a surface: the point under the mouse
+		FplPoint p = view.ToPlane(screen);
+		double z = EvalSurface(graph, p.x, p.y);
+		if (std::isfinite(z)) {
+			hit.graph = graph;
+			hit.plane = p;
+			hit.screen = screen;
+			hit.z = z;
+		}
+		return hit;
 	}
 	if (!hit)
 		hit = OnGraph(graph, screen, view);
