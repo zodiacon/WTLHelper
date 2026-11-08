@@ -169,9 +169,41 @@ bool IsDigit(wchar_t c) {
 class Lexer {
 public:
 	Lexer(std::wstring_view text, const std::vector<std::wstring>* params,
-		const std::vector<FplUserFunction>* functions = nullptr) : m_Text(text), m_Params(params), m_Functions(functions) {}
+		const std::vector<FplUserFunction>* functions = nullptr) : m_Text(text), m_Params(params), m_Functions(functions) {
+		// a line defining q, or a regression, has it as a name of its own
+		size_t i = m_Text.find_first_not_of(L' ');
+		if (m_Text.find(L'~') != m_Text.npos)
+			m_PlainQ = true;
+		else if (i != m_Text.npos && m_Text[i] == L'q') {
+			i = m_Text.find_first_not_of(L' ', i + 1);
+			m_PlainQ = i != m_Text.npos && m_Text[i] == L'=';
+		}
+	}
+	void PlainQ() { m_PlainQ = true; }
 
 	bool Run(std::vector<Token>& tokens, FplError& error) {
+		if (!Scan(tokens, error))
+			return false;
+		if (m_PlainQ)
+			return true;
+		// beside another variable q is a name of its own: y = q x wants a slider, not the point's angle
+		bool typedQ = false, other = false;
+		for (auto& t : tokens) {
+			if (t.type != Tk::Name || t.kind != NameKind::Var)
+				continue;
+			if (t.name == FplTheta && t.len == 1 && m_Text[t.pos] == L'q')
+				typedQ = true;
+			else if (t.name != FplTheta && t.name != L"r")
+				other = true;
+		}
+		if (!typedQ || !other)
+			return true;
+		m_PlainQ = true;
+		tokens.clear();
+		return Scan(tokens, error);
+	}
+
+	bool Scan(std::vector<Token>& tokens, FplError& error) {
 		size_t i = 0;
 		while (i < m_Text.size()) {
 			wchar_t c = m_Text[i];
@@ -279,10 +311,12 @@ private:
 		if (rest.size() < 4 || rest.substr(0, 3) != L"d/d")
 			return false;
 		static const struct { const wchar_t* text; const wchar_t* var; } Vars[] = {
-			{ L"theta", FplTheta }, { FplTheta, FplTheta }, { L"x", L"x" }, { L"y", L"y" }, { L"t", L"t" },
+			{ L"theta", FplTheta }, { FplTheta, FplTheta }, { L"q", FplTheta }, { L"x", L"x" }, { L"y", L"y" }, { L"t", L"t" },
 		};
 		for (auto& v : Vars) {
 			std::wstring_view name = v.text;
+			if (name == L"q" && !QIsTheta())
+				continue;
 			if (rest.substr(3, name.size()) != name)
 				continue;
 			size_t end = 3 + name.size();
@@ -404,7 +438,18 @@ private:
 					t.name = s;
 					return true;
 				}
+		if (s == L"q" && !m_PlainQ) {
+			t.kind = NameKind::Var;
+			t.name = FplTheta;
+			return true;
+		}
 		return false;
+	}
+
+	// Whether q would be read as theta here.
+	bool QIsTheta() const {
+		Token t;
+		return Lookup(L"q", t) && t.kind == NameKind::Var;
 	}
 
 	// A name that isn't known whole is split into known names ("xy", "sinx", "pix"): the fewest unknown single letters
@@ -469,6 +514,7 @@ private:
 	}
 
 	std::wstring_view m_Text;
+	bool m_PlainQ = false;
 	const std::vector<std::wstring>* m_Params;
 	const std::vector<FplUserFunction>* m_Functions;
 };
@@ -1115,6 +1161,8 @@ FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) 
 	FplParseResult result;
 	std::vector<Token> tokens;
 	Lexer lexer(text, options.parameters, options.functions);
+	if (options.plainQ)
+		lexer.PlainQ();
 	if (!lexer.Run(tokens, result.error))
 		return result;
 	Parser parser(std::move(tokens), result.ast, result.error, options);
@@ -1133,6 +1181,7 @@ FplFunctionDefinition FplParseFunction(std::wstring_view text, const FplParseOpt
 	std::vector<Token> tokens;
 	FplError ignored;
 	Lexer lexer(text, options.parameters, options.functions);
+	lexer.PlainQ();		// q(x) = ... and f(q) = ... name their own (its body may still use q as theta)
 	if (!lexer.Run(tokens, ignored))
 		return d;
 	// name ( p, ... ) =

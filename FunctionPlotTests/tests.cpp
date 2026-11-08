@@ -5009,6 +5009,114 @@ TEST(HiddenPoints3D) {
 	CHECK(round.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
 }
 
+TEST(QIsTheta) {
+	std::vector<std::wstring> none;
+	auto at = [&](const wchar_t* text, double theta, const std::vector<std::wstring>& names = {}, double param = 0) {
+		auto e = FplBuild(text, names);
+		CHECK(!e.error);
+		std::vector<double> slots(FplFirstParam + names.size(), param);
+		slots[FplSlotT] = slots[FplSlotX] = slots[FplSlotY] = 0;
+		slots[FplSlotTheta] = theta;
+		return e.error ? NaN : e.f.Eval(slots.data());
+	};
+	// polar, as with the letter and the word
+	CHECK(FplBuild(L"r = 2 + cos 3q", none).kind == FplKind::Polar);
+	CHECK_NEAR(at(L"r = 2 + cos 3q", 0.4), 2 + std::cos(1.2));
+	CHECK_NEAR(at(L"r = q/2", 0.4), 0.2);
+	CHECK_NEAR(at(L"r = 2q", 0.4), 0.8);
+	CHECK_NEAR(at(L"r = sin q", 0.4), std::sin(0.4));
+	CHECK_NEAR(at(L"r = sin(q)^2", 0.4), std::sin(0.4) * std::sin(0.4));
+	CHECK_NEAR(at(L"r = d/dq (q^2)", 3), 6);
+	CHECK_NEAR(at(L"r = d/dq (q^2)", 3), at(L"r = d/dtheta (theta^2)", 3));
+	CHECK(FplBuild(L"r < 3sin 2q", none).rel == FplRel::Lt);
+	// with r too, as theta alongside r is the plane's angle
+	CHECK(!FplBuild(L"r < q", none).error);
+	// beside another variable, or in an ODE, it's a name the app can offer to add, at its place
+	for (const wchar_t* text : { L"y = 2 q x", L"x^2 + q = 1", L"y = q", L"r = q x", L"(q, t)", L"z = q x", L"y' = q", L"y' = q y",
+		L"1 < y < q", L"x' = y, y' = q" }) {
+		auto bad = FplBuild(text, none);
+		CHECK(bad.error.code == FplErrorCode::UnknownName);
+		CHECK_STR(bad.error.name, L"q");
+		CHECK_INT(bad.error.len, 1);
+		CHECK(text[bad.error.pos] == L'q');
+	}
+	// while the letter and the word beside x stay the plane's angle
+	CHECK(FplBuild(L"y = \x03B8 x", none).kind == FplKind::Implicit);
+	CHECK(FplBuild(L"y = theta x", none).kind == FplKind::Implicit);
+	// where theta doesn't read either
+	CHECK(FplBuild(L"(cos q, sin q)", none).error.code == FplErrorCode::UnknownName);
+	// a definition
+	CHECK(FplBuild(L"q = 1", none).kind == FplKind::Definition);
+	// names that contain it are as they were; known names first
+	CHECK_NEAR(at(L"r = sqrt(q)", 4), 2);
+	CHECK(FplBuild(L"r = q1", none).error.code == FplErrorCode::UnknownName);
+	// a parameter by that name has it
+	CHECK(FplBuild(L"y = q x", { L"q" }).kind == FplKind::Function);
+	CHECK(!FplBuild(L"y = q x", { L"q" }).error);
+	CHECK(FplBuild(L"r = d/dq (q^2)", { L"q" }).error.code != FplErrorCode::None);
+	// the same name in a plot where a slider is added for it
+	auto sliders = MakePlot({ L"r = q", L"y = q x" }, { Param(L"q", 2) });
+	CHECK(sliders.graphs[0].expr.kind == FplKind::Polar);
+	CHECK(!sliders.graphs[1].expr.error);
+
+	// a line defining it: a number, what depends on it, whichever line comes first
+	auto plot = MakePlot({ L"q = 2", L"y = q x" });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[1].expr.error);
+	plot = MakePlot({ L"y = q x", L"q = 2" });
+	CHECK(plot.graphs[1].definition);
+	CHECK(!plot.graphs[0].expr.error);
+	auto slots = plot.Slots();
+	slots[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[0].expr.f.Eval(slots.data()), 6.0);
+	plot = MakePlot({ L"p = q", L"q = 2", L"y = p x" });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[2].expr.error);
+	// a substitution, a function of that name, a function's parameter
+	plot = MakePlot({ L"q = x - 1", L"y = 3q" });
+	CHECK(!plot.graphs[1].expr.error);
+	slots = plot.Slots();
+	slots[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(slots.data()), 6.0);
+	plot = MakePlot({ L"q(x) = x^2", L"y = q(x) + 1" });
+	CHECK(!plot.graphs[1].expr.error);
+	slots = plot.Slots();
+	slots[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(slots.data()), 10.0);
+	plot = MakePlot({ L"f(q, x) = q + x", L"y = f(2, x)" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(!plot.graphs[1].expr.error);
+	slots = plot.Slots();
+	slots[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(slots.data()), 5.0);
+	// a function of q alone is an ordinary parameter's, so it draws nothing, while one of theta is polar
+	plot = MakePlot({ L"f(q) = q^2" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(plot.graphs[0].expr.kind != FplKind::Polar);
+	// a body may use it as theta
+	plot = MakePlot({ L"g(\x03B8) = 1 + \x03B8", L"r = g(q)" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK(plot.graphs[1].expr.kind == FplKind::Polar);
+	// a regression's unknowns are fitted
+	auto fit = MakePlot({ L"X = [1, 2, 3, 4]", L"Y = [2, 4, 6, 8]", L"Y ~ q X" });
+	CHECK(!fit.graphs[2].expr.error);
+	CHECK(fit.graphs[2].expr.kind == FplKind::Regression);
+	CHECK_NEAR_TOL(fit.ValueOf(L"q"), 2.0, 1e-6);
+	// and a list's name
+	plot = MakePlot({ L"q = [1, 2]", L"y = q x" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(!plot.graphs[1].expr.error);
+	// draws: as the same line with the letter
+	FplViewport v = View();
+	auto one = MakePlot({ L"r = 2 + cos 3q" }), two = MakePlot({ L"r = 2 + cos 3\x03B8" });
+	one.Sample(v);
+	two.Sample(v);
+	CHECK(!one.graphs[0].geometry.lines.empty());
+	CHECK_INT(one.graphs[0].geometry.lines[0].size(), two.graphs[0].geometry.lines[0].size());
+	// saved as it's written
+	CHECK(one.graphs[0].text == L"r = 2 + cos 3q");
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -5092,6 +5200,7 @@ int wmain() {
 	Run_PolarGrid();
 	Run_Fields3D();
 	Run_HiddenPoints3D();
+	Run_QIsTheta();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

@@ -25,6 +25,9 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 
 // ---- Styles (the window's low word) ------------------------------------------
 
+// In a graph's text theta can be typed as the Greek letter, the word, or q. q is a name of its own when it's a parameter, a
+// line defines it, or its line has x, y or another variable (y = q x), a regression (~) or an ODE.
+
 #define FPLS_NOLEGEND      0x0001   // no list of the graphs
 #define FPLS_NOSLIDERS     0x0002   // no sliders for the parameters
 #define FPLS_NOGRID        0x0004   // the axes only

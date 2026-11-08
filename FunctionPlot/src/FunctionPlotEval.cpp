@@ -932,14 +932,16 @@ void CollectSingular(const FplAst& ast, int node, unsigned variable, bool guarde
 namespace {
 
 FplExpression BuildExpression(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
-	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists) {
+	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists, bool plainQ) {
 	FplExpression e;
 	FplParseOptions options;
 	options.parameters = &parameters;
 	options.degrees = degrees;
 	options.functions = functions;
 	options.lists = lists;
+	options.plainQ = plainQ;
 	if (auto ode = FplSplitOde(text); ode.isOde) {
+		options.plainQ = true;		// theta has no place in one
 		const bool system = ode.order == FplOdeOrder::System || ode.order == FplOdeOrder::System3D;
 		e.kind = ode.order == FplOdeOrder::First ? FplKind::SlopeField : ode.order == FplOdeOrder::Second ? FplKind::SecondOrder
 			: ode.order == FplOdeOrder::System ? FplKind::OdeSystem : FplKind::OdeSystem3D;
@@ -1118,8 +1120,14 @@ bool DefinesVariable(std::wstring_view text, size_t& at, size_t& length) {
 } // namespace
 
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
-	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists) {
-	FplExpression e = BuildExpression(text, parameters, degrees, functions, lists);
+	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists, bool plainQ) {
+	FplExpression e = BuildExpression(text, parameters, degrees, functions, lists, plainQ);
+	// a q that doesn't read as theta may be a name the app can offer to add
+	if (e.error && !plainQ && text.find(L'q') != text.npos) {
+		FplExpression plain = BuildExpression(text, parameters, degrees, functions, lists, true);
+		if (plain.error.code == FplErrorCode::UnknownName)
+			return plain;
+	}
 	// "u(x) = x - 1" reads as u times x, and "u = x - 1" as an equation with a variable that has no place in it: say what's
 	// wrong (only when it doesn't read: z = x y and r = 2 are plots)
 	if (e.error.code == FplErrorCode::VariableNotAllowed || e.error.code == FplErrorCode::NotAPlot ||

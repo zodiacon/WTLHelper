@@ -140,6 +140,10 @@ struct FplParseOptions {
 	// the names (among parameters) that are lists: mean(L), median, stdev, sum, count, min and max of one are the
 	// parameter named "mean(L)" and so on (FplAggregateName), which the app works out
 	const std::vector<std::wstring>* lists = nullptr;
+	// q is an easy way to type theta (the key that gives it in the Symbol font), unless the name is taken: by a parameter, a
+	// function, a line that defines it (q = ...), a regression, whose names are all fitted, a line with another variable
+	// (y = q x) or an ODE. True: it's an ordinary name.
+	bool plainQ = false;
 };
 
 // The list aggregates, and the parameter name one of a list is.
@@ -355,4 +359,5 @@ FplOdeText FplSplitOde(std::wstring_view text);
 // Parses, classifies and compiles text; the slots are as for FplCompile with the same parameters. An ODE (FplSplitOde)
 // is a SlopeField: F may use x, y and the parameters, a and b only the parameters.
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees = false,
-	const std::vector<FplUserFunction>* functions = nullptr, const std::vector<std::wstring>* lists = nullptr);
+	const std::vector<FplUserFunction>* functions = nullptr, const std::vector<std::wstring>* lists = nullptr,
+	bool plainQ = false);
