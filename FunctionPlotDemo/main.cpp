@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -100,7 +101,7 @@ struct Example {
 
 static const Example g_Examples[] = {
 	{ L"&Functions", L"y = sin x\r\ny = x^2/4 - 2\r\ny = tan x\r\ny = 1/x\r\ny = floor(x)/2 {x > 3}\r\n(2, 1)", true },
-	{ L"&Parameters", L"y = a sin(bx + c)\r\ny = a\r\nk = 2b", true },
+	{ L"&Parameters", L"y = a sin(bx + c)\r\ny = a\r\nk = 2b\r\na: 0..5\r\nb: 0..4, 0.5\r\nc: -pi..pi", true },
 	{ L"&Curves", L"(4cos 3t, 4sin 2t)\r\nr = 2 + 4cos 5\x03B8\r\nr = \x03B8/2\r\n(t cos t, t sin t)", false },
 	{ L"&Implicit", L"x^2 + y^2 = 16\r\ny^2 = x^3 - 4x\r\nx^2 - y^2 = 1\r\nsin x + cos y = 0.5", false },
 	{ L"I&nequalities", L"y < 4 - x^2\r\nx^2/16 + y^2/4 \x2264 1\r\ny > sin x + 2\r\nr < 2 + cos 6\x03B8", false },
@@ -203,12 +204,161 @@ static bool ValidName(const wchar_t* name) {
 	return true;
 }
 
-// Each line is a graph with the line's number as its id (so its color stays with it).
+// ---- Slider ranges: a line like "a: -8..8" ------------------------------------------
+
+struct RangeLine {
+	std::wstring name;
+	double min = 0, max = 0, step = 0;
+};
+
+static std::wstring Trimmed(std::wstring_view text) {
+	while (!text.empty() && (text.front() == L' ' || text.front() == L'\t'))
+		text.remove_prefix(1);
+	while (!text.empty() && (text.back() == L' ' || text.back() == L'\t'))
+		text.remove_suffix(1);
+	return std::wstring(text);
+}
+
+// A number, or one in terms of pi: "-8", "0.5", "2pi", "-pi/2", U+03C0 too.
+static bool ParseRangeNumber(const std::wstring& text, double& value) {
+	const wchar_t* p = text.c_str();
+	bool negative = false;
+	if (*p == L'-' || *p == wchar_t(0x2212)) {
+		negative = true;
+		p++;
+	}
+	double v = 1;
+	bool any = false;
+	if ((*p >= L'0' && *p <= L'9') || *p == L'.') {
+		wchar_t* end = nullptr;
+		v = wcstod(p, &end);
+		if (end == p)
+			return false;
+		p = end;
+		any = true;
+	}
+	if (p[0] == L'p' && p[1] == L'i') {
+		v *= 3.141592653589793;
+		p += 2;
+		any = true;
+	}
+	else if (*p == wchar_t(0x3C0)) {
+		v *= 3.141592653589793;
+		p++;
+		any = true;
+	}
+	if (!any)
+		return false;
+	if (*p == L'/') {
+		wchar_t* end = nullptr;
+		const double d = wcstod(p + 1, &end);
+		if (end == p + 1 || d == 0)
+			return false;
+		v /= d;
+		p = end;
+	}
+	if (*p || !std::isfinite(v))
+		return false;
+	value = negative ? -v : v;
+	return true;
+}
+
+// "a: -8..8", or with a step "a: -8..8, 0.5". Anything else isn't one, and is a graph (with whatever error it has).
+static bool ParseRangeLine(const std::wstring& line, RangeLine& range) {
+	const size_t colon = line.find(L':');
+	if (colon == std::wstring::npos)
+		return false;
+	range.name = Trimmed(std::wstring_view(line).substr(0, colon));
+	if (!ValidName(range.name.c_str()))
+		return false;
+	std::wstring rest = line.substr(colon + 1);
+	const size_t dots = rest.find(L"..");
+	if (dots == std::wstring::npos)
+		return false;
+	std::wstring right = rest.substr(dots + 2);
+	range.step = 0;
+	const size_t comma = right.find(L',');
+	if (comma != std::wstring::npos) {
+		if (!ParseRangeNumber(Trimmed(std::wstring_view(right).substr(comma + 1)), range.step) || !(range.step > 0))
+			return false;
+		right.resize(comma);
+	}
+	if (!ParseRangeNumber(Trimmed(std::wstring_view(rest).substr(0, dots)), range.min) ||
+		!ParseRangeNumber(Trimmed(right), range.max) || !(range.max > range.min))
+		return false;
+	// no step given: one a hundredth of the range or a little finer, a power of ten
+	if (range.step == 0)
+		range.step = std::pow(10.0, std::floor(std::log10((range.max - range.min) / 100)));
+	return true;
+}
+
+// What each ranged parameter's slider was before its line, to go back to when the line goes.
+struct SliderRange {
+	double min, max, step;
+};
+static std::map<std::wstring, SliderRange> g_rangedParams;
+
+static void ApplyRangeLines(const std::vector<std::wstring>& lines) {
+	std::map<std::wstring, RangeLine> wanted;
+	for (auto& line : lines) {
+		RangeLine range;
+		if (ParseRangeLine(line, range))
+			wanted[range.name] = range;
+	}
+	for (auto it = g_rangedParams.begin(); it != g_rangedParams.end();) {
+		if (wanted.count(it->first)) {
+			++it;
+			continue;
+		}
+		FPLPARAM p{};
+		if (g_plot.GetParameter(it->first.c_str(), p)) {
+			std::wstring name = it->first;
+			p.pszName = name.c_str();
+			p.min = it->second.min;
+			p.max = it->second.max;
+			p.step = it->second.step;
+			g_plot.SetParameter(p);
+		}
+		it = g_rangedParams.erase(it);
+	}
+	for (auto& [name, range] : wanted) {
+		FPLPARAM p{};
+		if (!g_plot.GetParameter(name.c_str(), p))
+			continue;		// nothing uses it (yet); ShowLineError says so
+		g_rangedParams.try_emplace(name, SliderRange{ p.min, p.max, p.step });
+		const double value = std::clamp(p.value, range.min, range.max);
+		if (p.min == range.min && p.max == range.max && p.step == range.step && p.value == value)
+			continue;
+		p.pszName = name.c_str();
+		p.min = range.min;
+		p.max = range.max;
+		p.step = range.step;
+		p.value = value;
+		g_plot.SetParameter(p);
+	}
+}
+
+// Each line is a graph with the line's number as its id (so its color stays with it). A range line is an empty one, which
+// draws nothing, with its text as the label: the saved state keeps that, for File > Open to bring the line back.
 static void SyncGraphs() {
 	auto lines = EditorLines();
 	for (size_t i = 0; i < lines.size(); i++) {
+		RangeLine range;
+		const bool isRange = ParseRangeLine(lines[i], range);
 		FPLGRAPH g{ FPLGM_TEXT, (UINT)i + 1 };
-		g.pszText = lines[i].c_str();
+		g.pszText = isRange ? L"" : lines[i].c_str();
+		if (isRange) {
+			g.mask |= FPLGM_LABEL;
+			g.pszLabel = lines[i].c_str();
+		}
+		else {
+			// was it one? its label goes
+			FPLGRAPH old{ FPLGM_TEXT | FPLGM_LABEL, g.id };
+			if (g_plot.GetGraph(old) && !*old.pszText && old.pszLabel && *old.pszLabel) {
+				g.mask |= FPLGM_LABEL;
+				g.pszLabel = nullptr;
+			}
+		}
 		if (!g_plot.SetGraph(g))
 			g_plot.AddGraph(g);
 	}
@@ -278,6 +428,7 @@ static void SyncGraphs() {
 			it = g_autoParams.erase(it);
 		}
 	}
+	ApplyRangeLines(lines);
 }
 
 // ---- Status bar --------------------------------------------------------------------
@@ -338,7 +489,15 @@ static void ShowLineError() {
 	const int line = CaretLine();
 	FPLGRAPHINFO info;
 	std::wstring text;
-	if (g_plot.GetGraphInfo((UINT)line + 1, info)) {
+	auto lines = EditorLines();
+	RangeLine range;
+	if (line < (int)lines.size() && ParseRangeLine(lines[line], range)) {
+		FPLPARAM p{};
+		text = g_plot.GetParameter(range.name.c_str(), p)
+			? range.name + L": a slider from " + Number(p.min) + L" to " + Number(p.max) + L", steps of " + Number(p.step)
+			: L"No line uses " + range.name + L" as a parameter";
+	}
+	else if (g_plot.GetGraphInfo((UINT)line + 1, info)) {
 		if (info.error != FPLE_NONE && info.error != FPLE_EMPTY)
 			text = L"Line " + std::to_wstring(line + 1) + L": " + info.szError + L" (at " + std::to_wstring(info.errorPos + 1) + L")";
 		else if (info.kind == FPLK_DEFINITION && std::isnan(info.value) && g_plot.GetList(info.szName, nullptr, 0) > 0)
@@ -361,6 +520,7 @@ static void LoadExample(int index) {
 	for (auto& name : g_autoParams)
 		g_plot.RemoveParameter(name.c_str());
 	g_autoParams.clear();
+	g_rangedParams.clear();
 	g_plot.RemoveAllGraphs();
 	while (g_plot.GetListCount() > 0)
 		g_plot.RemoveList(g_plot.GetListName(0));
@@ -537,13 +697,15 @@ static bool OpenPlot(LPCWSTR path) {
 	// the editor shows the graphs' texts, a line each; the parameters count as the demo's sliders
 	std::wstring lines;
 	for (int i = 0; i < g_plot.GetGraphCount(); i++) {
-		FPLGRAPH g{ FPLGM_TEXT, g_plot.GetGraphId(i) };
+		FPLGRAPH g{ FPLGM_TEXT | FPLGM_LABEL, g_plot.GetGraphId(i) };
 		g_plot.GetGraph(g);
 		if (i)
 			lines += L"\r\n";
-		lines += g.pszText;
+		// a range line is kept as an empty graph's label
+		lines += *g.pszText || !g.pszLabel ? g.pszText : g.pszLabel;
 	}
 	g_autoParams.clear();
+	g_rangedParams.clear();
 	for (int i = 0; i < g_plot.GetParameterCount(); i++) {
 		FPLPARAM p{};
 		g_plot.GetParameterAt(i, p);
