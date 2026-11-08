@@ -163,13 +163,9 @@ void AddOpen(ID2D1GeometrySink* sink, const FplPolyline& line, std::vector<D2D1_
 
 // An arrow: its shaft and a head of two strokes.
 void AddArrow(ID2D1GeometrySink* sink, const FplArrow& a, std::vector<D2D1_POINT_2F>& points) {
-	double len = std::hypot(a.to.x - a.from.x, a.to.y - a.from.y);
-	if (len <= 0)
+	FplPoint l, r;
+	if (!FplArrowHead(a, l, r))
 		return;
-	double ux = (a.to.x - a.from.x) / len, uy = (a.to.y - a.from.y) / len, head = std::min(7.0, 0.35 * len);
-	const double c = std::cos(0.45), sn = std::sin(0.45);
-	FplPoint l = { a.to.x - head * (ux * c - uy * sn), a.to.y - head * (uy * c + ux * sn) };
-	FplPoint r = { a.to.x - head * (ux * c + uy * sn), a.to.y - head * (uy * c - ux * sn) };
 	AddOpen(sink, { a.from, a.to }, points);
 	AddOpen(sink, { l, a.to, r }, points);
 }
@@ -453,7 +449,27 @@ void CFunctionPlotCtrl::PaintGrid() {
 
 	FplTicks tx = FplMakeTicksX(v, 90, (style & FPLS_PITICKS) != 0);
 	FplTicks ty = FplMakeTicksY(v, 60);
-	if (!(style & FPLS_NOGRID)) {
+	// circles and spokes: antialiased, as they're rarely on a pixel's middle
+	const FplPolarGrid polar = (style & FPLS_POLARGRID) ? FplMakePolarGrid(v) : FplPolarGrid{};
+	if (!(style & FPLS_NOGRID) && !polar.Empty()) {
+		std::vector<D2D1_POINT_2F> points;
+		auto draw = [&](const std::vector<FplPolyline>& rings, const std::vector<FplPolyline>& spokes, COLORREF color) {
+			ComPtr<ID2D1PathGeometry> path;
+			ComPtr<ID2D1GeometrySink> sink;
+			if (FAILED(FplD2DFactory()->CreatePathGeometry(path.GetAddressOf())) || FAILED(path->Open(sink.GetAddressOf())))
+				return;
+			for (auto& line : rings)
+				AddOpen(sink.Get(), line, points);
+			for (auto& line : spokes)
+				AddOpen(sink.Get(), line, points);
+			sink->Close();
+			rt->DrawGeometry(path.Get(), s.Brush(color), pixel);
+		};
+		if (c.crGridMinor != c.crBack)
+			draw(polar.minorRings, polar.minorSpokes, c.crGridMinor);
+		draw(polar.majorRings, polar.majorSpokes, c.crGrid);
+	}
+	else if (!(style & FPLS_NOGRID)) {
 		auto* minor = s.Brush(c.crGridMinor);
 		auto* major = s.Brush(c.crGrid);
 		rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
@@ -514,6 +530,21 @@ void CFunctionPlotCtrl::PaintLabels() {
 		Text(rt, text, format, rc, s.Brush(c.crLabel));
 	};
 	const float labelHeight = 16;
+	const FplPolarGrid polar = (style & FPLS_POLARGRID) ? FplMakePolarGrid(v) : FplPolarGrid{};
+	if (!polar.Empty()) {
+		for (auto& l : polar.radiusLabels) {
+			const float lx = (float)l.at.x, top = (float)l.at.y + 3;
+			label(FplFormatTick(l.value, polar.radii), s.labelCenter.Get(), { lx - 60, top, lx + 60, top + labelHeight });
+		}
+		for (auto& l : polar.angleLabels) {
+			const float lx = (float)l.at.x, mid = (float)l.at.y;
+			label(FplFormatAngle(l.value, (style & FPLS_PITICKS) != 0), s.labelCenter.Get(), { lx - 60, mid - 9, lx + 60, mid + 9 });
+		}
+		if (xAxis && yAxis)
+			label(L"0", s.labelRight.Get(), { ax - 40, ay + 3, ax - 5, ay + 3 + labelHeight });
+		patch->SetOpacity(1);
+		return;
+	}
 	// x labels under the axis (above it at the bottom)
 	float ly = std::clamp(ay + 3, 2.0f, h - labelHeight - 2);
 	for (double x : tx.major) {
@@ -1017,6 +1048,7 @@ bool CFunctionPlotCtrl::Ensure3D() {
 	if (!s.renderer.Ready()) {
 		s.gpu.clear();
 		s.gpuFills.clear();
+		s.gpuFields.clear();
 		s.boxEdges = s.floorGrid = {};
 		s.brushes.clear();
 		if (!s.renderer.Init(s.view3D, s.client.cx, s.client.cy, (float)s.dpi))
@@ -1034,9 +1066,11 @@ void CFunctionPlotCtrl::Upload3D() {
 	s.gpuStale = false;
 	s.gpu.assign(s.plot.graphs.size(), {});
 	s.gpuFills.assign(s.plot.graphs.size(), {});
+	s.gpuFields.assign(s.plot.graphs.size(), {});
 	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
 		s.gpu[i] = s.renderer.Create(s.plot.graphs[i].mesh);
 		s.gpuFills[i] = s.renderer.Create(s.plot.graphs[i].fillMesh);
+		s.gpuFields[i] = s.renderer.Create(s.plot.graphs[i].fieldMesh);
 	}
 	s.boxEdges = s.renderer.Create(FplBoxEdges());
 	// the floor's grid at the x and y ticks
@@ -1120,7 +1154,8 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 	};
 	for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpuFills.size(); i++) {
 		auto& g = s.plot.graphs[i];
-		translucent = translucent || (g.Drawable() && s.gpuFills[i] && fillOpacity(g) > 0);
+		translucent = translucent || (g.Drawable() && s.gpuFills[i] && fillOpacity(g) > 0) ||
+			(g.Drawable() && i < s.gpuFields.size() && s.gpuFields[i] && g.opacity > 0);
 	}
 	if (translucent && r.BeginTranslucent()) {
 		for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpu.size(); i++) {
@@ -1133,6 +1168,13 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 				fill.clip = true;
 				fill.unlit = true;
 				r.DrawTranslucent(s.gpuFills[i], fill, fillOpacity(g));
+			}
+			if (g.Drawable() && i < s.gpuFields.size() && s.gpuFields[i] && g.opacity > 0) {
+				FplDrawStyle field;
+				field.color = GraphColor((int)i);
+				field.clip = true;
+				field.unlit = true;
+				r.DrawTranslucent(s.gpuFields[i], field, g.opacity * g.fieldOpacity);
 			}
 		}
 		r.EndTranslucent();
@@ -1158,6 +1200,7 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		r.Reset();
 		s.gpu.clear();
 		s.gpuFills.clear();
+		s.gpuFields.clear();
 		s.brushes.clear();
 		Invalidate();
 	}
@@ -1182,7 +1225,8 @@ void CFunctionPlotCtrl::PaintPoints3D() {
 				continue;
 			const FplVec3 c = s.box.ToBox(points[k]);
 			FplPoint on;
-			if (!(std::abs(c.x) <= 1 && std::abs(c.y) <= 1 && std::abs(c.z) <= 1) || !s.camera.Project(c, w, h, on))
+			if (!(std::abs(c.x) <= 1 && std::abs(c.y) <= 1 && std::abs(c.z) <= 1) || !s.camera.Project(c, w, h, on) ||
+				s.plot.HiddenBySurface((int)i, c, s.camera, w, h))
 				continue;
 			const bool hot = (int)i == s.hotPoint && (int)k == s.hotPointIndex;
 			auto* brush = s.Brush(GraphColor((int)i));

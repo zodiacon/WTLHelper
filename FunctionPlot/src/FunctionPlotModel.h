@@ -88,6 +88,33 @@ FplTicks FplMakeTicksY(const FplViewport& view, double minSpacing);
 // 1e-4; on a log axis "0.01" to "1000", else 10 with a superscript power.
 std::wstring FplFormatTick(double value, const FplTicks& ticks);
 
+struct FplArrow {
+	FplPoint from, to;					// screen coordinates
+	double magnitude = 0;
+};
+
+// A grid of circles around the origin and lines out from it, in screen coordinates and cut to the view. A circle is lines
+// rather than an ellipse, as one can be many screens across when zoomed in.
+struct FplPolarLabel {
+	FplPoint at;					// its middle, on the screen
+	double value = 0;				// a radius, or an angle in radians
+};
+struct FplPolarGrid {
+	FplTicks radii;					// the circles' (their labels' format)
+	double angleStep = 0;			// radians between the major spokes
+	std::vector<FplPolyline> majorRings, minorRings, majorSpokes, minorSpokes;
+	std::vector<FplPolarLabel> radiusLabels, angleLabels;
+	bool Empty() const { return majorRings.empty() && majorSpokes.empty(); }
+};
+// Circles at least minSpacing DIPs apart, 12 or so spokes over the angles in view (every 30 degrees with the origin in
+// view, closer as the view sees less of the circle). Nothing on a log axis, where circles aren't.
+FplPolarGrid FplMakePolarGrid(const FplViewport& view, double minSpacing = 70);
+// An angle's label, in [0, 360): "30" with a degree sign, or with pi "5pi/6" (U+03C0) when it's a whole number of degrees.
+std::wstring FplFormatAngle(double radians, bool pi = false);
+
+// The two strokes of an arrow's head; false if it has no length.
+bool FplArrowHead(const FplArrow& arrow, FplPoint& left, FplPoint& right);
+
 // ---- Sampling --------------------------------------------------------------------------------------------------------
 
 struct FplSampleOptions {
@@ -165,11 +192,6 @@ std::vector<FplContour> FplSampleContours(const std::function<double(double, dou
 
 // A field's arrow, centered on its grid point, as long as its magnitude against the field's largest (the 95th
 // percentile), but never shorter than a fifth of the longest so its direction shows.
-struct FplArrow {
-	FplPoint from, to;					// screen coordinates
-	double magnitude = 0;
-};
-
 // Arrows at the plane's points a nice step apart (at least options.arrowSpacing DIPs), so they stay put as the view
 // pans; field(x, y) gives the vector (NaN: none there).
 std::vector<FplArrow> FplSampleField(const std::function<FplPoint(double, double)>& field, const FplViewport& view,

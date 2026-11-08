@@ -74,6 +74,7 @@ LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	DiscardTarget();
 	m_State->gpu.clear();
 	m_State->gpuFills.clear();
+	m_State->gpuFields.clear();
 	m_State->boxEdges = m_State->floorGrid = {};
 	m_State->renderer.Reset();
 	if (m_State->view3D) {
@@ -797,6 +798,7 @@ BOOL CFunctionPlotCtrl::SetMode(FPLMODE mode) {
 	else {
 		s.gpu.clear();
 		s.gpuFills.clear();
+		s.gpuFields.clear();
 		s.boxEdges = s.floorGrid = {};
 		s.renderer.Reset();
 		if (s.view3D) {
@@ -1577,6 +1579,7 @@ std::string CFunctionPlotCtrl::BuildSvg() {
 	svg.showGrid = !(style & FPLS_NOGRID);
 	svg.showAxes = !(style & FPLS_NOAXES);
 	svg.piTicks = (style & FPLS_PITICKS) != 0;
+	svg.polarGrid = (style & FPLS_POLARGRID) != 0;
 	svg.showLegend = !(style & FPLS_NOLEGEND) && !s.collapsed;
 	svg.axisTitles[0] = s.axisTitles[0];
 	svg.axisTitles[1] = s.axisTitles[1];

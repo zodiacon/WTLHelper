@@ -336,3 +336,189 @@ std::wstring FplFormatTick(double value, const FplTicks& ticks) {
 		s = m + wchar_t(0x00D7) + L"10";
 	return s + Superscript(e);
 }
+
+namespace {
+
+// The nice angle at least this big, in degrees, at most 30.
+double NiceAngle(double degrees) {
+	if (degrees >= 15)
+		return 30;
+	if (degrees >= 10)
+		return 15;
+	const double power = std::pow(10.0, std::floor(std::log10(degrees)));
+	const double m = degrees / power;
+	return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * power;
+}
+
+// How far a ray from the point goes before it leaves the view.
+double RoomAlong(FplPoint from, double dx, double dy, double width, double height) {
+	double room = 1e300;
+	if (dx > 0)
+		room = std::min(room, (width - from.x) / dx);
+	else if (dx < 0)
+		room = std::min(room, -from.x / dx);
+	if (dy > 0)
+		room = std::min(room, (height - from.y) / dy);
+	else if (dy < 0)
+		room = std::min(room, -from.y / dy);
+	return std::max(room, 0.0);
+}
+
+}  // namespace
+
+FplPolarGrid FplMakePolarGrid(const FplViewport& view, double minSpacing) {
+	FplPolarGrid grid;
+	if (!view.Valid() || view.logX || view.logY)
+		return grid;
+	const double Tau = 2 * std::numbers::pi;
+	const double w = view.width, h = view.height;
+	const double sx = view.ScaleX(), sy = view.ScaleY();
+	const double corners[4][2] = { { view.xMin, view.yMin }, { view.xMax, view.yMin }, { view.xMax, view.yMax }, { view.xMin, view.yMax } };
+	double rMax = 0;
+	for (auto& c : corners)
+		rMax = std::max(rMax, std::hypot(c[0], c[1]));
+	const double outX = std::max({ view.xMin, -view.xMax, 0.0 }), outY = std::max({ view.yMin, -view.yMax, 0.0 });
+	const double rMin = std::hypot(outX, outY);
+	const bool originInView = rMin == 0;
+	if (!(rMax > rMin))
+		return grid;
+
+	// the angles in view, around the view's middle's as seen from the origin
+	double from = 0, to = Tau;
+	if (!originInView) {
+		const double middle = std::atan2((view.yMin + view.yMax) / 2, (view.xMin + view.xMax) / 2);
+		double lo = 0, hi = 0;
+		for (auto& c : corners) {
+			double a = std::atan2(c[1], c[0]) - middle;
+			a = std::remainder(a, Tau);
+			lo = std::min(lo, a);
+			hi = std::max(hi, a);
+		}
+		from = middle + lo;
+		to = middle + hi;
+	}
+
+	const double dips = std::min(sx, sy);
+	grid.radii = FplMakeTicks(rMin, rMax, (rMax - rMin) * dips, minSpacing);
+	auto toScreen = [&](double r, double angle) -> FplPoint {
+		return { view.ToScreenX(r * std::cos(angle)), view.ToScreenY(r * std::sin(angle)) };
+	};
+	auto rings = [&](const std::vector<double>& radii, std::vector<FplPolyline>& out) {
+		for (double r : radii) {
+			if (r <= 0)
+				continue;
+			// chords off the circle by at most a tenth of a DIP
+			const double big = r * std::max(sx, sy);
+			const double step = std::min(std::sqrt(0.8 / big), Tau / 32);
+			const int n = std::clamp(static_cast<int>(std::ceil((to - from) / step)), 2, 4096);
+			FplPolyline line;
+			line.reserve(n + 1);
+			for (int i = 0; i <= n; i++)
+				line.push_back(toScreen(r, from + (to - from) * i / n));
+			auto cut = FplClip({ line }, 0, 0, w, h);
+			out.insert(out.end(), std::make_move_iterator(cut.begin()), std::make_move_iterator(cut.end()));
+		}
+	};
+	rings(grid.radii.major, grid.majorRings);
+	rings(grid.radii.minor, grid.minorRings);
+
+	// the spokes: the minor ones only where they aren't crowded
+	const double degrees = NiceAngle((to - from) * 180 / std::numbers::pi / 12);
+	grid.angleStep = degrees * std::numbers::pi / 180;
+	const double minorFrom = std::max(rMin, 24 / (grid.angleStep / 2) / dips);
+	const long long first = static_cast<long long>(std::ceil(from / grid.angleStep - 1e-9));
+	const long long last = static_cast<long long>(std::floor(to / grid.angleStep + 1e-9)) - (originInView ? 1 : 0);
+	for (long long k = first - 1; k <= last; k++) {
+		const double angle = k * grid.angleStep;
+		if (k >= first) {
+			auto cut = FplClip({ { toScreen(rMin, angle), toScreen(rMax, angle) } }, 0, 0, w, h);
+			if (!cut.empty() && cut[0].size() >= 2) {
+				// its label, in from where it leaves the view
+				const FplPoint a = cut[0].front(), b = cut[0].back();
+				const double len = std::hypot(b.x - a.x, b.y - a.y);
+				const FplPoint origin = toScreen(0, 0);
+				const bool bFar = std::hypot(b.x - origin.x, b.y - origin.y) >= std::hypot(a.x - origin.x, a.y - origin.y);
+				const FplPoint end = bFar ? b : a, start = bFar ? a : b;
+				// far enough in for a label's text to fit, whichever edge it's near
+				for (double d = 12; d < len - 12; d += 4) {
+					const FplPoint at = { end.x + (start.x - end.x) / len * d, end.y + (start.y - end.y) / len * d };
+					if (at.x >= 28 && at.x <= w - 28 && at.y >= 11 && at.y <= h - 11) {
+						double normal = std::fmod(angle, Tau);
+						grid.angleLabels.push_back({ at, normal < 0 ? normal + Tau : normal });
+						break;
+					}
+				}
+				grid.majorSpokes.push_back(cut[0]);
+			}
+		}
+		const double half = (k + 0.5) * grid.angleStep;
+		if (half >= from && half <= to && minorFrom < rMax) {
+			auto cut = FplClip({ { toScreen(minorFrom, half), toScreen(rMax, half) } }, 0, 0, w, h);
+			if (!cut.empty() && cut[0].size() >= 2)
+				grid.minorSpokes.push_back(cut[0]);
+		}
+	}
+
+	// the radii along a direction with room: the positive x axis if it's in view for long enough
+	double labelAngle = (from + to) / 2;
+	if (originInView) {
+		const FplPoint origin = toScreen(0, 0);
+		const double room[4] = { RoomAlong(origin, 1, 0, w, h), RoomAlong(origin, 0, -1, w, h), RoomAlong(origin, -1, 0, w, h), RoomAlong(origin, 0, 1, w, h) };
+		const double most = *std::max_element(room, room + 4);
+		for (int i = 0; i < 4; i++)
+			if (room[i] >= 0.6 * most) {
+				labelAngle = i * std::numbers::pi / 2;
+				break;
+			}
+	}
+	for (double r : grid.radii.major) {
+		if (r <= 0)
+			continue;
+		const FplPoint at = toScreen(r, labelAngle);
+		if (at.x >= 12 && at.x <= w - 12 && at.y >= 10 && at.y <= h - 10)
+			grid.radiusLabels.push_back({ at, r });
+	}
+	return grid;
+}
+
+std::wstring FplFormatAngle(double radians, bool pi) {
+	const double Tau = 2 * std::numbers::pi;
+	double a = std::fmod(radians, Tau);
+	if (a < 0)
+		a += Tau;
+	if (pi) {
+		// whole degrees are fractions of pi
+		const long long degrees = std::llround(a / (std::numbers::pi / 180));
+		if (std::abs(a - degrees * std::numbers::pi / 180) < 1e-9) {
+			if (degrees == 0 || degrees == 360)
+				return L"0";
+			const long long d = std::gcd(degrees, 180LL);
+			const long long num = degrees / d, den = 180 / d;
+			std::wstring s = num == 1 ? L"" : std::to_wstring(num);
+			s += wchar_t(0x03C0);
+			if (den != 1)
+				s += L"/" + std::to_wstring(den);
+			return s;
+		}
+	}
+	double value = pi ? a : a * 180 / std::numbers::pi;
+	if (!pi && std::abs(value - 360) < 1e-9)
+		value = 0;
+	wchar_t text[32];
+	swprintf_s(text, L"%.6g", std::round(value * 1e6) / 1e6);
+	std::wstring s = text;
+	if (!pi)
+		s += wchar_t(0x00B0);
+	return s;
+}
+
+bool FplArrowHead(const FplArrow& a, FplPoint& left, FplPoint& right) {
+	const double len = std::hypot(a.to.x - a.from.x, a.to.y - a.from.y);
+	if (!(len > 0))
+		return false;
+	const double ux = (a.to.x - a.from.x) / len, uy = (a.to.y - a.from.y) / len, head = std::min(7.0, 0.35 * len);
+	const double c = std::cos(0.45), s = std::sin(0.45);
+	left = { a.to.x - head * (ux * c - uy * s), a.to.y - head * (uy * c + ux * s) };
+	right = { a.to.x - head * (ux * c + uy * s), a.to.y - head * (uy * c - ux * s) };
+	return true;
+}

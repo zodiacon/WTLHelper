@@ -85,11 +85,12 @@ enum {
 	ID_DEMO_LOGY,
 	ID_DEMO_COPY,
 	ID_DEMO_PRINT,
+	ID_DEMO_POLARGRID,
 };
 
 // ---- Examples -------------------------------------------------------------------
 
-enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode, Glass, Lorenz };
+enum class Setup { None, FieldSlider, Animate, Bounds, Data, Styles, Log, Ode, Glass, Lorenz, Polar };
 
 struct Example {
 	const wchar_t* name;
@@ -117,6 +118,7 @@ static const Example g_Examples[] = {
 	{ L"D&ata and Regression", L"(x1, y1)\r\ny1 ~ a e^(k x1)\r\ny = a e^(k x)\r\ny = mean(y1)", false, false,
 		Setup::Data },
 	{ L"&Lists", L"L = [1, 2, 3, 4, 5]\r\ny = 3sin(x L/2)/L\r\n(L, mean(L))", false },
+	{ L"Polar Gri&d", L"r = 2 + 4cos 5\x03B8\r\nr = 6\r\nr < 3sin 2\x03B8\r\nr = \x03B8/2", true, false, Setup::Polar },
 	{ L"In&tersections", L"x^2 + y^2 = 16\r\nr = 2 + 2cos \x03B8\r\n(4cos t + 1, 2sin t)\r\nx = y^2/2 - 3\r\ny = x/2\r\ny' = -y/2, y(-6) = 5", false },
 	{ L"&ODEs and Slope Fields", L"y' = x - y, y(0) = -2, y(a) = b, y(-3) = 4", false, false, Setup::Ode },
 	{ L"Second-Order OD&Es", L"y'' = -y - y'/4, y(0) = a, y'(0) = 0, y(0) = -3, y'(0) = 3", false },
@@ -137,6 +139,7 @@ static const Example g_Examples[] = {
 		L"x^2 + y^2 - z^2/4 = 1", false, true },
 	{ L"3D: &Gyroid", L"sin(x/2)cos(y/2) + sin(y/2)cos(z/2) + sin(z/2)cos(x/2) = 0", false, true },
 	{ L"3D: See-&Through", L"x^2 + y^2 + z^2 = 36\r\nz = (x^2 - y^2)/12\r\n((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(5cos 4t, 5sin 4t, 3t - 9)", false, true, Setup::Glass },
+	{ L"3D: Fields on the Plane", L"(y, -x)\r\ny' = x - y, y(-6) = 4\r\nz = -7 - (x^2 + y^2)/30", false, true },
 	{ L"3D: Points and &Regions", L"(a, b, c)\r\nx^2 + y^2 < 25\r\nx^2/4 - 8 < y < -x^2/8 - 1\r\ny = 3sin x\r\nx' = -y + z/10, y' = x, z' = -z/4, (d, 0, 7)", false, true },
 	{ L"3D: &Lorenz Attractor", L"x' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1, 1, 20)\r\nx' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1.01, 1, 20)", false, true, Setup::Lorenz },
 	{ L"3D: Animated &Wave", L"z = 3sin(sqrt(x^2 + y^2) - 2p)/(1 + sqrt(x^2 + y^2)/4)", false, true, Setup::Animate },
@@ -567,6 +570,13 @@ static void LoadExample(int index) {
 	}
 	DWORD style = g_plot.GetStyle();
 	g_plot.SetWindowLong(GWL_STYLE, e.piTicks ? style | FPLS_PITICKS : style & ~FPLS_PITICKS);
+	// on for the example that shows it, off again after it
+	static bool polarGrid = false;
+	if (e.setup == Setup::Polar || polarGrid) {
+		polarGrid = e.setup == Setup::Polar;
+		const DWORD now = g_plot.GetStyle();
+		g_plot.SetWindowLong(GWL_STYLE, polarGrid ? now | FPLS_POLARGRID : now & ~FPLS_POLARGRID);
+	}
 	g_plot.SetMode(e.is3D ? FPLM_3D : FPLM_2D);
 	if (e.is3D)
 		g_plot.ResetView3D();
@@ -632,6 +642,7 @@ static void UpdateMenu(HMENU menu) {
 	auto check = [&](UINT id, bool on) { ::CheckMenuItem(menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED)); };
 	check(ID_DEMO_EQUAL, s & FPLS_EQUALSCALE);
 	check(ID_DEMO_PITICKS, s & FPLS_PITICKS);
+	check(ID_DEMO_POLARGRID, s & FPLS_POLARGRID);
 	check(ID_DEMO_DEGREES, g_plot.GetDegrees() != FALSE);
 	check(ID_DEMO_LEGEND, !(s & FPLS_NOLEGEND));
 	check(ID_DEMO_SLIDERS, !(s & FPLS_NOSLIDERS));
@@ -853,6 +864,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_ZOOMOUT: g_plot.Zoom(1 / 1.5); ShowView(); break;
 		case ID_DEMO_EQUAL: ToggleStyle(FPLS_EQUALSCALE); ShowView(); break;
 		case ID_DEMO_PITICKS: ToggleStyle(FPLS_PITICKS); break;
+		case ID_DEMO_POLARGRID: ToggleStyle(FPLS_POLARGRID); break;
 		case ID_DEMO_DEGREES: g_plot.SetDegrees(!g_plot.GetDegrees()); break;
 		case ID_DEMO_LEGEND: ToggleStyle(FPLS_NOLEGEND); break;
 		case ID_DEMO_SLIDERS: ToggleStyle(FPLS_NOSLIDERS); break;
@@ -1212,6 +1224,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_GRID, L"&Grid");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AXES, L"A&xes");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_PITICKS, L"&Pi Ticks");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_POLARGRID, L"Pola&r Grid");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TRACE, L"&Tracing");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_TANGENT, L"Ta&ngent Line");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_DEGREES, L"&Degrees");

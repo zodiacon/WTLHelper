@@ -35,6 +35,7 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLS_PITICKS       0x0080   // the x axis in multiples of pi
 #define FPLS_TANGENT       0x0100   // the tangent at a traced point of a function, and its slope
 #define FPLS_NOCOLORSCALE  0x0200   // no color scale beside a heat map
+#define FPLS_POLARGRID     0x0400   // circles and spokes for the grid, labeled by radius and angle (not on log axes, or in 3D)
 
 // ---- Graphs -------------------------------------------------------------------
 

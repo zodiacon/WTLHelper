@@ -740,3 +740,33 @@ bool FplDragUpright(FplVec3 origin, FplVec3 dir, const FplBox3& box, double x, d
 	z = box.ToSpace({ base.x, base.y, cube }).z;
 	return true;
 }
+
+FplMesh FplFlatSegments(const std::vector<std::pair<FplPoint, FplPoint>>& segments, const FplBox3& box, float halfWidth) {
+	FplMesh mesh;
+	if (!box.Valid())
+		return mesh;
+	mesh.vertices.reserve(segments.size() * 4);
+	mesh.indices.reserve(segments.size() * 6);
+	for (auto& [from, to] : segments) {
+		if (!std::isfinite(from.x) || !std::isfinite(from.y) || !std::isfinite(to.x) || !std::isfinite(to.y))
+			continue;
+		const FplVec3 a = box.ToBox(from.x, from.y, 0), b = box.ToBox(to.x, to.y, 0);
+		const float dx = b.x - a.x, dy = b.y - a.y, len = std::sqrt(dx * dx + dy * dy);
+		if (!(len > 0))
+			continue;
+		// across it, and a little past its ends, as a round cap would be
+		const float ux = dx / len * halfWidth, uy = dy / len * halfWidth;
+		const uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
+		const FplVec3 corners[4] = { { a.x - ux + uy, a.y - uy - ux, a.z }, { a.x - ux - uy, a.y - uy + ux, a.z },
+			{ b.x + ux - uy, b.y + uy + ux, b.z }, { b.x + ux + uy, b.y + uy - ux, b.z } };
+		for (auto& c : corners) {
+			FplVertex3 v;
+			v.pos = c;
+			v.normal = { 0, 0, 1 };
+			v.value = std::clamp((c.z + 1) / 2, 0.0f, 1.0f);
+			mesh.vertices.push_back(v);
+		}
+		mesh.indices.insert(mesh.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+	}
+	return mesh;
+}

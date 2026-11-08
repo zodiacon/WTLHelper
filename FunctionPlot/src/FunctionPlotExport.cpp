@@ -106,7 +106,21 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 		if (!d.empty())
 			svg += "<path d=\"" + d + "\" stroke=\"" + Color(color) + "\" stroke-width=\"1\" fill=\"none\"/>\n";
 	};
-	if (style.showGrid) {
+	const FplPolarGrid polar = style.polarGrid ? FplMakePolarGrid(view) : FplPolarGrid{};
+	auto polarPath = [&](const std::vector<FplPolyline>& rings, const std::vector<FplPolyline>& spokes, uint32_t color) {
+		std::string d;
+		for (auto& line : rings)
+			AddPolyline(d, line, false);
+		for (auto& line : spokes)
+			AddPolyline(d, line, false);
+		if (!d.empty())
+			svg += "<path d=\"" + d + "\" stroke=\"" + Color(color) + "\" stroke-width=\"1\" fill=\"none\"/>\n";
+	};
+	if (style.showGrid && !polar.Empty()) {
+		polarPath(polar.minorRings, polar.minorSpokes, style.gridMinor);
+		polarPath(polar.majorRings, polar.majorSpokes, style.grid);
+	}
+	else if (style.showGrid) {
 		gridPath(tx.minor, ty.minor, style.gridMinor);
 		gridPath(tx.major, ty.major, style.grid);
 	}
@@ -178,13 +192,9 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 		if (!g.geometry.arrows.empty()) {
 			std::string d;
 			for (auto& a : g.geometry.arrows) {
-				double len = std::hypot(a.to.x - a.from.x, a.to.y - a.from.y);
-				if (len <= 0)
+				FplPoint l, r;
+				if (!FplArrowHead(a, l, r))
 					continue;
-				double ux = (a.to.x - a.from.x) / len, uy = (a.to.y - a.from.y) / len, head = std::min(7.0, 0.35 * len);
-				const double c = std::cos(0.45), s = std::sin(0.45);
-				FplPoint l = { a.to.x - head * (ux * c - uy * s), a.to.y - head * (uy * c + ux * s) };
-				FplPoint r = { a.to.x - head * (ux * c + uy * s), a.to.y - head * (uy * c - ux * s) };
 				AddPolyline(d, { a.from, a.to }, false);
 				AddPolyline(d, { l, a.to, r }, false);
 			}
@@ -205,7 +215,15 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 	}
 
 	// the ticks' numbers
-	if (style.showAxes) {
+	if (style.showAxes && !polar.Empty()) {
+		for (auto& l : polar.radiusLabels)
+			Text(svg, l.at.x, l.at.y + 11, "middle", style.label, 12, FplFormatTick(l.value, polar.radii));
+		for (auto& l : polar.angleLabels)
+			Text(svg, l.at.x, l.at.y + 4, "middle", style.label, 12, FplFormatAngle(l.value, style.piTicks));
+		if (xAxis && yAxis)
+			Text(svg, ax - 5, ay + 11, "end", style.label, 12, L"0");
+	}
+	else if (style.showAxes) {
 		const double ly = std::clamp(ay + 11, 10.0, h - 10);
 		for (double x : tx.major) {
 			double sx = view.ToScreenX(x);

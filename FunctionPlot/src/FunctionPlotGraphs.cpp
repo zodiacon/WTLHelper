@@ -592,6 +592,30 @@ std::vector<FplPoint3> FplPlot::Points3D(int graph) const {
 	return points;
 }
 
+bool FplPlot::HiddenBySurface(int graph, FplVec3 place, const FplCamera& camera, float width, float height) const {
+	FplPoint on;
+	if (!camera.Project(place, width, height, on))
+		return false;
+	FplVec3 origin, dir;
+	camera.Ray(on, width, height, origin, dir);
+	const float dx = place.x - origin.x, dy = place.y - origin.y, dz = place.z - origin.z;
+	const float along = (dx * dir.x + dy * dir.y + dz * dir.z) / (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+	// a point's sphere is about 0.02 across its middle, and one can sit right on the surface
+	const float margin = 0.04f;
+	for (size_t j = 0; j < graphs.size(); j++) {
+		auto& other = graphs[j];
+		if (static_cast<int>(j) == graph || !other.Drawable() || other.opacity < 1 || other.mesh.Empty())
+			continue;
+		const FplKind kind = other.expr.kind;
+		if (kind != FplKind::Surface && kind != FplKind::ParametricSurface && kind != FplKind::ImplicitSurface)
+			continue;
+		float t;
+		if (FplIntersect(other.mesh, origin, dir, t) && t < along - margin)
+			return true;
+	}
+	return false;
+}
+
 int FplPlot::DraggableAt3D(FplPoint screen, const FplCamera& camera, const FplBox3& box, float width, float height,
 	double maxDistance, int* point) const {
 	int best = -1;
@@ -612,7 +636,8 @@ int FplPlot::DraggableAt3D(FplPoint screen, const FplCamera& camera, const FplBo
 			if (!camera.Project(c, width, height, on))
 				continue;
 			const double d = std::hypot(on.x - screen.x, on.y - screen.y);
-			if (d <= bestD) {
+			// (last: it's the costly one)
+			if (d <= bestD && !HiddenBySurface(static_cast<int>(i), c, camera, width, height)) {
 				bestD = d;
 				best = static_cast<int>(i);
 				if (point)
@@ -811,14 +836,20 @@ void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 	auto& g = graphs[graph];
 	g.mesh = {};
 	g.fillMesh = {};
+	g.fieldMesh = {};
+	g.fieldOpacity = 1;
 	g.incomplete3D = false;
 	m_MeshIncomplete = false;
 	m_FillMesh = {};
+	m_FieldMesh = {};
+	m_FieldOpacity = 1;
 	if (!g.Drawable() || !box.Valid())
 		return;
 	if (!g.Listed()) {
 		g.mesh = Mesh3D(g, box, implicitCells);
 		g.fillMesh = std::move(m_FillMesh);
+		g.fieldMesh = std::move(m_FieldMesh);
+		g.fieldOpacity = m_FieldOpacity;
 		g.incomplete3D = m_MeshIncomplete;
 		return;
 	}
@@ -831,6 +862,8 @@ void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 	}
 	m_Slots = std::move(saved);
 	g.fillMesh = std::move(m_FillMesh);
+	g.fieldMesh = std::move(m_FieldMesh);
+	g.fieldOpacity = m_FieldOpacity;
 	g.incomplete3D = m_MeshIncomplete;
 }
 
@@ -869,6 +902,26 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 			for (auto& p : polygon)
 				p = plane.ToPlane(p);
 		FplAppend(m_FillMesh, FplFillMesh(polygons, box));
+	};
+	// a field's slopes or arrows: flat on the plane, as it says nothing of z
+	auto addField = [&](const FplGeometry& flat) {
+		std::vector<std::pair<FplPoint, FplPoint>> segments;
+		segments.reserve(flat.marks.size() + flat.arrows.size() * 3);
+		for (auto& m : flat.marks)
+			segments.push_back({ plane.ToPlane(m.from), plane.ToPlane(m.to) });
+		for (auto& a : flat.arrows) {
+			FplPoint left, right;
+			if (!FplArrowHead(a, left, right))
+				continue;
+			const FplPoint tip = plane.ToPlane(a.to);
+			segments.push_back({ plane.ToPlane(a.from), tip });
+			segments.push_back({ plane.ToPlane(left), tip });
+			segments.push_back({ plane.ToPlane(right), tip });
+		}
+		if (segments.empty())
+			return;
+		FplAppend(m_FieldMesh, FplFlatSegments(segments, box, 0.3f * radius));
+		m_FieldOpacity = flat.lines.empty() ? (flat.marks.empty() ? 1.0f : 0.75f) : (flat.marks.empty() ? 0.45f : 0.4f);
 	};
 	// a function or polar curve's region, beside its curve's own tube
 	if ((e.kind == FplKind::Function || e.kind == FplKind::FunctionOfY || e.kind == FplKind::Polar) && e.rel != FplRel::Eq)
@@ -939,12 +992,13 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 			break;
 		// the 2D kinds that are curves or points, on the z = 0 plane
 		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem: case FplKind::Implicit:
-		case FplKind::Between: {
+		case FplKind::Between: case FplKind::VectorField: {
 			// their lines: an ODE's solutions, an implicit curve or a region's boundary, what's between two curves' sides;
-			// and fills. Slopes and arrows stay 2D's.
+			// fills; a field's slopes and arrows
 			FplGeometry flat = FplSample(e, m_Slots, plane, OptionsFor(static_cast<int>(&g - graphs.data()), {}));
 			m_MeshIncomplete = m_MeshIncomplete || flat.incomplete;
 			addFills(flat);
+			addField(flat);
 			std::vector<std::vector<FplVec3>> lines;
 			lines.reserve(flat.lines.size());
 			for (auto& line : flat.lines) {

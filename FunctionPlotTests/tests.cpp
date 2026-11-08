@@ -4744,6 +4744,271 @@ TEST(Substitutions) {
 	CHECK(!FplBuild(L"z(x) = x", none).error);			// z times x, a surface in 3D
 }
 
+TEST(PolarGrid) {
+	auto within = [](const FplPolyline& line, const FplViewport& v) {
+		for (auto& p : line)
+			if (p.x < -1e-6 || p.y < -1e-6 || p.x > v.width + 1e-6 || p.y > v.height + 1e-6)
+				return false;
+		return true;
+	};
+	// the origin in view: whole circles, 12 spokes and their labels at 30 degrees
+	FplViewport v = View(-10, 10, -10, 10, 800, 800);
+	auto grid = FplMakePolarGrid(v);
+	CHECK(!grid.Empty());
+	CHECK_NEAR_TOL(grid.angleStep, Pi / 6, 1e-12);
+	CHECK_INT(grid.majorSpokes.size(), 12);
+	CHECK_INT(grid.minorSpokes.size(), 12);
+	CHECK_INT(grid.angleLabels.size(), 12);
+	CHECK(!grid.majorRings.empty());
+	CHECK(!grid.radiusLabels.empty());
+	// every point of a ring is on one of the radii, every point of a spoke on one of the angles
+	bool onRing = true, inView = true;
+	for (auto& line : grid.majorRings) {
+		inView = inView && within(line, v);
+		// (a piece cut at the view's edge ends on a chord, a tenth of a DIP off at most: 0.0025 here)
+		const double r = std::hypot(v.ToPlaneX(line[0].x), v.ToPlaneY(line[0].y));
+		for (auto& p : line)
+			onRing = onRing && std::abs(std::hypot(v.ToPlaneX(p.x), v.ToPlaneY(p.y)) - r) < 0.006;
+		bool known = false;
+		for (double tick : grid.radii.major)
+			known = known || std::abs(tick - r) < 0.006;
+		onRing = onRing && known;
+	}
+	CHECK(onRing);
+	CHECK(inView);
+	bool onSpoke = true;
+	for (auto& line : grid.majorSpokes) {
+		CHECK(within(line, v));
+		const double x = v.ToPlaneX(line.back().x), y = v.ToPlaneY(line.back().y);
+		const double k = std::atan2(y, x) / (Pi / 6);
+		onSpoke = onSpoke && std::abs(k - std::round(k)) < 1e-9;
+	}
+	CHECK(onSpoke);
+	// no more points than a smooth circle takes
+	for (auto& line : grid.majorRings)
+		CHECK(line.size() < 2000);
+	// and whole ones smooth: the smallest circle's is in one piece, its chords short
+	CHECK(grid.majorRings[0].size() >= 16);
+	// the radii on the positive x axis, all different and positive; the angles' labels all different
+	for (auto& l : grid.radiusLabels) {
+		CHECK(l.value > 0);
+		CHECK_NEAR_TOL(l.at.y, v.ToScreenY(0), 1e-9);
+		CHECK(l.at.x > v.ToScreenX(0));
+	}
+	std::vector<double> angles;
+	for (auto& l : grid.angleLabels) {
+		CHECK(l.value >= 0 && l.value < 2 * Pi);
+		CHECK(l.at.x >= 0 && l.at.x <= v.width && l.at.y >= 0 && l.at.y <= v.height);
+		angles.push_back(l.value);
+	}
+	std::sort(angles.begin(), angles.end());
+	CHECK(std::adjacent_find(angles.begin(), angles.end(), [](double a, double b) { return std::abs(a - b) < 1e-9; }) == angles.end());
+	// no labels off the panel: the positive x axis gone, another direction takes them
+	auto left = FplMakePolarGrid(View(-20, 1, -10, 10, 800, 800));
+	CHECK(!left.radiusLabels.empty());
+	for (auto& l : left.radiusLabels)
+		CHECK(l.at.x < 800);
+	CHECK_INT(left.majorSpokes.size(), 12);
+
+	// the origin out of view: part of the circles, and only the angles in view
+	FplViewport off = View(20, 30, 20, 30, 800, 800);
+	auto part = FplMakePolarGrid(off);
+	CHECK(!part.Empty());
+	CHECK(part.angleStep < Pi / 6);
+	CHECK(part.majorSpokes.size() >= 3);
+	CHECK(part.majorSpokes.size() <= 26);
+	for (auto& line : part.majorRings)
+		CHECK(within(line, off));
+	for (auto& line : part.majorSpokes) {
+		const double a = std::atan2(off.ToPlaneY(line[0].y), off.ToPlaneX(line[0].x));
+		CHECK(a > 0 && a < Pi / 2);
+		CHECK(within(line, off));
+	}
+	for (auto& l : part.radiusLabels)
+		CHECK(l.value >= std::hypot(20, 20) - 1e-9 && l.value <= std::hypot(30, 30) + 1e-9);
+	// far in, many screens across: still a handful of points, drawn right
+	FplViewport deep = View(1000, 1000.001, 1000, 1000.001, 800, 800);
+	auto zoomed = FplMakePolarGrid(deep);
+	CHECK(!zoomed.Empty());
+	size_t count = 0;
+	for (auto& line : zoomed.majorRings)
+		count += line.size();
+	CHECK(count < 4000);
+	// a view straddling an axis, with the origin off to one side
+	CHECK(!FplMakePolarGrid(View(-5, 5, 10, 20, 800, 800)).Empty());
+	CHECK(!FplMakePolarGrid(View(-20, -10, -5, 5, 800, 800)).Empty());
+	// different scales: ellipses on the screen, circles on the plane, and not crowded
+	FplViewport wide = View(-100, 100, -5, 5, 800, 800);
+	auto squeezed = FplMakePolarGrid(wide);
+	CHECK(!squeezed.Empty());
+	CHECK(squeezed.radii.major.size() < 30);
+	// nothing on log axes, or for no view
+	FplViewport log = View(1, 100, 1, 100, 800, 800);
+	log.logX = true;
+	CHECK(FplMakePolarGrid(log).Empty());
+	FplViewport none = v;
+	none.width = 0;
+	CHECK(FplMakePolarGrid(none).Empty());
+
+	// angles' labels
+	const std::wstring deg(1, wchar_t(0x00B0)), pi(1, wchar_t(0x03C0));
+	CHECK_STR(FplFormatAngle(0), L"0" + deg);
+	CHECK_STR(FplFormatAngle(Pi / 6), L"30" + deg);
+	CHECK_STR(FplFormatAngle(-Pi / 2), L"270" + deg);
+	CHECK_STR(FplFormatAngle(2 * Pi), L"0" + deg);
+	CHECK_STR(FplFormatAngle(0.5 * Pi / 180), L"0.5" + deg);
+	CHECK_STR(FplFormatAngle(0, true), L"0");
+	CHECK_STR(FplFormatAngle(Pi, true), pi);
+	CHECK_STR(FplFormatAngle(Pi / 6, true), pi + L"/6");
+	CHECK_STR(FplFormatAngle(5 * Pi / 6, true), L"5" + pi + L"/6");
+	CHECK_STR(FplFormatAngle(3 * Pi / 2, true), L"3" + pi + L"/2");
+	CHECK_STR(FplFormatAngle(2 * Pi, true), L"0");
+	CHECK_STR(FplFormatAngle(1.5, true), L"1.5");
+	CHECK_STR(FplFormatAngle(10 * Pi / 180, true), pi + L"/18");
+	CHECK_STR(FplFormatAngle(50 * Pi / 180, true), L"5" + pi + L"/18");
+	CHECK_STR(FplFormatAngle(-Pi / 6, true), L"11" + pi + L"/6");
+	// labels leave room for their text at every edge
+	for (auto& l : grid.angleLabels)
+		CHECK(l.at.x >= 28 && l.at.x <= 800 - 28 && l.at.y >= 11 && l.at.y <= 800 - 11);
+
+	// the SVG: the grid's own lines instead of straight ones, the angles labeled
+	auto plot = MakePlot({ L"r = 3" });
+	FplSvgStyle style;
+	style.graphColors = { 0xFF0000 };
+	plot.Sample(v);
+	const std::string square = FplWriteSvg(plot, v, style);
+	style.polarGrid = true;
+	const std::string round = FplWriteSvg(plot, v, style);
+	CHECK(round != square);
+	CHECK(round.find("\xC2\xB0") != std::string::npos);
+	CHECK(square.find("\xC2\xB0") == std::string::npos);
+	style.showGrid = false;
+	style.showAxes = false;
+	CHECK(FplWriteSvg(plot, v, style).find("\xC2\xB0") == std::string::npos);
+	style.showGrid = true;
+	style.showAxes = true;
+	style.piTicks = true;
+	CHECK(FplWriteSvg(plot, v, style).find("\xCF\x80/6") != std::string::npos);
+	// on log axes it stays the square one
+	style.piTicks = false;
+	const std::string logSquare = FplWriteSvg(plot, log, style);
+	CHECK(logSquare.find("\xC2\xB0") == std::string::npos);
+}
+
+TEST(Fields3D) {
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	// segments flat on the plane: as wide as asked, and around what was given
+	auto one = FplFlatSegments({ { { -5, 0 }, { 5, 0 } } }, box, 0.01f);
+	CHECK_INT(one.vertices.size(), 4);
+	CHECK_INT(one.indices.size(), 6);
+	float minX = 9, maxX = -9, minY = 9, maxY = -9;
+	for (auto& p : one.vertices) {
+		CHECK(std::abs(p.pos.z) < 1e-6f);
+		minX = std::min(minX, p.pos.x), maxX = std::max(maxX, p.pos.x);
+		minY = std::min(minY, p.pos.y), maxY = std::max(maxY, p.pos.y);
+	}
+	CHECK_NEAR_TOL(minX, -0.51, 1e-5);
+	CHECK_NEAR_TOL(maxX, 0.51, 1e-5);
+	CHECK_NEAR_TOL(minY, -0.01, 1e-5);
+	CHECK_NEAR_TOL(maxY, 0.01, 1e-5);
+	CHECK(FplFlatSegments({ { { 1, 1 }, { 1, 1 } }, { { NaN, 0 }, { 1, 1 } } }, box, 0.01f).Empty());
+	CHECK(FplFlatSegments({ { { 0, 0 }, { 1, 1 } } }, FplBox3{ 1, 1, 0, 1, 0, 1 }, 0.01f).Empty());
+	// the head's strokes end at the tip, on either side of the shaft
+	FplArrow arrow{ { 0, 0 }, { 10, 0 }, 1 };
+	FplPoint l, r;
+	CHECK(FplArrowHead(arrow, l, r));
+	CHECK(l.x < 10 && r.x < 10);
+	CHECK(l.y * r.y < 0);
+	CHECK(!FplArrowHead({ { 3, 3 }, { 3, 3 }, 0 }, l, r));
+
+	// each kind that has a field, alone and with solutions, fainter then; no pick, no tubes where there's nothing else
+	auto plot = MakePlot({ L"(y, -x)", L"y' = x", L"y' = x, y(0) = 1", L"x' = y, y' = -x", L"x' = y, y' = -x, (1, 2)",
+		L"x' = t, y' = 1, (1, 2)", L"y = x", L"z = x", L"(1, 2)" });
+	for (auto& g : plot.graphs)
+		CHECK(!g.expr.error);
+	plot.Build3D(box);
+	CHECK(!plot.graphs[0].fieldMesh.Empty());
+	CHECK(plot.graphs[0].mesh.Empty());
+	CHECK_NEAR(plot.graphs[0].fieldOpacity, 1.0f);
+	CHECK(!plot.graphs[1].fieldMesh.Empty());
+	CHECK(plot.graphs[1].mesh.Empty());
+	CHECK_NEAR(plot.graphs[1].fieldOpacity, 0.75f);
+	CHECK(!plot.graphs[2].fieldMesh.Empty());
+	CHECK(!plot.graphs[2].mesh.Empty());
+	CHECK_NEAR(plot.graphs[2].fieldOpacity, 0.4f);
+	CHECK(!plot.graphs[3].fieldMesh.Empty());
+	CHECK_NEAR(plot.graphs[3].fieldOpacity, 1.0f);
+	CHECK(!plot.graphs[4].fieldMesh.Empty());
+	CHECK_NEAR(plot.graphs[4].fieldOpacity, 0.45f);
+	CHECK(plot.graphs[5].fieldMesh.Empty());		// with t: true of one moment
+	CHECK(plot.graphs[6].fieldMesh.Empty());
+	CHECK(plot.graphs[7].fieldMesh.Empty());
+	CHECK(plot.graphs[8].fieldMesh.Empty());
+	// it's on the plane, and inside the box
+	bool flat = true;
+	for (auto& v : plot.graphs[0].fieldMesh.vertices)
+		flat = flat && std::abs(v.pos.z) < 1e-6f && std::abs(v.pos.x) < 1.2f && std::abs(v.pos.y) < 1.2f;
+	CHECK(flat);
+	// a field gives no trace: hovering goes to what's solid
+	FplCamera cam;
+	FplVec3 origin, dir;
+	cam.Ray({ 400, 300 }, 800, 600, origin, dir);
+	auto field = MakePlot({ L"(y, -x)" });
+	field.Build3D(box);
+	CHECK(!field.Pick3D(origin, dir, box));
+	// hidden, none; parameters move it; a listed one's together
+	field.graphs[0].flags |= FplGraphHidden;
+	field.Build3D(box);
+	CHECK(field.graphs[0].fieldMesh.Empty());
+	auto listed = MakePlot({ L"L = [1, 2]", L"(L y, -x)" });
+	auto single = MakePlot({ L"(y, -x)" });
+	listed.Build3D(box);
+	single.Build3D(box);
+	CHECK(listed.graphs[1].fieldMesh.indices.size() > single.graphs[0].fieldMesh.indices.size());
+}
+
+TEST(HiddenPoints3D) {
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	FplCamera cam;
+	const float w = 800, h = 600;
+	auto params = { Param(L"a", 0), Param(L"b", 0), Param(L"c", 1) };
+	auto screen = [&](FplPoint3 p) {
+		FplPoint s;
+		cam.Project(box.ToBox(p), w, h, s);
+		return s;
+	};
+	// the camera's above: a surface over the point hides it, one under it doesn't, nor does one it's on
+	auto plot = MakePlot({ L"(a, b, c)", L"z = 5" }, params);
+	plot.Build3D(box);
+	CHECK(plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
+	CHECK(!plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 8 }), cam, w, h));
+	CHECK(!plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 5 }), cam, w, h));
+	CHECK(!plot.HiddenBySurface(1, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));	// its own doesn't
+	CHECK_INT(plot.DraggableAt3D(screen({ 0, 0, 1 }), cam, box, w, h, 6), -1);
+	// from under it, the other way round
+	FplCamera under = cam;
+	under.pitch = -cam.pitch;
+	CHECK(!plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), under, w, h));
+	CHECK(plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 8 }), under, w, h));
+	// see-through or hidden surfaces don't count, and curves don't
+	plot.graphs[1].opacity = 0.5f;
+	CHECK(!plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
+	CHECK_INT(plot.DraggableAt3D(screen({ 0, 0, 1 }), cam, box, w, h, 6), 0);
+	plot.graphs[1].opacity = 1;
+	plot.graphs[1].flags |= FplGraphHidden;
+	CHECK(!plot.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
+	auto curve = MakePlot({ L"(a, b, c)", L"y = x", L"x^2 + y^2 = 4" }, params);
+	curve.Build3D(box);
+	CHECK(!curve.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
+	// any solid kind: a sphere around it, and parametric
+	auto ball = MakePlot({ L"(a, b, c)", L"x^2 + y^2 + z^2 = 36" }, params);
+	ball.Build3D(box);
+	CHECK(ball.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
+	auto round = MakePlot({ L"(a, b, c)", L"(6cos u cos v, 6sin u cos v, 6sin v)" }, params);
+	round.Build3D(box);
+	CHECK(round.HiddenBySurface(0, box.ToBox(FplPoint3{ 0, 0, 1 }), cam, w, h));
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -4824,6 +5089,9 @@ int wmain() {
 	Run_Fills3D();
 	Run_Dragging3D();
 	Run_Substitutions();
+	Run_PolarGrid();
+	Run_Fields3D();
+	Run_HiddenPoints3D();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

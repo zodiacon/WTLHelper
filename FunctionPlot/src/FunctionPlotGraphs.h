@@ -64,6 +64,8 @@ struct FplGraph {
 	std::vector<FplFeature> features;	// from the last FindFeatures (a function's only)
 	bool incomplete3D = false;			// as geometry.incomplete, for the mesh
 	FplMesh fillMesh;					// a region's, on the z = 0 plane in 3D
+	FplMesh fieldMesh;					// a field's slopes or arrows, on the same plane
+	float fieldOpacity = 1;				// fainter under solutions, as in 2D
 
 	bool Drawable() const {
 		return !definition && !listDefinition && !expr.error && !(flags & FplGraphHidden) &&
@@ -240,6 +242,8 @@ public:
 	// The points a graph has in 3D, in the space's coordinates: (a, b, c), a 2D point or an ODE's start (on z = 0), a 3D
 	// system's start. In the order DragOf numbers them.
 	std::vector<FplPoint3> Points3D(int graph) const;
+	// Whether a solid surface is in front of this place in the box, seen from the camera (the graph's own mesh doesn't count).
+	bool HiddenBySurface(int graph, FplVec3 place, const FplCamera& camera, float width, float height) const;
 	// The draggable point at a screen position in 3D (in the box, and with a parameter to set), the graph, or -1.
 	int DraggableAt3D(FplPoint screen, const FplCamera& camera, const FplBox3& box, float width, float height,
 		double maxDistance, int* point = nullptr) const;
@@ -259,6 +263,8 @@ private:
 	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
 	bool m_MeshIncomplete = false;
 	FplMesh m_FillMesh;				// what Mesh3D made of a region's fills
+	FplMesh m_FieldMesh;			// and of a field's slopes or arrows
+	float m_FieldOpacity = 1;
 	void FindCurveMeetings(int graph, const FplViewport& view);
 	static void SortFeatures(FplGraph& g);
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;
@@ -304,7 +310,7 @@ struct FplSvgStyle {
 	uint32_t back = 0xFFFFFF, grid = 0xDDDDDD, gridMinor = 0xEEEEEE, axis = 0x404040, label = 0x404040;
 	uint32_t panelBack = 0xF8F8F8, panelText = 0, panelBorder = 0xCCCCCC;
 	std::vector<uint32_t> graphColors;
-	bool showGrid = true, showAxes = true, piTicks = false, showLegend = true;
+	bool showGrid = true, showAxes = true, piTicks = false, showLegend = true, polarGrid = false;
 	std::wstring axisTitles[2];			// x, y: at the axes' ends
 };
 std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplSvgStyle& style);

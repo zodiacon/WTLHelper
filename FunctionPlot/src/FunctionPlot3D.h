@@ -112,6 +112,9 @@ std::vector<FplTick3> FplBoxTicks(const FplBox3& box, const FplCamera& camera);
 // staircase rows to the box's height, which the region's boundary tube covers.
 FplMesh FplFillMesh(const std::vector<FplPolygon>& polygons, const FplBox3& box, int rows = 400);
 
+// Line segments flat on the z = 0 plane, given in the plane's coordinates, as quads halfWidth to each side in the box's units.
+FplMesh FplFlatSegments(const std::vector<std::pair<FplPoint, FplPoint>>& segments, const FplBox3& box, float halfWidth);
+
 // Where the ray meets the horizontal plane at z, inside the box's x and y: dragging a point on it. false if the ray is too
 // near level, or points away.
 bool FplDragOnPlane(FplVec3 origin, FplVec3 dir, const FplBox3& box, double z, FplPoint3& at);

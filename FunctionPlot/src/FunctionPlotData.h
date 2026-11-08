@@ -132,6 +132,7 @@ struct FplState {
 	FplRenderer3D renderer;
 	std::vector<FplGpuMesh> gpu;		// by graph
 	std::vector<FplGpuMesh> gpuFills;	// regions' on the z = 0 plane
+	std::vector<FplGpuMesh> gpuFields;	// fields' on the same plane
 	FplGpuMesh boxEdges, floorGrid;
 	bool gpuStale = true;				// the meshes changed since they were uploaded
 
