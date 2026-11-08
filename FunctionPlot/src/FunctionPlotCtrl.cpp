@@ -28,6 +28,7 @@ static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int
 	FPLK_REGRESSION == (int)FplKind::Regression && FPLK_BETWEEN == (int)FplKind::Between &&
 	FPLK_SLOPEFIELD == (int)FplKind::SlopeField && FPLK_SECONDORDER == (int)FplKind::SecondOrder &&
 	FPLK_ODESYSTEM == (int)FplKind::OdeSystem && FPLK_ODESYSTEM3D == (int)FplKind::OdeSystem3D);
+static_assert(FPLPF_AUTO == FplParamAuto);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
@@ -1614,6 +1615,8 @@ CString CFunctionPlotCtrl::GetState() const {
 	st.degrees = s.plot.degrees;
 	st.mode3D = s.mode3D;
 	st.collapsed = s.collapsed;
+	st.piTicks = (GetStyle() & FPLS_PITICKS) != 0;
+	st.polarGrid = (GetStyle() & FPLS_POLARGRID) != 0;
 	st.view = s.view;
 	st.box = s.box;
 	st.yaw = s.camera.yaw;
@@ -1639,6 +1642,11 @@ BOOL CFunctionPlotCtrl::SetState(LPCWSTR pszState) {
 	s.collapsed = st.collapsed;
 	for (int k = 0; k < 3; k++)
 		s.axisTitles[k] = st.axisTitles[k];
+	if (st.hasTicks && IsWindow()) {
+		DWORD style = GetStyle() & ~(FPLS_PITICKS | FPLS_POLARGRID);
+		style |= (st.piTicks ? FPLS_PITICKS : 0) | (st.polarGrid ? FPLS_POLARGRID : 0);
+		SetWindowLong(GWL_STYLE, style);
+	}
 	s.history.Clear();
 	s.box = st.box;
 	s.camera.yaw = 0;
@@ -1791,6 +1799,7 @@ std::string CFunctionPlotCtrl::BuildSvg() {
 	svg.showAxes = !(style & FPLS_NOAXES);
 	svg.piTicks = (style & FPLS_PITICKS) != 0;
 	svg.polarGrid = (style & FPLS_POLARGRID) != 0;
+	svg.showColorScale = !(style & FPLS_NOCOLORSCALE);
 	svg.showLegend = !(style & FPLS_NOLEGEND) && !s.collapsed;
 	svg.axisTitles[0] = s.axisTitles[0];
 	svg.axisTitles[1] = s.axisTitles[1];

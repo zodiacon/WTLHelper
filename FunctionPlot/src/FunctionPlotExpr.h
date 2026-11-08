@@ -67,6 +67,7 @@ enum class FplOp : uint8_t {
 	Piecewise,	// {cond: value, cond: value, default}: kids are cond, value pairs, then the default if hasDefault
 	Tuple,		// (a, b): a point or a parametric curve, only as the whole expression
 	Integral,	// integral(body, var, lo, hi): name is the variable, bound in the body; kids body, lo, hi
+	Series,		// sum(body, k, lo, hi), or prod(...) with product: name is the index, bound in the body; kids body, lo, hi
 	List,		// [a, b, c]: only as a definition's value
 };
 
@@ -109,6 +110,7 @@ struct FplNode {
 	std::wstring name;				// Var; Num's constant name
 	std::vector<int> kids;
 	int pos = 0, len = 0;			// in the source; 0, 0 for nodes made later (a derivative's)
+	bool product = false;		// Series: prod rather than sum
 };
 
 // Nodes in one vector, referred to by index. Nodes are never changed once made, so a subtree can be shared (a chained
@@ -153,6 +155,8 @@ struct FplParseOptions {
 	// function, a line that defines it (q = ...), a regression, whose names are all fitted, a line with another variable
 	// (y = q x) or an ODE. True: it's an ordinary name.
 	bool plainQ = false;
+	// A parameter q that was only added for another line (FPLPF_AUTO) doesn't take it from a line with r and no other variable.
+	bool weakQ = false;
 };
 
 // The list aggregates, and the parameter name one of a list is.
@@ -267,6 +271,7 @@ enum class FplCode : uint8_t {
 	Lt, Le, Gt, Ge, Eq, And,
 	JumpIfFalse, Jump,
 	Integral,			// pops hi and lo: the integral of a sub-program (arg) over the slot in value
+	Sum, Product,		// pops hi and lo: a sub-program (arg) over the whole numbers between, in the slot in value
 };
 
 struct FplInstr {
@@ -369,4 +374,10 @@ FplOdeText FplSplitOde(std::wstring_view text);
 // is a SlopeField: F may use x, y and the parameters, a and b only the parameters.
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees = false,
 	const std::vector<FplUserFunction>* functions = nullptr, const std::vector<std::wstring>* lists = nullptr,
-	bool plainQ = false);
+	bool plainQ = false, bool weakQ = false);
+
+// The names the parser knows as functions, and those of them that give way to the user's or need parentheses (the README
+// lists them; a test holds it to these).
+std::vector<std::wstring> FplFunctionNames();
+std::vector<std::wstring> FplYieldingNames();
+std::vector<std::wstring> FplCallOnlyNames();

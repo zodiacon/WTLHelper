@@ -91,6 +91,8 @@ struct FplList {
 	std::vector<double> values;
 };
 
+constexpr unsigned FplParamAuto = 0x0002;		// FPLPF_AUTO
+
 struct FplParam {
 	std::wstring name;
 	double value = 0;
@@ -294,6 +296,8 @@ struct FplSavedState {
 	std::vector<FplParam> params;
 	std::vector<FplList> lists;
 	bool degrees = false, mode3D = false, collapsed = false;
+	bool piTicks = false, polarGrid = false;
+	bool hasTicks = false;				// read from a text that said (older ones leave the control's as they are)
 	FplViewport view;					// its ranges (the size is the window's)
 	FplBox3 box;
 	float yaw = FplCamera{}.yaw, pitch = FplCamera{}.pitch;
@@ -310,10 +314,12 @@ struct FplSvgStyle {
 	uint32_t back = 0xFFFFFF, grid = 0xDDDDDD, gridMinor = 0xEEEEEE, axis = 0x404040, label = 0x404040;
 	uint32_t panelBack = 0xF8F8F8, panelText = 0, panelBorder = 0xCCCCCC;
 	std::vector<uint32_t> graphColors;
-	bool showGrid = true, showAxes = true, piTicks = false, showLegend = true, polarGrid = false;
+	bool showGrid = true, showAxes = true, piTicks = false, showLegend = true, polarGrid = false, showColorScale = true;
 	std::wstring axisTitles[2];			// x, y: at the axes' ends
 };
 std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplSvgStyle& style);
+// A PNG of rows of RGBA bytes (straight alpha), uncompressed: small enough for a heat map, and needing no codec.
+std::string FplEncodePng(int width, int height, const std::vector<uint8_t>& rgba);
 
 // A traced coordinate with as many decimals as a DIP needs at this scale (unitsPerDip), plus one; trailing zeros
 // dropped; U+2212 for minus; "0" for what rounds to zero.

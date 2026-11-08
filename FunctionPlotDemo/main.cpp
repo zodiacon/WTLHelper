@@ -112,6 +112,7 @@ static const Example g_Examples[] = {
 	{ L"&User Functions", L"f(x) = x^3/6 - x\r\nf'(x)\r\nf''(x)\r\ng(x) = f(x - a) + 1\r\ny = d/dx sin(x^2/4)", false },
 	{ L"Waves and Steps", L"y = square(x) + 5\r\ny = triangle(x) + 2.5\r\ny = sawtooth(x)\r\ny = step(x - 1) - 2.5\r\ny = 2sinc(2x) - 5", false },
 	{ L"Normal Distribution", L"y = 10normpdf(x, m, s)\r\ny = 3normcdf(x, m, s)\r\nm: -4..4\r\ns: 0.2..3", false },
+	{ L"Series", L"y = sum(sin((2k - 1)x)/(2k - 1), k, 1, n) + 3\r\ny = sum(x^k/k!, k, 0, n) - 3\r\nn: 1..30, 1", false },
 	{ L"Substitutions", L"a = x - 1\r\nb = a^2\r\ny = 3a\r\ny = b/2 - 4\r\nx^2 + a^2 + y^2 = 16\r\ny' = -a y, y(0) = 3", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },
 	{ L"&Vector Field", L"(y, -sin x)\r\ny^2/2 - cos x = c", false, false, Setup::FieldSlider },
@@ -440,7 +441,7 @@ static void SyncGraphs() {
 				if (!g_plot.GetGraphInfo(g_plot.GetGraphId(i), info) || info.error != FPLE_UNKNOWNNAME ||
 					!ValidName(info.szName))
 					continue;
-				FPLPARAM p{ info.szName, 1, -10, 10, 0.1, 0 };
+				FPLPARAM p{ info.szName, 1, -10, 10, 0.1, FPLPF_AUTO };
 				g_plot.SetParameter(p);
 				g_autoParams.insert(info.szName);
 				added = true;
@@ -616,13 +617,9 @@ static void LoadExample(int index) {
 	}
 	DWORD style = g_plot.GetStyle();
 	g_plot.SetWindowLong(GWL_STYLE, e.piTicks ? style | FPLS_PITICKS : style & ~FPLS_PITICKS);
-	// on for the example that shows it, off again after it
-	static bool polarGrid = false;
-	if (e.setup == Setup::Polar || polarGrid) {
-		polarGrid = e.setup == Setup::Polar;
-		const DWORD now = g_plot.GetStyle();
-		g_plot.SetWindowLong(GWL_STYLE, polarGrid ? now | FPLS_POLARGRID : now & ~FPLS_POLARGRID);
-	}
+	// on for the example that shows it, off for the others (a plot opened before may have turned it on)
+	const DWORD now = g_plot.GetStyle();
+	g_plot.SetWindowLong(GWL_STYLE, e.setup == Setup::Polar ? now | FPLS_POLARGRID : now & ~FPLS_POLARGRID);
 	g_plot.SetMode(e.is3D ? FPLM_3D : FPLM_2D);
 	if (e.is3D)
 		g_plot.ResetView3D();

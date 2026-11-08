@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
+#include <functional>
 #include <numbers>
 #include <unordered_map>
 
@@ -172,20 +173,22 @@ struct Token {
 
 // Names that were free before they were functions, and so may well be someone's own: a parameter or function of that name
 // has it, and a line defining it (step = 2, step(x) = ...) makes it one.
-bool IsYieldingName(std::wstring_view s) {
-	static const std::wstring_view Names[] = {
+const std::wstring_view g_YieldingNames[] = {
 		L"square", L"triangle", L"sawtooth", L"asec", L"acsc", L"acot", L"sech", L"csch", L"coth", L"asech", L"acsch", L"acoth",
 		L"trunc", L"lgamma", L"erfc", L"nCr", L"nPr", L"ncr", L"npr", L"gcd", L"lcm", L"step", L"heaviside", L"sinc",
 		L"normpdf", L"normcdf", L"frac", L"clamp", L"deg", L"rad", L"log10", L"arcsec", L"arccsc", L"arccot", L"arsech", L"arcsch",
-		L"arcoth", L"arcsech", L"arccsch", L"arccoth", L"cosec", L"tg", L"ctg", L"arctg", L"arcctg",
-	};
-	return std::find(std::begin(Names), std::end(Names), s) != std::end(Names);
+		L"arcoth", L"arcsech", L"arccsch", L"arccoth", L"cosec", L"tg", L"ctg", L"arctg", L"arcctg", L"prod", L"product",
+};
+
+bool IsYieldingName(std::wstring_view s) {
+	return std::find(std::begin(g_YieldingNames), std::end(g_YieldingNames), s) != std::end(g_YieldingNames);
 }
 
 // Short ones that read as products too (tg is t g; (t, tg) was a curve): functions only when called with parentheses.
+const std::wstring_view g_CallOnlyNames[] = { L"tg", L"ctg", L"deg", L"rad", L"gcd", L"lcm", L"ncr", L"npr", L"nCr", L"nPr" };
+
 bool IsCallOnlyName(std::wstring_view s) {
-	static const std::wstring_view Names[] = { L"tg", L"ctg", L"deg", L"rad", L"gcd", L"lcm", L"ncr", L"npr", L"nCr", L"nPr" };
-	return std::find(std::begin(Names), std::end(Names), s) != std::end(Names);
+	return std::find(std::begin(g_CallOnlyNames), std::end(g_CallOnlyNames), s) != std::end(g_CallOnlyNames);
 }
 
 bool IsLetter(wchar_t c) {
@@ -209,7 +212,61 @@ public:
 			m_PlainQ = i != m_Text.npos && m_Text[i] == L'=';
 		}
 		FindOwnName();
+		FindIndexes();
 	}
+
+	// sum(body, k, lo, hi), prod(...): k is known throughout the text, as tokens come before the parse (which then says if
+	// one is used outside its sum).
+	void FindIndexes() {
+		for (size_t i = 0; i < m_Text.size(); i++) {
+			const bool symbol = m_Text[i] == L'\x2211' || m_Text[i] == L'\x220F';
+			size_t after = i + 1;
+			if (!symbol) {
+				if (!IsLetter(m_Text[i]) || (i > 0 && IsLetter(m_Text[i - 1])))
+					continue;
+				while (after < m_Text.size() && IsLetter(m_Text[after]))
+					after++;
+				const std::wstring_view word = m_Text.substr(i, after - i);
+				if (word != L"sum" && word != L"prod" && word != L"product")
+					continue;
+			}
+			size_t at = m_Text.find_first_not_of(L' ', after);
+			if (at == m_Text.npos || m_Text[at] != L'(')
+				continue;
+			int depth = 0;
+			std::vector<size_t> commas;
+			for (; at < m_Text.size(); at++) {
+				const wchar_t c = m_Text[at];
+				if (c == L'(' || c == L'[' || c == L'{')
+					depth++;
+				else if (c == L')' || c == L']' || c == L'}') {
+					if (--depth == 0)
+						break;
+				}
+				else if (c == L',' && depth == 1)
+					commas.push_back(at);
+			}
+			if (commas.size() != 3)
+				continue;
+			size_t from = m_Text.find_first_not_of(L' ', commas[0] + 1), to = commas[1];
+			while (to > from && m_Text[to - 1] == L' ')
+				to--;
+			if (from >= to || !IsLetter(m_Text[from]))
+				continue;
+			const std::wstring_view name = m_Text.substr(from, to - from);
+			bool plain = true;
+			for (wchar_t c : name)
+				plain = plain && (IsLetter(c) || IsDigit(c));
+			if (!plain)
+				continue;
+			m_Indexes.push_back(name);
+			if (name == L"q")
+				m_PlainQ = true;
+		}
+	}
+
+	const std::vector<std::wstring_view>& Indexes() const { return m_Indexes; }
+	void WeakQ() { m_WeakQ = true; }
 
 	// "step = 2", "step(x) = ...": a line that defines one of the names that yield.
 	void FindOwnName() {
@@ -241,21 +298,25 @@ public:
 	void PlainQ() { m_PlainQ = true; }
 
 	bool Run(std::vector<Token>& tokens, FplError& error) {
+		tokens.clear();
 		if (!Scan(tokens, error))
 			return false;
 		if (m_PlainQ)
 			return true;
 		// beside another variable q is a name of its own: y = q x wants a slider, not the point's angle
-		bool typedQ = false, other = false;
+		bool typedQ = false, other = false, radius = false;
 		for (auto& t : tokens) {
 			if (t.type != Tk::Name || t.kind != NameKind::Var)
 				continue;
 			if (t.name == FplTheta && t.len == 1 && m_Text[t.pos] == L'q')
 				typedQ = true;
-			else if (t.name != FplTheta && t.name != L"r")
+			else if (t.name == L"r")
+				radius = true;
+			else if (t.name != FplTheta)
 				other = true;
 		}
-		if (!typedQ || !other)
+		// over a parameter q added for another line, only with r
+		if (!typedQ || (!other && (radius || !m_WeakQ)))
 			return true;
 		m_PlainQ = true;
 		tokens.clear();
@@ -304,6 +365,16 @@ public:
 					t.type = Tk::Name;
 					t.kind = NameKind::Integral;
 					t.name = L"integral";
+					break;
+				case L'\x2211':
+					t.type = Tk::Name;
+					t.kind = NameKind::Aggregate;
+					t.name = L"sum";
+					break;
+				case L'\x220F':
+					t.type = Tk::Name;
+					t.kind = NameKind::Integral;
+					t.name = L"prod";
 					break;
 				case L'-': case L'\x2212':
 					t.op = L'-';
@@ -456,6 +527,11 @@ private:
 					isFunction = isFunction && s != p;
 		}
 		if (isFunction) {
+			if (s == L"prod" || s == L"product") {
+				t.kind = NameKind::Integral;
+				t.name = L"prod";
+				return true;
+			}
 			for (size_t f = 0; f < std::size(g_Funcs); f++)
 				if (s == g_Funcs[f].name) {
 					t.kind = NameKind::Func;
@@ -502,6 +578,11 @@ private:
 					t.name = s;
 					return true;
 				}
+		if (s == L"q" && m_WeakQ && !m_PlainQ) {
+			t.kind = NameKind::Var;
+			t.name = FplTheta;
+			return true;
+		}
 		if (m_Params)
 			for (auto& p : *m_Params)
 				if (s == p) {
@@ -512,6 +593,11 @@ private:
 		if (s == L"q" && !m_PlainQ) {
 			t.kind = NameKind::Var;
 			t.name = FplTheta;
+			return true;
+		}
+		if (std::find(m_Indexes.begin(), m_Indexes.end(), s) != m_Indexes.end()) {
+			t.kind = NameKind::Param;
+			t.name = s;
 			return true;
 		}
 		return false;
@@ -600,6 +686,8 @@ private:
 	std::wstring_view m_Text;
 	bool m_PlainQ = false;
 	std::wstring_view m_OwnName;
+	bool m_WeakQ = false;
+	std::vector<std::wstring_view> m_Indexes;
 	const std::vector<std::wstring>* m_Params;
 	const std::vector<FplUserFunction>* m_Functions;
 };
@@ -1108,11 +1196,32 @@ private:
 	int Aggregate(const Token& name, const std::wstring& aggregate) {
 		int end;
 		std::vector<int> args = Arguments(name, end);
+		if (aggregate == L"sum" && args.size() == 4)
+			return Series(name, std::move(args), end, false);
 		if (args.size() != 1 || m_Ast[args[0]].op != FplOp::Var || !IsList(m_Ast[args[0]].name)) {
 			m_Error = { FplErrorCode::NotAList, name.pos, end - name.pos, aggregate };
 			throw ParseError();
 		}
 		return Make(m_Ast.Var(FplAggregateName(aggregate, m_Ast[args[0]].name)), name.pos, end - name.pos);
+	}
+
+	// sum(body, k, lo, hi), prod(body, k, lo, hi): over the whole numbers from lo to hi, k being any name but a variable's.
+	int Series(const Token& name, std::vector<int> args, int end, bool product) {
+		auto& v = m_Ast[args[1]];
+		if (v.op != FplOp::Var) {
+			m_Error = { FplErrorCode::UnexpectedToken, v.pos, v.len, name.name };
+			throw ParseError();
+		}
+		if (FplIsVariable(v.name)) {
+			m_Error = { FplErrorCode::ReservedName, v.pos, v.len, v.name };
+			throw ParseError();
+		}
+		FplNode n;
+		n.op = FplOp::Series;
+		n.name = v.name;
+		n.product = product;
+		n.kids = { args[0], args[2], args[3] };
+		return Make(m_Ast.Add(std::move(n)), name.pos, end - name.pos);
 	}
 
 	// integral(f, lo, hi) over x, or integral(f, t, lo, hi) over a standard variable.
@@ -1121,6 +1230,13 @@ private:
 			Fail(FplErrorCode::MissingArgument, name, name.name);
 		int end;
 		std::vector<int> args = Arguments(name, end);
+		if (name.name == L"prod") {
+			if (args.size() != 4) {
+				m_Error = { FplErrorCode::ArgCount, name.pos, end - name.pos, L"prod" };
+				throw ParseError();
+			}
+			return Series(name, std::move(args), end, true);
+		}
 		std::wstring var = L"x";
 		if (args.size() == 4) {
 			auto& v = m_Ast[args[1]];
@@ -1290,6 +1406,8 @@ FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) 
 	Lexer lexer(text, options.parameters, options.functions);
 	if (options.plainQ)
 		lexer.PlainQ();
+	if (options.weakQ)
+		lexer.WeakQ();
 	if (!lexer.Run(tokens, result.error))
 		return result;
 	Parser parser(std::move(tokens), result.ast, result.error, options);
@@ -1299,6 +1417,38 @@ FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) 
 	catch (const ParseError&) {
 		result.root = -1;
 		return result;
+	}
+	// a sum's index used outside it is an unknown name (unless a parameter has the name too)
+	if (!lexer.Indexes().empty()) {
+		std::vector<std::wstring> scope;
+		const FplAst& ast = result.ast;
+		std::function<bool(int)> check = [&](int node) {
+			auto& n = ast[node];
+			if (n.op == FplOp::Var) {
+				auto& indexes = lexer.Indexes();
+				if (std::find(indexes.begin(), indexes.end(), n.name) != indexes.end() &&
+					std::find(scope.begin(), scope.end(), n.name) == scope.end() &&
+					!(options.parameters && std::find(options.parameters->begin(), options.parameters->end(), n.name) != options.parameters->end())) {
+					result.error = { FplErrorCode::UnknownName, n.pos, n.len, n.name };
+					return false;
+				}
+				return true;
+			}
+			if (n.op == FplOp::Series) {
+				if (!check(n.kids[1]) || !check(n.kids[2]))
+					return false;
+				scope.push_back(n.name);
+				const bool ok = check(n.kids[0]);
+				scope.pop_back();
+				return ok;
+			}
+			for (int k : n.kids)
+				if (!check(k))
+					return false;
+			return true;
+		};
+		if (!check(result.root))
+			result.root = -1;
 	}
 	return result;
 }
@@ -1375,4 +1525,25 @@ FplFunctionDefinition FplParseFunction(std::wstring_view text, const FplParseOpt
 
 std::wstring FplAggregateName(std::wstring_view aggregate, std::wstring_view list) {
 	return std::wstring(aggregate) + L"(" + std::wstring(list) + L")";
+}
+
+std::vector<std::wstring> FplFunctionNames() {
+	std::vector<std::wstring> names;
+	names.reserve(std::size(g_Funcs) + std::size(g_Aliases) + 2);
+	for (auto& f : g_Funcs)
+		if (std::wstring_view(f.name).find(L'\'') == std::wstring_view::npos)
+			names.push_back(f.name);
+	for (auto& a : g_Aliases)
+		names.push_back(a.name);
+	names.push_back(L"prod");
+	names.push_back(L"product");
+	return names;
+}
+
+std::vector<std::wstring> FplYieldingNames() {
+	return { std::begin(g_YieldingNames), std::end(g_YieldingNames) };
+}
+
+std::vector<std::wstring> FplCallOnlyNames() {
+	return { std::begin(g_CallOnlyNames), std::end(g_CallOnlyNames) };
 }

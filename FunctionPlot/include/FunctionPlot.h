@@ -149,6 +149,8 @@ struct FPLGRAPHINFO {
 // ---- Parameters ------------------------------------------------------------------
 
 #define FPLPF_NOSLIDER     0x0001   // no slider for it
+#define FPLPF_AUTO         0x0002   // not chosen by name, but added because a graph needed it: if it's q, a line with r and no
+                                    // other variable still reads q as theta
 
 struct FPLPARAM {
 	LPCWSTR pszName;           // a name the expressions use ("a", "k", "alpha")

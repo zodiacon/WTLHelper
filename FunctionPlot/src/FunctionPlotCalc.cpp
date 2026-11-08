@@ -102,7 +102,7 @@ unsigned FplVariablesOf(const FplAst& ast, int node) {
 	auto& n = ast[node];
 	if (n.op == FplOp::Var)
 		return VarBit(n.name);
-	if (n.op == FplOp::Integral)		// its variable is bound in the body
+	if (n.op == FplOp::Integral || n.op == FplOp::Series)		// its variable is bound in the body
 		return (FplVariablesOf(ast, n.kids[0]) & ~VarBit(n.name)) | FplVariablesOf(ast, n.kids[1]) |
 			FplVariablesOf(ast, n.kids[2]);
 	unsigned mask = 0;
@@ -453,7 +453,7 @@ private:
 		auto& n = m_Ast[node];
 		if (n.op == FplOp::Var)
 			return n.name == m_Var;
-		if (n.op == FplOp::Integral && n.name == m_Var)		// bound in the body
+		if ((n.op == FplOp::Integral || n.op == FplOp::Series) && n.name == m_Var)		// bound in the body
 			return Depends(n.kids[1]) || Depends(n.kids[2]);
 		for (int k : n.kids)
 			if (Depends(k))
@@ -527,6 +527,19 @@ private:
 				}
 				return result;
 			}
+			case FplOp::Series: {
+				// term by term, the limits being whole numbers that only step
+				FplNode terms = n;
+				terms.pos = terms.len = 0;
+				if (!n.product) {
+					terms.kids[0] = D(k[0]);
+					return m_Ast.Add(std::move(terms));
+				}
+				// a product times the sum of its terms' f'/f
+				terms.product = false;
+				terms.kids[0] = Div(D(k[0]), k[0]);
+				return Mul(node, m_Ast.Add(std::move(terms)));
+			}
 			case FplOp::Cmp:
 			case FplOp::And:
 				failed = true;
@@ -541,7 +554,7 @@ private:
 		const FplNode n = m_Ast[node];
 		if (n.op == FplOp::Var)
 			return n.name == name ? with : node;
-		if (n.op == FplOp::Integral && n.name == name) {
+		if ((n.op == FplOp::Integral || n.op == FplOp::Series) && n.name == name) {
 			FplNode c = n;
 			c.kids[1] = Subst(n.kids[1], name, with);
 			c.kids[2] = Subst(n.kids[2], name, with);
@@ -848,6 +861,15 @@ void Print(const FplAst& ast, int node, std::wstring& out) {
 				Print(ast, k[i], out);
 			}
 			out += L']';
+			break;
+		case FplOp::Series:
+			out += n.product ? L"prod(" : L"sum(";
+			Print(ast, k[0], out);
+			out += L", " + n.name + L", ";
+			Print(ast, k[1], out);
+			out += L", ";
+			Print(ast, k[2], out);
+			out += L')';
 			break;
 		case FplOp::Integral:
 			out += L"integral(";

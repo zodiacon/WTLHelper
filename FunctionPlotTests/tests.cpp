@@ -11,6 +11,11 @@
 // regressions, the saved state, fitting the view, labels, styles, undo, the sampling thread, log axes,
 // ODEs, curves' intersections and surfaces' line grids.
 
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <iterator>
+#include <cstring>
 #include "FunctionPlotExpr.h"
 #include "FunctionPlot3D.h"
 #include "FunctionPlotGraphs.h"
@@ -5483,6 +5488,351 @@ TEST(MoreFunctions) {
 	CHECK_NEAR(at(L"sinc^2(x)", x), std::pow(std::sin(x) / x, 2));
 }
 
+TEST(SumsAndProducts) {
+	std::vector<std::wstring> none;
+	auto at = [&](const std::wstring& text, double x, std::vector<std::wstring> names = {}, std::vector<double> values = {}) {
+		auto e = FplBuild(L"y = " + text, names);
+		CHECK(!e.error);
+		std::vector<double> slots(FplFirstParam + names.size());
+		slots[FplSlotX] = x;
+		for (size_t i = 0; i < values.size(); i++)
+			slots[FplFirstParam + i] = values[i];
+		return e.error ? NaN : e.f.Eval(slots.data());
+	};
+	CHECK_NEAR(at(L"sum(k, k, 1, 10)", 0), 55);
+	CHECK_NEAR(at(L"sum(k^2, k, 1, 3)", 0), 14);
+	CHECK_NEAR(at(L"prod(k, k, 1, 5)", 0), 120);
+	CHECK_NEAR(at(L"product(k, k, 1, 5)", 0), 120);
+	// with the variable, parameters in any place, and in expressions
+	CHECK_NEAR_TOL(at(L"sum(x^k/k!, k, 0, 20)", 1.5), std::exp(1.5), 1e-10);
+	CHECK_NEAR(at(L"sum(k x, k, 1, 3)", 2), 12);
+	CHECK_NEAR(at(L"sum(k a, k, 1, n)", 2, { L"a", L"n" }, { 3, 4 }), 30);
+	CHECK_NEAR(at(L"sum(k, k, a, a + 2)", 0, { L"a" }, { 5 }), 18);
+	CHECK_NEAR(at(L"2 sum(k, k, 1, 3) + 1", 0), 13);
+	CHECK_NEAR(at(L"sum(k, k, 1, 3)^2", 0), 36);
+	CHECK_NEAR(at(L"x sum(k, k, 1, 3)", 2), 12);
+	// the letters, implicit products of the index, a longer name, symbols
+	CHECK_NEAR(at(L"sum(2k, k, 1, 3)", 0), 12);
+	CHECK_NEAR(at(L"sum(kx, k, 1, 3)", 2), 12);
+	CHECK_NEAR(at(L"sum(idx^2, idx, 1, 3)", 0), 14);
+	CHECK_NEAR(at(std::wstring(1, wchar_t(0x2211)) + L"(k, k, 1, 4)", 0), 10);
+	CHECK_NEAR(at(std::wstring(1, wchar_t(0x220F)) + L"(k, k, 1, 4)", 0), 24);
+	// limits rounded, empty, one term, negative
+	CHECK_NEAR(at(L"sum(k, k, 0.6, 3.4)", 0), 6);
+	CHECK_NEAR(at(L"sum(k, k, 3, 1)", 0), 0);
+	CHECK_NEAR(at(L"prod(k, k, 3, 1)", 0), 1);
+	CHECK_NEAR(at(L"sum(k, k, 2, 2)", 0), 2);
+	CHECK_NEAR(at(L"sum(k, k, -2, 2)", 0), 0);
+	// too many, undefined limits or terms
+	CHECK_NEAR(at(L"sum(1, k, 1, 99999)", 0), 99999);
+	CHECK(std::isnan(at(L"sum(1, k, 1, 100001)", 0)));
+	CHECK(std::isnan(at(L"sum(1, k, 1, sqrt(x))", -1)));
+	CHECK(std::isnan(at(L"sum(sqrt(k), k, -1, 1)", 0)));
+	// nested: the inner limits can use the outer index, and each index is its own
+	CHECK_NEAR(at(L"sum(sum(j, j, 1, k), k, 1, 3)", 0), 10);
+	CHECK_NEAR(at(L"sum(k prod(j, j, 1, k), k, 1, 3)", 0), 1 + 4 + 18);
+	CHECK_NEAR(at(L"sum(k, k, 1, 2) + sum(k, k, 1, 3)", 0), 9);
+	CHECK_NEAR(at(L"sum(sum(k, k, 1, 2), k, 1, 3)", 0), 9);
+	// an index named as a parameter: it's the index inside, the parameter outside
+	CHECK_NEAR(at(L"a + sum(a, a, 1, 3)", 0, { L"a" }, { 100 }), 106);
+	CHECK_NEAR(at(L"sum(a + b, a, 1, 2)", 0, { L"a", L"b" }, { 100, 10 }), 23);
+	// in an integral, and one in it
+	CHECK_NEAR_TOL(at(L"integral(sum(x^k, k, 0, 2), 0, 1)", 0), 1 + 0.5 + 1.0 / 3, 1e-9);
+	CHECK_NEAR_TOL(at(L"sum(integral(k x, 0, 1), k, 1, 3)", 0), 3, 1e-9);
+	// in a user's function, and one that takes the index
+	auto plot = MakePlot({ L"f(a) = sum(a^k, k, 0, 2)", L"y = f(x) + f(2)" });
+	CHECK(!plot.graphs[1].expr.error);
+	auto slots = plot.Slots();
+	slots[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(slots.data()), 13 + 7);
+	plot = MakePlot({ L"g(a) = a^2", L"y = sum(g(k), k, 1, 3)" });
+	CHECK(!plot.graphs[1].expr.error);
+	slots = plot.Slots();
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(slots.data()), 14);
+	// a definition takes its value; a substitution works
+	plot = MakePlot({ L"c = sum(k, k, 1, 4)", L"y = c x" });
+	CHECK(plot.graphs[0].definition);
+	CHECK_NEAR(plot.DefinitionValue(0), 10);
+	plot = MakePlot({ L"s1 = sum(x^k, k, 0, 2)", L"y = 2s1" });
+	CHECK(!plot.graphs[1].expr.error);
+	// an unknown limit asks for a parameter, not the index
+	auto unknown = FplBuild(L"y = sum(k, k, 1, n)", none);
+	CHECK(unknown.error.code == FplErrorCode::UnknownName);
+	CHECK_STR(unknown.error.name, L"n");
+	// errors: the index outside, as a limit, a variable's name, not a name, the wrong count
+	auto outside = FplBuild(L"y = k + sum(k, k, 1, 3)", none);
+	CHECK(outside.error.code == FplErrorCode::UnknownName);
+	CHECK_STR(outside.error.name, L"k");
+	CHECK_INT(outside.error.pos, 4);
+	CHECK(FplBuild(L"y = sum(k, k, 1, k)", none).error.code == FplErrorCode::UnknownName);
+	CHECK(FplBuild(L"y = sum(x, x, 1, 3)", none).error.code == FplErrorCode::ReservedName);
+	CHECK(FplBuild(L"y = sum(x, 2, 1, 3)", none).error.code == FplErrorCode::UnexpectedToken);
+	CHECK(FplBuild(L"y = sum(k, 2, 1, 3)", none).error.code == FplErrorCode::UnknownName);		// k isn't an index then
+	CHECK(FplBuild(L"y = prod(2, 2)", none).error.code == FplErrorCode::ArgCount);
+	CHECK(FplBuild(L"y = sum(3)", none).error.code == FplErrorCode::NotAList);
+	// sum of a list is as it was; prod gives way to the user's
+	auto list = MakePlot({ L"L = [1, 2, 3]", L"y = sum(L) x" });
+	CHECK(!list.graphs[1].expr.error);
+	slots = list.Slots();
+	slots[FplSlotX] = 2;
+	CHECK_NEAR(list.graphs[1].expr.f.Eval(slots.data()), 12);
+	plot = MakePlot({ L"prod = 2", L"y = prod x" });
+	CHECK(plot.graphs[0].definition);
+	// q as the index is the index
+	CHECK_NEAR(at(L"sum(q, q, 1, 3)", 0), 6);
+
+	// compiled and the slow tree; derivatives; printed and read back
+	struct Case { const wchar_t* text; double x; };
+	const Case cases[] = {
+		{ L"sum(x^k/k!, k, 0, 6)", 0.7 }, { L"sum(sin(k x)/k, k, 1, 5)", 0.7 }, { L"prod(x + k, k, 1, 3)", 0.7 },
+		{ L"prod(1 + x/k, k, 1, 4)", 0.7 }, { L"sum(prod(x + j, j, 1, k), k, 1, 3)", 0.7 }, { L"sum(k x, k, 1, 3) sin x", 0.7 },
+	};
+	for (auto& c : cases) {
+		FplParseOptions options;
+		auto r = FplParse(c.text, options);
+		CHECK(!r.error);
+		if (r.error)
+			continue;
+		auto program = FplCompile(r.ast, r.root, none);
+		double values[FplFirstParam] = {};
+		values[FplSlotX] = c.x;
+		const double value = program.Eval(values);
+		CHECK_NEAR_TOL(Tree(r.ast, r.root, c.x), value, 1e-9);
+		FplError error;
+		int d = FplDerive(r.ast, r.root, L"x", &error);
+		CHECK(d >= 0);
+		if (d < 0)
+			continue;
+		auto derivative = FplCompile(r.ast, d, none);
+		const double h = 1e-5;
+		values[FplSlotX] = c.x + h;
+		const double up = program.Eval(values);
+		values[FplSlotX] = c.x - h;
+		const double down = program.Eval(values);
+		values[FplSlotX] = c.x;
+		CHECK_NEAR_TOL(derivative.Eval(values), (up - down) / (2 * h), 1e-5 * (1 + std::abs(value)));
+		auto again = FplParse(FplToString(r.ast, r.root), options);
+		CHECK(!again.error);
+		if (!again.error)
+			CHECK_NEAR_TOL(FplCompile(again.ast, again.root, none).Eval(values), value, 1e-9 * (1 + std::abs(value)));
+	}
+	CHECK_NEAR(at(L"d/dx sum(k x, k, 1, 3)", 5), 6);
+	// constant ones fold, so they're cheap and read nothing
+	auto folded = FplBuild(L"y = sum(k, k, 1, 1000)", none);
+	CHECK(folded.f.IsConstant());
+	CHECK(!FplBuild(L"y = sum(x, k, 1, 3)", none).f.IsConstant());
+	// it draws, and a slot array just big enough is enough
+	FplViewport v = View();
+	plot = MakePlot({ L"y = sum(sin((2k - 1)x)/(2k - 1), k, 1, 5)" });
+	plot.Sample(v);
+	CHECK(!plot.graphs[0].geometry.lines.empty());
+}
+
+TEST(AutoQ) {
+	FplParam automatic = Param(L"q", 2), chosen = Param(L"q", 2);
+	automatic.flags = FplParamAuto;
+	// a slider only added for another line leaves q as theta in a line with r
+	auto plot = MakePlot({ L"r = 2 + cos 3q", L"y = q x", L"sin q" }, { automatic });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(plot.graphs[0].expr.kind == FplKind::Polar);
+	auto slots = plot.Slots();
+	slots[FplSlotTheta] = 0.4;
+	slots[FplSlotX] = 3;
+	CHECK_NEAR(plot.graphs[0].expr.f.Eval(slots.data()), 2 + std::cos(1.2));
+	// the other lines have the slider
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(slots.data()), 6.0);
+	CHECK(plot.graphs[2].expr.kind == FplKind::Function);
+	CHECK_NEAR(plot.graphs[2].expr.f.Eval(slots.data()), std::sin(2.0));
+	// and one the app chose has it everywhere, in a line with r too
+	plot = MakePlot({ L"r = q", L"y = q x" }, { chosen });
+	CHECK(plot.graphs[0].expr.kind == FplKind::Polar);
+	slots = plot.Slots();
+	slots[FplSlotTheta] = 0.4;
+	CHECK_NEAR(plot.graphs[0].expr.f.Eval(slots.data()), 2.0);
+	// no parameter: as ever. A line defining q: it's that, even over an auto one
+	plot = MakePlot({ L"r = q" });
+	slots = plot.Slots();
+	slots[FplSlotTheta] = 0.4;
+	CHECK_NEAR(plot.graphs[0].expr.f.Eval(slots.data()), 0.4);
+}
+
+TEST(TicksInState) {
+	FplSavedState a;
+	a.piTicks = true;
+	a.polarGrid = true;
+	FplSavedState b;
+	CHECK(FplLoadState(FplSaveState(a), b));
+	CHECK(b.hasTicks && b.piTicks && b.polarGrid);
+	a.piTicks = a.polarGrid = false;
+	CHECK(FplLoadState(FplSaveState(a), b));
+	CHECK(b.hasTicks && !b.piTicks && !b.polarGrid);
+	a.polarGrid = true;
+	CHECK(FplLoadState(FplSaveState(a), b));
+	CHECK(b.hasTicks && !b.piTicks && b.polarGrid);
+	// a text from before says nothing, so the control's stay
+	CHECK(FplLoadState(L"FunctionPlot 1\ndegrees 0\n", b));
+	CHECK(!b.hasTicks);
+}
+
+TEST(HeatmapsInSvg) {
+	// the PNG: signature, size, and every chunk's check; its pixels through the stored blocks
+	std::vector<uint8_t> rgba;
+	const int w = 300, h = 300;		// past one stored block
+	rgba.reserve(w * h * 4);
+	for (int i = 0; i < w * h; i++)
+		for (int c = 0; c < 4; c++)
+			rgba.push_back(static_cast<uint8_t>((i * 7 + c * 31) & 255));
+	const std::string png = FplEncodePng(w, h, rgba);
+	CHECK(png.compare(0, 8, std::string("\x89PNG\r\n\x1A\n", 8)) == 0);
+	auto be32 = [&](size_t at) {
+		uint32_t v = 0;
+		for (int i = 0; i < 4; i++)
+			v = (v << 8) | static_cast<uint8_t>(png[at + i]);
+		return v;
+	};
+	auto crc32 = [&](size_t at, size_t n) {
+		uint32_t crc = 0xFFFFFFFFu;
+		for (size_t i = 0; i < n; i++) {
+			crc ^= static_cast<uint8_t>(png[at + i]);
+			for (int k = 0; k < 8; k++)
+				crc = crc & 1 ? 0xEDB88320u ^ (crc >> 1) : crc >> 1;
+		}
+		return crc ^ 0xFFFFFFFFu;
+	};
+	std::string data;
+	std::vector<std::string> types;
+	for (size_t at = 8; at < png.size();) {
+		const uint32_t n = be32(at);
+		types.push_back(png.substr(at + 4, 4));
+		CHECK(crc32(at + 4, n + 4) == be32(at + 8 + n));
+		if (types.back() == "IDAT")
+			data.append(png, at + 8, n);
+		if (types.back() == "IHDR") {
+			CHECK(be32(at + 8) == uint32_t(w));
+			CHECK(be32(at + 12) == uint32_t(h));
+		}
+		at += 12 + n;
+	}
+	CHECK(types == (std::vector<std::string>{ "IHDR", "IDAT", "IEND" }));
+	std::string raw;
+	size_t pos = 2;
+	for (bool last = false; !last && pos < data.size();) {
+		last = data[pos] & 1;
+		const size_t n = static_cast<uint8_t>(data[pos + 1]) | (size_t(static_cast<uint8_t>(data[pos + 2])) << 8);
+		const size_t inverse = static_cast<uint8_t>(data[pos + 3]) | (size_t(static_cast<uint8_t>(data[pos + 4])) << 8);
+		CHECK((n ^ inverse) == 0xFFFF);
+		raw.append(data, pos + 5, n);
+		pos += 5 + n;
+	}
+	CHECK_INT(raw.size(), (w * 4 + 1) * h);
+	bool same = true;
+	for (int y = 0; y < h; y++) {
+		same = same && raw[y * (size_t(w) * 4 + 1)] == 0;
+		same = same && std::memcmp(raw.data() + y * (size_t(w) * 4 + 1) + 1, rgba.data() + size_t(y) * w * 4, size_t(w) * 4) == 0;
+	}
+	CHECK(same);
+	uint32_t a = 1, b = 0;
+	for (unsigned char c : raw) {
+		a = (a + c) % 65521;
+		b = (b + a) % 65521;
+	}
+	uint32_t adler = 0;
+	for (int i = 0; i < 4; i++)
+		adler = (adler << 8) | static_cast<uint8_t>(data[pos + i]);
+	CHECK(adler == ((b << 16) | a));
+	CHECK(FplEncodePng(0, 5, {}).empty());
+	CHECK(FplEncodePng(2, 2, { 1, 2, 3 }).empty());
+
+	// the SVG: a picture under the grid, and the scale's colors and values
+	FplViewport v = View(-10, 10, -8, 8, 1000, 800);
+	auto plot = MakePlot({ L"z = sin x + cos y" });
+	plot.graphs[0].flags |= FplGraphHeatmap;
+	plot.Sample(v);
+	CHECK(!plot.graphs[0].geometry.heatmap.Empty());
+	FplSvgStyle style;
+	style.graphColors = { 0xFF0000 };
+	std::string svg = FplWriteSvg(plot, v, style);
+	const size_t image = svg.find("<image ");
+	CHECK(image != std::string::npos);
+	CHECK(svg.find("data:image/png;base64,") != std::string::npos);
+	CHECK(svg.find("opacity=\"0.85\"") != std::string::npos);
+	CHECK(image < svg.find("stroke=\"#dddddd\""));
+	CHECK(svg.find("<linearGradient") != std::string::npos);
+	CHECK(svg.find("url(#scale0)") != std::string::npos);
+	style.showColorScale = false;
+	CHECK(FplWriteSvg(plot, v, style).find("<linearGradient") == std::string::npos);
+	CHECK(FplWriteSvg(plot, v, style).find("<image ") != std::string::npos);
+	// hidden, or no heat map: nothing
+	style.showColorScale = true;
+	plot.graphs[0].flags |= FplGraphHidden;
+	CHECK(FplWriteSvg(plot, v, style).find("<image ") == std::string::npos);
+	auto curve = MakePlot({ L"y = x" });
+	curve.Sample(v);
+	CHECK(FplWriteSvg(curve, v, style).find("<linearGradient") == std::string::npos);
+	// two: their marks
+	auto both = MakePlot({ L"z = sin x", L"z = cos y" });
+	both.graphs[0].flags |= FplGraphHeatmap;
+	both.graphs[1].flags |= FplGraphHeatmap;
+	both.Sample(v);
+	style.graphColors = { 0xFF0000, 0x00FF00 };
+	svg = FplWriteSvg(both, v, style);
+	CHECK(svg.find("url(#scale1)") != std::string::npos);
+}
+
+TEST(ReadmeMatchesParser) {
+	// next to the sources, wherever the tests were started from
+	std::filesystem::path path = std::filesystem::path(__FILE__).parent_path().parent_path() / L"FunctionPlot" / L"README.md";
+	std::ifstream file(path, std::ios::binary);
+	CHECK(file.good());
+	if (!file.good())
+		return;
+	const std::string doc((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	std::set<std::wstring> words;
+	std::wstring word;
+	for (char c : doc) {
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+			word += static_cast<wchar_t>(c);
+		else if (!word.empty()) {
+			words.insert(word);
+			word.clear();
+		}
+	}
+	for (auto& name : FplFunctionNames())
+		if (!words.count(name)) {
+			wprintf(L"  the README doesn't list '%s'\n", name.c_str());
+			CHECK(words.count(name) != 0);
+		}
+	// its lists of names are exact, in either direction
+	auto listAfter = [&](const char* marker) {
+		std::set<std::wstring> names;
+		const size_t at = doc.find(marker);
+		CHECK(at != std::string::npos);
+		if (at == std::string::npos)
+			return names;
+		const size_t from = doc.find('`', at) + 1, to = doc.find('`', from);
+		std::wstring current;
+		for (size_t i = from; i <= to; i++) {
+			if (doc[i] == ' ' || i == to) {
+				if (!current.empty())
+					names.insert(current);
+				current.clear();
+			}
+			else
+				current += static_cast<wchar_t>(doc[i]);
+		}
+		return names;
+	};
+	auto yielding = FplYieldingNames(), callOnly = FplCallOnlyNames();
+	CHECK(listAfter("These are the names:") == std::set<std::wstring>(yielding.begin(), yielding.end()));
+	CHECK(listAfter("is still t times g:") == std::set<std::wstring>(callOnly.begin(), callOnly.end()));
+	// and those names are functions
+	auto all = FplFunctionNames();
+	for (auto& name : yielding)
+		CHECK(std::find(all.begin(), all.end(), name) != all.end());
+	for (auto& name : callOnly)
+		CHECK(std::find(yielding.begin(), yielding.end(), name) != yielding.end());
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -5570,6 +5920,11 @@ int wmain() {
 	Run_Transitions();
 	Run_StretchingDrawings();
 	Run_MoreFunctions();
+	Run_SumsAndProducts();
+	Run_AutoQ();
+	Run_TicksInState();
+	Run_HeatmapsInSvg();
+	Run_ReadmeMatchesParser();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

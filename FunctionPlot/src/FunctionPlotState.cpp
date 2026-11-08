@@ -4,6 +4,7 @@
 //	degrees 0
 //	mode 2d
 //	panel 0
+//	ticks <pi> <polar>												pi ticks and the polar grid (1)
 //	log <x> <y>														log scales (1), when either is; before view
 //	view <xMin> <xMax> <yMin> <yMax>
 //	box <xMin> <xMax> <yMin> <yMax> <zMin> <zMax> <yaw> <pitch>
@@ -96,6 +97,7 @@ std::wstring FplSaveState(const FplSavedState& state) {
 	out += L"degrees " + std::wstring(state.degrees ? L"1" : L"0") + L"\n";
 	out += L"mode " + std::wstring(state.mode3D ? L"3d" : L"2d") + L"\n";
 	out += L"panel " + std::wstring(state.collapsed ? L"1" : L"0") + L"\n";
+	out += L"ticks " + std::wstring(state.piTicks ? L"1" : L"0") + L" " + std::wstring(state.polarGrid ? L"1" : L"0") + L"\n";
 	auto& v = state.view;
 	if (v.logX || v.logY)
 		out += L"log " + std::wstring(v.logX ? L"1" : L"0") + L" " + std::wstring(v.logY ? L"1" : L"0") + L"\n";
@@ -147,6 +149,11 @@ bool FplLoadState(std::wstring_view text, FplSavedState& state) {
 			s.degrees = rest == L"1";
 		else if (key == L"mode")
 			s.mode3D = rest == L"3d";
+		else if (key == L"ticks" && words.size() >= 2) {
+			s.piTicks = words[0] == L"1";
+			s.polarGrid = words[1] == L"1";
+			s.hasTicks = true;
+		}
 		else if (key == L"panel")
 			s.collapsed = rest == L"1";
 		else if (key == L"log" && words.size() >= 2) {

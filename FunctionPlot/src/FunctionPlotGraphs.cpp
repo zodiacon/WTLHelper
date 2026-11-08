@@ -115,6 +115,8 @@ void FplPlot::Build() {
 		i = g.text.find_first_not_of(L' ', i + 1);
 		options.plainQ = options.plainQ || (i != std::wstring::npos && (g.text[i] == L'=' || g.text[i] == L'('));
 	}
+	for (auto& p : params)
+		options.weakQ = options.weakQ || (p.name == L"q" && (p.flags & FplParamAuto));
 	std::vector<FplError> functionErrors(graphs.size());
 	auto taken = [&](const std::wstring& name) {
 		if (std::find(m_Names.begin(), m_Names.end(), name) != m_Names.end())
@@ -243,7 +245,7 @@ void FplPlot::Build() {
 			std::wstring text = p == L"x" ? call : p == L"y" ? L"x = " + call : p == L"t" ? call
 				: p == FplTheta ? L"r = " + call : std::wstring();
 			if (!text.empty()) {
-				g.expr = FplBuild(text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ);
+				g.expr = FplBuild(text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ, options.weakQ);
 			}
 			else {
 				g.expr.kind = FplKind::Definition;
@@ -280,7 +282,7 @@ void FplPlot::Build() {
 			if (!g.fitted.empty()) {
 				// a regression: built against every name, its fitted ones too
 				auto fittedSlots = g.fitted;
-				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ);
+				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ, options.weakQ);
 				g.fitted = fittedSlots;
 				if (!g.expr.error && g.expr.kind != FplKind::Regression)
 					g.expr.error = { FplErrorCode::NotAPlot, 0, static_cast<int>(g.text.size()) };
@@ -292,7 +294,7 @@ void FplPlot::Build() {
 				continue;
 			}
 			else {
-				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ);
+				g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ, options.weakQ);
 				if (!g.expr.error && (g.expr.kind == FplKind::Point || g.expr.kind == FplKind::SlopeField ||
 					g.expr.kind == FplKind::SecondOrder || g.expr.kind == FplKind::OdeSystem ||
 					g.expr.kind == FplKind::Point3D || g.expr.kind == FplKind::OdeSystem3D))

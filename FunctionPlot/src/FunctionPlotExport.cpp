@@ -3,6 +3,7 @@
 #include "FunctionPlotGraphs.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 
@@ -86,6 +87,92 @@ void Text(std::string& svg, double x, double y, const char* anchor, uint32_t col
 
 } // namespace
 
+std::string FplEncodePng(int width, int height, const std::vector<uint8_t>& rgba) {
+	std::string png;
+	if (width <= 0 || height <= 0 || rgba.size() != size_t(width) * height * 4)
+		return png;
+	static const std::array<uint32_t, 256> table = [] {
+		std::array<uint32_t, 256> t{};
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t c = i;
+			for (int k = 0; k < 8; k++)
+				c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+			t[i] = c;
+		}
+		return t;
+	}();
+	auto be32 = [](std::string& out, uint32_t v) {
+		for (int shift = 24; shift >= 0; shift -= 8)
+			out += static_cast<char>((v >> shift) & 255);
+	};
+	auto chunk = [&](const char* type, const std::string& data) {
+		be32(png, static_cast<uint32_t>(data.size()));
+		const size_t from = png.size();
+		png += type;
+		png += data;
+		uint32_t crc = 0xFFFFFFFFu;
+		for (size_t i = from; i < png.size(); i++)
+			crc = table[(crc ^ static_cast<uint8_t>(png[i])) & 255] ^ (crc >> 8);
+		be32(png, crc ^ 0xFFFFFFFFu);
+	};
+	png.assign("\x89PNG\r\n\x1A\n", 8);
+	std::string header;
+	be32(header, width);
+	be32(header, height);
+	header += "\x08\x06";		// 8 bits, RGBA
+	header.append(3, '\0');
+	chunk("IHDR", header);
+	// each row after a filter byte of none, in deflate's stored blocks
+	std::string raw;
+	const size_t stride = size_t(width) * 4;
+	raw.reserve((stride + 1) * height);
+	for (int y = 0; y < height; y++) {
+		raw += '\0';
+		raw.append(reinterpret_cast<const char*>(rgba.data()) + stride * y, stride);
+	}
+	std::string z("\x78\x01", 2);
+	uint32_t a = 1, b = 0;
+	for (unsigned char c : raw) {
+		a = (a + c) % 65521;
+		b = (b + a) % 65521;
+	}
+	for (size_t at = 0; at < raw.size();) {
+		const size_t length = std::min<size_t>(raw.size() - at, 65535);
+		z += static_cast<char>(at + length == raw.size() ? 1 : 0);
+		z += static_cast<char>(length & 255);
+		z += static_cast<char>(length >> 8);
+		z += static_cast<char>(~length & 255);
+		z += static_cast<char>((~length >> 8) & 255);
+		z.append(raw, at, length);
+		at += length;
+	}
+	be32(z, (b << 16) | a);
+	chunk("IDAT", z);
+	chunk("IEND", {});
+	return png;
+}
+
+namespace {
+
+std::string Base64(const std::string& data) {
+	static const char Digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	out.reserve((data.size() + 2) / 3 * 4);
+	for (size_t i = 0; i < data.size(); i += 3) {
+		const uint32_t b0 = static_cast<uint8_t>(data[i]);
+		const uint32_t b1 = i + 1 < data.size() ? static_cast<uint8_t>(data[i + 1]) : 0;
+		const uint32_t b2 = i + 2 < data.size() ? static_cast<uint8_t>(data[i + 2]) : 0;
+		const uint32_t v = (b0 << 16) | (b1 << 8) | b2;
+		out += Digits[(v >> 18) & 63];
+		out += Digits[(v >> 12) & 63];
+		out += i + 1 < data.size() ? Digits[(v >> 6) & 63] : '=';
+		out += i + 2 < data.size() ? Digits[v & 63] : '=';
+	}
+	return out;
+}
+
+}  // namespace
+
 std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplSvgStyle& style) {
 	std::string svg;
 	if (!view.Valid())
@@ -94,6 +181,29 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 	svg += "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + Num(w) + "\" height=\"" + Num(h) + "\" viewBox=\"0 0 " +
 		Num(w) + " " + Num(h) + "\" font-family=\"Segoe UI, sans-serif\">\n";
 	svg += "<rect width=\"100%\" height=\"100%\" fill=\"" + Color(style.back) + "\"/>\n";
+
+	// heat maps first, under the grid, as a picture each: their colors over the view, clear where they're undefined
+	for (auto& g : plot.graphs) {
+		auto& map = g.geometry.heatmap;
+		if (!g.Drawable() || map.Empty() || !(map.hi > map.lo || map.hi == map.lo))
+			continue;
+		std::vector<uint8_t> rgba(map.values.size() * 4);
+		for (size_t k = 0; k < map.values.size(); k++) {
+			const float v = map.values[k];
+			if (!std::isfinite(v))
+				continue;
+			const double t = map.hi > map.lo ? std::clamp((v - map.lo) / (map.hi - map.lo), 0.0, 1.0) : 0.5;
+			const uint32_t c = FplColormap(t);
+			rgba[k * 4] = static_cast<uint8_t>(c & 255);
+			rgba[k * 4 + 1] = static_cast<uint8_t>((c >> 8) & 255);
+			rgba[k * 4 + 2] = static_cast<uint8_t>((c >> 16) & 255);
+			rgba[k * 4 + 3] = 255;
+		}
+		const float opacity = g.fillOpacity >= 0 ? g.fillOpacity : 0.85f;
+		svg += "<image x=\"0\" y=\"0\" width=\"" + Num(map.cols * map.cell) + "\" height=\"" + Num(map.rows * map.cell) +
+			"\" preserveAspectRatio=\"none\" opacity=\"" + Num(opacity) + "\" href=\"data:image/png;base64," +
+			Base64(FplEncodePng(map.cols, map.rows, rgba)) + "\"/>\n";
+	}
 
 	FplTicks tx = FplMakeTicksX(view, 90, style.piTicks);
 	FplTicks ty = FplMakeTicksY(view, 60);
@@ -211,6 +321,43 @@ std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplS
 			else
 				svg += "<circle cx=\"" + Num(p.x) + "\" cy=\"" + Num(p.y) + "\" r=\"" + Num(2.5 + g.width) + "\" fill=\"" +
 					color + "\"" + (g.opacity < 1 ? " fill-opacity=\"" + Num(g.opacity) + "\"" : std::string()) + "/>\n";
+		}
+	}
+
+	// a heat map's color scale at the right, as the control's: the colors, and the values on a patch of the background
+	if (style.showColorScale) {
+		const double barWidth = 14, barHeight = std::min(220.0, h * 0.4), slot = 76, top = 14;
+		double right = w - 12;
+		size_t count = 0;
+		for (auto& g : plot.graphs)
+			count += g.Drawable() && !g.geometry.heatmap.Empty();
+		for (size_t i = 0; i < plot.graphs.size() && barHeight >= 60; i++) {
+			auto& g = plot.graphs[i];
+			auto& map = g.geometry.heatmap;
+			if (!g.Drawable() || map.Empty())
+				continue;
+			const double left = right - barWidth;
+			if (left - slot + barWidth < 0)
+				break;
+			const float opacity = g.fillOpacity >= 0 ? g.fillOpacity : 0.85f;
+			const std::string id = "scale" + std::to_string(i);
+			svg += "<rect x=\"" + Num(right - slot + 4) + "\" y=\"" + Num(top - 8) + "\" width=\"" + Num(slot + 2) +
+				"\" height=\"" + Num(barHeight + 16) + "\" rx=\"4\" fill=\"" + Color(style.back) + "\" fill-opacity=\"0.75\"/>\n";
+			svg += "<linearGradient id=\"" + id + "\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">";
+			for (int k = 0; k <= 16; k++)
+				svg += "<stop offset=\"" + Num(k / 16.0) + "\" stop-color=\"" + Color(FplColormap(1 - k / 16.0)) + "\"/>";
+			svg += "</linearGradient>\n";
+			svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top) + "\" width=\"" + Num(barWidth) + "\" height=\"" +
+				Num(barHeight) + "\" fill=\"url(#" + id + ")\" fill-opacity=\"" + Num(opacity) + "\" stroke=\"" + Color(style.axis) + "\"/>\n";
+			if (count > 1)
+				svg += "<rect x=\"" + Num(left) + "\" y=\"" + Num(top - 5) + "\" width=\"" + Num(barWidth) +
+					"\" height=\"3\" fill=\"" + Color(colorOf(i)) + "\"/>\n";
+			for (auto& tick : FplMakeColorScale(map.lo, map.hi, barHeight)) {
+				const double y = top + barHeight * (1 - tick.fraction);
+				svg += "<path d=\"M" + Num(left - 3) + " " + Num(y) + "H" + Num(left) + "\" stroke=\"" + Color(style.axis) + "\"/>\n";
+				Text(svg, left - 5, y + 4, "end", style.label, 12, tick.text);
+			}
+			right -= slot;
 		}
 	}
 

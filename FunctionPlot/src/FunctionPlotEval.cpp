@@ -326,6 +326,22 @@ double Simpson(F& f, double a, double b, double fa, double fm, double fb, double
 		Simpson(f, m, b, fm, fr, fb, right, eps / 2, depth - 1, budget);
 }
 
+// A sum or product over the whole numbers from lo to hi (both rounded): empty is 0 or 1. Too many terms to draw isn't a value.
+template <typename F>
+double RunSeries(F& f, double lo, double hi, bool product) {
+	if (!std::isfinite(lo) || !std::isfinite(hi))
+		return NaN;
+	const double first = std::round(lo), last = std::round(hi);
+	if (last - first >= 100000)
+		return NaN;
+	double total = product ? 1 : 0;
+	for (double k = first; k <= last; k++) {
+		const double term = f(k);
+		total = product ? total * term : total + term;
+	}
+	return total;
+}
+
 template <typename F>
 double Integrate(F& f, double a, double b) {
 	if (!std::isfinite(a) || !std::isfinite(b))
@@ -406,6 +422,20 @@ double FplEvalTree(const FplAst& ast, int node, const std::vector<std::wstring>&
 			return n.hasDefault ? ev(int(k.size() - 1)) : NaN;
 		}
 		case FplOp::Tuple: case FplOp::List: return NaN;
+		case FplOp::Series: {
+			std::vector<std::wstring> inner;
+			inner.reserve(names.size() + 1);
+			inner.push_back(n.name);
+			inner.insert(inner.end(), names.begin(), names.end());
+			std::vector<double> vals(names.size() + 1);
+			for (size_t i = 0; i < names.size(); i++)
+				vals[i + 1] = values[i];
+			auto f = [&](double t) {
+				vals[0] = t;
+				return FplEvalTree(ast, k[0], inner, vals.data());
+			};
+			return RunSeries(f, ev(1), ev(2), n.product);
+		}
 		case FplOp::Integral: {
 			// the body with its variable first among the names
 			std::vector<std::wstring> inner;
@@ -466,7 +496,7 @@ private:
 		auto& n = m_Ast[node];
 		if (n.op == FplOp::Var)
 			return std::find(bound.begin(), bound.end(), n.name) == bound.end();
-		if (n.op == FplOp::Integral) {
+		if (n.op == FplOp::Integral || n.op == FplOp::Series) {
 			if (HasFreeNames(n.kids[1], bound) || HasFreeNames(n.kids[2], bound))
 				return true;
 			bound.push_back(n.name);
@@ -507,6 +537,12 @@ private:
 				return true;
 			case FplOp::Var: {
 				int slot = StandardSlot(n.name);
+				// the innermost sum's index by that name, over a parameter
+				for (auto it = m_Indexes.rbegin(); it != m_Indexes.rend(); ++it)
+					if (it->first == n.name) {
+						slot = it->second;
+						break;
+					}
 				if (slot < 0) {
 					auto it = std::find(m_Params.begin(), m_Params.end(), n.name);
 					if (it == m_Params.end() || n.name == L"r")
@@ -604,6 +640,26 @@ private:
 					m_Prog.m_Code[j].arg = int(m_Prog.m_Code.size());
 				return true;
 			}
+			case FplOp::Series: {
+				// the body as a program of its own, its index in a slot past all the names, one more for each sum around it
+				const int slot = FplFirstParam + int(m_Params.size()) + int(m_Indexes.size());
+				auto body = std::make_shared<FplProgram>();
+				FplCompiler inner(m_Ast, m_Params, *body, m_Error);
+				inner.m_Bound = m_Bound;
+				inner.m_Bound.push_back(n.name);
+				inner.m_Indexes = m_Indexes;
+				inner.m_Indexes.push_back({ n.name, slot });
+				if (!inner.Compile(k[0]) || !Emit(k[1]) || !Emit(k[2]))
+					return false;
+				m_Prog.m_Slots |= body->m_Slots;
+				m_Prog.m_SlotCount = std::max(m_Prog.m_SlotCount, std::min(body->m_SlotCount, slot));
+				FplInstr in{ n.product ? FplCode::Product : FplCode::Sum };
+				in.arg = int(m_Prog.m_Subs.size());
+				in.value = slot;
+				m_Prog.m_Subs.push_back(std::move(body));
+				Push(in, -1);
+				return true;
+			}
 			case FplOp::Integral: {
 				// the body as a program of its own, run over the variable's slot
 				int slot = StandardSlot(n.name);
@@ -613,6 +669,7 @@ private:
 				FplCompiler inner(m_Ast, m_Params, *body, m_Error);
 				inner.m_Bound = m_Bound;
 				inner.m_Bound.push_back(n.name);
+				inner.m_Indexes = m_Indexes;
 				if (!inner.Compile(k[0]) || !Emit(k[1]) || !Emit(k[2]))
 					return false;
 				// what the body reads, but not its variable, is read here too
@@ -646,6 +703,7 @@ private:
 	int m_Depth = 0;
 	int m_Max = 0;
 	std::vector<std::wstring> m_Bound;	// the integrals' variables around what's compiled
+	std::vector<std::pair<std::wstring, int>> m_Indexes;	// the sums' around it, with their slots
 };
 
 FplProgram FplCompile(const FplAst& ast, int node, const std::vector<std::wstring>& parameters, FplError* error) {
@@ -720,6 +778,21 @@ double FplProgram::Eval(const double* slots) const {
 					pc = size_t(in.arg);
 				break;
 			case FplCode::Jump: pc = size_t(in.arg); break;
+			case FplCode::Sum: case FplCode::Product: {
+				sp--;
+				const FplProgram& body = *m_Subs[in.arg];
+				const int slot = int(in.value);
+				// what the body reads, copied, with its index past that
+				const int read = std::min(body.m_SlotCount, slot);
+				std::vector<double> local(std::max(body.m_SlotCount, slot + 1), 0.0);
+				std::copy(slots, slots + read, local.begin());
+				auto f = [&](double k) {
+					local[slot] = k;
+					return body.Eval(local.data());
+				};
+				st[sp - 1] = RunSeries(f, st[sp - 1], st[sp], in.code == FplCode::Product);
+				break;
+			}
 			case FplCode::Integral: {
 				sp--;
 				const FplProgram& body = *m_Subs[in.arg];
@@ -1043,7 +1116,7 @@ void CollectSingular(const FplAst& ast, int node, unsigned variable, bool guarde
 			out.push_back({ k, wrap, guarded });
 	};
 	auto& n = ast[node];
-	if (n.op == FplOp::Integral)
+	if (n.op == FplOp::Integral || n.op == FplOp::Series)
 		return;		// its body's variable is its own
 	if (n.op == FplOp::Div)
 		factors(n.kids[1], 0);
@@ -1071,7 +1144,7 @@ void CollectSingular(const FplAst& ast, int node, unsigned variable, bool guarde
 namespace {
 
 FplExpression BuildExpression(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
-	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists, bool plainQ) {
+	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists, bool plainQ, bool weakQ) {
 	FplExpression e;
 	FplParseOptions options;
 	options.parameters = &parameters;
@@ -1079,6 +1152,7 @@ FplExpression BuildExpression(std::wstring_view text, const std::vector<std::wst
 	options.functions = functions;
 	options.lists = lists;
 	options.plainQ = plainQ;
+	options.weakQ = weakQ;
 	if (auto ode = FplSplitOde(text); ode.isOde) {
 		options.plainQ = true;		// theta has no place in one
 		const bool system = ode.order == FplOdeOrder::System || ode.order == FplOdeOrder::System3D;
@@ -1259,11 +1333,11 @@ bool DefinesVariable(std::wstring_view text, size_t& at, size_t& length) {
 } // namespace
 
 FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
-	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists, bool plainQ) {
-	FplExpression e = BuildExpression(text, parameters, degrees, functions, lists, plainQ);
+	const std::vector<FplUserFunction>* functions, const std::vector<std::wstring>* lists, bool plainQ, bool weakQ) {
+	FplExpression e = BuildExpression(text, parameters, degrees, functions, lists, plainQ, weakQ);
 	// a q that doesn't read as theta may be a name the app can offer to add
 	if (e.error && !plainQ && text.find(L'q') != text.npos) {
-		FplExpression plain = BuildExpression(text, parameters, degrees, functions, lists, true);
+		FplExpression plain = BuildExpression(text, parameters, degrees, functions, lists, true, false);
 		if (plain.error.code == FplErrorCode::UnknownName)
 			return plain;
 	}
