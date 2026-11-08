@@ -2067,7 +2067,7 @@ TEST(Graphs3D) {
 		flat = flat && std::abs(v.pos.z) < 0.02f;
 	CHECK(flat);
 	CHECK(!plot.graphs[5].mesh.Empty());
-	CHECK(plot.graphs[6].mesh.Empty());			// implicit curves aren't drawn in 3D
+	CHECK(!plot.graphs[6].mesh.Empty());		// an implicit curve, on the plane
 	CHECK(plot.graphs[7].mesh.Empty());
 	CHECK(plot.graphs[8].mesh.Empty());			// outside the box
 	CHECK(plot.graphs[9].mesh.Empty());
@@ -2140,7 +2140,7 @@ TEST(ImplicitSurfaces) {
 	auto plot = MakePlot({ L"x^2 + y^2 + z^2 = 25", L"x^2 + y^2 = 4" });
 	plot.Build3D(box);
 	CHECK(!plot.graphs[0].mesh.Empty());
-	CHECK(plot.graphs[1].mesh.Empty());
+	CHECK(!plot.graphs[1].mesh.Empty());		// the 2D curve, on the plane
 	plot.Sample(View());
 	CHECK(plot.graphs[0].geometry.lines.empty());		// nothing in 2D
 }
@@ -4217,41 +4217,125 @@ TEST(StiffOdes) {
 	for (auto& p : jumped)
 		beyond = std::max(beyond, v.ToPlaneX(p.x));
 	CHECK(beyond > 1.05);
-	// too stiff for its budget: it stops early, right as far as it goes, and within the budget
-	for (double L : { 1e5, 1e6 }) {
+	// as stiff as you like: the whole view, by turning implicit
+	for (double L : { 1e5, 1e6, 1e8, 1e12 }) {
 		std::function<double(double, double)> F = [L](double x, double y) { return -L * (y - std::cos(x)); };
 		size_t used = 0;
-		auto line = FplSolveOde(F, 0, 1, v, {}, &used);
+		bool ranOut = false;
+		auto line = FplSolveOde(F, 0, 1, v, {}, &used, &ranOut);
 		auto r = reach(line, [L](double x) { return (L * L * std::cos(x) + L * std::sin(x)) / (L * L + 1); });
-		CHECK(r.points > 1000);
-		CHECK(r.hi > 0.01);
+		CHECK(r.hi > 10);
 		CHECK(r.worst < 0.002);
-		CHECK(used <= FplSampleOptions{}.maxEvals + 100);
+		CHECK(!ranOut);
+		CHECK(used < 200000);		// not the budget, as it was when these were explicit
+	}
+	// off the slow solution at the start, by far: straight down to it, then along it
+	{
+		const double L = 1e8;
+		std::function<double(double, double)> F = [L](double x, double y) { return -L * (y - std::cos(x)); };
+		auto line = FplSolveOde(F, 0, 2.5, v);
+		double hi = -1e300, worst = 0;
+		for (auto& p : line) {
+			FplPoint q = v.ToPlane(p);
+			hi = std::max(hi, q.x);
+			if (q.x > 0.01 && q.y > -3 && q.y < 3)
+				worst = std::max(worst, std::abs(q.y - std::cos(q.x)));
+		}
+		CHECK(hi > 10);
+		CHECK(worst < 0.002);
+	}
+	// and on any view: the smallest step is recognized whatever the rounding (some widths once spent the whole budget on
+	// the transient, drawing nothing, and one size passing proves little)
+	{
+		auto plot = MakePlot({ L"y' = -100000(y - cos x), y(0) = 2.5" });
+		int bad = 0;
+		for (double w = 900; w <= 1100; w += 1) {
+			const FplViewport view = View(-10, 10, -8, 8, w, 800);
+			plot.Sample(view);
+			auto& g = plot.graphs[0].geometry;
+			size_t points = 0;
+			for (auto& line : g.lines)
+				points += line.size();
+			if (g.incomplete || points < 100 || g.evals > 100000)
+				bad++;
+		}
+		CHECK_INT(bad, 0);
 	}
 	// second order: the slow mode e^(-x/L)
-	for (double L : { 1e3, 1e4, 1e5 }) {
+	for (double L : { 1e3, 1e4, 1e5, 1e8 }) {
 		std::function<double(double, const double*)> F = [L](double, const double* y) { return -L * y[1] - y[0]; };
 		const double start[] = { 1, -1 / L };
-		auto r = reach(FplSolveOdeN(F, 2, 0, start, v), [L](double x) { return std::exp(-x / L); });
-		CHECK(r.points > 1000);
-		CHECK(r.hi > (L <= 1e4 ? 10 : 0.01));
+		bool ranOut = false;
+		auto r = reach(FplSolveOdeN(F, 2, 0, start, v, {}, nullptr, &ranOut), [L](double x) { return std::exp(-x / L); });
+		CHECK(r.hi > 10);
 		CHECK(r.worst < 0.002);
+		CHECK(!ranOut);
 	}
 	// a system
-	for (double L : { 1e3, 1e5 }) {
+	for (double L : { 1e3, 1e5, 1e8 }) {
 		std::function<FplPoint(double, double)> F = [L](double x, double y) { return FplPoint{ 1, -L * (y - std::sin(x)) }; };
 		auto r = reach(FplSolveSystem(F, 0, 0, v), [L](double x) { return (L * L * std::sin(x) - L * std::cos(x)) / (L * L + 1); });
-		CHECK(r.points > 100);
-		CHECK(r.hi > 0.01);
+		CHECK(r.hi > 10);
 		CHECK(r.worst < 0.002);
 	}
 	// and in 3D
 	FplBox3 box{ -5, 5, -5, 5, -5, 5 };
 	std::function<FplPoint3(double, double, double, double)> stiff3 = [](double, double x, double y, double z) {
-		return FplPoint3{ 1, -1e4 * (y - std::sin(x)), 0 * z };
+		return FplPoint3{ 1, -1e8 * (y - std::sin(x)), 0 * z };
 	};
 	auto line3 = FplSolveSystem3(stiff3, true, { 0, 0, 0 }, box);
 	CHECK(line3.size() > 10);
+	double off3 = 0, far3 = 0;
+	for (auto& p : line3) {
+		const FplPoint3 q{ -5 + (p.x + 1) * 5.0, -5 + (p.y + 1) * 5.0, 0 };
+		off3 = std::max(off3, q.x > 0.01 && q.x < 5 ? std::abs(q.y - std::sin(q.x)) : 0.0);
+		far3 = std::max(far3, q.x);
+	}
+	CHECK(far3 > 5);
+	CHECK(off3 < 0.01);
+	// Van der Pol, the classic: fast and slow in turn, on a cycle of size about 2
+	std::function<FplPoint(double, double)> vdp = [](double x, double y) { return FplPoint{ y, 1000 * (1 - x * x) * y - x }; };
+	FplViewport wide = View(-3, 3, -2000, 2000, 800, 800);
+	size_t vdpEvals = 0;
+	auto cycle = FplSolveSystem(vdp, 2, 0, wide, {}, &vdpEvals);
+	CHECK(cycle.size() > 10);
+	double most = 0;
+	for (auto& p : cycle)
+		most = std::max(most, std::abs(wide.ToPlaneX(p.x)));
+	CHECK(most < 3);
+	CHECK(most > 1.9);
+	CHECK(vdpEvals <= FplSampleOptions{}.maxEvals + 100);
+
+	// not everything turns implicit: tangents and blow-ups spread apart, so those stay as they were (Odes tests them), and
+	// a plain equation is as cheap as it was
+	std::function<double(double, double)> plain = [](double, double y) { return -y; };
+	size_t plainEvals = 0;
+	FplSolveOde(plain, 0, 1, v, {}, &plainEvals);
+	CHECK(plainEvals < 40000);
+	// a fast oscillation isn't stiffness: nothing shrinks, so it can only run out of steps, and says so
+	std::function<double(double, const double*)> fast = [](double, const double* y) { return -1e8 * y[0]; };
+	const double wave[] = { 1, 0 };
+	bool stopped = false;
+	auto waved = FplSolveOdeN(fast, 2, 0, wave, v, {}, nullptr, &stopped);
+	CHECK(waved.size() > 1);
+	CHECK(stopped);
+	// while reaching the view's edge, leaving it or a vertical tangent doesn't
+	std::function<double(double, double)> circle = [](double x, double y) { return -x / y; };
+	stopped = false;
+	FplSolveOde(circle, 0, 2, View(-3, 3, -3, 3, 600, 600), {}, nullptr, &stopped);
+	CHECK(!stopped);
+	stopped = false;
+	FplSolveOde(plain, 0, 1, v, {}, nullptr, &stopped);
+	CHECK(!stopped);
+	// in a plot
+	auto plot = MakePlot({ L"y'' = -100000000 y, y(0) = 1, y'(0) = 0", L"y' = -y, y(0) = 1", L"y = x" });
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.incomplete);
+	CHECK(!plot.graphs[1].geometry.incomplete);
+	CHECK(!plot.graphs[2].geometry.incomplete);
+	plot.Build3D(box);
+	CHECK(plot.graphs[0].incomplete3D);
+	CHECK(!plot.graphs[1].incomplete3D);
 }
 
 TEST(Odes3DAndPicking) {
@@ -4287,6 +4371,21 @@ TEST(Odes3DAndPicking) {
 			off = std::max(off, std::abs(q.y - 3 * std::exp(-q.x)));
 	}
 	CHECK(off < 1.0);		// a tube's radius, measured up a slope of at most 3, and the dot
+	// implicit curves and what's between two curves on the plane too, picked on it
+	auto flatKinds = MakePlot({ L"x^2 + y^2 = 16", L"x^2 + y^2 < 4", L"x^2/4 - 3 < y < 4 - x^2/2", L"y > x" });
+	flatKinds.Build3D(box);
+	for (int i = 0; i < 4; i++)
+		CHECK(!flatKinds.graphs[i].mesh.Empty());
+	bool flatAll = true;
+	for (auto& vertex : flatKinds.graphs[0].mesh.vertices)
+		flatAll = flatAll && std::abs(vertex.pos.z - flat) < 0.05f;
+	CHECK(flatAll);
+	auto circle3 = MakePlot({ L"x^2 + y^2 = 16" });
+	circle3.Build3D(box);
+	auto onCircle = pick(circle3, { 4, 0, 0 });
+	CHECK_INT(onCircle.graph, 0);
+	if (onCircle)
+		CHECK_NEAR(onCircle.z, 0.0);
 	// its point moves the sphere: a start outside the box has none
 	auto outside = MakePlot({ L"y'' = -y, y(50) = 2, y'(50) = 0" });
 	auto inside = MakePlot({ L"y'' = -y, y(0) = 2, y'(0) = 0" });

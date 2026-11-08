@@ -683,6 +683,7 @@ void FplPlot::SampleGraph(int graph, const FplViewport& view, const FplSampleOpt
 		all.arrows.insert(all.arrows.end(), one.arrows.begin(), one.arrows.end());
 		all.marks.insert(all.marks.end(), one.marks.begin(), one.marks.end());
 		all.dashed = one.dashed;
+		all.incomplete = all.incomplete || one.incomplete;
 		all.evals += one.evals;
 	}
 	g.geometry = std::move(all);
@@ -696,10 +697,13 @@ void FplPlot::Build3D(const FplBox3& box) {
 void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 	auto& g = graphs[graph];
 	g.mesh = {};
+	g.incomplete3D = false;
+	m_MeshIncomplete = false;
 	if (!g.Drawable() || !box.Valid())
 		return;
 	if (!g.Listed()) {
 		g.mesh = Mesh3D(g, box, implicitCells);
+		g.incomplete3D = m_MeshIncomplete;
 		return;
 	}
 	// once per element (the first 200), the meshes together
@@ -710,6 +714,7 @@ void FplPlot::Build3DGraph(int graph, const FplBox3& box, int implicitCells) {
 		FplAppend(g.mesh, Mesh3D(g, box, implicitCells));
 	}
 	m_Slots = std::move(saved);
+	g.incomplete3D = m_MeshIncomplete;
 }
 
 FplLineGrid FplPlot::LineGridOf(int graph, const FplBox3& box) const {
@@ -780,7 +785,7 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 			const FplSampleOptions options = OptionsFor(static_cast<int>(&g - graphs.data()), {});
 			for (size_t k = 0; k + 2 < e.starts.size(); k += 3) {
 				const FplPoint3 p0{ e.starts[k].Eval(s), e.starts[k + 1].Eval(s), e.starts[k + 2].Eval(s) };
-				auto line = FplSolveSystem3(field, autonomous, p0, box, options);
+				auto line = FplSolveSystem3(field, autonomous, p0, box, options, nullptr, &m_MeshIncomplete);
 				if (!line.empty())
 					FplAppend(mesh, FplTubes({ std::move(line) }, radius));
 				// a dot where it starts, in the box
@@ -800,13 +805,15 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 			}, box, implicitCells);
 			break;
 		// the 2D kinds that are curves or points, on the z = 0 plane
-		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem: {
-			// an ODE's solutions as sampled for a view of the box's x and y; its slopes and arrows stay 2D's, as a
-			// vector field's do
+		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem: case FplKind::Implicit:
+		case FplKind::Between: {
+			// their lines as sampled for a view of the box's x and y: an ODE's solutions, an implicit curve or a region's
+			// boundary, what's between two curves' sides. Slopes, arrows and fills stay 2D's.
 			FplViewport plane;
 			plane.xMin = box.xMin, plane.xMax = box.xMax, plane.yMin = box.yMin, plane.yMax = box.yMax;
 			plane.width = plane.height = 1000;
 			FplGeometry flat = FplSample(e, m_Slots, plane, OptionsFor(static_cast<int>(&g - graphs.data()), {}));
+			m_MeshIncomplete = m_MeshIncomplete || flat.incomplete;
 			std::vector<std::vector<FplVec3>> lines;
 			lines.reserve(flat.lines.size());
 			for (auto& line : flat.lines) {
@@ -1301,7 +1308,8 @@ FplTraceHit FplPlot::Pick3D(FplVec3 origin, FplVec3 dir, const FplBox3& box) con
 			if (!graph.Listed())
 				p = { graph.expr.f.Eval(slots.data()), graph.expr.g.Eval(slots.data()), 0 };
 			break;
-		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem:
+		case FplKind::SlopeField: case FplKind::SecondOrder: case FplKind::OdeSystem: case FplKind::Implicit:
+		case FplKind::Between:
 			p.z = 0;		// on its plane, not the tube's surface
 			break;
 		default:

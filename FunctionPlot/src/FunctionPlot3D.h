@@ -120,7 +120,8 @@ struct FplLineGrid {
 // at most 0.02 of them; ended where it's far outside the box, settles on a point or closes on itself (autonomous only),
 // or has run 100 of them, so a chaotic one (Lorenz's) has an end (FPLGM_RANGE's t decides, if shorter).
 std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, double, double, double)>& field,
-	bool autonomous, FplPoint3 p0, const FplBox3& box, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+	bool autonomous, FplPoint3 p0, const FplBox3& box, const FplSampleOptions& options = {}, size_t* evals = nullptr,
+	bool* ranOut = nullptr);
 
 // x, y, z: at the box's ticks; levels: z at a closer step, for height lines (over z).
 FplLineGrid FplMakeLineGrid(const FplBox3& box, bool x, bool y, bool z, bool levels, float cells = 0);

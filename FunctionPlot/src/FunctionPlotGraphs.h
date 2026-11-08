@@ -60,6 +60,7 @@ struct FplGraph {
 	FplGeometry geometry;			// from the last Sample
 	FplMesh mesh;					// from the last Build3D
 	std::vector<FplFeature> features;	// from the last FindFeatures (a function's only)
+	bool incomplete3D = false;			// as geometry.incomplete, for the mesh
 
 	bool Drawable() const {
 		return !definition && !listDefinition && !expr.error && !(flags & FplGraphHidden) &&
@@ -187,8 +188,8 @@ public:
 	// listed ones, which go element by element here).
 	bool IsHeavy(int graph, bool in3D) const;
 	// The drawable graphs' meshes for a 3D box: surfaces (z = F(x, y), parametric), curves as tubes (space curves, and
-	// the 2D curves on the z = 0 plane), points as spheres. An ODE's solutions too (its slopes and arrows stay 2D's);
-	// implicit curves, regions and vector fields have none.
+	// the 2D curves on the z = 0 plane), points as spheres. An ODE's solutions, implicit curves and regions' boundaries
+	// too, and what's between two curves' sides (their slopes, arrows and fills stay 2D's); vector fields have none.
 	void Build3D(const FplBox3& box);
 	void Build3DGraph(int graph, const FplBox3& box, int implicitCells = 48);
 	// The lines a surface has by its flags: z = F(x, y) in x and y at the box's ticks, a parametric surface along its u
@@ -242,6 +243,7 @@ private:
 	void Fit(FplGraph& g);
 	void SetElement(std::vector<double>& slots, const FplGraph& g, size_t i) const;
 	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
+	bool m_MeshIncomplete = false;
 	void FindCurveMeetings(int graph, const FplViewport& view);
 	static void SortFeatures(FplGraph& g);
 	FplTraceHit OnGraph(int graph, FplPoint screen, const FplViewport& view) const;

@@ -49,6 +49,7 @@ struct FplPanelRow {
 	D2D1_RECT_F play{};					// a slider's play button
 	bool error = false;					// a graph's: a second line with the message
 	bool note = false;					// a graph's: a second line with a regression's fit
+	bool stopped = false;				// an ODE's solution ran out of steps
 };
 
 enum class FplPanelPart : uint8_t { None, Panel, Graph, Slider, Play, Toggle };

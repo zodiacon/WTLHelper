@@ -123,6 +123,7 @@ static const Example g_Examples[] = {
 	{ L"Forced Oscillator", L"x' = y, y' = -x - y/5 + cos(t), (2, 0)", false },
 	{ L"Phase Plane", L"x' = y, y' = -sin x - y/5, (a, b), (-6, 3), (1, 0)", false, false, Setup::Ode },
 	{ L"As&ymptotes and Holes", L"y = tan x\r\ny = (x^2 - 1)/(x - 1) + 3\r\ny = 1/(x + 5) - 4\r\ny = sin(x)/x - 5\r\ny = ln(x - 7)", false },
+	{ L"Stiff &Equations", L"y' = -100000(y - cos x), y(0) = 2.5\r\nx' = y, y' = 100(1 - x^2)y - x, (2, 0)\r\ny'' = -100000000 y, y(0) = 3, y'(0) = 0", false },
 	{ L"Logistic Gro&wth", L"dy/dx = k y(1 - y/4), y(-6) = 0.2, y(-6) = 6, y(0) = 2", false },
 	{ L"Lo&g Scales", L"y = x^2\r\ny = 2^x\r\ny = 1000/x\r\ny = 50 log x\r\n(10, 100)\r\ny' = y/x, y(1) = 3", false, false, Setup::Log },
 	{ L"La&bels and Styles", L"(2, 3)\r\n(a, 1)\r\ny = x^2/4\r\ny = 2sin x\r\nx^2 + y^2 < 9", false, false, Setup::Styles },
@@ -206,9 +207,12 @@ static bool ValidName(const wchar_t* name) {
 
 // ---- Slider ranges: a line like "a: -8..8" ------------------------------------------
 
+enum class RangeKind { NotOne, Good, Bad };
 struct RangeLine {
 	std::wstring name;
 	double min = 0, max = 0, step = 0;
+	std::wstring problem;		// Bad's
+	size_t at = 0;				// where what's after the colon starts
 };
 
 static std::wstring Trimmed(std::wstring_view text) {
@@ -263,33 +267,44 @@ static bool ParseRangeNumber(const std::wstring& text, double& value) {
 	return true;
 }
 
-// "a: -8..8", or with a step "a: -8..8, 0.5". Anything else isn't one, and is a graph (with whatever error it has).
-static bool ParseRangeLine(const std::wstring& line, RangeLine& range) {
+// "a: -8..8", or with a step "a: -8..8, 0.5". A name, a colon and two dots are meant as one, so one that doesn't read is
+// Bad, with its own message rather than the parser's. Anything else is a graph (with whatever error it has).
+static RangeKind ParseRangeLine(const std::wstring& line, RangeLine& range) {
 	const size_t colon = line.find(L':');
 	if (colon == std::wstring::npos)
-		return false;
+		return RangeKind::NotOne;
 	range.name = Trimmed(std::wstring_view(line).substr(0, colon));
 	if (!ValidName(range.name.c_str()))
-		return false;
+		return RangeKind::NotOne;
 	std::wstring rest = line.substr(colon + 1);
 	const size_t dots = rest.find(L"..");
 	if (dots == std::wstring::npos)
-		return false;
+		return RangeKind::NotOne;
+	range.at = line.find_first_not_of(L" \t", colon + 1);
+	auto bad = [&](std::wstring why) {
+		range.problem = range.name + L": " + std::move(why);
+		return RangeKind::Bad;
+	};
+	const std::wstring reads = L"a range reads like " + range.name + L": -8..8, or " + range.name + L": 0..2pi, 0.1";
 	std::wstring right = rest.substr(dots + 2);
 	range.step = 0;
 	const size_t comma = right.find(L',');
 	if (comma != std::wstring::npos) {
-		if (!ParseRangeNumber(Trimmed(std::wstring_view(right).substr(comma + 1)), range.step) || !(range.step > 0))
-			return false;
+		if (!ParseRangeNumber(Trimmed(std::wstring_view(right).substr(comma + 1)), range.step))
+			return bad(reads);
+		if (!(range.step > 0))
+			return bad(L"a slider's step must be more than 0");
 		right.resize(comma);
 	}
 	if (!ParseRangeNumber(Trimmed(std::wstring_view(rest).substr(0, dots)), range.min) ||
-		!ParseRangeNumber(Trimmed(right), range.max) || !(range.max > range.min))
-		return false;
+		!ParseRangeNumber(Trimmed(right), range.max))
+		return bad(reads);
+	if (!(range.max > range.min))
+		return bad(L"a range goes from low to high");
 	// no step given: one a hundredth of the range or a little finer, a power of ten
 	if (range.step == 0)
 		range.step = std::pow(10.0, std::floor(std::log10((range.max - range.min) / 100)));
-	return true;
+	return RangeKind::Good;
 }
 
 // What each ranged parameter's slider was before its line, to go back to when the line goes.
@@ -302,7 +317,7 @@ static void ApplyRangeLines(const std::vector<std::wstring>& lines) {
 	std::map<std::wstring, RangeLine> wanted;
 	for (auto& line : lines) {
 		RangeLine range;
-		if (ParseRangeLine(line, range))
+		if (ParseRangeLine(line, range) == RangeKind::Good)
 			wanted[range.name] = range;
 	}
 	for (auto it = g_rangedParams.begin(); it != g_rangedParams.end();) {
@@ -344,7 +359,7 @@ static void SyncGraphs() {
 	auto lines = EditorLines();
 	for (size_t i = 0; i < lines.size(); i++) {
 		RangeLine range;
-		const bool isRange = ParseRangeLine(lines[i], range);
+		const bool isRange = ParseRangeLine(lines[i], range) != RangeKind::NotOne;
 		FPLGRAPH g{ FPLGM_TEXT, (UINT)i + 1 };
 		g.pszText = isRange ? L"" : lines[i].c_str();
 		if (isRange) {
@@ -491,7 +506,10 @@ static void ShowLineError() {
 	std::wstring text;
 	auto lines = EditorLines();
 	RangeLine range;
-	if (line < (int)lines.size() && ParseRangeLine(lines[line], range)) {
+	const RangeKind rangeKind = line < (int)lines.size() ? ParseRangeLine(lines[line], range) : RangeKind::NotOne;
+	if (rangeKind == RangeKind::Bad)
+		text = range.problem;
+	else if (rangeKind == RangeKind::Good) {
 		FPLPARAM p{};
 		text = g_plot.GetParameter(range.name.c_str(), p)
 			? range.name + L": a slider from " + Number(p.min) + L" to " + Number(p.max) + L", steps of " + Number(p.step)
@@ -929,8 +947,15 @@ static void PaintErrorMarks(HWND hwnd) {
 	for (;;) {
 		size_t end = text.find(L'\n', start);
 		const int lineEnd = end == std::wstring::npos ? length : (int)end - (end > 0 && text[end - 1] == L'\r' ? 1 : 0);
-		FPLGRAPHINFO info;
-		if (g_plot.GetGraphInfo((UINT)id, info) && info.error != FPLE_NONE && info.error != FPLE_EMPTY && lineEnd > start) {
+		FPLGRAPHINFO info{};
+		RangeLine range;
+		const bool badRange = lineEnd > start && ParseRangeLine(text.substr(start, lineEnd - start), range) == RangeKind::Bad;
+		if (badRange) {
+			// what's after the colon
+			info.errorPos = (int)range.at;
+			info.errorLen = lineEnd - start - (int)range.at;
+		}
+		if (badRange || (g_plot.GetGraphInfo((UINT)id, info) && info.error != FPLE_NONE && info.error != FPLE_EMPTY && lineEnd > start)) {
 			any = true;
 			// the dot, at the line's first row
 			const POINT first = posOf(start);

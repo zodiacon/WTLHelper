@@ -198,6 +198,7 @@ struct FplGeometry {
 	std::vector<FplArrow> marks;		// SlopeField: its slopes, short segments with no heads
 	std::vector<double> asymptotes;		// y = f(x): screen x's of vertical asymptotes; x = f(y): screen y's
 	std::vector<FplPoint> holes;		// where it isn't defined but its limit is, the same from both sides
+	bool incomplete = false;			// an ODE's solution ran out of its step budget before the view's edge
 	bool dashed = false;				// a strict inequality's boundary
 	size_t evals = 0;
 };
@@ -210,24 +211,31 @@ std::vector<FplArrow> FplSampleSlopes(const std::function<double(double, double)
 // Dormand-Prince 5(4) with steps of at most odeStep DIPs in x and odeTolerance DIPs of error in y; stopped where it
 // isn't defined, blows up off the screen or the steps get too small. In screen coordinates, not clipped.
 FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x0, double y0, const FplViewport& view,
-	const FplSampleOptions& options = {}, size_t* evals = nullptr);
+	const FplSampleOptions& options = {}, size_t* evals = nullptr,
+	bool* ranOut = nullptr);
 
+// All these start explicit and turn implicit (ROS2, L-stable) when an equation shows itself stiff, so stiffness only costs
+// them accuracy's order, not stopping. ranOut is set if the step budget ended it before the view's edge.
 // y^(n) = F(x, y, y', ... y^(n-1)) from y and its derivatives at x0 (y0[0] is y), as FplSolveOde; F is given them the same
 // way. Up to FplMaxOdeOrder.
 inline constexpr int FplMaxOdeOrder = 5;
 FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, int order, double x0, const double* y0,
-	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr,
+	bool* ranOut = nullptr);
 // y'' = F(x, y, y') through (x0, y0) with slope v0.
 FplPolyline FplSolveOde2(const std::function<double(double, double, double)>& F, double x0, double y0, double v0,
-	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr,
+	bool* ranOut = nullptr);
 // The trajectory of (x', y') = field(x, y) through (x0, y0), both ways in time, with steps of at most odeStep DIPs on
 // the screen; ended where it leaves the view grown by its size, settles on a point, closes on itself, or has run 8 times
 // around the view. A point where the field is zero has no line.
 FplPolyline FplSolveSystem(const std::function<FplPoint(double, double)>& field, double x0, double y0,
-	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+	const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr,
+	bool* ranOut = nullptr);
 // The same with t in it (field(t, x, y), starting at t = 0): not autonomous, it neither settles nor closes.
 FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)>& field, bool autonomous, double x0,
-	double y0, const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr);
+	double y0, const FplViewport& view, const FplSampleOptions& options = {}, size_t* evals = nullptr,
+	bool* ranOut = nullptr);
 
 // Samples a built expression with its parameters' values (slots from FplFirstParam on; the others are set here).
 // Definitions draw nothing.

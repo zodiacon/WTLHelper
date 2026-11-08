@@ -135,6 +135,7 @@ struct FPLGRAPHINFO {
 	WCHAR    szName[64];       // the name it's about (FPLE_UNKNOWNNAME: one an app may add as a parameter); a definition's name
 	double   value;            // FPLK_DEFINITION, FPLK_INTEGRAL: its value; FPLK_REGRESSION: R squared
 	COLORREF color;            // the color it's drawn in
+	BOOL     incomplete;       // an ODE's solution ran out of its step budget before the view's edge (the legend says so)
 };
 
 // ---- Parameters ------------------------------------------------------------------
@@ -444,6 +445,7 @@ private:
 	void SetViewport(double xMin, double xMax, double yMin, double yMax);
 	void UpdateTrace(POINT pt, bool dragging);
 	// undo: a step from the state now (a burst of one kind within 0.7 s is one step; kind < 0: always a new one)
+	void NoteIncomplete();
 	void Remember(int kind);
 	struct FplSnapshot TakeSnapshot() const;
 	void Restore(const struct FplSnapshot& snapshot);

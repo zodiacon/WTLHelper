@@ -312,7 +312,8 @@ void CFunctionPlotCtrl::LayoutPanel() {
 			row.index = (int)i;
 			row.error = (bool)g.expr.error;
 			row.note = !row.error && g.expr.kind == FplKind::Regression;
-			float h = FplGraphRow + (row.error || row.note ? FplErrorLine : 0);
+			row.stopped = !row.error && (s.mode3D ? g.incomplete3D : g.geometry.incomplete);
+			float h = FplGraphRow + (row.error || row.note || row.stopped ? FplErrorLine : 0);
 			row.rect = { left, y, right, y + h };
 			s.rows.push_back(row);
 			y += h;
@@ -926,6 +927,10 @@ void CFunctionPlotCtrl::PaintPanel() {
 				Text(rt, g.expr.error.Message(), s.panelSmall.Get(),
 					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine },
 					s.Brush(c.crError));
+			}
+			else if (row.stopped) {
+				Text(rt, L"Stops early: it ran out of steps", s.panelSmall.Get(),
+					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine }, muted);
 			}
 			else if (row.note) {
 				// the fit: its names' values and R squared (U+00B2)

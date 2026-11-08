@@ -29,13 +29,15 @@ constexpr double B4[] = { 5179.0 / 57600, 0, 7571.0 / 16695, 393.0 / 640, -92097
 	1.0 / 40 };
 
 // A step for n values: f gives their rates at (s, y). The 5th order result and each one's error; false if something
-// wasn't a number.
+// wasn't a number. stiffness gets h times how fast the last two stages' difference is shrinking (StiffWatch).
 template<int Most, typename D>
-bool StepN(D f, int n, double s, const double* y, double h, double* y5, double* error) {
+bool StepN(D f, int n, double s, const double* y, double h, double* y5, double* error, double* stiffness = nullptr) {
 	double k[7][Most];
-	double at[Most];
+	double at[Most], before[Most];
 	for (int st = 0; st < 7; st++) {
 		for (int v = 0; v < n; v++) {
+			if (st == 6)
+				before[v] = at[v];
 			at[v] = y[v];
 			for (int j = 0; j < st; j++)
 				at[v] += h * A[st][j] * k[j][v];
@@ -44,6 +46,16 @@ bool StepN(D f, int n, double s, const double* y, double h, double* y5, double* 
 		for (int v = 0; v < n; v++)
 			if (!std::isfinite(k[st][v]))
 				return false;
+	}
+	if (stiffness) {
+		// the Rayleigh quotient of the Jacobian along the stages' difference
+		double dot = 0, size = 0;
+		for (int v = 0; v < n; v++) {
+			const double dy = at[v] - before[v];
+			dot += (k[6][v] - k[5][v]) * dy;
+			size += dy * dy;
+		}
+		*stiffness = size > 0 ? h * dot / size : 0;
 	}
 	for (int v = 0; v < n; v++) {
 		double five = y[v], four = y[v];
@@ -58,6 +70,114 @@ bool StepN(D f, int n, double s, const double* y, double h, double* y5, double* 
 	}
 	return true;
 }
+
+// A step of ROS2 (Verwer's, L-stable, 2nd order) for n values: a Rosenbrock method, so a linear solve in place of Newton's
+// iterations, with a numerical Jacobian. The independent variable is one more value, so f's dependence on it counts. The
+// 2nd order result and each one's error against the 1st order one; false if something wasn't a number or the matrix is
+// singular. Costs n + 3 of f.
+template<int Most, typename D>
+bool Ros2Step(D f, int n, double s, const double* y, double h, double* y2, double* error) {
+	constexpr double Gamma = 0.29289321881345247;		// 1 - 1/sqrt(2)
+	const int m = n + 1;
+	double z[Most + 1], f0[Most + 1], moved[Most + 1], d[Most + 1];
+	double a[Most + 1][Most + 1];
+	auto rates = [&](const double* at, double* out) {
+		out[0] = 1;
+		f(at[0], at + 1, out + 1);
+	};
+	z[0] = s;
+	std::copy(y, y + n, z + 1);
+	rates(z, f0);
+	for (int i = 0; i < m; i++)
+		if (!std::isfinite(f0[i]))
+			return false;
+	// I - gamma h J, by forward differences
+	for (int j = 0; j < m; j++) {
+		std::copy(z, z + m, moved);
+		const double delta = 1.5e-8 * std::max(std::abs(z[j]), 1e-3);
+		moved[j] += delta;
+		rates(moved, d);
+		for (int i = 0; i < m; i++) {
+			const double dfdz = (d[i] - f0[i]) / (moved[j] - z[j]);
+			if (!std::isfinite(dfdz))
+				return false;
+			a[i][j] = (i == j ? 1.0 : 0.0) - Gamma * h * dfdz;
+		}
+	}
+	// LU with partial pivoting
+	int pivot[Most + 1];
+	for (int c = 0; c < m; c++) {
+		int best = c;
+		for (int r = c + 1; r < m; r++)
+			if (std::abs(a[r][c]) > std::abs(a[best][c]))
+				best = r;
+		if (a[best][c] == 0 || !std::isfinite(a[best][c]))
+			return false;
+		pivot[c] = best;
+		if (best != c)
+			for (int j = 0; j < m; j++)
+				std::swap(a[c][j], a[best][j]);
+		for (int r = c + 1; r < m; r++) {
+			a[r][c] /= a[c][c];
+			for (int j = c + 1; j < m; j++)
+				a[r][j] -= a[r][c] * a[c][j];
+		}
+	}
+	auto solve = [&](double* x) {
+		for (int c = 0; c < m; c++) {
+			std::swap(x[c], x[pivot[c]]);
+			for (int r = c + 1; r < m; r++)
+				x[r] -= a[r][c] * x[c];
+		}
+		for (int c = m - 1; c >= 0; c--) {
+			for (int j = c + 1; j < m; j++)
+				x[c] -= a[c][j] * x[j];
+			x[c] /= a[c][c];
+		}
+	};
+	double k1[Most + 1], k2[Most + 1];
+	std::copy(f0, f0 + m, k1);
+	solve(k1);
+	for (int i = 0; i < m; i++)
+		moved[i] = z[i] + h * k1[i];
+	rates(moved, k2);
+	for (int i = 0; i < m; i++) {
+		if (!std::isfinite(k2[i]))
+			return false;
+		k2[i] -= 2 * k1[i];
+	}
+	solve(k2);
+	for (int v = 0; v < n; v++) {
+		y2[v] = y[v] + h * (1.5 * k1[v + 1] + 0.5 * k2[v + 1]);
+		error[v] = std::abs(0.5 * h * (k1[v + 1] + k2[v + 1]));
+		if (!std::isfinite(y2[v]) || !std::isfinite(error[v]))
+			return false;
+	}
+	return true;
+}
+
+// Whether an equation has turned stiff: what limits the explicit steps is stability, not accuracy. Hairer's test: h times
+// the rate at which the last stages' difference shrinks, past the method's stability limit, a few trials running (rejected
+// ones too, as a very stiff equation never gets as far as accepting one). The sign matters: near a vertical tangent or a
+// blow-up that rate is as large but solutions are spreading apart, and there the steps must stay short. A wrong guess only
+// costs an order of accuracy, the error being watched either way.
+struct StiffWatch {
+	bool stiff = false;
+	int trials = 0;
+	void Trial(double rate) {
+		if (rate < -3.25) {
+			if (++trials >= 3)
+				stiff = true;
+		}
+		else
+			trials = 0;
+	}
+	// what the step size controller's error goes as
+	double Power() const { return stiff ? 0.5 : 0.2; }
+};
+
+// (The smallest step is set a little over the limit and recognized with a margin: without one, rounding on some view sizes
+// left it just past "at the smallest", to be cut and set back to the same value until the budget ran out.)
 
 // How far to cut a step that moved too far, at most tenfold: on a stiff equation an unstable trial's move is astronomical,
 // and cutting by its ratio went straight past the smallest step allowed, so nothing was drawn at all.
@@ -79,7 +199,7 @@ double DipsY(const FplViewport& view, double y) {
 } // namespace
 
 FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, int order, double x0, const double* y0,
-	const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
+	const FplViewport& view, const FplSampleOptions& options, size_t* evals, bool* ranOut) {
 	FplPolyline result;
 	if (!view.Valid() || !std::isfinite(x0) || order < 1 || order > FplMaxOdeOrder)
 		return result;
@@ -105,7 +225,9 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 		std::copy(y0, y0 + order, y);
 		line.push_back(view.ToScreen({ x, y[0] }));
 		double h = dir * maxStep / DipsX(view, x);
-		for (int steps = 0; steps < 100000 && count < options.maxEvals; steps++) {
+		StiffWatch watch;
+		int steps = 0;
+		for (; steps < 100000 && count < options.maxEvals; steps++) {
 			const double remaining = end - x;
 			if (!(remaining * dir > 0))
 				break;
@@ -114,8 +236,19 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 				h = dir * longest;
 			if (std::abs(h) > std::abs(remaining))
 				h = remaining;
-			const bool finite = StepN<FplMaxOdeOrder>(rates, order, x, y, h, y5, error);
-			count += 7;
+			bool finite;
+			if (watch.stiff) {
+				finite = Ros2Step<FplMaxOdeOrder>(rates, order, x, y, h, y5, error);
+				count += order + 3;
+			}
+			else {
+				double rate = 0;
+				finite = StepN<FplMaxOdeOrder>(rates, order, x, y, h, y5, error, &rate);
+				count += 7;
+				watch.Trial(rate);
+			}
+			// implicit, the smallest step goes on whatever it does: a stiff transient can be a jump
+			const bool atFloor = watch.stiff && std::abs(h) * dipsX <= 1.02e-4;
 			if (!finite) {
 				h /= 4;
 				if (std::abs(h) * dipsX < 1e-4)
@@ -124,10 +257,13 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 			}
 			const double dips = DipsY(view, y5[0]);
 			const double rise = std::abs(y5[0] - y[0]) * dips;
-			if (rise > chord) {
+			if (rise > chord && !atFloor) {
 				h *= Shrink(chord / rise);
-				if (std::abs(h) * dipsX < 1e-4)
-					break;
+				if (std::abs(h) * dipsX < 1e-4) {
+					if (!watch.stiff)
+						break;
+					h = dir * 1.01e-4 / dipsX;
+				}
 				continue;
 			}
 			// a derivative's error counts by what it does to y over the step: h^k / k!
@@ -137,8 +273,7 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 				weight *= std::abs(h) / (v + 1);
 			}
 			err *= dips;
-			if (err <= tolerance) {
-				const double before = std::abs(y[1]);
+			if (err <= tolerance || atFloor) {
 				x += h;
 				std::copy(y5, y5 + order, y);
 				FplPoint p = view.ToScreen({ x, y[0] });
@@ -147,15 +282,17 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 				line.push_back(p);
 				if (p.y < -11 * view.height || p.y > 12 * view.height)
 					break;
-				// upright on the screen and getting steeper: it's gone (a blow-up); a stiff transient falls
-				if (order > 1 && std::abs(y[1]) * dips > 1000 * dipsX && std::abs(y[1]) >= before)
-					break;
 			}
-			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
+			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, watch.Power()) : 5;
 			h *= std::clamp(factor, 0.2, 5.0);
-			if (std::abs(h) * dipsX < 1e-4)
-				break;
+			if (std::abs(h) * dipsX < 1e-4) {
+				if (!watch.stiff)
+					break;
+				h = dir * 1.01e-4 / dipsX;
+			}
 		}
+		if (ranOut && (steps >= 100000 || count >= options.maxEvals))
+			*ranOut = true;
 	}
 	if (evals)
 		*evals += count;
@@ -166,14 +303,14 @@ FplPolyline FplSolveOdeN(const std::function<double(double, const double*)>& F, 
 }
 
 FplPolyline FplSolveOde2(const std::function<double(double, double, double)>& F, double x0, double y0, double v0,
-	const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
+	const FplViewport& view, const FplSampleOptions& options, size_t* evals, bool* ranOut) {
 	const double start[] = { y0, v0 };
 	std::function<double(double, const double*)> second = [&](double x, const double* y) { return F(x, y[0], y[1]); };
-	return FplSolveOdeN(second, 2, x0, start, view, options, evals);
+	return FplSolveOdeN(second, 2, x0, start, view, options, evals, ranOut);
 }
 
 FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)>& field, bool autonomous, double x0,
-	double y0, const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
+	double y0, const FplViewport& view, const FplSampleOptions& options, size_t* evals, bool* ranOut) {
 	FplPolyline result;
 	if (!view.Valid() || !std::isfinite(x0) || !std::isfinite(y0))
 		return result;
@@ -201,6 +338,9 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 	auto tooSmall = [&](double h, double pace, double t) {
 		return autonomous ? std::abs(h) * pace < 1e-4 : std::abs(h) < 1e-10 * (1 + std::abs(t));
 	};
+	auto smallest = [&](double h, double pace, double t) {
+		return std::copysign(1.01 * (autonomous ? 1e-4 / pace : 1e-10 * (1 + std::abs(t))), h);
+	};
 	FplPolyline sides[2];
 	bool closed = false;
 	for (int side = 1; side >= 0 && !closed; side--) {
@@ -213,7 +353,9 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 		if (!std::isfinite(speed) || (autonomous && speed < 1e-9))
 			continue;
 		double h = dir * maxStep / std::max(speed, 1e-6);
-		for (int steps = 0; steps < 50000 && count < options.maxEvals && length < budget; steps++) {
+		StiffWatch watch;
+		int steps = 0;
+		for (; steps < 50000 && count < options.maxEvals && length < budget; steps++) {
 			const double remaining = end - t;
 			if (!(remaining * dir > 0) || std::abs(t) > 1e9)
 				break;
@@ -229,8 +371,19 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 			if (std::abs(h) > std::abs(remaining))
 				h = remaining;
 			double y5[2], error[2];
-			const bool finite = StepN<2>(rates, 2, t, y, h, y5, error);
-			count += 7;
+			bool finite;
+			if (watch.stiff) {
+				finite = Ros2Step<2>(rates, 2, t, y, h, y5, error);
+				count += 5;
+			}
+			else {
+				double rate = 0;
+				finite = StepN<2>(rates, 2, t, y, h, y5, error, &rate);
+				count += 7;
+				watch.Trial(rate);
+			}
+			// implicit, the smallest step goes on whatever it does: a stiff transient can be a jump
+			const bool atFloor = watch.stiff && tooSmall(h * 0.98, pace, t);
 			FplPoint p = finite ? view.ToScreen({ y5[0], y5[1] }) : FplPoint{};
 			if (!finite || !Finite(p)) {
 				h /= 4;
@@ -239,12 +392,14 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 				continue;
 			}
 			const double move = std::hypot(p.x - line.back().x, p.y - line.back().y);
-			if (move > chord) {
+			if (move > chord && !atFloor) {
 				h *= Shrink(chord / move);
+				if (watch.stiff && tooSmall(h, pace, t))
+					h = smallest(h, pace, t);
 				continue;
 			}
 			const double err = std::max(error[0] * DipsX(view, y5[0]), error[1] * DipsY(view, y5[1]));
-			if (err <= tolerance) {
+			if (err <= tolerance || atFloor) {
 				t += h;
 				y[0] = y5[0];
 				y[1] = y5[1];
@@ -259,11 +414,16 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 					break;
 				}
 			}
-			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
+			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, watch.Power()) : 5;
 			h *= std::clamp(factor, 0.2, 5.0);
-			if (tooSmall(h, pace, t))
-				break;
+			if (tooSmall(h, pace, t)) {
+				if (!watch.stiff)
+					break;
+				h = smallest(h, pace, t);
+			}
 		}
+		if (ranOut && (steps >= 50000 || count >= options.maxEvals))
+			*ranOut = true;
 	}
 	if (evals)
 		*evals += count;
@@ -276,13 +436,13 @@ FplPolyline FplSolveSystemT(const std::function<FplPoint(double, double, double)
 }
 
 FplPolyline FplSolveSystem(const std::function<FplPoint(double, double)>& field, double x0, double y0,
-	const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
+	const FplViewport& view, const FplSampleOptions& options, size_t* evals, bool* ranOut) {
 	std::function<FplPoint(double, double, double)> withTime = [&](double, double x, double y) { return field(x, y); };
-	return FplSolveSystemT(withTime, true, x0, y0, view, options, evals);
+	return FplSolveSystemT(withTime, true, x0, y0, view, options, evals, ranOut);
 }
 
 std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, double, double, double)>& field,
-	bool autonomous, FplPoint3 p0, const FplBox3& box, const FplSampleOptions& options, size_t* evals) {
+	bool autonomous, FplPoint3 p0, const FplBox3& box, const FplSampleOptions& options, size_t* evals, bool* ranOut) {
 	std::vector<FplVec3> result;
 	if (!box.Valid() || !std::isfinite(p0.x) || !std::isfinite(p0.y) || !std::isfinite(p0.z))
 		return result;
@@ -308,6 +468,9 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 	auto tooSmall = [&](double h, double pace, double t) {
 		return autonomous ? std::abs(h) * pace < Small : std::abs(h) < 1e-10 * (1 + std::abs(t));
 	};
+	auto smallest = [&](double h, double pace, double t) {
+		return std::copysign(1.01 * (autonomous ? Small / pace : 1e-10 * (1 + std::abs(t))), h);
+	};
 	std::vector<FplVec3> sides[2];
 	bool closed = false;
 	for (int side = 1; side >= 0 && !closed; side--) {
@@ -320,7 +483,9 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 		if (!std::isfinite(speed) || (autonomous && speed < 1e-9))
 			continue;
 		double h = dir * MaxStep / std::max(speed, 1e-6);
-		for (int steps = 0; steps < 100000 && count < options.maxEvals && length < Budget; steps++) {
+		StiffWatch watch;
+		int steps = 0;
+		for (; steps < 100000 && count < options.maxEvals && length < Budget; steps++) {
 			const double remaining = end - t;
 			if (!(remaining * dir > 0) || std::abs(t) > 1e9)
 				break;
@@ -333,8 +498,18 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 			if (std::abs(h) > std::abs(remaining))
 				h = remaining;
 			double y5[3], error[3];
-			const bool finite = StepN<3>(rates, 3, t, y, h, y5, error);
-			count += 7;
+			bool finite;
+			if (watch.stiff) {
+				finite = Ros2Step<3>(rates, 3, t, y, h, y5, error);
+				count += 6;
+			}
+			else {
+				double rate = 0;
+				finite = StepN<3>(rates, 3, t, y, h, y5, error, &rate);
+				count += 7;
+				watch.Trial(rate);
+			}
+			const bool atFloor = watch.stiff && tooSmall(h * 0.98, pace, t);
 			if (!finite) {
 				h /= 4;
 				if (tooSmall(h, pace, t))
@@ -343,12 +518,14 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 			}
 			const double dx = (y5[0] - y[0]) * sx, dy = (y5[1] - y[1]) * sy, dz = (y5[2] - y[2]) * sz;
 			const double move = std::sqrt(dx * dx + dy * dy + dz * dz);
-			if (move > 2 * MaxStep) {
+			if (move > 2 * MaxStep && !atFloor) {
 				h *= Shrink(MaxStep / move);
+				if (watch.stiff && tooSmall(h, pace, t))
+					h = smallest(h, pace, t);
 				continue;
 			}
 			const double err = std::max({ error[0] * sx, error[1] * sy, error[2] * sz });
-			if (err <= Tolerance) {
+			if (err <= Tolerance || atFloor) {
 				t += h;
 				std::copy(y5, y5 + 3, y);
 				const FplVec3 p = box.ToBox(y[0], y[1], y[2]);
@@ -365,11 +542,16 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 					break;
 				}
 			}
-			const double factor = err > 0 ? 0.9 * std::pow(Tolerance / err, 0.2) : 5;
+			const double factor = err > 0 ? 0.9 * std::pow(Tolerance / err, watch.Power()) : 5;
 			h *= std::clamp(factor, 0.2, 5.0);
-			if (tooSmall(h, pace, t))
-				break;
+			if (tooSmall(h, pace, t)) {
+				if (!watch.stiff)
+					break;
+				h = smallest(h, pace, t);
+			}
 		}
+		if (ranOut && (steps >= 100000 || count >= options.maxEvals))
+			*ranOut = true;
 	}
 	if (evals)
 		*evals += count;
@@ -384,7 +566,7 @@ std::vector<FplVec3> FplSolveSystem3(const std::function<FplPoint3(double, doubl
 }
 
 FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x0, double y0, const FplViewport& view,
-	const FplSampleOptions& options, size_t* evals) {
+	const FplSampleOptions& options, size_t* evals, bool* ranOut) {
 	FplPolyline result;
 	if (!view.Valid() || !std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(F(x0, y0)))
 		return result;
@@ -400,7 +582,9 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 		double x = x0, y = y0;
 		line.push_back(view.ToScreen({ x, y }));
 		double h = dir * maxStep / view.DipsPerUnitX(x);
-		for (int steps = 0; steps < 100000 && count < options.maxEvals; steps++) {
+		StiffWatch watch;
+		int steps = 0;
+		for (; steps < 100000 && count < options.maxEvals; steps++) {
 			const double remaining = end - x;
 			if (!(remaining * dir > 0))
 				break;
@@ -411,20 +595,33 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 				h = remaining;
 			double k[7];
 			bool finite = true;
-			for (int st = 0; st < 7 && finite; st++) {
-				double yy = y;
-				for (int j = 0; j < st; j++)
-					yy += h * A[st][j] * k[j];
-				k[st] = F(x + C[st] * h, yy);
-				finite = std::isfinite(k[st]);
-			}
-			count += 7;
 			double y5 = y, y4 = y;
-			if (finite)
-				for (int st = 0; st < 7; st++) {
-					y5 += h * B5[st] * k[st];
-					y4 += h * B4[st] * k[st];
+			if (watch.stiff) {
+				auto rate = [&](double at, const double* value, double* d) { d[0] = F(at, value[0]); };
+				double e = 0;
+				finite = Ros2Step<1>(rate, 1, x, &y, h, &y5, &e);
+				y4 = y5 - e;
+				count += 4;
+			}
+			else {
+				double stage5 = 0, stage6 = 0;
+				for (int st = 0; st < 7 && finite; st++) {
+					double yy = y;
+					for (int j = 0; j < st; j++)
+						yy += h * A[st][j] * k[j];
+					k[st] = F(x + C[st] * h, yy);
+					finite = std::isfinite(k[st]);
+					(st == 5 ? stage5 : stage6) = yy;
 				}
+				count += 7;
+				if (finite) {
+					for (int st = 0; st < 7; st++) {
+						y5 += h * B5[st] * k[st];
+						y4 += h * B4[st] * k[st];
+					}
+					watch.Trial(stage6 != stage5 ? h * (k[6] - k[5]) / (stage6 - stage5) : 0);
+				}
+			}
 			// the error in DIPs on the screen (a log axis's at the value, or its scale where it has none)
 			double dips = view.DipsPerUnitY(std::abs(y5));
 			if (!std::isfinite(dips) || dips <= 0)
@@ -434,7 +631,9 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 			// for this too, but its slope is falling. At the smallest steps it's let through: a jump in F is no tangent.
 			const double dipsX = view.DipsPerUnitX(x);
 			const double steep = 10 * dipsX / dips;
-			if (finite && std::max(std::abs(k[0]), std::abs(k[6])) > steep &&
+			// implicit, the smallest step goes on whatever it does: a stiff transient can be a jump
+			const bool atFloor = watch.stiff && std::abs(h) * dipsX <= 1.02e-4;
+			if (!watch.stiff && finite && std::max(std::abs(k[0]), std::abs(k[6])) > steep &&
 				std::abs(k[6] - k[0]) > 0.5 * std::max(std::abs(k[0]), std::abs(k[6])) && std::abs(h) * dipsX >= 1e-4) {
 				h /= 2;
 				continue;
@@ -450,13 +649,16 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 			// a chord no longer than maxChord/2 on the screen: smooth, and it stops at a vertical tangent instead of
 			// going through it
 			const double rise = std::abs(y5 - y) * dips, chord = std::max(options.maxChord / 2, 0.5);
-			if (rise > chord) {
+			if (rise > chord && !atFloor) {
 				h *= Shrink(chord / rise);
-				if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-					break;
+				if (std::abs(h) * dipsX < 1e-4) {
+					if (!watch.stiff)
+						break;
+					h = dir * 1.01e-4 / dipsX;
+				}
 				continue;
 			}
-			if (err <= tolerance) {
+			if (err <= tolerance || atFloor) {
 				x += h;
 				y = y5;
 				FplPoint p = view.ToScreen({ x, y });
@@ -467,15 +669,21 @@ FplPolyline FplSolveOde(const std::function<double(double, double)>& F, double x
 				if (p.y < top - 10 * view.height || p.y > bottom + 10 * view.height)
 					break;
 				// upright on the screen and getting steeper: a vertical tangent, where the solution ends (a stiff
-				// transient starts as steep, but falls)
-				if (std::abs(k[6]) * dips > 1000 * dipsX && std::abs(k[6]) >= std::abs(k[0]))
+				// transient starts as steep, but falls). Not when implicit: solutions are drawing together there, so
+				// it's no tangent, and F off the slow solution by a rounding error is a huge number that means nothing.
+				if (!watch.stiff && std::abs(k[6]) * dips > 1000 * dipsX && std::abs(k[6]) >= std::abs(k[0]))
 					break;
 			}
-			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, 0.2) : 5;
+			const double factor = err > 0 ? 0.9 * std::pow(tolerance / err, watch.Power()) : 5;
 			h *= std::clamp(factor, 0.2, 5.0);
-			if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4)
-				break;
+			if (std::abs(h) * view.DipsPerUnitX(x) < 1e-4) {
+				if (!watch.stiff)
+					break;
+				h = dir * 1.01e-4 / view.DipsPerUnitX(x);
+			}
 		}
+		if (ranOut && (steps >= 100000 || count >= options.maxEvals))
+			*ranOut = true;
 	}
 	if (evals)
 		*evals += count;

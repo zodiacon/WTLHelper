@@ -354,6 +354,7 @@ BOOL CFunctionPlotCtrl::GetGraphInfo(UINT id, FPLGRAPHINFO& info) const {
 	info.value = g.expr.kind == FplKind::Integral ? plot.IntegralValue(i)
 		: g.expr.kind == FplKind::Regression ? g.r2 : plot.DefinitionValue(i);
 	info.color = GraphColor(i);
+	info.incomplete = m_State->mode3D ? g.incomplete3D : g.geometry.incomplete;
 	return TRUE;
 }
 
@@ -620,6 +621,7 @@ void CFunctionPlotCtrl::Resample() {
 			}
 		}
 		s.gpuStale = true;
+		NoteIncomplete();
 		return;
 	}
 	if (!s.viewSet)
@@ -641,6 +643,23 @@ void CFunctionPlotCtrl::Resample() {
 	if (s.featuresGraph >= 0 && !(GetStyle() & FPLS_NOTRACE))
 		s.plot.FindFeatures(s.featuresGraph, s.view);
 	BuildGeometries();
+	NoteIncomplete();
+}
+
+// A solution that ran out of steps says so in the legend, a line more: the panel's rows change with what was sampled.
+void CFunctionPlotCtrl::NoteIncomplete() {
+	auto& s = *m_State;
+	if (!IsWindow())
+		return;
+	for (auto& row : s.rows) {
+		if (row.kind != FplPanelRow::Graph || row.index >= (int)s.plot.graphs.size())
+			continue;
+		auto& g = s.plot.graphs[row.index];
+		if (row.stopped != (s.mode3D ? g.incomplete3D : g.geometry.incomplete)) {
+			LayoutPanel();
+			return;
+		}
+	}
 }
 
 void CFunctionPlotCtrl::ViewChanged(bool notify) {

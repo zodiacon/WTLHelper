@@ -1102,7 +1102,7 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 			g.points.push_back(start);
 			if (!Finite(start))
 				continue;
-			FplPolyline solution = FplSolveOdeN(F, order, a, state, view, options, &g.evals);
+			FplPolyline solution = FplSolveOdeN(F, order, a, state, view, options, &g.evals, &g.incomplete);
 			if (solution.size() > 1)
 				solutions.push_back(std::move(solution));
 		}
@@ -1130,7 +1130,7 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 			g.points.push_back(start);
 			if (!Finite(start))
 				continue;
-			FplPolyline path = FplSolveSystemT(field, autonomous, a, b, view, options, &g.evals);
+			FplPolyline path = FplSolveSystemT(field, autonomous, a, b, view, options, &g.evals, &g.incomplete);
 			if (path.size() > 1)
 				paths.push_back(std::move(path));
 		}
@@ -1154,7 +1154,7 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 			g.points.push_back(start);
 			if (!Finite(start))
 				continue;
-			FplPolyline solution = FplSolveOde(F, a, b, view, options, &g.evals);
+			FplPolyline solution = FplSolveOde(F, a, b, view, options, &g.evals, &g.incomplete);
 			if (solution.size() > 1)
 				solutions.push_back(std::move(solution));
 		}
