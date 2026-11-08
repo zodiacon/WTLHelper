@@ -3,18 +3,22 @@
 #include "FunctionPlotData.h"
 
 #include <uxtheme.h>
+#include <wincodec.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "windowscodecs.lib")
 
 static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed && FPLGF_NOTRACE == FplGraphNoTrace &&
-	FPLGF_NOFEATURES == FplGraphNoFeatures);
+	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours);
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
-	FPLK_IMPLICIT == (int)FplKind::Implicit);
+	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
+	FPLK_VECTORFIELD == (int)FplKind::VectorField);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
@@ -53,6 +57,7 @@ LRESULT CFunctionPlotCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	KillTimer(AnimationTimer);
 	DiscardTarget();
 	bHandled = FALSE;
 	return 0;
@@ -688,6 +693,11 @@ FplPanelHit CFunctionPlotCtrl::HitPanel(POINT pt) const {
 	auto& s = *m_State;
 	FplPanelHit hit;
 	float x = ToDips(pt.x), y = ToDips(pt.y);
+	if (s.toggle.right > s.toggle.left && x >= s.toggle.left && x < s.toggle.right && y >= s.toggle.top &&
+		y < s.toggle.bottom) {
+		hit.part = FplPanelPart::Toggle;
+		return hit;
+	}
 	if (s.panel.right <= s.panel.left || x < s.panel.left || x >= s.panel.right || y < s.panel.top ||
 		y >= s.panel.bottom)
 		return hit;
@@ -696,6 +706,8 @@ FplPanelHit CFunctionPlotCtrl::HitPanel(POINT pt) const {
 		auto& r = s.rows[i];
 		if (y >= r.rect.top && y < r.rect.bottom) {
 			hit.part = r.kind == FplPanelRow::Graph ? FplPanelPart::Graph : FplPanelPart::Slider;
+			if (r.kind == FplPanelRow::Slider && x >= r.play.left && x < r.play.right)
+				hit.part = FplPanelPart::Play;
 			hit.row = (int)i;
 			break;
 		}
@@ -711,9 +723,15 @@ void CFunctionPlotCtrl::DragSlider(int row, float x) {
 	auto& p = s.plot.params[r.index];
 	float width = r.track.right - r.track.left;
 	double t = width > 0 ? std::clamp((x - r.track.left) / width, 0.0f, 1.0f) : 0;
-	double value = p.min + t * (p.max - p.min);
-	if (p.step > 0)
-		value = std::clamp(p.min + std::round((value - p.min) / p.step) * p.step, p.min, p.max);
+	SetParam(r.index, p.min + t * (p.max - p.min), true);
+}
+
+void CFunctionPlotCtrl::SetParam(int param, double value, bool snap) {
+	auto& s = *m_State;
+	auto& p = s.plot.params[param];
+	if (snap && p.step > 0)
+		value = p.min + std::round((value - p.min) / p.step) * p.step;
+	value = std::clamp(value, p.min, p.max);
 	if (value == p.value)
 		return;
 	p.value = value;
@@ -725,10 +743,185 @@ void CFunctionPlotCtrl::DragSlider(int row, float x) {
 	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
 }
 
+int CFunctionPlotCtrl::NextSlider(bool back) const {
+	auto& s = *m_State;
+	const int n = (int)s.rows.size();
+	if (back) {
+		if (s.focusRow < 0)
+			return -2;
+		for (int r = s.focusRow - 1; r >= 0; r--)
+			if (s.rows[r].kind == FplPanelRow::Slider)
+				return r;
+		return -1;
+	}
+	for (int r = s.focusRow + 1; r < n; r++)
+		if (s.rows[r].kind == FplPanelRow::Slider)
+			return r;
+	return -2;
+}
+
+// ---- Animation -------------------------------------------------------------------------
+
+BOOL CFunctionPlotCtrl::AnimateParameter(LPCWSTR pszName, BOOL play) {
+	auto& s = *m_State;
+	int i = pszName ? s.plot.FindParam(pszName) : -1;
+	if (i < 0)
+		return FALSE;
+	s.plot.params[i].animating = play != FALSE;
+	bool any = false;
+	for (auto& p : s.plot.params)
+		any = any || p.animating;
+	if (IsWindow()) {
+		if (any) {
+			s.lastTick = ::GetTickCount64();
+			SetTimer(AnimationTimer, 16);
+		}
+		else
+			KillTimer(AnimationTimer);
+		Invalidate();
+	}
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::IsParameterAnimating(LPCWSTR pszName) const {
+	int i = pszName ? m_State->plot.FindParam(pszName) : -1;
+	return i >= 0 && m_State->plot.params[i].animating;
+}
+
+LRESULT CFunctionPlotCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
+	auto& s = *m_State;
+	if (wParam != AnimationTimer) {
+		bHandled = FALSE;
+		return 0;
+	}
+	const ULONGLONG now = ::GetTickCount64();
+	// at most a tenth of a second a step, so a stall doesn't jump
+	const double dt = std::min(0.1, (now - s.lastTick) / 1000.0);
+	s.lastTick = now;
+	bool any = false;
+	for (size_t i = 0; i < s.plot.params.size(); i++) {
+		auto& p = s.plot.params[i];
+		if (!p.animating)
+			continue;
+		any = true;
+		// the range in 4 seconds, back and forth
+		double v = p.value + p.direction * (p.max - p.min) * dt / 4;
+		if (v >= p.max) {
+			v = p.max;
+			p.direction = -1;
+		}
+		else if (v <= p.min) {
+			v = p.min;
+			p.direction = 1;
+		}
+		SetParam((int)i, v, false);
+	}
+	if (!any)
+		KillTimer(AnimationTimer);
+	return 0;
+}
+
+// ---- The panel's button ----------------------------------------------------------------
+
+void CFunctionPlotCtrl::SetPanelCollapsed(BOOL collapsed) {
+	m_State->collapsed = collapsed != FALSE;
+	LayoutPanel();
+	if (IsWindow())
+		Invalidate();
+}
+
+BOOL CFunctionPlotCtrl::IsPanelCollapsed() const {
+	return m_State->collapsed;
+}
+
+// ---- Export ----------------------------------------------------------------------------
+
+BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
+	auto& s = *m_State;
+	if (!pszPath || !s.view.Valid())
+		return FALSE;
+	scale = std::clamp(scale, 0.25f, 8.0f);
+	const UINT width = (UINT)std::ceil(s.view.width * scale), height = (UINT)std::ceil(s.view.height * scale);
+	ComPtr<IWICImagingFactory> wic;
+	ComPtr<IWICBitmap> bitmap;
+	ComPtr<ID2D1RenderTarget> target;
+	if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf()))) ||
+		FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.GetAddressOf())))
+		return FALSE;
+	const float dpi = 96 * scale;
+	auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+		D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), dpi, dpi);
+	if (FAILED(FplD2DFactory()->CreateWicBitmapRenderTarget(bitmap.Get(), props, target.GetAddressOf())))
+		return FALSE;
+	// the window's brushes and bitmaps belong to its target: set aside while the export paints
+	if (!CreateTarget())
+		return FALSE;
+	auto brushes = std::move(s.brushes);
+	s.brushes.clear();
+	std::vector<ComPtr<ID2D1Bitmap>> heats;
+	for (auto& p : s.paths)
+		heats.push_back(std::move(p.heat));
+	HRESULT hr = PaintTo(target.Get(), dpi, true);
+	for (size_t i = 0; i < s.paths.size() && i < heats.size(); i++)
+		s.paths[i].heat = std::move(heats[i]);
+	s.brushes = std::move(brushes);
+	if (FAILED(hr))
+		return FALSE;
+
+	ComPtr<IWICStream> stream;
+	ComPtr<IWICBitmapEncoder> encoder;
+	ComPtr<IWICBitmapFrameEncode> frame;
+	return SUCCEEDED(wic->CreateStream(stream.GetAddressOf())) &&
+		SUCCEEDED(stream->InitializeFromFilename(pszPath, GENERIC_WRITE)) &&
+		SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf())) &&
+		SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+		SUCCEEDED(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr)) &&
+		SUCCEEDED(frame->Initialize(nullptr)) &&
+		SUCCEEDED(frame->SetSize(width, height)) &&
+		SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) &&
+		SUCCEEDED(frame->Commit()) &&
+		SUCCEEDED(encoder->Commit());
+}
+
+BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
+	auto& s = *m_State;
+	if (!pszPath || !s.view.Valid())
+		return FALSE;
+	const FPLCOLORS c = GetColors();
+	const DWORD style = GetStyle();
+	FplSvgStyle svg;
+	svg.back = c.crBack;
+	svg.grid = c.crGrid;
+	svg.gridMinor = c.crGridMinor == c.crBack ? c.crGrid : c.crGridMinor;
+	svg.axis = c.crAxis;
+	svg.label = c.crLabel;
+	svg.panelBack = c.crPanelBack;
+	svg.panelText = c.crPanelText;
+	svg.panelBorder = c.crPanelBorder;
+	for (size_t i = 0; i < s.plot.graphs.size(); i++)
+		svg.graphColors.push_back(GraphColor((int)i));
+	svg.showGrid = !(style & FPLS_NOGRID);
+	svg.showAxes = !(style & FPLS_NOAXES);
+	svg.piTicks = (style & FPLS_PITICKS) != 0;
+	svg.showLegend = !(style & FPLS_NOLEGEND) && !s.collapsed;
+	std::string text = FplWriteSvg(s.plot, s.view, svg);
+	FILE* f = nullptr;
+	if (_wfopen_s(&f, pszPath, L"wb") || !f)
+		return FALSE;
+	bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
+	ok = fclose(f) == 0 && ok;
+	return ok;
+}
+
 // ---- Input -----------------------------------------------------------------------------
 
-LRESULT CFunctionPlotCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM, BOOL&) {
-	return DLGC_WANTARROWS | DLGC_WANTCHARS;
+LRESULT CFunctionPlotCtrl::OnGetDlgCode(UINT, WPARAM, LPARAM lParam, BOOL&) {
+	LRESULT code = DLGC_WANTARROWS | DLGC_WANTCHARS;
+	// Tab goes along the sliders, and out of the control past them
+	auto msg = (const MSG*)lParam;
+	if (msg && msg->message == WM_KEYDOWN && msg->wParam == VK_TAB && NextSlider(::GetKeyState(VK_SHIFT) < 0) != -2)
+		code |= DLGC_WANTTAB;
+	return code;
 }
 
 LRESULT CFunctionPlotCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
@@ -738,6 +931,32 @@ LRESULT CFunctionPlotCtrl::OnFocus(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& s = *m_State;
+	if (wParam == VK_TAB) {
+		int next = NextSlider(::GetKeyState(VK_SHIFT) < 0);
+		if (next != -2) {
+			s.focusRow = next;
+			Invalidate();
+			return 0;
+		}
+		bHandled = FALSE;
+		return 0;
+	}
+	// a slider with the keys: steps, pages, its ends, Space plays it
+	if (s.focusRow >= 0 && s.focusRow < (int)s.rows.size() && s.rows[s.focusRow].kind == FplPanelRow::Slider) {
+		const int param = s.rows[s.focusRow].index;
+		auto& p = s.plot.params[param];
+		const double step = p.step > 0 ? p.step : (p.max - p.min) / 100;
+		switch (wParam) {
+			case VK_LEFT: case VK_DOWN: SetParam(param, p.value - step, true); return 0;
+			case VK_RIGHT: case VK_UP: SetParam(param, p.value + step, true); return 0;
+			case VK_PRIOR: SetParam(param, p.value + 10 * step, true); return 0;
+			case VK_NEXT: SetParam(param, p.value - 10 * step, true); return 0;
+			case VK_HOME: SetParam(param, p.min, false); return 0;
+			case VK_END: SetParam(param, p.max, false); return 0;
+			case VK_SPACE: AnimateParameter(p.name.c_str(), !p.animating); return 0;
+			case VK_ESCAPE: s.focusRow = -1; Invalidate(); return 0;
+		}
+	}
 	const bool canMove = !(GetStyle() & FPLS_NOPANZOOM);
 	auto& v = s.view;
 	switch (wParam) {
@@ -775,6 +994,20 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	SetFocus();
 	auto hit = HitPanel(pt);
+	if (hit.part != FplPanelPart::Slider && hit.part != FplPanelPart::Play && s.focusRow >= 0) {
+		s.focusRow = -1;
+		Invalidate();
+	}
+	if (hit.part == FplPanelPart::Toggle) {
+		SetPanelCollapsed(!s.collapsed);
+		return 0;
+	}
+	if (hit.part == FplPanelPart::Play) {
+		s.focusRow = hit.row;
+		auto& p = s.plot.params[s.rows[hit.row].index];
+		AnimateParameter(p.name.c_str(), !p.animating);
+		return 0;
+	}
 	if (hit.part == FplPanelPart::Graph) {
 		auto& g = s.plot.graphs[s.rows[hit.row].index];
 		if (!g.definition) {
@@ -791,6 +1024,7 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		return 0;
 	}
 	if (hit.part == FplPanelPart::Slider) {
+		s.focusRow = hit.row;
 		s.drag = FplDrag::Slider;
 		s.dragRow = hit.row;
 		SetCapture();
@@ -862,9 +1096,12 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 			break;
 	}
 	auto hit = HitPanel(pt);
-	int hot = hit.part == FplPanelPart::Graph || hit.part == FplPanelPart::Slider ? hit.row : -1;
-	if (hot != s.hotRow) {
+	int hot = hit.part == FplPanelPart::Graph || hit.part == FplPanelPart::Slider || hit.part == FplPanelPart::Play
+		? hit.row : -1;
+	bool hotToggle = hit.part == FplPanelPart::Toggle;
+	if (hot != s.hotRow || hotToggle != s.hotToggle) {
 		s.hotRow = hot;
+		s.hotToggle = hotToggle;
 		Invalidate();
 	}
 	if (hit.part == FplPanelPart::None) {
@@ -880,8 +1117,9 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 LRESULT CFunctionPlotCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& s = *m_State;
 	s.trackingLeave = false;
-	if (s.hotRow >= 0) {
+	if (s.hotRow >= 0 || s.hotToggle) {
 		s.hotRow = -1;
+		s.hotToggle = false;
 		Invalidate();
 	}
 	if (s.drag == FplDrag::None && !s.traceDragged)
@@ -898,7 +1136,7 @@ LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 	LPCWSTR cursor = IDC_ARROW;
 	if (s.drag == FplDrag::Pan)
 		cursor = IDC_SIZEALL;
-	else if (s.drag == FplDrag::Slider || s.hotRow >= 0)
+	else if (s.drag == FplDrag::Slider || s.hotRow >= 0 || s.hotToggle)
 		cursor = IDC_HAND;
 	else if (s.drag == FplDrag::Trace || s.traceValid)
 		cursor = IDC_CROSS;

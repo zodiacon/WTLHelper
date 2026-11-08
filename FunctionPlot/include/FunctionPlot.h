@@ -1,8 +1,9 @@
 #pragma once
 
 // Function plot: draws math as people type it ("y = x^2", "2 sin x", "r = 1 + cos 3theta", "(cos t, sin t)",
-// "x^2 + y^2 < 4") with Direct2D: functions, polar and parametric curves, implicit curves, inequalities and points,
-// over a grid with labeled axes. The user pans by dragging, zooms with the wheel, traces a graph (its roots, extrema
+// "x^2 + y^2 < 4", "f(x) = x^2", "y = d/dx f(x)", "z = x y", "(-y, x)") with Direct2D: functions, polar and parametric
+// curves, implicit curves, inequalities, points, surfaces (contours, heat maps) and vector fields, over a grid with
+// labeled axes. The user pans by dragging, zooms with the wheel, traces a graph (its roots, extrema
 // and intersections marked), toggles graphs in the legend and moves the parameters' sliders. The API follows the
 // common controls: C-style structures and WM_NOTIFY codes (FPLN_*) sent to the parent.
 
@@ -12,6 +13,8 @@
 #include <atlstr.h>
 
 #include <memory>
+
+struct ID2D1RenderTarget;
 
 // ---- Window class name -------------------------------------------------------
 
@@ -42,6 +45,8 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLGF_DASHED       0x0002   // dashed (a strict inequality's boundary always is)
 #define FPLGF_NOTRACE      0x0004
 #define FPLGF_NOFEATURES   0x0008   // no roots, extrema or intersections marked while tracing it
+#define FPLGF_HEATMAP      0x0010   // a surface (z = F(x, y)): its values as colors
+#define FPLGF_NOCONTOURS   0x0020   // a surface: no contour lines
 
 struct FPLGRAPH {
 	UINT     mask;             // FPLGM_*: the members to set, or to fill
@@ -62,7 +67,9 @@ enum FPLKIND {
 	FPLK_PARAMETRIC,           // (x(t), y(t))
 	FPLK_IMPLICIT,             // F(x, y) = 0, or an inequality
 	FPLK_POINT,                // (a, b)
-	FPLK_DEFINITION,           // "c = 2a": defines c for the other graphs
+	FPLK_DEFINITION,           // "c = 2a": defines c for the other graphs; "g(a, b) = a b" (a function of others)
+	FPLK_SURFACE,              // z = F(x, y): contours and, with FPLGF_HEATMAP, a heat map
+	FPLK_VECTORFIELD,          // (P(x, y), Q(x, y)): arrows
 };
 
 // The errors (FPLGRAPHINFO::error), FplErrorCode's values.
@@ -210,7 +217,10 @@ public:
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 	END_MSG_MAP()
+
+	enum : UINT_PTR { AnimationTimer = 1 };
 
 	// ---- Graphs ----
 	BOOL AddGraph(const FPLGRAPH& graph);      // false if the id is taken (or 0)
@@ -232,6 +242,9 @@ public:
 	BOOL RemoveParameter(LPCWSTR pszName);
 	int GetParameterCount() const;
 	BOOL GetParameterAt(int index, FPLPARAM& param) const;
+	// a parameter's value sweeping its slider's range and back (4 seconds a way), as its play button does
+	BOOL AnimateParameter(LPCWSTR pszName, BOOL play);
+	BOOL IsParameterAnimating(LPCWSTR pszName) const;
 	void SetDegrees(BOOL degrees);             // the trigonometric functions in degrees
 	BOOL GetDegrees() const;
 
@@ -250,6 +263,16 @@ public:
 	// A function's roots, extrema, y intercept and intersections with the other functions over the view; the
 	// number there are (up to max filled).
 	int GetFeatures(UINT id, FPLFEATURE* features, int max) const;
+
+	// ---- The panel (the legend and the sliders) ----
+	void SetPanelCollapsed(BOOL collapsed);    // folded to its button (the user's click on it too)
+	BOOL IsPanelCollapsed() const;
+
+	// ---- Export ----
+	// The view as a PNG, scale times its size in DIPs (COM must be initialized on the thread: WIC).
+	BOOL ExportPng(LPCWSTR pszPath, float scale = 1);
+	// The view as SVG: the grid, the axes and their labels, the graphs (not heat maps) and the legend.
+	BOOL ExportSvg(LPCWSTR pszPath);
 
 	// ---- Look ----
 	void SetColors(const FPLCOLORS* colors);   // null: back to the system's (and the dark mode's)
@@ -278,6 +301,7 @@ private:
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 
 	// FunctionPlotCtrl.cpp
 	void Rebuild();                            // texts, names or the angle unit changed
@@ -291,17 +315,22 @@ private:
 	void NotifyView();
 	float ToDips(int pixels) const;
 	struct FplPanelHit HitPanel(POINT pt) const;
-	void DragSlider(int param, float x);
+	void DragSlider(int row, float x);
+	void SetParam(int param, double value, bool snap);   // a slider's value: sampled again, notified
+	int NextSlider(bool back) const;           // Tab's row: -1 the plot itself, -2 out of the control
 	COLORREF GraphColor(int index) const;
 
 	// FunctionPlotPaint.cpp
 	void Paint();
+	HRESULT PaintTo(ID2D1RenderTarget* target, float dpi, bool exporting);
 	bool CreateTarget();
 	void DiscardTarget();
 	void BuildGeometries();                    // the sampled lines and fills as Direct2D geometries
 	void LayoutPanel();                        // the legend's and sliders' rows
+	void PaintHeatmaps();
 	void PaintGrid();
 	void PaintGraphs();
+	void PaintContourLabels();
 	void PaintLabels();
 	void PaintTrace();
 	void PaintPanel();

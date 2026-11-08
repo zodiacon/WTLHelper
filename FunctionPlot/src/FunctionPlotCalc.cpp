@@ -11,6 +11,7 @@ namespace {
 unsigned VarBit(std::wstring_view name) {
 	if (name == L"x") return FplVarX;
 	if (name == L"y") return FplVarY;
+	if (name == L"z") return FplVarZ;
 	if (name == L"t") return FplVarT;
 	if (name == L"r") return FplVarR;
 	if (name == FplTheta) return FplVarTheta;
@@ -21,6 +22,7 @@ const wchar_t* VarName(unsigned bit) {
 	switch (bit) {
 		case FplVarX: return L"x";
 		case FplVarY: return L"y";
+		case FplVarZ: return L"z";
 		case FplVarT: return L"t";
 		case FplVarR: return L"r";
 		default: return FplTheta;
@@ -129,12 +131,18 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 			def.error.len = top.len;
 			return def;
 		}
+		// (x(t), y(t)), or a vector field (P(x, y), Q(x, y)), or a point
 		unsigned vars = FplVariablesOf(ast, root);
-		if (vars & ~FplVarT) {
+		const unsigned field = FplVarX | FplVarY;
+		if ((vars & FplVarT) && (vars & ~FplVarT)) {
 			NotAllowed(def, ast, root, ~unsigned(FplVarT));
 			return def;
 		}
-		def.kind = vars ? FplKind::Parametric : FplKind::Point;
+		if (vars & ~(FplVarT | field)) {
+			NotAllowed(def, ast, root, ~unsigned(FplVarT | field));
+			return def;
+		}
+		def.kind = (vars & FplVarT) ? FplKind::Parametric : (vars & field) ? FplKind::VectorField : FplKind::Point;
 		def.expr[0] = top.kids[0];
 		def.expr[1] = top.kids[1];
 		return def;
@@ -188,11 +196,21 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 	if (oneSide(L"y", FplVarY, FplVarX, FplKind::Function) || oneSide(L"x", FplVarX, FplVarY, FplKind::FunctionOfY)
 		|| oneSide(L"r", FplVarR, FplVarTheta, FplKind::Polar))
 		return def;
+	// z = F(x, y): a surface, drawn as contours or a heat map (an equation only)
+	if (oneSide(L"z", FplVarZ, FplVarX | FplVarY, FplKind::Surface)) {
+		if (rel != FplRel::Eq) {
+			def = {};
+			def.error.code = FplErrorCode::NotAPlot;
+			def.error.pos = top.pos;
+			def.error.len = top.len;
+		}
+		return def;
+	}
 
 	// Anything else in x and y is F(x, y) rel 0, with theta and r as atan2(y, x) and hypot(x, y).
 	unsigned vars = lv | rv;
-	if (vars & FplVarT) {
-		NotAllowed(def, ast, root, FplVarT);
+	if (vars & (FplVarT | FplVarZ)) {
+		NotAllowed(def, ast, root, FplVarT | FplVarZ);
 		return def;
 	}
 	if (!(vars & (FplVarX | FplVarY | FplVarR | FplVarTheta))) {

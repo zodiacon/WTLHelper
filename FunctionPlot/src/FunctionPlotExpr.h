@@ -108,15 +108,25 @@ struct FplAst {
 	int Cmp(FplRel rel, int a, int b);
 };
 
-// The standard variables. Any other name is a parameter.
+// The standard variables (x y z t theta r). Any other name is a parameter. z has no slot: it's what a surface gives.
 inline constexpr wchar_t FplTheta[] = L"\x03B8";
 bool FplIsVariable(std::wstring_view name);
 
 // ---- Parsing ---------------------------------------------------------------------------------------------------------
 
+// A function the user defined ("f(x) = x^2", "g(a, b) = a b"): its parameters and its body, in a tree of its own. A
+// call is inlined: the body copied with the arguments for the parameters ("f'(x)": its derivative first).
+struct FplUserFunction {
+	std::wstring name;
+	std::vector<std::wstring> params;
+	FplAst ast;
+	int body = -1;
+};
+
 struct FplParseOptions {
 	const std::vector<std::wstring>* parameters = nullptr;	// the names an app has defined
 	bool degrees = false;	// trigonometric functions in degrees
+	const std::vector<FplUserFunction>* functions = nullptr;	// the user's functions, known by name
 };
 
 struct FplParseResult {
@@ -129,12 +139,23 @@ struct FplParseResult {
 // implicit ("2x", "x(x+1)", "2 sin x"). '^' binds tighter than unary minus and is right associative; a function's
 // argument can go without parentheses, taking the implicit product after it up to an operator or the next function
 // ("sin 2x cos x" is sin(2x) cos(x)); "sin^2 x" is (sin x)^2. A name that isn't known is split into known ones
-// ("xy", "pix", "sinx"). Also: |x|, x!, {x < 0: -x, x}, {0 < x < 1} (1 inside, nothing outside), (a, b), "**" for
+// ("xy", "pix", "sinx"). The user's functions are called as the built-in ones are, f'(x) and f''(x) their
+// derivatives; "d/dx" (d/dy, d/dt, d/dtheta) is the derivative of what follows, as a function's argument. Also: |x|, x!, {x < 0: -x, x}, {0 < x < 1} (1 inside, nothing outside), (a, b), "**" for
 // '^', "<=" ">=", and the characters people paste: times and dots (U+00D7 U+00B7 U+22C5), U+00F7, the minus U+2212,
 // U+2264 U+2265, the square root sign U+221A (of the factor after it), superscript 2 and 3 (U+00B2 U+00B3), and the
 // Greek letters (pi, tau and theta mean what their names do). An unknown name alone before '=' is a definition
 // ("a = 2").
 FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options = {});
+
+// "f(x) = x^2": a function's definition, if the text is one (a name nothing knows, its parameters, '='); the body is
+// parsed with the parameters known. error: the body's (positions in the whole text), or Redefined for a parameter
+// named twice.
+struct FplFunctionDefinition {
+	bool isDefinition = false;
+	FplUserFunction function;
+	FplError error;
+};
+FplFunctionDefinition FplParseFunction(std::wstring_view text, const FplParseOptions& options = {});
 
 // ---- What a parsed expression draws ----------------------------------------------------------------------------------
 
@@ -146,6 +167,8 @@ enum class FplKind : uint8_t {
 	Implicit,		// F(x, y) rel 0; expr[0] is F (theta and r replaced by atan2(y, x) and hypot(x, y))
 	Point,			// (a, b) with no variables; expr[0], expr[1]
 	Definition,		// name = value with no variables; expr[0] is the value
+	Surface,		// z = F(x, y); expr[0] is F
+	VectorField,	// (P(x, y), Q(x, y)); expr[0], expr[1]
 };
 
 struct FplPlotDef {
@@ -160,7 +183,7 @@ struct FplPlotDef {
 FplPlotDef FplClassify(FplAst& ast, int root);
 
 // Bit per standard variable, for FplVariablesOf.
-enum : unsigned { FplVarX = 1, FplVarY = 2, FplVarT = 4, FplVarTheta = 8, FplVarR = 16 };
+enum : unsigned { FplVarX = 1, FplVarY = 2, FplVarT = 4, FplVarTheta = 8, FplVarR = 16, FplVarZ = 32 };
 unsigned FplVariablesOf(const FplAst& ast, int node);
 bool FplHasNames(const FplAst& ast, int node);	// any Var at all (variables or parameters)
 
@@ -235,4 +258,5 @@ struct FplExpression {
 };
 
 // Parses, classifies and compiles text; the slots are as for FplCompile with the same parameters.
-FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees = false);
+FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees = false,
+	const std::vector<FplUserFunction>* functions = nullptr);

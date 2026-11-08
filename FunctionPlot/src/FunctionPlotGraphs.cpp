@@ -61,24 +61,52 @@ void FplPlot::Build() {
 	for (auto& p : params)
 		m_Names.push_back(p.name);
 	m_Definitions.clear();
+	m_Functions.clear();
 	for (auto& g : graphs) {
 		g.expr = {};
 		g.definition = false;
+		g.function = -1;
 		g.slot = -1;
 		g.geometry = {};
 		g.features.clear();
 	}
 
-	// the definitions, found round after round: "c = 2d" is one once d is known
+	// the definitions and the functions, found round after round: "c = 2d" is one once d is known, "g(x) = 2f(x)"
+	// once f is
 	FplParseOptions options;
 	options.degrees = degrees;
+	options.functions = &m_Functions;
+	std::vector<FplError> functionErrors(graphs.size());
+	auto taken = [&](const std::wstring& name) {
+		if (std::find(m_Names.begin(), m_Names.end(), name) != m_Names.end())
+			return true;
+		for (auto& f : m_Functions)
+			if (f.name == name)
+				return true;
+		return false;
+	};
 	for (bool found = true; found;) {
 		found = false;
 		for (size_t i = 0; i < graphs.size(); i++) {
 			auto& g = graphs[i];
-			if (g.definition || g.expr.error.code == FplErrorCode::Redefined)
+			if (g.definition || g.function >= 0 || g.expr.error.code == FplErrorCode::Redefined)
 				continue;
 			options.parameters = &m_Names;
+			auto fd = FplParseFunction(g.text, options);
+			if (fd.isDefinition) {
+				if (fd.error.code == FplErrorCode::Redefined || taken(fd.function.name)) {
+					g.expr.error = fd.error.code == FplErrorCode::Redefined ? fd.error
+						: FplError{ FplErrorCode::Redefined, 0, static_cast<int>(fd.function.name.size()), fd.function.name };
+					continue;
+				}
+				functionErrors[i] = fd.error;
+				if (fd.error)
+					continue;
+				g.function = static_cast<int>(m_Functions.size());
+				m_Functions.push_back(std::move(fd.function));
+				found = true;
+				continue;
+			}
 			auto r = FplParse(g.text, options);
 			std::wstring name;
 			if (RedefinesName(r, m_Names, name)) {
@@ -91,6 +119,10 @@ void FplPlot::Build() {
 			auto def = FplClassify(r.ast, r.root);
 			if (def.error || def.kind != FplKind::Definition)
 				continue;
+			if (taken(def.name)) {
+				g.expr.error = { FplErrorCode::Redefined, 0, static_cast<int>(def.name.size()), def.name };
+				continue;
+			}
 			g.definition = true;
 			g.slot = FplFirstParam + static_cast<int>(m_Names.size());
 			m_Names.push_back(def.name);
@@ -99,11 +131,32 @@ void FplPlot::Build() {
 		}
 	}
 
-	for (auto& g : graphs) {
+	for (size_t i = 0; i < graphs.size(); i++) {
+		auto& g = graphs[i];
 		if (g.expr.error.code == FplErrorCode::Redefined)
 			continue;
+		if (g.function >= 0) {
+			// one parameter that is a variable: drawn as what that variable makes it; else nothing to draw
+			auto& fn = m_Functions[g.function];
+			const std::wstring& p = fn.params.size() == 1 ? fn.params[0] : std::wstring();
+			std::wstring call = fn.name + L"(" + p + L")";
+			std::wstring text = p == L"x" ? call : p == L"y" ? L"x = " + call : p == L"t" ? call
+				: p == FplTheta ? L"r = " + call : std::wstring();
+			if (!text.empty()) {
+				g.expr = FplBuild(text, m_Names, degrees, &m_Functions);
+			}
+			else {
+				g.expr.kind = FplKind::Definition;
+				g.expr.name = fn.name;
+			}
+			continue;
+		}
+		if (functionErrors[i]) {
+			g.expr.error = functionErrors[i];
+			continue;
+		}
 		if (!g.definition) {
-			g.expr = FplBuild(g.text, m_Names, degrees);
+			g.expr = FplBuild(g.text, m_Names, degrees, &m_Functions);
 			continue;
 		}
 		// its value, compiled against every name but its own
@@ -154,6 +207,8 @@ void FplPlot::Sample(const FplViewport& view, const FplSampleOptions& options) {
 			continue;
 		}
 		FplSampleOptions o = options;
+		o.heatmap = (g.flags & FplGraphHeatmap) != 0;
+		o.contours = !(g.flags & FplGraphNoContours);
 		if (g.hasRange) {
 			o.tMin = o.thetaMin = g.tMin;
 			o.tMax = o.thetaMax = g.tMax;

@@ -40,9 +40,10 @@ D2D1_POINT_2F Pt(FplPoint p) {
 	return D2D1::Point2F((float)p.x, (float)p.y);
 }
 
-ComPtr<IDWriteTextFormat> MakeFormat(float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT align) {
+ComPtr<IDWriteTextFormat> MakeFormat(float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT align,
+	const wchar_t* family = L"Segoe UI") {
 	ComPtr<IDWriteTextFormat> format;
-	if (FAILED(FplDWriteFactory()->CreateTextFormat(L"Segoe UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+	if (FAILED(FplDWriteFactory()->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
 		DWRITE_FONT_STRETCH_NORMAL, size, L"", format.GetAddressOf())))
 		return nullptr;
 	format->SetTextAlignment(align);
@@ -88,8 +89,8 @@ const wchar_t* FeatureName(FplFeatureKind kind) {
 
 ID2D1SolidColorBrush* FplState::Brush(COLORREF color) {
 	auto& brush = brushes[color];
-	if (!brush && target)
-		target->CreateSolidColorBrush(Color(color), brush.GetAddressOf());
+	if (!brush && rt)
+		rt->CreateSolidColorBrush(Color(color), brush.GetAddressOf());
 	return brush.Get();
 }
 
@@ -122,6 +123,7 @@ bool CFunctionPlotCtrl::CreateTarget() {
 		s.panelText = MakeFormat(14, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
 		s.panelSmall = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
 		s.traceText = MakeFormat(13, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
+		s.icons = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, L"Segoe MDL2 Assets");
 	}
 	return true;
 }
@@ -130,7 +132,38 @@ void CFunctionPlotCtrl::DiscardTarget() {
 	auto& s = *m_State;
 	s.target.Reset();
 	s.brushes.clear();
+	// the heat maps' bitmaps belong to the target
+	for (auto& p : s.paths)
+		p.heat.Reset();
 }
+
+namespace {
+
+void AddOpen(ID2D1GeometrySink* sink, const FplPolyline& line, std::vector<D2D1_POINT_2F>& points) {
+	if (line.size() < 2)
+		return;
+	sink->BeginFigure(Pt(line[0]), D2D1_FIGURE_BEGIN_HOLLOW);
+	points.clear();
+	for (size_t k = 1; k < line.size(); k++)
+		points.push_back(Pt(line[k]));
+	sink->AddLines(points.data(), (UINT32)points.size());
+	sink->EndFigure(D2D1_FIGURE_END_OPEN);
+}
+
+// An arrow: its shaft and a head of two strokes.
+void AddArrow(ID2D1GeometrySink* sink, const FplArrow& a, std::vector<D2D1_POINT_2F>& points) {
+	double len = std::hypot(a.to.x - a.from.x, a.to.y - a.from.y);
+	if (len <= 0)
+		return;
+	double ux = (a.to.x - a.from.x) / len, uy = (a.to.y - a.from.y) / len, head = std::min(7.0, 0.35 * len);
+	const double c = std::cos(0.45), sn = std::sin(0.45);
+	FplPoint l = { a.to.x - head * (ux * c - uy * sn), a.to.y - head * (uy * c + ux * sn) };
+	FplPoint r = { a.to.x - head * (ux * c + uy * sn), a.to.y - head * (uy * c - ux * sn) };
+	AddOpen(sink, { a.from, a.to }, points);
+	AddOpen(sink, { l, a.to, r }, points);
+}
+
+}  // namespace
 
 void CFunctionPlotCtrl::BuildGeometries() {
 	auto& s = *m_State;
@@ -174,6 +207,54 @@ void CFunctionPlotCtrl::BuildGeometries() {
 				sink->Close();
 			}
 		}
+		// a surface's contours, with a label at the middle of each level's longest line
+		std::vector<D2D1_POINT_2F> points;
+		if (!geometry.contours.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.contours.GetAddressOf()))) {
+			ComPtr<ID2D1GeometrySink> sink;
+			if (SUCCEEDED(paths.contours->Open(sink.GetAddressOf()))) {
+				for (auto& c : geometry.contours)
+					for (auto& line : c.lines)
+						AddOpen(sink.Get(), line, points);
+				sink->Close();
+			}
+			const double step = geometry.contours.size() > 1
+				? std::abs(geometry.contours[1].level - geometry.contours[0].level) : 1;
+			for (auto& c : geometry.contours) {
+				const FplPolyline* longest = nullptr;
+				for (auto& line : c.lines)
+					if (!longest || line.size() > longest->size())
+						longest = &line;
+				if (longest && longest->size() >= 8)
+					paths.labels.push_back({ (*longest)[longest->size() / 2], FplFormatCoordinate(c.level, step / 100) });
+			}
+		}
+		// a vector field's arrows
+		if (!geometry.arrows.empty() && SUCCEEDED(FplD2DFactory()->CreatePathGeometry(paths.arrows.GetAddressOf()))) {
+			ComPtr<ID2D1GeometrySink> sink;
+			if (SUCCEEDED(paths.arrows->Open(sink.GetAddressOf()))) {
+				for (auto& a : geometry.arrows)
+					AddArrow(sink.Get(), a, points);
+				sink->Close();
+			}
+		}
+		// a heat map's pixels: its values on the colormap, transparent where undefined
+		auto& hm = geometry.heatmap;
+		if (!hm.Empty()) {
+			paths.heatCols = hm.cols;
+			paths.heatRows = hm.rows;
+			paths.heatCell = (float)hm.cell;
+			paths.heatPixels.resize(hm.values.size());
+			const double range = hm.hi - hm.lo;
+			for (size_t k = 0; k < hm.values.size(); k++) {
+				float v = hm.values[k];
+				if (!std::isfinite(v)) {
+					paths.heatPixels[k] = 0;
+					continue;
+				}
+				uint32_t c = FplColormap((v - hm.lo) / range);
+				paths.heatPixels[k] = 0xFF000000u | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
+			}
+		}
 	}
 }
 
@@ -183,6 +264,7 @@ void CFunctionPlotCtrl::LayoutPanel() {
 	auto& s = *m_State;
 	s.rows.clear();
 	s.panel = {};
+	s.toggle = {};
 	if (!IsWindow())
 		return;
 	const DWORD style = GetStyle();
@@ -213,16 +295,29 @@ void CFunctionPlotCtrl::LayoutPanel() {
 			row.index = (int)i;
 			row.rect = { left, y, right, y + FplSliderRow };
 			const float mid = y + FplSliderRow / 2;
-			row.track = { left + 52, mid - 2, right - 66, mid + 2 };
+			row.play = { left + 6, mid - 11, left + 28, mid + 11 };
+			row.track = { left + 76, mid - 2, right - 66, mid + 2 };
 			s.rows.push_back(row);
 			y += FplSliderRow;
 		}
 	}
-	if (s.rows.empty())
+	if (s.rows.empty()) {
+		s.focusRow = s.hotRow = -1;
 		return;
+	}
+	if (s.collapsed) {
+		// only the button that opens it again
+		s.rows.clear();
+		s.focusRow = s.hotRow = -1;
+		s.toggle = { FplPanelMargin, FplPanelMargin, FplPanelMargin + 26, FplPanelMargin + 26 };
+		return;
+	}
 	s.panel = { left, FplPanelMargin, right, y + FplPanelPad };
+	s.toggle = { right + 4, FplPanelMargin, right + 30, FplPanelMargin + 26 };
 	if (s.hotRow >= (int)s.rows.size())
 		s.hotRow = -1;
+	if (s.focusRow >= (int)s.rows.size() || (s.focusRow >= 0 && s.rows[s.focusRow].kind != FplPanelRow::Slider))
+		s.focusRow = -1;
 }
 
 // ---- Painting --------------------------------------------------------------------------
@@ -231,31 +326,85 @@ void CFunctionPlotCtrl::Paint() {
 	auto& s = *m_State;
 	if (!CreateTarget())
 		return;
-	const FPLCOLORS c = GetColors();
-	s.target->BeginDraw();
-	s.target->SetTransform(D2D1::Matrix3x2F::Identity());
-	s.target->Clear(Color(c.crBack));
-	if (s.view.Valid()) {
-		PaintGrid();
-		PaintGraphs();
-		PaintLabels();
-		PaintTrace();
-		PaintPanel();
-	}
-	if (s.target->EndDraw() == D2DERR_RECREATE_TARGET) {
+	if (PaintTo(s.target.Get(), (float)s.dpi, false) == D2DERR_RECREATE_TARGET) {
 		DiscardTarget();
 		Invalidate();
 	}
 }
 
+HRESULT CFunctionPlotCtrl::PaintTo(ID2D1RenderTarget* target, float dpi, bool exporting) {
+	auto& s = *m_State;
+	s.rt = target;
+	s.paintDpi = dpi;
+	s.exporting = exporting;
+	const FPLCOLORS c = GetColors();
+	target->BeginDraw();
+	target->SetTransform(D2D1::Matrix3x2F::Identity());
+	target->Clear(Color(c.crBack));
+	if (s.view.Valid()) {
+		PaintHeatmaps();
+		PaintGrid();
+		PaintGraphs();
+		PaintContourLabels();
+		PaintLabels();
+		PaintTrace();
+		PaintPanel();
+	}
+	HRESULT hr = target->EndDraw();
+	s.rt = s.target.Get();
+	s.paintDpi = (float)s.dpi;
+	s.exporting = false;
+	return hr;
+}
+
+void CFunctionPlotCtrl::PaintHeatmaps() {
+	auto& s = *m_State;
+	auto* rt = s.rt;
+	for (size_t i = 0; i < s.plot.graphs.size() && i < s.paths.size(); i++) {
+		auto& p = s.paths[i];
+		if (!s.plot.graphs[i].Drawable() || p.heatPixels.empty())
+			continue;
+		if (!p.heat) {
+			auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+			if (FAILED(rt->CreateBitmap(D2D1::SizeU(p.heatCols, p.heatRows), p.heatPixels.data(), p.heatCols * 4, props,
+				p.heat.GetAddressOf())))
+				continue;
+		}
+		rt->DrawBitmap(p.heat.Get(), D2D1::RectF(0, 0, p.heatCols * p.heatCell, p.heatRows * p.heatCell), 0.85f,
+			D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+	}
+}
+
+void CFunctionPlotCtrl::PaintContourLabels() {
+	auto& s = *m_State;
+	auto* rt = s.rt;
+	const FPLCOLORS c = GetColors();
+	auto* patch = s.Brush(c.crBack);
+	for (size_t i = 0; i < s.plot.graphs.size() && i < s.paths.size(); i++) {
+		if (!s.plot.graphs[i].Drawable())
+			continue;
+		auto* color = s.Brush(GraphColor((int)i));
+		for (auto& label : s.paths[i].labels) {
+			const float x = (float)label.at.x, y = (float)label.at.y;
+			if (x < 0 || y < 0 || x > s.view.width || y > s.view.height)
+				continue;
+			const float tw = TextWidth(label.text, s.labelCenter.Get()) + 6;
+			patch->SetOpacity(0.8f);
+			rt->FillRoundedRectangle({ { x - tw / 2, y - 8, x + tw / 2, y + 8 }, 3, 3 }, patch);
+			patch->SetOpacity(1);
+			Text(rt, label.text, s.labelCenter.Get(), { x - 60, y - 9, x + 60, y + 9 }, color);
+		}
+	}
+}
+
 void CFunctionPlotCtrl::PaintGrid() {
 	auto& s = *m_State;
-	auto* rt = s.target.Get();
+	auto* rt = s.rt;
 	const FPLCOLORS c = GetColors();
 	const DWORD style = GetStyle();
 	auto& v = s.view;
 	const float w = (float)v.width, h = (float)v.height;
-	const float pixel = 96.0f / s.dpi;
+	const float pixel = 96.0f / s.paintDpi;
 	// a line on a pixel's middle, so a one-pixel line is sharp
 	auto snap = [&](double d) { return (float)((std::floor(d / pixel) + 0.5) * pixel); };
 
@@ -301,7 +450,7 @@ void CFunctionPlotCtrl::PaintGrid() {
 // The ticks' numbers, over the graphs on a patch of the background so a curve doesn't run through them.
 void CFunctionPlotCtrl::PaintLabels() {
 	auto& s = *m_State;
-	auto* rt = s.target.Get();
+	auto* rt = s.rt;
 	const FPLCOLORS c = GetColors();
 	const DWORD style = GetStyle();
 	if (style & FPLS_NOAXES)
@@ -353,7 +502,7 @@ void CFunctionPlotCtrl::PaintLabels() {
 
 void CFunctionPlotCtrl::PaintGraphs() {
 	auto& s = *m_State;
-	auto* rt = s.target.Get();
+	auto* rt = s.rt;
 	auto& graphs = s.plot.graphs;
 	// the regions first, under every curve
 	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
@@ -365,10 +514,16 @@ void CFunctionPlotCtrl::PaintGraphs() {
 		brush->SetOpacity(1);
 	}
 	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
+		if (graphs[i].Drawable() && s.paths[i].contours)
+			rt->DrawGeometry(s.paths[i].contours.Get(), s.Brush(GraphColor((int)i)), 1.25f, s.roundStroke.Get());
+	}
+	for (size_t i = 0; i < graphs.size() && i < s.paths.size(); i++) {
 		auto& g = graphs[i];
 		if (!g.Drawable())
 			continue;
 		auto* brush = s.Brush(GraphColor((int)i));
+		if (s.paths[i].arrows)
+			rt->DrawGeometry(s.paths[i].arrows.Get(), brush, 1.5f, s.roundStroke.Get());
 		float width = g.width;
 		if ((int)i == s.traceGraph && s.traceValid)
 			width += 1;
@@ -385,7 +540,7 @@ void CFunctionPlotCtrl::PaintGraphs() {
 
 void CFunctionPlotCtrl::PaintTrace() {
 	auto& s = *m_State;
-	auto* rt = s.target.Get();
+	auto* rt = s.rt;
 	const FPLCOLORS c = GetColors();
 	auto& v = s.view;
 	// the features of the graph being traced
@@ -427,26 +582,41 @@ void CFunctionPlotCtrl::PaintTrace() {
 		y = (float)p.y + 10;
 	D2D1_ROUNDED_RECT box = { { x, y, x + tw, y + th }, 4, 4 };
 	rt->FillRoundedRectangle(box, s.Brush(c.crPanelBack));
-	rt->DrawRoundedRectangle(box, s.Brush(c.crPanelBorder), 96.0f / s.dpi);
+	rt->DrawRoundedRectangle(box, s.Brush(c.crPanelBorder), 96.0f / s.paintDpi);
 	Text(rt, text, s.traceText.Get(), { x + 7, y, x + tw, y + th }, s.Brush(c.crPanelText));
 }
 
 void CFunctionPlotCtrl::PaintPanel() {
 	auto& s = *m_State;
+	auto* rt = s.rt;
+	const FPLCOLORS c = GetColors();
+	const float pixel = 96.0f / s.paintDpi;
+	auto* text = s.Brush(c.crPanelText);
+	auto* muted = s.Brush(c.crLabel);
+	// the button that folds the panel (not in an export)
+	if (s.toggle.right > s.toggle.left && !s.exporting) {
+		D2D1_ROUNDED_RECT button = { s.toggle, 4, 4 };
+		rt->FillRoundedRectangle(button, s.Brush(c.crPanelBack));
+		if (s.hotToggle) {
+			auto* hot = s.Brush(c.crPanelBorder);
+			hot->SetOpacity(0.5f);
+			rt->FillRoundedRectangle(button, hot);
+			hot->SetOpacity(1);
+		}
+		rt->DrawRoundedRectangle(button, s.Brush(c.crPanelBorder), pixel);
+		// ChevronLeft / ChevronRight
+		Text(rt, s.collapsed ? L"\xE76C" : L"\xE76B", s.icons.Get(), s.toggle, text);
+	}
 	if (s.rows.empty())
 		return;
-	auto* rt = s.target.Get();
-	const FPLCOLORS c = GetColors();
-	const float pixel = 96.0f / s.dpi;
 	D2D1_ROUNDED_RECT box = { s.panel, 6, 6 };
 	rt->FillRoundedRectangle(box, s.Brush(c.crPanelBack));
 	rt->DrawRoundedRectangle(box, s.Brush(c.crPanelBorder), pixel);
-	auto* text = s.Brush(c.crPanelText);
-	auto* muted = s.Brush(c.crLabel);
+	const bool focused = ::GetFocus() == m_hWnd && !s.exporting;
 	for (size_t r = 0; r < s.rows.size(); r++) {
 		auto& row = s.rows[r];
 		const float left = row.rect.left, right = row.rect.right, top = row.rect.top;
-		if ((int)r == s.hotRow) {
+		if ((int)r == s.hotRow && !s.exporting) {
 			auto* hot = s.Brush(c.crPanelBorder);
 			hot->SetOpacity(0.35f);
 			rt->FillRectangle({ left + 1, top, right - 1, row.rect.bottom }, hot);
@@ -456,7 +626,7 @@ void CFunctionPlotCtrl::PaintPanel() {
 			auto& g = s.plot.graphs[row.index];
 			const float mid = top + FplGraphRow / 2;
 			const bool hidden = (g.flags & FplGraphHidden) != 0;
-			if (!g.definition) {
+			if (!g.definition && !(g.expr.kind == FplKind::Definition && !g.expr.error)) {
 				auto* color = s.Brush(GraphColor(row.index));
 				D2D1_ELLIPSE swatch = D2D1::Ellipse({ left + 15, mid }, 6, 6);
 				if (hidden || g.expr.error)
@@ -469,8 +639,7 @@ void CFunctionPlotCtrl::PaintPanel() {
 				double value = s.plot.DefinitionValue(row.index);
 				label += L"   = " + FplFormatCoordinate(value, 1e-6);
 			}
-			Text(rt, label, s.panelText.Get(), { left + 28, top, right - 8, top + FplGraphRow },
-				hidden ? muted : text);
+			Text(rt, label, s.panelText.Get(), { left + 28, top, right - 8, top + FplGraphRow }, hidden ? muted : text);
 			if (row.error) {
 				Text(rt, g.expr.error.Message(), s.panelSmall.Get(),
 					{ left + 28, top + FplGraphRow - 6, right - 8, top + FplGraphRow - 6 + FplErrorLine },
@@ -480,11 +649,13 @@ void CFunctionPlotCtrl::PaintPanel() {
 		else {
 			auto& p = s.plot.params[row.index];
 			const float mid = top + FplSliderRow / 2;
-			Text(rt, p.name, s.panelText.Get(), { left + 10, top, row.track.left - 8, top + FplSliderRow }, text);
+			auto* accent = s.Brush(c.crPalette[1]);
+			// Play / Pause
+			Text(rt, p.animating ? L"\xE769" : L"\xE768", s.icons.Get(), row.play, accent);
+			Text(rt, p.name, s.panelText.Get(), { row.play.right + 4, top, row.track.left - 8, top + FplSliderRow }, text);
 			// the track, filled up to the value
 			const double t = p.max > p.min ? std::clamp((p.value - p.min) / (p.max - p.min), 0.0, 1.0) : 0;
 			const float tx = row.track.left + (float)t * (row.track.right - row.track.left);
-			auto* accent = s.Brush(GetColors().crPalette[1]);
 			D2D1_ROUNDED_RECT track = { row.track, 2, 2 };
 			rt->FillRoundedRectangle(track, s.Brush(c.crPanelBorder));
 			D2D1_ROUNDED_RECT filled = { { row.track.left, row.track.top, tx, row.track.bottom }, 2, 2 };
@@ -495,6 +666,9 @@ void CFunctionPlotCtrl::PaintPanel() {
 			const double unit = p.step > 0 ? p.step / 10 : (p.max - p.min) / 1000;
 			Text(rt, FplFormatCoordinate(p.value, unit), s.panelText.Get(),
 				{ row.track.right + 12, top, right - 8, top + FplSliderRow }, text);
+			// the keys' slider
+			if (focused && (int)r == s.focusRow)
+				rt->DrawRectangle({ left + 3, top + 2, right - 3, row.rect.bottom - 2 }, text, pixel, s.dashStroke.Get());
 		}
 	}
 }

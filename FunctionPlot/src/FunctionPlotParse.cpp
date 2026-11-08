@@ -2,9 +2,11 @@
 
 #include "FunctionPlotExpr.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cwctype>
 #include <numbers>
+#include <unordered_map>
 
 namespace {
 
@@ -36,6 +38,8 @@ constexpr wchar_t Tau[] = L"\x03C4";
 constexpr wchar_t LessEq = L'\x2264';
 constexpr wchar_t GreaterEq = L'\x2265';
 constexpr wchar_t SqrtSign = L'\x221A';
+constexpr wchar_t DerivOp = L'\xE000';		// "d/dx": the token's name is the variable
+constexpr wchar_t Prime = L'\'';
 
 }	// namespace
 
@@ -44,7 +48,7 @@ const FplFuncInfo& FplFuncInfoOf(FplFunc f) {
 }
 
 bool FplIsVariable(std::wstring_view name) {
-	return name == L"x" || name == L"y" || name == L"t" || name == L"r" || name == FplTheta;
+	return name == L"x" || name == L"y" || name == L"z" || name == L"t" || name == L"r" || name == FplTheta;
 }
 
 // ---- The tree --------------------------------------------------------------------------------------------------------
@@ -132,13 +136,14 @@ std::wstring FplError::Message() const {
 namespace {
 
 enum class Tk : uint8_t { Num, Name, Op, Sup, End };
-enum class NameKind : uint8_t { Func, Const, Var, Param, Unknown };
+enum class NameKind : uint8_t { Func, User, Const, Var, Param, Unknown };
 
 struct Token {
 	Tk type = Tk::End;
 	wchar_t op = 0;				// Op: '+' '-' '*' '/' '^' '(' ')' '[' ']' '{' '}' ',' ':' '|' '!' '<' '>' '=' LessEq GreaterEq SqrtSign
 	NameKind kind = NameKind::Unknown;
 	FplFunc func = FplFunc::Sin;
+	int user = -1;				// User: the function's index
 	double value = 0;			// Num, Const, Sup
 	std::wstring name;			// Name: canonical (theta is theta, pi is pi); Num: its text
 	std::wstring hint;			// Unknown: the part to report (an unknown letter of "ax"), at hintPos
@@ -157,7 +162,8 @@ bool IsDigit(wchar_t c) {
 
 class Lexer {
 public:
-	Lexer(std::wstring_view text, const std::vector<std::wstring>* params) : m_Text(text), m_Params(params) {}
+	Lexer(std::wstring_view text, const std::vector<std::wstring>* params,
+		const std::vector<FplUserFunction>* functions = nullptr) : m_Text(text), m_Params(params), m_Functions(functions) {}
 
 	bool Run(std::vector<Token>& tokens, FplError& error) {
 		size_t i = 0;
@@ -173,6 +179,8 @@ public:
 					return false;
 				continue;
 			}
+			if (c == L'd' && Derivative(i, tokens))
+				continue;
 			if (IsLetter(c)) {
 				size_t j = i + 1;
 				while (j < m_Text.size() && (IsLetter(m_Text[j]) || IsDigit(m_Text[j]) || m_Text[j] == L'_'))
@@ -190,6 +198,9 @@ public:
 				case L'+': case L'/': case L'^': case L'(': case L')': case L'[': case L']': case L'{': case L'}':
 				case L',': case L':': case L'|': case L'!': case SqrtSign:
 					t.op = c;
+					break;
+				case Prime: case L'\x2032':
+					t.op = Prime;
 					break;
 				case L'-': case L'\x2212':
 					t.op = L'-';
@@ -250,6 +261,34 @@ public:
 	}
 
 private:
+	// "d/dx", "d/dy", "d/dt", "d/dtheta" (or the letter), as one token; not "d/dxy".
+	bool Derivative(size_t& i, std::vector<Token>& tokens) {
+		std::wstring_view rest = m_Text.substr(i);
+		if (rest.size() < 4 || rest.substr(0, 3) != L"d/d")
+			return false;
+		static const struct { const wchar_t* text; const wchar_t* var; } Vars[] = {
+			{ L"theta", FplTheta }, { FplTheta, FplTheta }, { L"x", L"x" }, { L"y", L"y" }, { L"t", L"t" },
+		};
+		for (auto& v : Vars) {
+			std::wstring_view name = v.text;
+			if (rest.substr(3, name.size()) != name)
+				continue;
+			size_t end = 3 + name.size();
+			if (end < rest.size() && (IsLetter(rest[end]) || IsDigit(rest[end])))
+				continue;
+			Token t;
+			t.type = Tk::Op;
+			t.op = DerivOp;
+			t.name = v.var;
+			t.pos = int(i);
+			t.len = int(end);
+			tokens.push_back(std::move(t));
+			i += end;
+			return true;
+		}
+		return false;
+	}
+
 	bool Number(size_t& i, std::vector<Token>& tokens, FplError& error) {
 		size_t start = i;
 		int dots = 0;
@@ -327,6 +366,14 @@ private:
 			t.name = s == L"theta" ? std::wstring(FplTheta) : std::wstring(s);
 			return true;
 		}
+		if (m_Functions)
+			for (size_t f = 0; f < m_Functions->size(); f++)
+				if (s == (*m_Functions)[f].name) {
+					t.kind = NameKind::User;
+					t.user = int(f);
+					t.name = s;
+					return true;
+				}
 		if (m_Params)
 			for (auto& p : *m_Params)
 				if (s == p) {
@@ -400,7 +447,43 @@ private:
 
 	std::wstring_view m_Text;
 	const std::vector<std::wstring>* m_Params;
+	const std::vector<FplUserFunction>* m_Functions;
 };
+
+bool IsTrig(FplFunc f) {
+	return f >= FplFunc::Sin && f <= FplFunc::Cot;
+}
+
+bool IsInverseTrig(FplFunc f) {
+	return f >= FplFunc::Asin && f <= FplFunc::Atan2;
+}
+
+// A copy of src's subtree in dst (they may be the same tree), Var nodes named in subst replaced by its nodes, all at
+// once (so g(y, x) swaps them). Shared subtrees stay shared.
+int CopyTree(FplAst& dst, const FplAst& src, int node, const std::unordered_map<std::wstring, int>& subst,
+	std::vector<int>& memo) {
+	if (memo[node] >= 0)
+		return memo[node];
+	FplNode n = src[node];
+	int result;
+	auto it = n.op == FplOp::Var ? subst.find(n.name) : subst.end();
+	if (it != subst.end()) {
+		result = it->second;
+	}
+	else {
+		for (auto& k : n.kids)
+			k = CopyTree(dst, src, k, subst, memo);
+		n.pos = n.len = 0;
+		result = dst.Add(std::move(n));
+	}
+	memo[node] = result;
+	return result;
+}
+
+int CopyTree(FplAst& dst, const FplAst& src, int node, const std::unordered_map<std::wstring, int>& subst = {}) {
+	std::vector<int> memo(src.nodes.size(), -1);
+	return CopyTree(dst, src, node, subst, memo);
+}
 
 // ---- The parser ------------------------------------------------------------------------------------------------------
 
@@ -408,7 +491,8 @@ struct ParseError {};
 
 class Parser {
 public:
-	Parser(std::vector<Token> tokens, FplAst& ast, FplError& error) : m_Tokens(std::move(tokens)), m_Ast(ast), m_Error(error) {}
+	Parser(std::vector<Token> tokens, FplAst& ast, FplError& error, const FplParseOptions& options)
+		: m_Tokens(std::move(tokens)), m_Ast(ast), m_Error(error), m_Options(options) {}
 
 	int Top() {
 		if (Peek().type == Tk::End)
@@ -501,7 +585,7 @@ private:
 			return false;
 		if (t.op == L'|')
 			return m_AbsDepth == 0;
-		return t.op == L'(' || t.op == L'[' || t.op == L'{' || t.op == SqrtSign;
+		return t.op == L'(' || t.op == L'[' || t.op == L'{' || t.op == SqrtSign || t.op == DerivOp;
 	}
 
 	int Sum() {
@@ -587,6 +671,7 @@ private:
 					case NameKind::Var:
 					case NameKind::Param: return Make(m_Ast.Var(t.name), t.pos, t.len);
 					case NameKind::Func: return Function(t);
+					case NameKind::User: return UserCall(t);
 					case NameKind::Unknown: Fail(FplErrorCode::UnknownName, t);
 				}
 				break;
@@ -623,6 +708,8 @@ private:
 						int a = Postfix();
 						return Make(m_Ast.Call(FplFunc::Sqrt, { a }), t.pos, m_Ast[a].pos + m_Ast[a].len - t.pos);
 					}
+					case DerivOp:
+						return Derivative(t);
 				}
 				break;
 
@@ -690,10 +777,93 @@ private:
 			m_Error.name = finfo.name;
 			throw ParseError();
 		}
+		// degrees: a trigonometric function's argument times pi/180, an inverse one's result times 180/pi (now, so a
+		// derivative taken later in the parse sees them)
+		if (m_Options.degrees && IsTrig(func))
+			args[0] = m_Ast.Binary(FplOp::Mul, args[0], m_Ast.Num(std::numbers::pi / 180));
 		int call = Make(m_Ast.Call(func, std::move(args)), name.pos, end - name.pos);
+		if (m_Options.degrees && IsInverseTrig(func))
+			call = Make(m_Ast.Binary(FplOp::Mul, call, m_Ast.Num(180 / std::numbers::pi)), name.pos, end - name.pos);
 		if (power >= 0)
 			call = Span(m_Ast.Binary(FplOp::Pow, call, power), call, power);
 		return call;
+	}
+
+	// A function's arguments: "(a, b)", or the implicit product after it.
+	std::vector<int> Arguments(const Token& name, int& end) {
+		std::vector<int> args;
+		if (IsOp(Peek(), L'(') || IsOp(Peek(), L'[')) {
+			wchar_t close = Next().op == L'(' ? L')' : L']';
+			int saved = m_AbsDepth;
+			m_AbsDepth = 0;
+			args.push_back(Sum());
+			while (IsOp(Peek(), L','))
+				Next(), args.push_back(Sum());
+			Close(close);
+			m_AbsDepth = saved;
+			end = m_Tokens[m_Pos - 1].pos + 1;
+		}
+		else {
+			if (!StartsArgument(Peek()))
+				Fail(FplErrorCode::MissingArgument, name, name.name);
+			int a = ImplicitArgument();
+			args.push_back(a);
+			end = m_Ast[a].pos + m_Ast[a].len;
+		}
+		return args;
+	}
+
+	// The user's function, inlined: "f(2x)", "f'(x)", "g(a, b)".
+	int UserCall(const Token& name) {
+		const auto& fn = (*m_Options.functions)[name.user];
+		int primes = 0;
+		while (IsOp(Peek(), Prime))
+			Next(), primes++;
+		int end;
+		std::vector<int> args = Arguments(name, end);
+		if (args.size() != fn.params.size()) {
+			m_Error.code = FplErrorCode::ArgCount;
+			m_Error.pos = name.pos;
+			m_Error.len = end - name.pos;
+			m_Error.name = fn.name;
+			throw ParseError();
+		}
+		int body = CopyTree(m_Ast, fn.ast, fn.body);
+		for (int i = 0; i < primes; i++) {
+			FplError e;
+			body = FplDerive(m_Ast, body, fn.params[0], &e);
+			if (body < 0) {
+				m_Error = { FplErrorCode::NotDifferentiable, name.pos, end - name.pos, fn.name };
+				throw ParseError();
+			}
+		}
+		std::unordered_map<std::wstring, int> subst;
+		for (size_t i = 0; i < args.size(); i++)
+			subst[fn.params[i]] = args[i];
+		body = CopyTree(m_Ast, m_Ast, body, subst);
+		// a node of its own for the call's place in the text (the body may be an argument itself)
+		FplNode wrap = m_Ast[body];
+		return Make(m_Ast.Add(std::move(wrap)), name.pos, end - name.pos);
+	}
+
+	// "d/dx x^2", "d/dx (x sin x)": the derivative of the argument.
+	int Derivative(const Token& op) {
+		Token name = op;
+		name.name = L"d/d" + op.name;
+		int end;
+		std::vector<int> args = Arguments(name, end);
+		if (args.size() != 1) {
+			m_Error = { FplErrorCode::ArgCount, op.pos, end - op.pos, name.name };
+			throw ParseError();
+		}
+		FplError e;
+		int d = FplDerive(m_Ast, args[0], op.name, &e);
+		if (d < 0) {
+			m_Error = { FplErrorCode::NotDifferentiable, op.pos, end - op.pos, name.name };
+			throw ParseError();
+		}
+		FplNode wrap = m_Ast[d];
+		return Make(m_Ast.Add(std::move(wrap)), op.pos, end - op.pos);
 	}
 
 	static FplFunc Inverse(FplFunc f) {
@@ -724,7 +894,9 @@ private:
 			return ImplicitArgument();
 		}
 		int node = Power();
-		while (StartsImplicitFactor(Peek()) && !(Peek().type == Tk::Name && Peek().kind == NameKind::Func)) {
+		while (StartsImplicitFactor(Peek()) &&
+			!(Peek().type == Tk::Name && (Peek().kind == NameKind::Func || Peek().kind == NameKind::User)) &&
+			!IsOp(Peek(), DerivOp)) {
 			int rhs = Power();
 			node = Span(m_Ast.Binary(FplOp::Mul, node, rhs), node, rhs);
 		}
@@ -800,55 +972,18 @@ private:
 	int m_AbsDepth = 0;
 	FplAst& m_Ast;
 	FplError& m_Error;
+	const FplParseOptions& m_Options;
 };
-
-bool IsTrig(FplFunc f) {
-	return f >= FplFunc::Sin && f <= FplFunc::Cot;
-}
-
-bool IsInverseTrig(FplFunc f) {
-	return f >= FplFunc::Asin && f <= FplFunc::Atan2;
-}
-
-// Degrees: the trigonometric functions' arguments times pi/180, the inverse ones' results times 180/pi.
-int ToDegrees(FplAst& ast, int node, std::vector<int>& memo) {
-	if (memo[node] >= 0)
-		return memo[node];
-	FplNode n = ast[node];
-	bool changed = false;
-	for (auto& k : n.kids) {
-		int nk = ToDegrees(ast, k, memo);
-		changed = changed || nk != k;
-		k = nk;
-	}
-	int result = node;
-	if (n.op == FplOp::Call && IsTrig(n.func)) {
-		int arg = ast.Binary(FplOp::Mul, n.kids[0], ast.Num(std::numbers::pi / 180));
-		n.kids[0] = arg;
-		result = ast.Add(std::move(n));
-	}
-	else if (n.op == FplOp::Call && IsInverseTrig(n.func)) {
-		int pos = n.pos, len = n.len;
-		int call = ast.Add(std::move(n));
-		result = ast.Binary(FplOp::Mul, call, ast.Num(180 / std::numbers::pi));
-		ast.nodes[result].pos = pos;
-		ast.nodes[result].len = len;
-	}
-	else if (changed)
-		result = ast.Add(std::move(n));
-	memo[node] = result;
-	return result;
-}
 
 }	// namespace
 
 FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) {
 	FplParseResult result;
 	std::vector<Token> tokens;
-	Lexer lexer(text, options.parameters);
+	Lexer lexer(text, options.parameters, options.functions);
 	if (!lexer.Run(tokens, result.error))
 		return result;
-	Parser parser(std::move(tokens), result.ast, result.error);
+	Parser parser(std::move(tokens), result.ast, result.error, options);
 	try {
 		result.root = parser.Top();
 	}
@@ -856,9 +991,74 @@ FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) 
 		result.root = -1;
 		return result;
 	}
-	if (options.degrees) {
-		std::vector<int> memo(result.ast.nodes.size(), -1);
-		result.root = ToDegrees(result.ast, result.root, memo);
-	}
 	return result;
+}
+
+FplFunctionDefinition FplParseFunction(std::wstring_view text, const FplParseOptions& options) {
+	FplFunctionDefinition d;
+	std::vector<Token> tokens;
+	FplError ignored;
+	Lexer lexer(text, options.parameters, options.functions);
+	if (!lexer.Run(tokens, ignored))
+		return d;
+	// name ( p, ... ) =
+	auto isOp = [&](size_t i, wchar_t op) { return i < tokens.size() && tokens[i].type == Tk::Op && tokens[i].op == op; };
+	// the name: one nothing knows whole ("area", though e is known), or the user's function's again
+	if (tokens.size() < 5 || tokens[0].type != Tk::Name ||
+		(tokens[0].kind != NameKind::Unknown && tokens[0].kind != NameKind::User) || !isOp(1, L'('))
+		return d;
+	std::vector<std::wstring> params;
+	size_t i = 2;
+	for (;;) {
+		if (i >= tokens.size() || tokens[i].type != Tk::Name || tokens[i].kind == NameKind::Func ||
+			tokens[i].kind == NameKind::User || tokens[i].kind == NameKind::Const ||
+			(tokens[i].kind == NameKind::Unknown && !tokens[i].definable))
+			return d;
+		params.push_back(tokens[i].name);
+		i++;
+		if (isOp(i, L',')) {
+			i++;
+			continue;
+		}
+		if (isOp(i, L')'))
+			break;
+		return d;
+	}
+	i++;
+	if (!isOp(i, L'=') || tokens[i].len != 1)
+		return d;
+	d.isDefinition = true;
+	d.function.name = tokens[0].name;
+	d.function.params = params;
+	if (tokens[0].kind == NameKind::User) {
+		d.error = { FplErrorCode::Redefined, tokens[0].pos, tokens[0].len, tokens[0].name };
+		return d;
+	}
+	for (size_t a = 0; a < params.size(); a++)
+		for (size_t b = a + 1; b < params.size(); b++)
+			if (params[a] == params[b]) {
+				d.error = { FplErrorCode::Redefined, tokens[2].pos, tokens[i - 1].pos - tokens[2].pos, params[a] };
+				return d;
+			}
+
+	// the body, with the parameters known
+	const int offset = tokens[i].pos + 1;
+	std::vector<std::wstring> names = options.parameters ? *options.parameters : std::vector<std::wstring>{};
+	for (auto& p : params)
+		if (!FplIsVariable(p) && p != FplTheta && std::find(names.begin(), names.end(), p) == names.end())
+			names.push_back(p);
+	FplParseOptions bodyOptions = options;
+	bodyOptions.parameters = &names;
+	auto r = FplParse(text.substr(offset), bodyOptions);
+	if (!r.error && r.ast[r.root].op == FplOp::Cmp) {
+		r.error = { FplErrorCode::MisplacedRelation, r.ast[r.root].pos, r.ast[r.root].len };
+	}
+	if (r.error) {
+		d.error = r.error;
+		d.error.pos += offset;
+		return d;
+	}
+	d.function.ast = std::move(r.ast);
+	d.function.body = r.root;
+	return d;
 }

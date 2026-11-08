@@ -22,6 +22,18 @@ IDWriteFactory* FplDWriteFactory();
 struct FplGraphPaths {
 	ComPtr<ID2D1PathGeometry> lines;
 	ComPtr<ID2D1PathGeometry> fills;
+	ComPtr<ID2D1PathGeometry> contours;
+	ComPtr<ID2D1PathGeometry> arrows;
+	struct Label {
+		FplPoint at;
+		std::wstring text;
+	};
+	std::vector<Label> labels;			// a contour level's, at the middle of its longest line
+	// a heat map: its pixels (premultiplied BGRA) and the bitmap made from them on the target
+	std::vector<uint32_t> heatPixels;
+	int heatCols = 0, heatRows = 0;
+	float heatCell = 0;
+	ComPtr<ID2D1Bitmap> heat;
 };
 
 // a row of the panel over the plot's top left: a graph in the legend, or a parameter's slider
@@ -30,10 +42,11 @@ struct FplPanelRow {
 	int index = 0;						// in the plot's graphs or params
 	D2D1_RECT_F rect{};					// client DIPs
 	D2D1_RECT_F track{};				// a slider's
+	D2D1_RECT_F play{};					// a slider's play button
 	bool error = false;					// a graph's: a second line with the message
 };
 
-enum class FplPanelPart : uint8_t { None, Panel, Graph, Slider };
+enum class FplPanelPart : uint8_t { None, Panel, Graph, Slider, Play, Toggle };
 
 struct FplPanelHit {
 	FplPanelPart part = FplPanelPart::None;
@@ -57,15 +70,23 @@ struct FplState {
 
 	// Direct2D
 	ComPtr<ID2D1HwndRenderTarget> target;
+	ID2D1RenderTarget* rt = nullptr;	// what's painted on: the window's target, or an export's
+	float paintDpi = 96;
+	bool exporting = false;
 	std::unordered_map<COLORREF, ComPtr<ID2D1SolidColorBrush>> brushes;
 	ComPtr<ID2D1StrokeStyle> roundStroke, dashStroke;
-	ComPtr<IDWriteTextFormat> labelCenter, labelLeft, labelRight, panelText, panelSmall, traceText;
+	ComPtr<IDWriteTextFormat> labelCenter, labelLeft, labelRight, panelText, panelSmall, traceText, icons;
 	std::vector<FplGraphPaths> paths;	// by graph
 
 	// the panel
 	std::vector<FplPanelRow> rows;
 	D2D1_RECT_F panel{};				// empty: none
+	D2D1_RECT_F toggle{};				// the button that folds it (empty: none)
+	bool collapsed = false;
 	int hotRow = -1;
+	bool hotToggle = false;
+	int focusRow = -1;					// the slider the keys move (-1: the keys pan)
+	ULONGLONG lastTick = 0;				// the animation's
 
 	// tracing
 	int traceGraph = -1;

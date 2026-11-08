@@ -835,6 +835,30 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 			g.fills = FplSampleRegion(F, view, options, &g.evals);
 		break;
 	}
+	case FplKind::Surface: {
+		std::function<double(double, double)> F = [&](double x, double y) {
+			s[FplSlotX] = x;
+			s[FplSlotY] = y;
+			return e.f.Eval(s);
+		};
+		// the grid always: its range picks the contours' levels
+		FplHeatmap heat = FplSampleHeatmap(F, view, options, &g.evals);
+		if (options.contours && !heat.Empty())
+			g.contours = FplSampleContours(F, FplContourLevels(heat.lo, heat.hi, options.contourLevels), view, options,
+				&g.evals);
+		if (options.heatmap)
+			g.heatmap = std::move(heat);
+		break;
+	}
+	case FplKind::VectorField: {
+		std::function<FplPoint(double, double)> field = [&](double x, double y) {
+			s[FplSlotX] = x;
+			s[FplSlotY] = y;
+			return FplPoint{ e.f.Eval(s), e.g.Eval(s) };
+		};
+		g.arrows = FplSampleField(field, view, options, &g.evals);
+		break;
+	}
 	case FplKind::Point: {
 		FplPoint p = view.ToScreen({ e.f.Eval(s), e.g.Eval(s) });
 		if (Finite(p))
@@ -845,4 +869,143 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 		break;
 	}
 	return g;
+}
+
+// ---- Surfaces and vector fields --------------------------------------------------------------------------------------
+
+namespace {
+
+// The p-th fraction of the values (they're reordered).
+double Percentile(std::vector<double>& values, double p) {
+	size_t k = std::min(values.size() - 1, static_cast<size_t>(p * (values.size() - 1) + 0.5));
+	std::nth_element(values.begin(), values.begin() + k, values.end());
+	return values[k];
+}
+
+} // namespace
+
+FplHeatmap FplSampleHeatmap(const std::function<double(double, double)>& F, const FplViewport& view,
+	const FplSampleOptions& options, size_t* evals) {
+	FplHeatmap h;
+	if (!view.Valid())
+		return h;
+	h.cell = std::max(options.heatCell, 1.0);
+	h.cols = static_cast<int>(std::ceil(view.width / h.cell));
+	h.rows = static_cast<int>(std::ceil(view.height / h.cell));
+	h.values.resize(static_cast<size_t>(h.cols) * h.rows);
+	std::vector<double> finite;
+	finite.reserve(h.values.size());
+	for (int r = 0; r < h.rows; r++) {
+		double y = view.ToPlaneY((r + 0.5) * h.cell);
+		for (int c = 0; c < h.cols; c++) {
+			double v = F(view.ToPlaneX((c + 0.5) * h.cell), y);
+			h.values[static_cast<size_t>(r) * h.cols + c] = static_cast<float>(v);
+			if (std::isfinite(v))
+				finite.push_back(v);
+		}
+	}
+	if (evals)
+		*evals += h.values.size();
+	if (finite.empty()) {
+		h.values.clear();
+		return h;
+	}
+	h.lo = Percentile(finite, 0.02);
+	h.hi = Percentile(finite, 0.98);
+	if (!(h.hi > h.lo)) {
+		double pad = std::max(1.0, std::abs(h.lo)) * 0.5;
+		h.lo -= pad;
+		h.hi += pad;
+	}
+	return h;
+}
+
+std::vector<double> FplContourLevels(double lo, double hi, int count) {
+	std::vector<double> levels;
+	if (!std::isfinite(lo) || !std::isfinite(hi) || !(hi > lo) || count < 1)
+		return levels;
+	// ticks over the range as if it were count * 10 DIPs with 10 between them
+	FplTicks t = FplMakeTicks(lo, hi, count * 10.0, 10.0);
+	return t.major;
+}
+
+std::vector<FplContour> FplSampleContours(const std::function<double(double, double)>& F,
+	const std::vector<double>& levels, const FplViewport& view, const FplSampleOptions& options, size_t* evals) {
+	std::vector<FplContour> contours;
+	contours.reserve(levels.size());
+	for (double level : levels) {
+		std::function<double(double, double)> shifted = [&](double x, double y) { return F(x, y) - level; };
+		FplContour c;
+		c.level = level;
+		c.lines = FplSampleImplicit(shifted, view, options, evals);
+		if (!c.lines.empty())
+			contours.push_back(std::move(c));
+	}
+	return contours;
+}
+
+std::vector<FplArrow> FplSampleField(const std::function<FplPoint(double, double)>& field, const FplViewport& view,
+	const FplSampleOptions& options, size_t* evals) {
+	std::vector<FplArrow> arrows;
+	if (!view.Valid())
+		return arrows;
+	const double spacing = std::max(options.arrowSpacing, 8.0);
+	FplTicks tx = FplMakeTicks(view.xMin, view.xMax, view.width, spacing);
+	FplTicks ty = FplMakeTicks(view.yMin, view.yMax, view.height, spacing);
+	if (tx.major.empty() || ty.major.empty())
+		return arrows;
+	// the room an arrow has: the grid's smaller step on the screen
+	const double room = std::min(tx.step * view.ScaleX(), ty.step * view.ScaleY());
+	struct Raw {
+		FplPoint center;
+		double dx, dy, m;
+	};
+	std::vector<Raw> raw;
+	raw.reserve(tx.major.size() * ty.major.size());
+	std::vector<double> magnitudes;
+	for (double y : ty.major) {
+		for (double x : tx.major) {
+			FplPoint v = field(x, y);
+			if (!std::isfinite(v.x) || !std::isfinite(v.y))
+				continue;
+			// the direction on the screen (y down; the axes' scales may differ)
+			double dx = v.x * view.ScaleX(), dy = -v.y * view.ScaleY();
+			double m = std::hypot(v.x, v.y);
+			raw.push_back({ view.ToScreen({ x, y }), dx, dy, m });
+			magnitudes.push_back(m);
+		}
+	}
+	if (evals)
+		*evals += tx.major.size() * ty.major.size();
+	if (raw.empty())
+		return arrows;
+	double top = Percentile(magnitudes, 0.95);
+	const double longest = 0.85 * room;
+	arrows.reserve(raw.size());
+	for (auto& r : raw) {
+		double screen = std::hypot(r.dx, r.dy);
+		if (r.m == 0 || screen == 0)
+			continue;
+		double len = top > 0 ? longest * std::min(1.0, r.m / top) : longest;
+		len = std::max(len, 0.2 * longest);
+		double ux = r.dx / screen * len / 2, uy = r.dy / screen * len / 2;
+		arrows.push_back({ { r.center.x - ux, r.center.y - uy }, { r.center.x + ux, r.center.y + uy }, r.m });
+	}
+	return arrows;
+}
+
+uint32_t FplColormap(double t) {
+	// viridis, by its stops at 0, 1/4, 1/2, 3/4, 1
+	static const double Stops[5][3] = {
+		{ 68, 1, 84 }, { 59, 82, 139 }, { 33, 145, 140 }, { 94, 201, 98 }, { 253, 231, 37 },
+	};
+	if (!std::isfinite(t))
+		t = 0;
+	t = std::clamp(t, 0.0, 1.0) * 4;
+	int i = std::min(3, static_cast<int>(t));
+	double f = t - i;
+	uint32_t rgb[3];
+	for (int k = 0; k < 3; k++)
+		rgb[k] = static_cast<uint32_t>(std::lround(Stops[i][k] + (Stops[i + 1][k] - Stops[i][k]) * f));
+	return rgb[0] | (rgb[1] << 8) | (rgb[2] << 16);
 }

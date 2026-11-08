@@ -9,6 +9,7 @@
 
 #include "FunctionPlotExpr.h"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -74,6 +75,12 @@ struct FplSampleOptions {
 	double cellSize = 8;			// DIPs: the implicit grid's cells
 	int cellDepth = 2;				// halvings of a cell with the curve in it
 	size_t maxEvals = 2'000'000;	// a budget: past it, intervals and cells aren't split any more
+	// surfaces and vector fields
+	bool contours = true;			// a surface's contour lines
+	bool heatmap = false;			// a surface's values on a grid, for a heat map
+	int contourLevels = 10;			// about this many
+	double heatCell = 4;			// DIPs: the heat map's cells
+	double arrowSpacing = 40;		// DIPs: at least this far apart
 };
 
 // A curve given as t -> a point in the plane (NaN where undefined), sampled over [t0, t1] from samples + 1 first
@@ -96,12 +103,58 @@ std::vector<FplPolygon> FplSampleRegion(const std::function<double(double, doubl
 std::vector<FplPolyline> FplClip(const std::vector<FplPolyline>& lines, double left, double top, double right,
 	double bottom);
 
+// ---- Surfaces and vector fields --------------------------------------------------------------------------------------
+
+// A surface's values at the centers of a grid of cells over the view (NaN where undefined), and the range they're
+// colored over: the 2nd to the 98th percentile, so a pole doesn't wash the rest out.
+struct FplHeatmap {
+	int cols = 0, rows = 0;
+	double cell = 0;					// DIPs; cell (0, 0)'s top left is the view's
+	std::vector<float> values;			// row by row
+	double lo = 0, hi = 0;
+	bool Empty() const { return values.empty(); }
+};
+
+FplHeatmap FplSampleHeatmap(const std::function<double(double, double)>& F, const FplViewport& view,
+	const FplSampleOptions& options = {}, size_t* evals = nullptr);
+
+// Nice levels between lo and hi, about count of them (1, 2 or 5 times a power of ten apart).
+std::vector<double> FplContourLevels(double lo, double hi, int count);
+
+struct FplContour {
+	double level = 0;
+	std::vector<FplPolyline> lines;		// screen coordinates
+};
+
+// Where F(x, y) is each level, by marching squares (FplSampleImplicit of F - level).
+std::vector<FplContour> FplSampleContours(const std::function<double(double, double)>& F,
+	const std::vector<double>& levels, const FplViewport& view, const FplSampleOptions& options = {},
+	size_t* evals = nullptr);
+
+// A field's arrow, centered on its grid point, as long as its magnitude against the field's largest (the 95th
+// percentile), but never shorter than a fifth of the longest so its direction shows.
+struct FplArrow {
+	FplPoint from, to;					// screen coordinates
+	double magnitude = 0;
+};
+
+// Arrows at the plane's points a nice step apart (at least options.arrowSpacing DIPs), so they stay put as the view
+// pans; field(x, y) gives the vector (NaN: none there).
+std::vector<FplArrow> FplSampleField(const std::function<FplPoint(double, double)>& field, const FplViewport& view,
+	const FplSampleOptions& options = {}, size_t* evals = nullptr);
+
+// t from 0 to 1 to a color (a COLORREF, 0x00BBGGRR) on a perceptual scale from dark blue through green to yellow.
+uint32_t FplColormap(double t);
+
 // ---- An expression's geometry ----------------------------------------------------------------------------------------
 
 struct FplGeometry {
 	std::vector<FplPolyline> lines;		// the curve, or a region's boundary
 	std::vector<FplPolygon> fills;		// an inequality's region
 	std::vector<FplPoint> points;		// Point: in screen coordinates (may be outside the view)
+	std::vector<FplContour> contours;	// Surface (options.contours)
+	FplHeatmap heatmap;					// Surface (options.heatmap)
+	std::vector<FplArrow> arrows;		// VectorField
 	bool dashed = false;				// a strict inequality's boundary
 	size_t evals = 0;
 };

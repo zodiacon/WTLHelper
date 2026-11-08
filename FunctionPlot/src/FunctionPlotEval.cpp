@@ -449,11 +449,13 @@ double FplProgram::Eval(const double* slots) const {
 
 // ---- All of it -------------------------------------------------------------------------------------------------------
 
-FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees) {
+FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& parameters, bool degrees,
+	const std::vector<FplUserFunction>* functions) {
 	FplExpression e;
 	FplParseOptions options;
 	options.parameters = &parameters;
 	options.degrees = degrees;
+	options.functions = functions;
 	auto parsed = FplParse(text, options);
 	if (parsed.error) {
 		e.error = parsed.error;

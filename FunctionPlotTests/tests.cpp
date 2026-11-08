@@ -5,7 +5,8 @@
 // positions, what an expression draws, constant folding, compiling and the stack machine against the tree, the math
 // functions, degrees, derivatives against differences, simplifying and printing), and the 2D model (the view, ticks
 // and labels, clipping, sampling functions, curves, implicit curves and regions, roots, extrema and intersections), and the
-// control's graphs (definitions, sampling, features, tracing, coordinates).
+// control's graphs (definitions, sampling, features, tracing, coordinates), user functions
+// and d/dx, surfaces (heat maps, contours), vector fields and the SVG export.
 
 #include "FunctionPlotExpr.h"
 #include "FunctionPlotGraphs.h"
@@ -1301,6 +1302,19 @@ TEST(SampleSpeed) {
 		std::chrono::duration<double, std::milli>(t2 - t1).count(), g2.evals, g2.lines.size());
 	CHECK(!g.lines.empty());
 	CHECK(!g2.lines.empty());
+	// a surface: its grid, heat map and contours
+	FplSampleOptions o;
+	o.heatmap = true;
+	e = FplBuild(L"z = sin x + cos y", g_Params);
+	auto t3 = std::chrono::steady_clock::now();
+	auto g3 = FplSample(e, ParamSlots(), v, o);
+	auto t4 = std::chrono::steady_clock::now();
+	size_t contourLines = 0;
+	for (auto& c : g3.contours)
+		contourLines += c.lines.size();
+	wprintf(L"        surface: %.2f ms (%zu evaluations, %zu levels, %zu lines)\n",
+		std::chrono::duration<double, std::milli>(t4 - t3).count(), g3.evals, g3.contours.size(), contourLines);
+	CHECK(!g3.contours.empty());
 }
 
 // ---- The graphs ----------------------------------------------------------------
@@ -1479,6 +1493,359 @@ TEST(Coordinates) {
 	CHECK_STR(FplFormatCoordinate(1234.5678, 50), L"1235");
 }
 
+// ---- User functions and derivatives ----------------------------------------------
+
+// f of text built with the user's functions, at x.
+static double UF(std::wstring_view text, const std::vector<FplUserFunction>& fns, double x,
+	const std::vector<std::wstring>& params = {}, const double* values = nullptr, bool degrees = false) {
+	auto e = FplBuild(text, params, degrees, &fns);
+	if (e.error)
+		return Failed;
+	double s[16] = {};
+	s[FplSlotX] = s[FplSlotT] = s[FplSlotTheta] = x;
+	for (size_t i = 0; values && i < params.size(); i++)
+		s[FplFirstParam + i] = values[i];
+	return e.f.Eval(s);
+}
+
+static void Define(std::vector<FplUserFunction>& fns, std::wstring_view text, const std::vector<std::wstring>& params = {},
+	bool degrees = false) {
+	FplParseOptions o;
+	o.parameters = &params;
+	o.functions = &fns;
+	o.degrees = degrees;
+	auto d = FplParseFunction(text, o);
+	if (d.isDefinition && !d.error)
+		fns.push_back(std::move(d.function));
+}
+
+TEST(UserFunctionDefinitions) {
+	auto d = FplParseFunction(L"f(x) = x^2");
+	CHECK(d.isDefinition);
+	CHECK(!d.error);
+	CHECK_STR(d.function.name, L"f");
+	CHECK_INT(d.function.params.size(), 1);
+	CHECK_STR(FplToString(d.function.ast, d.function.body), L"x^2");
+	d = FplParseFunction(L"area(w, h) = w h / 2");
+	CHECK(d.isDefinition && !d.error);
+	CHECK_INT(d.function.params.size(), 2);
+	// not definitions
+	CHECK(!FplParseFunction(L"y = x").isDefinition);
+	CHECK(!FplParseFunction(L"sin(x) = 2").isDefinition);
+	CHECK(!FplParseFunction(L"f(2) = 3").isDefinition);
+	CHECK(!FplParseFunction(L"f(x) <= 3").isDefinition);
+	std::vector<std::wstring> ab = { L"a", L"b" };
+	FplParseOptions o;
+	o.parameters = &ab;
+	CHECK(!FplParseFunction(L"ab(x) = x", o).isDefinition);	// a times b
+	// errors in it
+	d = FplParseFunction(L"g(a, a) = a");
+	CHECK(d.isDefinition);
+	CHECK_INT(d.error.code, FplErrorCode::Redefined);
+	d = FplParseFunction(L"f(x) = x +");
+	CHECK_INT(d.error.code, FplErrorCode::UnexpectedEnd);
+	CHECK_INT(d.error.pos, 10);
+	d = FplParseFunction(L"f(x) = 2q x");
+	CHECK_INT(d.error.code, FplErrorCode::UnknownName);
+	CHECK_STR(d.error.name, L"q");
+	CHECK_INT(d.error.pos, 8);
+	d = FplParseFunction(L"f(x) = x < 2");
+	CHECK_INT(d.error.code, FplErrorCode::MisplacedRelation);
+}
+
+TEST(UserFunctionCalls) {
+	std::vector<FplUserFunction> fns;
+	Define(fns, L"f(x) = x^2");
+	Define(fns, L"g(a, b) = a - b");
+	Define(fns, L"h(u) = f(u) + 1");		// using one before it
+	CHECK_INT(fns.size(), 3);
+	CHECK_NEAR(UF(L"y = f(2x) + 1", fns, 3), 37);
+	CHECK_NEAR(UF(L"f'(x)", fns, 3), 6);
+	CHECK_NEAR(UF(L"f''(x)", fns, 3), 2);
+	CHECK_NEAR(UF(L"f\x2032(x)", fns, 3), 6);
+	CHECK_NEAR(UF(L"g(x, 1)", fns, 3), 2);
+	CHECK_NEAR(UF(L"g(1, x)", fns, 3), -2);
+	CHECK_NEAR(UF(L"h(x)", fns, 3), 10);
+	CHECK_NEAR(UF(L"h'(x)", fns, 3), 6);
+	// as the built-in ones: without parentheses, split out of a name
+	CHECK_NEAR(UF(L"f 2x", fns, 3), 36);
+	CHECK_NEAR(UF(L"2fx", fns, 3), 18);
+	CHECK_NEAR(UF(L"f(x) f(x)", fns, 3), 81);
+	// arguments that use the parameters' names
+	Define(fns, L"s(x, y) = x - 2y");
+	CHECK_NEAR(UF(L"y = s(1, x)", fns, 3), -5);
+	// wrong number of arguments
+	auto e = FplBuild(L"g(x)", {}, false, &fns);
+	CHECK_INT(e.error.code, FplErrorCode::ArgCount);
+	CHECK_STR(e.error.name, L"g");
+	CHECK_INT(e.error.pos, 0);
+	CHECK_INT(e.error.len, 4);
+	// a derivative of the first parameter only, of a point
+	Define(fns, L"c(t) = (cos t, sin t)");
+	e = FplBuild(L"c(t)", {}, false, &fns);
+	CHECK_INT(e.kind, FplKind::Parametric);
+	e = FplBuild(L"c'(t)", {}, false, &fns);
+	CHECK_INT(e.kind, FplKind::Parametric);
+	double sl[8] = {};
+	CHECK_NEAR(e.f.Eval(sl), 0);
+	CHECK_NEAR(e.g.Eval(sl), 1);
+	// the app's parameters in a body
+	std::vector<std::wstring> params = { L"k" };
+	const double k = 5;
+	std::vector<FplUserFunction> withK;
+	Define(withK, L"m(x) = k x", params);
+	CHECK_NEAR(UF(L"m(x) + 1", withK, 2, params, &k), 11);
+	// an error points at the call
+	e = FplBuild(L"y = 1 + f(x", {}, false, &fns);
+	CHECK_INT(e.error.code, FplErrorCode::MissingClose);
+}
+
+TEST(DerivativeSyntax) {
+	std::vector<FplUserFunction> none;
+	CHECK_NEAR(UF(L"d/dx x^3", none, 2), 12);
+	CHECK_NEAR(UF(L"y = d/dx (x sin x)", none, Pi / 2), 1);
+	CHECK_NEAR(UF(L"d/dx sin x cos x", none, 0), 1);		// d/dx sin(x), times cos x
+	CHECK_NEAR(UF(L"d/dx(x^2) + 1", none, 3), 7);
+	CHECK_NEAR(UF(L"d/dx d/dx x^3", none, 2), 12);
+	CHECK_NEAR(UF(L"r = d/d\x03B8 (\x03B8^2)", none, 3), 6);
+	CHECK_NEAR(UF(L"r = d/dtheta (theta^2)", none, 3), 6);
+	auto e = FplBuild(L"(d/dt cos t, d/dt sin t)", {});
+	CHECK_INT(e.kind, FplKind::Parametric);
+	double sl[8] = {};
+	CHECK_NEAR(e.g.Eval(sl), 1);
+	// partial: other variables are constants
+	e = FplBuild(L"d/dx (x y) = 1", {});
+	CHECK(!e.error);
+	// mistakes
+	e = FplBuild(L"y = d/dx", {});
+	CHECK_INT(e.error.code, FplErrorCode::MissingArgument);
+	CHECK_STR(e.error.name, L"d/dx");
+	e = FplBuild(L"d/dx (1, 2)", {});
+	CHECK_INT(e.error.code, FplErrorCode::ArgCount);
+	// "d/dxy" isn't one: d over d x y
+	e = FplBuild(L"d/dxy", {});
+	CHECK_INT(e.error.code, FplErrorCode::UnknownName);
+	// with a parameter d, "d/dx" is still the derivative
+	std::vector<std::wstring> dp = { L"d" };
+	const double dv = 7;
+	CHECK_NEAR(UF(L"d/dx x^2", none, 3, dp, &dv), 6);
+	CHECK_NEAR(UF(L"d/2", none, 3, dp, &dv), 3.5);
+	// degrees: the derivative of sin(x degrees) is pi/180 cos(x degrees)
+	CHECK_NEAR(UF(L"d/dx sin x", none, 0, {}, nullptr, true), Pi / 180);
+	std::vector<FplUserFunction> deg;
+	Define(deg, L"f(x) = sin x", {}, true);
+	CHECK_NEAR(UF(L"f'(x)", deg, 0, {}, nullptr, true), Pi / 180);
+	CHECK_NEAR(UF(L"f(90)", deg, 0, {}, nullptr, true), 1);
+	// printed back
+	auto r = FplParse(L"d/dx x^2");
+	CHECK_STR(FplToString(r.ast, r.root), L"2*x");
+}
+
+TEST(GraphFunctions) {
+	auto plot = MakePlot({ L"f(x) = x^2", L"y = f(x - 1)", L"g(t) = (cos t, sin t)", L"h(a, b) = a b",
+		L"y = h(x, 2)", L"p(\x03B8) = 1 + \x03B8", L"q(y) = y^3" });
+	CHECK_INT(plot.graphs[0].function, 0);
+	CHECK_INT(plot.graphs[0].expr.kind, FplKind::Function);
+	CHECK_NEAR(plot.Eval(0, 3), 9);
+	CHECK_NEAR(plot.Eval(1, 3), 4);
+	CHECK_INT(plot.graphs[2].expr.kind, FplKind::Parametric);
+	CHECK_INT(plot.graphs[3].expr.kind, FplKind::Definition);
+	CHECK(!plot.graphs[3].expr.error);
+	CHECK(plot.graphs[3].expr.f.Empty());
+	CHECK_NEAR(plot.Eval(4, 3), 6);
+	CHECK_INT(plot.graphs[5].expr.kind, FplKind::Polar);
+	CHECK_INT(plot.graphs[6].expr.kind, FplKind::FunctionOfY);
+	CHECK_INT(plot.Functions().size(), 5);
+	// features of a function's graph
+	auto v = View();
+	plot.Sample(v);
+	plot.FindFeatures(0, v);
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Minimum, 0, 0));
+
+	// any order, with definitions
+	plot = MakePlot({ L"y = f(x)", L"f(x) = 2c x", L"c = 3", L"k = f(2)" });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK_NEAR(plot.Eval(0, 1), 6);
+	CHECK_NEAR(plot.DefinitionValue(3), 12);
+	// twice, or over another name
+	plot = MakePlot({ L"f(x) = x", L"f(x) = 2x" });
+	CHECK_INT(plot.graphs[1].expr.error.code, FplErrorCode::Redefined);
+	CHECK_INT(plot.graphs[1].expr.error.pos, 0);
+	CHECK_INT(plot.graphs[1].expr.error.len, 1);
+	plot = MakePlot({ L"a(x) = x" }, { Param(L"a", 1) });
+	CHECK(!(plot.graphs[0].function >= 0));
+	// a body that can't be read
+	plot = MakePlot({ L"f(x) = q x" });
+	CHECK_INT(plot.graphs[0].expr.error.code, FplErrorCode::UnknownName);
+	CHECK_STR(plot.graphs[0].expr.error.name, L"q");
+	CHECK_INT(plot.graphs[0].expr.error.pos, 7);
+}
+
+// ---- Surfaces and vector fields ------------------------------------------------------
+
+TEST(Surfaces) {
+	auto e = FplBuild(L"z = x^2 + y^2", {});
+	CHECK_INT(e.kind, FplKind::Surface);
+	CHECK(!e.error);
+	double sl[8] = {};
+	sl[FplSlotX] = 3;
+	sl[FplSlotY] = 4;
+	CHECK_NEAR(e.f.Eval(sl), 25);
+	CHECK_INT(FplBuild(L"x y - 1 = z", {}).kind, FplKind::Surface);
+	CHECK_INT(FplBuild(L"z = 2", {}).kind, FplKind::Surface);
+	CHECK_INT(FplBuild(L"z < x", {}).error.code, FplErrorCode::NotAPlot);
+	CHECK_INT(FplBuild(L"y = z", {}).kind, FplKind::Surface);	// z = y
+	e = FplBuild(L"y = z x", {});
+	CHECK_INT(e.error.code, FplErrorCode::VariableNotAllowed);
+	CHECK_STR(e.error.name, L"z");
+	CHECK_INT(FplBuild(L"z = t", {}).error.code, FplErrorCode::VariableNotAllowed);
+	CHECK_INT(FplBuild(L"z", {}).error.code, FplErrorCode::NotAPlot);
+
+	// the heat map's grid and its range
+	auto v = View();
+	auto h = FplSampleHeatmap([](double x, double y) { return x + y; }, v);
+	CHECK_INT(h.cols, 200);
+	CHECK_INT(h.rows, 200);
+	CHECK_NEAR_TOL(h.values[0], 0, 1e-6);		// (-9.95, 9.95)
+	CHECK_NEAR_TOL(h.values[199], 9.95 + 9.95, 1e-5);
+	CHECK(h.lo < -10 && h.hi > 10);
+	CHECK_NEAR_TOL(h.lo, -h.hi, 1e-6);
+	h = FplSampleHeatmap([](double x, double) { return std::sqrt(x); }, v);
+	CHECK(std::isnan(h.values[0]));
+	CHECK(h.lo >= 0);
+	h = FplSampleHeatmap([](double, double) { return NaN; }, v);
+	CHECK(h.Empty());
+	h = FplSampleHeatmap([](double, double) { return 3.0; }, v);
+	CHECK(h.lo < 3 && h.hi > 3);
+	// a pole doesn't stretch the range
+	h = FplSampleHeatmap([](double x, double y) { return 1 / (x * x + y * y); }, v);
+	CHECK(h.hi < 50);
+
+	// levels
+	auto levels = FplContourLevels(0, 1, 10);
+	CHECK_INT(levels.size(), 11);
+	CHECK(levels[3] == 0.3);
+	levels = FplContourLevels(-3.7, 8.2, 5);
+	CHECK_INT(levels.size(), 2);
+	CHECK_NEAR(levels[1], 5);
+	CHECK(FplContourLevels(1, 1, 10).empty());
+
+	// contours of a paraboloid: circles
+	auto g = Geometry(L"z = x^2 + y^2", v);
+	CHECK(!g.contours.empty());
+	CHECK(g.heatmap.Empty());
+	CHECK(g.lines.empty());
+	bool round = true;
+	for (auto& c : g.contours) {
+		for (auto& line : c.lines)
+			for (auto& s : line) {
+				auto p = v.ToPlane(s);
+				round = round && std::abs(std::hypot(p.x, p.y) - std::sqrt(c.level)) < 1e-6;
+			}
+	}
+	CHECK(round);
+	FplSampleOptions o;
+	o.heatmap = true;
+	o.contours = false;
+	g = Geometry(L"z = x^2 + y^2", v, o);
+	CHECK(g.contours.empty());
+	CHECK(!g.heatmap.Empty());
+	// through the graphs' flags
+	auto plot = MakePlot({ L"z = x y" });
+	plot.graphs[0].flags = FplGraphHeatmap | FplGraphNoContours;
+	plot.Sample(v);
+	CHECK(!plot.graphs[0].geometry.heatmap.Empty());
+	CHECK(plot.graphs[0].geometry.contours.empty());
+
+	// the colormap's ends and middle
+	CHECK_INT(FplColormap(0), 68 | (1 << 8) | (84 << 16));
+	CHECK_INT(FplColormap(1), 253 | (231 << 8) | (37 << 16));
+	CHECK_INT(FplColormap(0.5), 33 | (145 << 8) | (140 << 16));
+	CHECK_INT(FplColormap(-1), FplColormap(0));
+	CHECK_INT(FplColormap(NaN), FplColormap(0));
+}
+
+TEST(VectorFields) {
+	auto e = FplBuild(L"(-y, x)", {});
+	CHECK_INT(e.kind, FplKind::VectorField);
+	CHECK_INT(FplBuild(L"(1, 2)", {}).kind, FplKind::Point);
+	CHECK_INT(FplBuild(L"(x, t)", {}).error.code, FplErrorCode::VariableNotAllowed);
+	CHECK_INT(FplBuild(L"(x, z)", {}).error.code, FplErrorCode::VariableNotAllowed);
+
+	auto v = View();
+	auto g = Geometry(L"(-y, x)", v);
+	// a step of 1 (40 DIPs): 21 by 21 points, but none at the origin, where the field is zero
+	CHECK_INT(g.arrows.size(), 440);
+	auto origin = v.ToScreen({ 0, 0 });
+	bool around = true, sized = true;
+	double longest = 0;
+	for (auto& a : g.arrows) {
+		FplPoint c = { (a.from.x + a.to.x) / 2, (a.from.y + a.to.y) / 2 };
+		double dot = (c.x - origin.x) * (a.to.x - a.from.x) + (c.y - origin.y) * (a.to.y - a.from.y);
+		double len = std::hypot(a.to.x - a.from.x, a.to.y - a.from.y);
+		around = around && std::abs(dot) < 1e-6 * (1 + len * std::hypot(c.x - origin.x, c.y - origin.y));
+		sized = sized && len <= 0.85 * 40 + 1e-9 && len >= 0.2 * 0.85 * 40 - 1e-9;
+		longest = std::max(longest, len);
+	}
+	CHECK(around);
+	CHECK(sized);
+	CHECK_NEAR(longest, 0.85 * 40);
+	// directions on the screen: right is right, up is up
+	auto right = FplSampleField([](double, double) { return FplPoint{ 1, 0 }; }, v);
+	CHECK(right[0].to.x > right[0].from.x);
+	CHECK_NEAR(right[0].to.y, right[0].from.y);
+	auto up = FplSampleField([](double, double) { return FplPoint{ 0, 1 }; }, v);
+	CHECK(up[0].to.y < up[0].from.y);
+	// the points are the plane's: panning a little keeps them
+	auto moved = v;
+	moved.Pan(7, 0);
+	auto shifted = FplSampleField([](double, double) { return FplPoint{ 1, 0 }; }, moved);
+	CHECK_NEAR(shifted[0].from.x - right[0].from.x, 7);
+	// none where it's undefined
+	CHECK(FplSampleField([](double, double) { return FplPoint{ NaN, 1 }; }, v).empty());
+}
+
+// ---- SVG ----------------------------------------------------------------------------
+
+static size_t Occurrences(const std::string& s, const std::string& what) {
+	size_t n = 0;
+	for (size_t i = s.find(what); i != std::string::npos; i = s.find(what, i + 1))
+		n++;
+	return n;
+}
+
+TEST(Svg) {
+	auto v = View();
+	auto plot = MakePlot({ L"y = x", L"x^2 + y^2 < 4", L"(1, 2)", L"z = x y", L"(-y, x)", L"y = 2 +", L"" });
+	plot.Sample(v);
+	FplSvgStyle style;
+	style.graphColors = { 0x4044C7, 0xB3702D, 0x468C38, 0xA64260, 0x197EFA, 0x8E8E1B, 0 };
+	std::string svg = FplWriteSvg(plot, v, style);
+	CHECK(svg.rfind("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"800\"", 0) == 0);
+	CHECK(svg.size() > 1000);
+	CHECK(svg.substr(svg.size() - 7) == "</svg>\n");
+	// the line in its color, the region translucent with a dashed edge, the point, contours and arrows
+	CHECK(svg.find("stroke=\"#C74440\" stroke-width=\"2.5\"") != std::string::npos);
+	CHECK_INT(Occurrences(svg, "fill-opacity=\"0.22\""), 1);
+	CHECK_INT(Occurrences(svg, "stroke-dasharray"), 1);
+	CHECK(svg.find("<circle cx=\"440\" cy=\"320\"") != std::string::npos);
+	CHECK(svg.find("stroke=\"#6042A6\" stroke-width=\"1.25\"") != std::string::npos);
+	CHECK(svg.find("stroke=\"#FA7E19\" stroke-width=\"1.5\"") != std::string::npos);
+	// labels: a minus sign in UTF-8, the legend's text escaped, an empty line left out
+	CHECK(svg.find(">\xE2\x88\x92" "5</text>") != std::string::npos);
+	CHECK(svg.find(">x^2 + y^2 &lt; 4</text>") != std::string::npos);
+	CHECK_INT(Occurrences(svg, "font-size=\"14\""), 6);
+	// the failing graph: in the legend, no swatch
+	CHECK_INT(Occurrences(svg, "r=\"6\""), 5);
+	// without the grid, the axes or the legend
+	style.showGrid = style.showAxes = style.showLegend = false;
+	std::string bare = FplWriteSvg(plot, v, style);
+	CHECK(bare.find("</text>") == std::string::npos);
+	CHECK(bare.find("stroke=\"#DDDDDD\"") == std::string::npos);
+	CHECK(bare.size() < svg.size());
+	CHECK(FplWriteSvg(plot, View(1, 1), style).empty());
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -1515,6 +1882,13 @@ int wmain() {
 	Run_GraphFeatures();
 	Run_GraphTracing();
 	Run_Coordinates();
+	Run_UserFunctionDefinitions();
+	Run_UserFunctionCalls();
+	Run_DerivativeSyntax();
+	Run_GraphFunctions();
+	Run_Surfaces();
+	Run_VectorFields();
+	Run_Svg();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

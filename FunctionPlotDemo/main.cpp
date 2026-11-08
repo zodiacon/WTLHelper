@@ -1,6 +1,7 @@
 // FunctionPlotDemo: an expression list beside a function plot. Each line of the editor is a graph; a name the
 // expressions use that nothing defines becomes a slider (View > Automatic Sliders). The status bar shows the traced
-// point and the view.
+// point and the view. File > Examples has functions, parameters, curves, implicit curves, inequalities, the user's
+// functions and d/dx, a surface, a vector field and an animation; File > Export writes PNG or SVG.
 
 #define WIN32_LEAN_AND_MEAN
 
@@ -10,6 +11,8 @@
 #include <atlctrls.h>
 #include <atlstr.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <shellapi.h>
 
 #include "FunctionPlot.h"
 
@@ -19,6 +22,7 @@
 #include <WTLHelper.h>
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <iterator>
 #include <set>
@@ -26,6 +30,9 @@
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 CAppModule _Module;
@@ -38,6 +45,8 @@ enum {
 	IDC_STATUS,
 
 	ID_DEMO_EXIT = 201,
+	ID_DEMO_EXPORTPNG,
+	ID_DEMO_EXPORTSVG,
 	ID_EXAMPLE_FIRST = 210,     // one per example
 
 	ID_DEMO_HOME = 301,
@@ -55,6 +64,8 @@ enum {
 	ID_DEMO_DARKMODE,
 	ID_DEMO_HIGHCONTRAST,
 	ID_DEMO_FEATURES,
+	ID_DEMO_HEATMAPS,
+	ID_DEMO_COLLAPSE,
 };
 
 // ---- Examples -------------------------------------------------------------------
@@ -72,6 +83,10 @@ static const Example g_Examples[] = {
 	{ L"&Implicit", L"x^2 + y^2 = 16\r\ny^2 = x^3 - 4x\r\nx^2 - y^2 = 1\r\nsin x + cos y = 0.5", false },
 	{ L"I&nequalities", L"y < 4 - x^2\r\nx^2/16 + y^2/4 \x2264 1\r\ny > sin x + 2\r\nr < 2 + cos 6\x03B8", false },
 	{ L"&Steps and Domains", L"y = floor x\r\ny = sqrt(9 - x^2)\r\ny = |x - 2| - 3\r\ny = x^3/10 {-4 < x < 4}\r\ny = sign(x) - 5", false },
+	{ L"&User Functions", L"f(x) = x^3/6 - x\r\nf'(x)\r\nf''(x)\r\ng(x) = f(x - a) + 1\r\ny = d/dx sin(x^2/4)", false },
+	{ L"S&urfaces", L"z = sin x + cos y", false },
+	{ L"&Vector Field", L"(y, -sin x)\r\ny^2/2 - cos x = c", false },
+	{ L"&Animation", L"x^2 + y^2 = 4\r\n(2cos p, 2sin p)\r\ny = 2sin(x - p)\r\nr = 3 + cos(5\x03B8 + 2p)", false },
 	{ L"&Errors", L"y = 2 +\r\ny = sin(x\r\nx = y = 1\r\ny = sin()\r\ny = 2 * * 3", false },
 };
 
@@ -83,6 +98,11 @@ static CStatusBarCtrl g_status;
 static CFont g_editFont;
 static HWND g_main;
 static bool g_autoSliders = true;
+static bool g_heatmaps = true;
+// FunctionPlotDemo.exe /example 7 /export plot.png: an example, written to a file (.png or .svg), then exit
+static int g_startExample = 0;
+static std::wstring g_exportPath;
+static int g_exitCode = 0;
 static std::set<std::wstring> g_autoParams;   // the sliders the demo added
 
 // ---- The graphs from the editor's lines --------------------------------------------
@@ -155,6 +175,16 @@ static void SyncGraphs() {
 				break;
 		}
 	}
+	// heat maps for the surfaces (View > Heat Maps)
+	for (int i = 0; i < g_plot.GetGraphCount(); i++) {
+		FPLGRAPH g{ FPLGM_FLAGS, g_plot.GetGraphId(i) };
+		g_plot.GetGraph(g);
+		UINT flags = g_heatmaps ? g.flags | FPLGF_HEATMAP : g.flags & ~FPLGF_HEATMAP;
+		if (flags != g.flags) {
+			g.flags = flags;
+			g_plot.SetGraph(g);
+		}
+	}
 	// and none for a name no longer used (or now defined by a line)
 	for (auto it = g_autoParams.begin(); it != g_autoParams.end();) {
 		FPLPARAM p{};
@@ -165,9 +195,12 @@ static void SyncGraphs() {
 		FPLPARAM saved = p;
 		std::wstring name = *it;
 		saved.pszName = name.c_str();
+		bool playing = g_plot.IsParameterAnimating(name.c_str()) != FALSE;
 		g_plot.RemoveParameter(name.c_str());
 		if (g_autoSliders && Unknown(name)) {
 			g_plot.SetParameter(saved);
+			if (playing)
+				g_plot.AnimateParameter(name.c_str(), TRUE);
 			++it;
 		}
 		else {
@@ -234,6 +267,16 @@ static void LoadExample(int index) {
 	g_edit.SetWindowText(e.text);   // a multiline edit sends no EN_CHANGE for this
 	SyncGraphs();
 	ShowLineError();
+	if (index == (int)std::size(g_Examples) - 2) {
+		// the animation: p around a circle, playing
+		FPLPARAM p{ L"p", 0, 0, 6.283185307179586, 0, 0 };
+		g_plot.SetParameter(p);
+		g_plot.AnimateParameter(L"p", TRUE);
+	}
+	else if (index == (int)std::size(g_Examples) - 3) {
+		FPLPARAM c{ L"c", 0.5, -1, 3, 0.05, 0 };
+		g_plot.SetParameter(c);
+	}
 	g_plot.ResetView();
 	ShowView();
 }
@@ -251,6 +294,8 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_TRACE, !(s & FPLS_NOTRACE));
 	check(ID_DEMO_AUTOSLIDERS, g_autoSliders);
 	check(ID_DEMO_HIGHCONTRAST, g_plot.IsHighContrast());
+	check(ID_DEMO_HEATMAPS, g_heatmaps);
+	check(ID_DEMO_COLLAPSE, g_plot.IsPanelCollapsed() != FALSE);
 #ifdef DEMO_WTLHELPER
 	check(ID_DEMO_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -283,6 +328,23 @@ static void ShowFeatures() {
 	::MessageBoxW(g_main, text.c_str(), L"Features", MB_ICONINFORMATION);
 }
 
+static void Export(bool svg) {
+	wchar_t path[MAX_PATH] = L"plot";
+	OPENFILENAMEW ofn{ sizeof(ofn) };
+	ofn.hwndOwner = g_main;
+	ofn.lpstrFilter = svg ? L"SVG (*.svg)\0*.svg\0" : L"PNG (*.png)\0*.png\0";
+	ofn.lpstrDefExt = svg ? L"svg" : L"png";
+	ofn.lpstrFile = path;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+	if (!::GetSaveFileNameW(&ofn))
+		return;
+	// a PNG at twice the size, for a sharp picture
+	BOOL ok = svg ? g_plot.ExportSvg(path) : g_plot.ExportPng(path, 2);
+	if (!ok)
+		::MessageBoxW(g_main, L"The file couldn't be written.", L"Export", MB_ICONERROR);
+}
+
 static void OnCommand(HWND hwnd, UINT id) {
 	if (id >= ID_EXAMPLE_FIRST && id < ID_EXAMPLE_FIRST + std::size(g_Examples)) {
 		LoadExample(id - ID_EXAMPLE_FIRST);
@@ -304,6 +366,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_AUTOSLIDERS: g_autoSliders = !g_autoSliders; SyncGraphs(); break;
 		case ID_DEMO_HIGHCONTRAST: g_plot.ForceHighContrast(g_plot.IsHighContrast() ? 0 : 1); break;
 		case ID_DEMO_FEATURES: ShowFeatures(); break;
+		case ID_DEMO_EXPORTPNG: Export(false); break;
+		case ID_DEMO_EXPORTSVG: Export(true); break;
+		case ID_DEMO_HEATMAPS: g_heatmaps = !g_heatmaps; SyncGraphs(); break;
+		case ID_DEMO_COLLAPSE: g_plot.SetPanelCollapsed(!g_plot.IsPanelCollapsed()); break;
 #ifdef DEMO_WTLHELPER
 		case ID_DEMO_DARKMODE:
 			WTLHelper::SwitchToMode(WTLHelper::IsDarkMode() ? DarkModeKind::Classic : DarkModeKind::Dark, hwnd);
@@ -352,7 +418,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				0, IDC_PLOT);
 			g_status.Create(hwnd, nullptr, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, IDC_STATUS);
 			Layout(hwnd);
-			LoadExample(0);
+			LoadExample(g_startExample);
+			if (!g_exportPath.empty()) {
+				bool svg = g_exportPath.size() > 4 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 4, L".svg") == 0;
+				BOOL ok = svg ? g_plot.ExportSvg(g_exportPath.c_str()) : g_plot.ExportPng(g_exportPath.c_str(), 1);
+				// a quit posted while the window is being made is lost: close it once the loop runs
+				g_exitCode = ok ? 0 : 1;
+				::PostMessage(hwnd, WM_CLOSE, 0, 0);
+			}
 			FPLTRACE none{};
 			ShowTrace(none);
 			g_edit.SetFocus();
@@ -392,7 +465,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			return 0;
 		}
 		case WM_DESTROY:
-			::PostQuitMessage(0);
+			::PostQuitMessage(g_exitCode);
 			return 0;
 	}
 	return ::DefWindowProc(hwnd, msg, wParam, lParam);
@@ -400,6 +473,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+	int argc = 0;
+	if (LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc)) {
+		for (int i = 1; i + 1 < argc; i++) {
+			if (_wcsicmp(argv[i], L"/example") == 0)
+				g_startExample = std::clamp(_wtoi(argv[++i]), 0, (int)std::size(g_Examples) - 1);
+			else if (_wcsicmp(argv[i], L"/export") == 0)
+				g_exportPath = argv[++i];
+		}
+		::LocalFree(argv);
+	}
+	// WIC (Export PNG) needs COM
+	::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 	INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
 	::InitCommonControlsEx(&icc);
 
@@ -424,6 +509,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		::AppendMenuW(hExamples, MF_STRING, ID_EXAMPLE_FIRST + i, g_Examples[i].name);
 	::AppendMenuW(hFile, MF_POPUP, (UINT_PTR)hExamples, L"&Examples");
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTPNG, L"Export &PNG...");
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTSVG, L"Export &SVG...");
+	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXIT, L"E&xit");
 
 	HMENU hView = ::CreatePopupMenu();
@@ -434,6 +522,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_LEGEND, L"&Legend");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_SLIDERS, L"&Sliders");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_COLLAPSE, L"&Collapse Panel\tCtrl+L");
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_HEATMAPS, L"&Heat Maps");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AUTOSLIDERS, L"&Automatic Sliders");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_GRID, L"&Grid");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_AXES, L"A&xes");
@@ -461,6 +551,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, VK_OEM_MINUS, ID_DEMO_ZOOMOUT },
 		{ FVIRTKEY | FCONTROL, VK_SUBTRACT, ID_DEMO_ZOOMOUT },
 		{ FVIRTKEY, VK_F2, ID_DEMO_FEATURES },
+		{ FVIRTKEY | FCONTROL, 'L', ID_DEMO_COLLAPSE },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));
 
@@ -478,5 +569,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	}
 	::DestroyAcceleratorTable(hAccel);
 	_Module.Term();
+	::CoUninitialize();
 	return (int)msg.wParam;
 }
