@@ -360,6 +360,49 @@ static void ApplyRangeLines(const std::vector<std::wstring>& lines) {
 
 // Each line is a graph with the line's number as its id (so its color stays with it). A range line is an empty one, which
 // draws nothing, with its text as the label: the saved state keeps that, for File > Open to bring the line back.
+// The word "theta" in the editor becomes its letter, keeping the caret where it was. Not inside a longer name ("mytheta",
+// or a pasted "thetas": typed, it's converted before the "s" arrives), but after "d/d", as the parser takes that whole. It
+// can't be undone: Ctrl+Z would give back the word, which would turn straight back into the letter, and Ctrl+Z would seem
+// to do nothing.
+static void ConvertTheta() {
+	static bool busy = false;		// replacing sends EN_CHANGE
+	if (busy)
+		return;
+	busy = true;
+	const int len = g_edit.GetWindowTextLength();
+	std::wstring text(len + 1, L'\0');
+	g_edit.GetWindowText(text.data(), len + 1);
+	text.resize(len);
+	int start = 0, end = 0;
+	g_edit.GetSel(start, end);
+	const std::wstring_view word = L"theta";
+	const int removed = static_cast<int>(word.size()) - 1;
+	bool changed = false;
+	// from the end, so the places found stay right
+	for (size_t at = text.rfind(word); at != std::wstring::npos; at = at == 0 ? std::wstring::npos : text.rfind(word, at - 1)) {
+		const size_t after = at + word.size();
+		const bool letterBefore = at > 0 && ::IsCharAlphaW(text[at - 1]);
+		const bool derivative = at >= 3 && text.compare(at - 3, 3, L"d/d") == 0;
+		const bool letterAfter = after < text.size() && ::IsCharAlphaW(text[after]);
+		if ((letterBefore && !derivative) || letterAfter)
+			continue;
+		g_edit.SetSel(static_cast<int>(at), static_cast<int>(after), TRUE);
+		g_edit.ReplaceSel(L"\x03B8", FALSE);
+		auto move = [&](int& place) {
+			if (place >= static_cast<int>(after))
+				place -= removed;
+			else if (place > static_cast<int>(at))
+				place = static_cast<int>(at) + 1;
+		};
+		move(start);
+		move(end);
+		changed = true;
+	}
+	if (changed)
+		g_edit.SetSel(start, end, FALSE);
+	busy = false;
+}
+
 static void SyncGraphs() {
 	auto lines = EditorLines();
 	for (size_t i = 0; i < lines.size(); i++) {
@@ -743,6 +786,7 @@ static bool OpenPlot(LPCWSTR path) {
 		g_autoParams.insert(p.pszName);
 	}
 	g_edit.SetWindowText(lines.c_str());
+	ConvertTheta();
 	SyncGraphs();
 	ShowLineError();
 	ShowView();
@@ -1123,6 +1167,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 		case WM_COMMAND:
 			if (LOWORD(wParam) == IDC_EDIT) {
 				if (HIWORD(wParam) == EN_CHANGE) {
+					ConvertTheta();
 					SyncGraphs();
 					ShowLineError();
 					// the graphs' errors may have changed
