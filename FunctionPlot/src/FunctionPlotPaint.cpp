@@ -805,7 +805,8 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		auto& g = s.plot.graphs[i];
 		if (!g.Drawable())
 			continue;
-		bool surface = g.expr.kind == FplKind::Surface || g.expr.kind == FplKind::ParametricSurface;
+		bool surface = g.expr.kind == FplKind::Surface || g.expr.kind == FplKind::ParametricSurface ||
+			g.expr.kind == FplKind::ImplicitSurface;
 		r.Draw(s.gpu[i], GraphColor((int)i), surface && (g.flags & FplGraphHeatmap), false, true);
 	}
 	if (auto* dc = r.BeginOverlay()) {

@@ -97,6 +97,9 @@ static const Example g_Examples[] = {
 	{ L"3D: Su&rfaces", L"z = 4sin(x/2)cos(y/2)\r\nz = (x^2 - y^2)/20 - 6\r\ny = 6cos(x/2)", false, true },
 	{ L"3D: Curves and S&olids", L"(5cos 4t, 5sin 4t, 3t - 9)\r\n(4cos u sin(v/2), 4sin u sin(v/2), 4cos(v/2))\r\n"
 		L"((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(0, 0, 8)", false, true },
+	{ L"3D: &Implicit Surfaces", L"(sqrt(x^2 + y^2) - 6)^2 + z^2 = 4\r\nx^2 + y^2 + (z - 5)^2 = 9\r\n"
+		L"x^2 + y^2 - z^2/4 = 1", false, true },
+	{ L"3D: &Gyroid", L"sin(x/2)cos(y/2) + sin(y/2)cos(z/2) + sin(z/2)cos(x/2) = 0", false, true },
 	{ L"3D: Animated &Wave", L"z = 3sin(sqrt(x^2 + y^2) - 2p)/(1 + sqrt(x^2 + y^2)/4)", false, true, Setup::Animate },
 };
 

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <string>
@@ -1317,6 +1318,20 @@ TEST(SampleSpeed) {
 	wprintf(L"        surface: %.2f ms (%zu evaluations, %zu levels, %zu lines)\n",
 		std::chrono::duration<double, std::milli>(t4 - t3).count(), g3.evals, g3.contours.size(), contourLines);
 	CHECK(!g3.contours.empty());
+	// an implicit surface in 3D: a 48^3 grid
+	e = FplBuild(L"sin x cos y + sin y cos z + sin z cos x = 0", g_Params);
+	std::vector<double> sl3 = ParamSlots();
+	auto t5 = std::chrono::steady_clock::now();
+	auto mesh = FplImplicitMesh([&](double x, double y, double z) {
+		sl3[FplSlotX] = x;
+		sl3[FplSlotY] = y;
+		sl3[FplSlotZ] = z;
+		return e.f.Eval(sl3.data());
+	}, FplBox3{}, 48);
+	auto t6 = std::chrono::steady_clock::now();
+	wprintf(L"        implicit 3D: %.2f ms (%zu vertices, %zu triangles)\n",
+		std::chrono::duration<double, std::milli>(t6 - t5).count(), mesh.vertices.size(), mesh.indices.size() / 3);
+	CHECK(!mesh.Empty());
 }
 
 // ---- The graphs ----------------------------------------------------------------
@@ -1697,7 +1712,8 @@ TEST(Surfaces) {
 	CHECK_INT(FplBuild(L"z = 2", {}).kind, FplKind::Surface);
 	CHECK_INT(FplBuild(L"z < x", {}).error.code, FplErrorCode::NotAPlot);
 	CHECK_INT(FplBuild(L"y = z", {}).kind, FplKind::Surface);	// z = y
-	e = FplBuild(L"y = z x", {});
+	CHECK_INT(FplBuild(L"y = z x", {}).kind, FplKind::ImplicitSurface);	// a saddle, in 3D
+	e = FplBuild(L"y = z t", {});
 	CHECK_INT(e.error.code, FplErrorCode::VariableNotAllowed);
 	CHECK_STR(e.error.name, L"z");
 	CHECK_INT(FplBuild(L"z = t", {}).error.code, FplErrorCode::VariableNotAllowed);
@@ -2053,6 +2069,66 @@ TEST(Graphs3D) {
 	CHECK(top < 0.1f + 0.0126f && top > 0.1f);
 }
 
+TEST(ImplicitSurfaces) {
+	auto e = FplBuild(L"x^2 + y^2 + z^2 = 25", {});
+	CHECK_INT(e.kind, FplKind::ImplicitSurface);
+	double sl[16] = {};
+	sl[FplSlotZ] = 5;
+	CHECK_NEAR(e.f.Eval(sl), 0);
+	CHECK_INT(FplBuild(L"x = z^2", {}).kind, FplKind::ImplicitSurface);
+	CHECK_INT(FplBuild(L"z = x y", {}).kind, FplKind::Surface);
+	CHECK_INT(FplBuild(L"x^2 + z^2 < 4", {}).error.code, FplErrorCode::NotAPlot);
+	CHECK_INT(FplBuild(L"x + z + t = 0", {}).error.code, FplErrorCode::VariableNotAllowed);
+
+	// a sphere of radius 5: its points on it, its normals along the radius, no cracks
+	FplBox3 box;
+	auto m = FplImplicitMesh([](double x, double y, double z) { return x * x + y * y + z * z - 25; }, box, 24);
+	CHECK(m.indices.size() > 300);
+	bool on = true, radial = true;
+	for (auto& v : m.vertices) {
+		FplPoint3 p = box.ToSpace(v.pos);
+		double r = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+		on = on && std::abs(r - 5) < 1e-3;
+		float len = std::sqrt(v.pos.x * v.pos.x + v.pos.y * v.pos.y + v.pos.z * v.pos.z);
+		float dot = (v.normal.x * v.pos.x + v.normal.y * v.pos.y + v.normal.z * v.pos.z) / len;
+		radial = radial && dot > 0.99f;
+	}
+	CHECK(on);
+	CHECK(radial);
+	std::map<std::pair<uint32_t, uint32_t>, int> edges;
+	for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
+		for (int k = 0; k < 3; k++) {
+			uint32_t a = m.indices[i + k], b = m.indices[i + (k + 1) % 3];
+			edges[{ std::min(a, b), std::max(a, b) }]++;
+		}
+	bool closed = true;
+	for (auto& [edge, count] : edges)
+		closed = closed && count == 2;
+	CHECK(closed);
+	// shared vertices: about one per crossing, not three per triangle
+	CHECK(m.vertices.size() * 3 < m.indices.size());
+
+	// a jump (z = tan x as F = z - tan x): nothing along the asymptotes
+	m = FplImplicitMesh([](double x, double, double z) { return z - std::tan(x); }, box, 24);
+	CHECK(!m.Empty());
+	bool fits = true;
+	for (auto& v : m.vertices) {
+		FplPoint3 p = box.ToSpace(v.pos);
+		fits = fits && std::abs(p.z - std::tan(p.x)) < 1e-2 * (1 + std::abs(std::tan(p.x)));
+	}
+	CHECK(fits);
+	// nothing there, or undefined
+	CHECK(FplImplicitMesh([](double x, double y, double z) { return x * x + y * y + z * z + 1; }, box, 12).Empty());
+	CHECK(FplImplicitMesh([](double, double, double) { return NaN; }, box, 12).Empty());
+	// through the graphs
+	auto plot = MakePlot({ L"x^2 + y^2 + z^2 = 25", L"x^2 + y^2 = 4" });
+	plot.Build3D(box);
+	CHECK(!plot.graphs[0].mesh.Empty());
+	CHECK(plot.graphs[1].mesh.Empty());
+	plot.Sample(View());
+	CHECK(plot.graphs[0].geometry.lines.empty());		// nothing in 2D
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -2100,6 +2176,7 @@ int wmain() {
 	Run_BoxAndCamera();
 	Run_Meshes3D();
 	Run_Graphs3D();
+	Run_ImplicitSurfaces();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

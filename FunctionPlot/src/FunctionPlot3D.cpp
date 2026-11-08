@@ -272,6 +272,160 @@ FplMesh FplParametricMesh(const std::function<FplPoint3(double, double)>& f, con
 	});
 }
 
+FplMesh FplImplicitMesh(const std::function<double(double, double, double)>& F, const FplBox3& box, int n) {
+	FplMesh mesh;
+	if (!box.Valid())
+		return mesh;
+	n = std::clamp(n, 2, 256);
+	const int w = n + 1;
+	const double dx = (box.xMax - box.xMin) / n, dy = (box.yMax - box.yMin) / n, dz = (box.zMax - box.zMin) / n;
+	auto space = [&](int i, int j, int k) {
+		return FplPoint3{ box.xMin + dx * i, box.yMin + dy * j, box.zMin + dz * k };
+	};
+	auto index = [&](int i, int j, int k) { return (static_cast<size_t>(k) * w + j) * w + i; };
+	std::vector<double> values(static_cast<size_t>(w) * w * w);
+	for (int k = 0; k <= n; k++)
+		for (int j = 0; j <= n; j++)
+			for (int i = 0; i <= n; i++) {
+				FplPoint3 p = space(i, j, k);
+				values[index(i, j, k)] = F(p.x, p.y, p.z);
+			}
+
+	// F's gradient at a grid point, in the cube's coordinates, from its neighbors (one side at the box's faces)
+	auto gradient = [&](int i, int j, int k, double out[3]) {
+		const int at[3] = { i, j, k };
+		for (int axis = 0; axis < 3; axis++) {
+			int lo[3] = { i, j, k }, hi[3] = { i, j, k };
+			lo[axis] = std::max(at[axis] - 1, 0);
+			hi[axis] = std::min(at[axis] + 1, n);
+			double d = values[index(hi[0], hi[1], hi[2])] - values[index(lo[0], lo[1], lo[2])];
+			out[axis] = std::isfinite(d) ? d / (hi[axis] - lo[axis]) * n / 2 : 0;
+		}
+	};
+
+	// a crossing on the edge between two grid points: its vertex (shared by the tetrahedra around the edge), -1 when
+	// it's a jump. Edges by their lower point and one of the 7 directions the tetrahedra use.
+	const size_t steps[7] = { 1, (size_t)w, (size_t)w * w, 1 + (size_t)w, 1 + (size_t)w * w, (size_t)w + (size_t)w * w,
+		1 + (size_t)w + (size_t)w * w };
+	std::vector<int32_t> edges(values.size() * 7, -2);
+	auto vertexOn = [&](size_t a, size_t b) -> int64_t {
+		if (a > b)
+			std::swap(a, b);
+		int dir = 0;
+		while (dir < 6 && steps[dir] != b - a)
+			dir++;
+		int32_t& slot = edges[a * 7 + dir];
+		if (slot != -2)
+			return slot;
+		auto cell = [&](size_t g, int c[3]) {
+			c[0] = static_cast<int>(g % w);
+			c[1] = static_cast<int>(g / w % w);
+			c[2] = static_cast<int>(g / w / w);
+		};
+		int ca[3], cb[3];
+		cell(a, ca);
+		cell(b, cb);
+		FplPoint3 pa = space(ca[0], ca[1], ca[2]), pb = space(cb[0], cb[1], cb[2]);
+		const double va = values[a], vb = values[b], start = std::abs(va) + std::abs(vb);
+		auto at = [&](double t) {
+			return FplPoint3{ pa.x + (pb.x - pa.x) * t, pa.y + (pb.y - pa.y) * t, pa.z + (pb.z - pa.z) * t };
+		};
+		// halved toward the zero, then the secant between the last two
+		double lo = 0, hi = 1, flo = va, fhi = vb;
+		for (int step = 0; step < 6; step++) {
+			double m = (lo + hi) / 2;
+			FplPoint3 q = at(m);
+			double fm = F(q.x, q.y, q.z);
+			if (std::isnan(fm))
+				break;
+			if ((fm < 0) == (flo < 0)) {
+				lo = m;
+				flo = fm;
+			}
+			else {
+				hi = m;
+				fhi = fm;
+			}
+		}
+		// a zero's values shrink toward it; an asymptote's don't
+		if (!(std::abs(flo) + std::abs(fhi) <= 0.25 * start)) {
+			slot = -1;
+			return slot;
+		}
+		double t = flo != fhi ? std::clamp(lo + (hi - lo) * flo / (flo - fhi), lo, hi) : (lo + hi) / 2;
+		double ga[3], gb[3];
+		gradient(ca[0], ca[1], ca[2], ga);
+		gradient(cb[0], cb[1], cb[2], gb);
+		FplVertex3 v;
+		v.pos = box.ToBox(at(t));
+		v.normal = Normalize({ static_cast<float>(ga[0] + (gb[0] - ga[0]) * t), static_cast<float>(ga[1] + (gb[1] - ga[1]) * t),
+			static_cast<float>(ga[2] + (gb[2] - ga[2]) * t) });
+		v.value = std::clamp((v.pos.z + 1) / 2, 0.0f, 1.0f);
+		slot = static_cast<int32_t>(mesh.vertices.size());
+		mesh.vertices.push_back(v);
+		return slot;
+	};
+	auto triangle = [&](int64_t a, int64_t b, int64_t c) {
+		if (a >= 0 && b >= 0 && c >= 0 && a != b && b != c && a != c)
+			mesh.indices.insert(mesh.indices.end(), { (uint32_t)a, (uint32_t)b, (uint32_t)c });
+	};
+
+	// the 6 tetrahedra of a cell around its 0-7 diagonal (Kuhn's): corner bits are x 1, y 2, z 4
+	static const int Tets[6][4] = { { 0, 1, 3, 7 }, { 0, 1, 5, 7 }, { 0, 2, 3, 7 }, { 0, 2, 6, 7 }, { 0, 4, 5, 7 },
+		{ 0, 4, 6, 7 } };
+	for (int k = 0; k < n; k++)
+		for (int j = 0; j < n; j++)
+			for (int i = 0; i < n; i++) {
+				size_t corner[8];
+				bool defined = true, any = false, all = true;
+				for (int c = 0; c < 8; c++) {
+					corner[c] = index(i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1));
+					double v = values[corner[c]];
+					defined = defined && !std::isnan(v);
+					any = any || v < 0;
+					all = all && v < 0;
+				}
+				if (!defined || !any || all)
+					continue;
+				for (auto& t : Tets) {
+					size_t g[4];
+					int inside = 0, mask = 0;
+					for (int c = 0; c < 4; c++) {
+						g[c] = corner[t[c]];
+						if (values[g[c]] < 0) {
+							inside++;
+							mask |= 1 << c;
+						}
+					}
+					if (inside == 0 || inside == 4)
+						continue;
+					if (inside == 1 || inside == 3) {
+						// one corner on its own side: a triangle across the edges from it
+						int lone = 0;
+						for (int c = 0; c < 4; c++)
+							if (((mask >> c) & 1) == (inside == 1 ? 1 : 0))
+								lone = c;
+						int o[3], m = 0;
+						for (int c = 0; c < 4; c++)
+							if (c != lone)
+								o[m++] = c;
+						triangle(vertexOn(g[lone], g[o[0]]), vertexOn(g[lone], g[o[1]]), vertexOn(g[lone], g[o[2]]));
+					}
+					else {
+						// two and two: a quad across the four edges between them
+						int a[2], b[2], na = 0, nb = 0;
+						for (int c = 0; c < 4; c++)
+							((mask >> c) & 1 ? a[na++] : b[nb++]) = c;
+						int64_t p0 = vertexOn(g[a[0]], g[b[0]]), p1 = vertexOn(g[a[0]], g[b[1]]);
+						int64_t p2 = vertexOn(g[a[1]], g[b[1]]), p3 = vertexOn(g[a[1]], g[b[0]]);
+						triangle(p0, p1, p2);
+						triangle(p0, p2, p3);
+					}
+				}
+			}
+	return mesh;
+}
+
 std::vector<std::vector<FplVec3>> FplSampleCurve3(const std::function<FplPoint3(double)>& f, const FplBox3& box,
 	double t0, double t1, int samples) {
 	std::vector<std::vector<FplVec3>> lines;

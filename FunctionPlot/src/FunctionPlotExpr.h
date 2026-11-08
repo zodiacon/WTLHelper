@@ -172,6 +172,7 @@ enum class FplKind : uint8_t {
 	SpaceCurve,		// (x(t), y(t), z(t)); expr[0..2] (3D)
 	ParametricSurface,	// (x(u, v), y(u, v), z(u, v)); expr[0..2] (3D)
 	Point3D,		// (a, b, c) with no variables; expr[0..2] (3D)
+	ImplicitSurface,	// F(x, y, z) = 0, an equation with z that isn't z = F(x, y); expr[0] is F (3D)
 };
 
 struct FplPlotDef {

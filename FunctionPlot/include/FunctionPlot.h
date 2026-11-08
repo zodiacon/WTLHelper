@@ -73,6 +73,7 @@ enum FPLKIND {
 	FPLK_SPACECURVE,           // (x(t), y(t), z(t)): 3D only
 	FPLK_PARAMSURFACE,         // (x(u, v), y(u, v), z(u, v)): 3D only; u and v over the graph's range
 	FPLK_POINT3D,              // (a, b, c): 3D only
+	FPLK_IMPLICITSURFACE,      // F(x, y, z) = 0 ("x^2 + y^2 + z^2 = 25"): 3D only
 };
 
 // 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D

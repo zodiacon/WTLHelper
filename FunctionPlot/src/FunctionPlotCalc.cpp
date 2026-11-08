@@ -230,6 +230,21 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 
 	// Anything else in x and y is F(x, y) rel 0, with theta and r as atan2(y, x) and hypot(x, y).
 	unsigned vars = lv | rv;
+	// with z: a surface F(x, y, z) = 0 (3D); an equation only, and no t, u, v, theta or r
+	if ((vars & FplVarZ) && !(vars & (FplVarT | FplVarU | FplVarV | FplVarTheta | FplVarR))) {
+		if (rel != FplRel::Eq) {
+			def.error.code = FplErrorCode::NotAPlot;
+			def.error.pos = top.pos;
+			def.error.len = top.len;
+			return def;
+		}
+		int f = ast.Binary(FplOp::Sub, lhs, rhs);
+		ast.nodes[f].pos = top.pos;
+		ast.nodes[f].len = top.len;
+		def.kind = FplKind::ImplicitSurface;
+		def.expr[0] = f;
+		return def;
+	}
 	if (vars & (FplVarT | FplVarZ | FplVarU | FplVarV)) {
 		NotAllowed(def, ast, root, FplVarT | FplVarZ | FplVarU | FplVarV);
 		return def;

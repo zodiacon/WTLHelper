@@ -77,6 +77,12 @@ FplMesh FplSurfaceMesh(const std::function<double(double, double)>& F, const Fpl
 FplMesh FplParametricMesh(const std::function<FplPoint3(double, double)>& f, const FplBox3& box, double u0, double u1,
 	double v0, double v1, int n);
 
+// F(x, y, z) = 0 over the box on an n^3 grid of cells, each split into the 6 tetrahedra around its diagonal (so
+// neighbors' faces match and the surface has no cracks): the crossings found along the grid's edges (shared by the
+// tetrahedra around an edge, halved toward the zero), normals from F's gradient. A crossing whose values don't shrink
+// toward zero (an asymptote) is dropped with its triangles.
+FplMesh FplImplicitMesh(const std::function<double(double, double, double)>& F, const FplBox3& box, int n);
+
 // A space curve at samples + 1 values of t, in the cube, broken where it's undefined or jumps.
 std::vector<std::vector<FplVec3>> FplSampleCurve3(const std::function<FplPoint3(double)>& f, const FplBox3& box,
 	double t0, double t1, int samples);

@@ -260,6 +260,14 @@ void FplPlot::Build3D(const FplBox3& box) {
 			case FplKind::Point3D:
 				sphere({ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) });
 				break;
+			case FplKind::ImplicitSurface:
+				g.mesh = FplImplicitMesh([&](double x, double y, double z) {
+					s[FplSlotX] = x;
+					s[FplSlotY] = y;
+					s[FplSlotZ] = z;
+					return e.f.Eval(s);
+				}, box, 48);
+				break;
 			// the 2D kinds that are curves or points, on the z = 0 plane
 			case FplKind::Function:
 				tubes([&](double x) {

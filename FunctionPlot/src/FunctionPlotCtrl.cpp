@@ -19,7 +19,8 @@ static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed &
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
 	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
-	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D);
+	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D &&
+	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
