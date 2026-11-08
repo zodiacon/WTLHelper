@@ -470,5 +470,13 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 	e.f = FplCompile(parsed.ast, def.expr[0], parameters, &e.error);
 	if (!e.error && def.expr[1] >= 0)
 		e.g = FplCompile(parsed.ast, def.expr[1], parameters, &e.error);
+	if (!e.error && (def.kind == FplKind::Function || def.kind == FplKind::FunctionOfY)) {
+		FplError ignored;
+		int d = FplDerive(parsed.ast, def.expr[0], def.kind == FplKind::Function ? L"x" : L"y", &ignored);
+		if (d >= 0 && !ignored)
+			e.df = FplCompile(parsed.ast, d, parameters, &ignored);
+		if (ignored)
+			e.df = {};
+	}
 	return e;
 }

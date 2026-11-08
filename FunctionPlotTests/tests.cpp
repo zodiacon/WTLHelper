@@ -3,9 +3,11 @@
 // Deliberately dependency-free (same approach as GraphControlTests): a console exe that returns the number of failed
 // checks. Covered: the expression engine (lexing, implicit products, name splitting, parsing, errors and their
 // positions, what an expression draws, constant folding, compiling and the stack machine against the tree, the math
-// functions, degrees, derivatives against differences, simplifying and printing).
+// functions, degrees, derivatives against differences, simplifying and printing), and the 2D model (the view, ticks
+// and labels, clipping, sampling functions, curves, implicit curves and regions, roots, extrema and intersections).
 
 #include "FunctionPlotExpr.h"
+#include "FunctionPlotModel.h"
 
 #include <windows.h>
 
@@ -13,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -728,7 +731,578 @@ TEST(Speed) {
 	CHECK(std::isfinite(sum));
 }
 
+// ---- The 2D model ------------------------------------------------------------
+
+static FplViewport View(double xMin = -10, double xMax = 10, double yMin = -10, double yMax = 10, double w = 800,
+	double h = 800) {
+	FplViewport v;
+	v.xMin = xMin;
+	v.xMax = xMax;
+	v.yMin = yMin;
+	v.yMax = yMax;
+	v.width = w;
+	v.height = h;
+	return v;
+}
+
+static std::vector<double> ParamSlots() {
+	std::vector<double> s(FplFirstParam + 2, 0);
+	s[FplFirstParam] = g_ParamValues[0];
+	s[FplFirstParam + 1] = g_ParamValues[1];
+	return s;
+}
+
+static FplGeometry Geometry(std::wstring_view text, const FplViewport& v, const FplSampleOptions& o = {}) {
+	auto e = FplBuild(text, g_Params);
+	return FplSample(e, ParamSlots(), v, o);
+}
+
+// f(x) of a built expression (or its derivative), for the analysis.
+static std::function<double(double)> Fn(std::wstring_view text, bool derivative = false) {
+	auto e = std::make_shared<FplExpression>(FplBuild(text, g_Params));
+	return [e, derivative](double x) {
+		double s[8];
+		Slots(s, x, 0);
+		return derivative ? e->df.Eval(s) : e->f.Eval(s);
+	};
+}
+
+static double SignedArea(const FplPolygon& p) {
+	double a = 0;
+	for (size_t i = 0; i < p.size(); i++) {
+		auto& q = p[i];
+		auto& r = p[(i + 1) % p.size()];
+		a += q.x * r.y - r.x * q.y;
+	}
+	return a / 2;
+}
+
+static double Dist2(FplPoint a, FplPoint b) {
+	return (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
+}
+
+static bool InFarBox(const FplGeometry& g, const FplViewport& v) {
+	for (auto& line : g.lines)
+		for (auto& p : line)
+			if (!(p.x >= -v.width - 1e-9 && p.x <= 2 * v.width + 1e-9 && p.y >= -v.height - 1e-9 &&
+				p.y <= 2 * v.height + 1e-9))
+				return false;
+	return true;
+}
+
+static size_t Points(const std::vector<FplPolyline>& lines) {
+	size_t n = 0;
+	for (auto& l : lines)
+		n += l.size();
+	return n;
+}
+
+TEST(Viewport) {
+	auto v = View(-10, 10, -5, 5, 800, 400);
+	CHECK(v.Valid());
+	CHECK_NEAR(v.ScaleX(), 40);
+	CHECK_NEAR(v.ToScreenX(0), 400);
+	CHECK_NEAR(v.ToScreenY(5), 0);
+	CHECK_NEAR(v.ToScreenY(-5), 400);
+	auto p = v.ToPlane(v.ToScreen({ 3.25, -1.5 }));
+	CHECK_NEAR(p.x, 3.25);
+	CHECK_NEAR(p.y, -1.5);
+
+	// zooming keeps the point under the mouse
+	FplPoint mouse = { 600, 100 };
+	auto before = v.ToPlane(mouse);
+	v.Zoom(2, 2, mouse);
+	auto after = v.ToPlane(mouse);
+	CHECK_NEAR(before.x, after.x);
+	CHECK_NEAR(before.y, after.y);
+	CHECK_NEAR(v.xMax - v.xMin, 10);
+	CHECK_NEAR(v.yMax - v.yMin, 5);
+	v.Zoom(0.5, 1, mouse);
+	CHECK_NEAR(v.xMax - v.xMin, 20);
+	CHECK_NEAR(v.yMax - v.yMin, 5);
+
+	// panning: what was under the mouse follows it
+	v = View(-10, 10, -5, 5, 800, 400);
+	auto under = v.ToPlane({ 100, 100 });
+	v.Pan(50, -20);
+	auto moved = v.ToPlane({ 150, 80 });
+	CHECK_NEAR(under.x, moved.x);
+	CHECK_NEAR(under.y, moved.y);
+
+	// resizing keeps the center and the scales
+	v = View(-10, 10, -5, 5, 800, 400);
+	v.Resize(400, 800);
+	CHECK_NEAR(v.ScaleX(), 40);
+	CHECK_NEAR(v.ScaleY(), 40);
+	CHECK_NEAR(v.xMin, -5);
+	CHECK_NEAR(v.yMax, 10);
+
+	v = View(-10, 10, -10, 10, 800, 400);
+	v.EqualScale();
+	CHECK_NEAR(v.ScaleX(), v.ScaleY());
+	CHECK_NEAR(v.yMax - v.yMin, 20);
+	CHECK_NEAR(v.xMax - v.xMin, 40);
+
+	// zooming in forever stops while the ends can still be told apart
+	v = View(1e6, 1e6 + 1, -1, 1);
+	for (int i = 0; i < 200; i++)
+		v.Zoom(10, 10, { 400, 400 });
+	CHECK(v.xMax > v.xMin);
+	CHECK(v.Valid());
+	CHECK(!View(1, 1).Valid());
+}
+
+TEST(Ticks) {
+	auto t = FplMakeTicks(0, 10, 500, 50);
+	CHECK_NEAR(t.step, 1);
+	CHECK_INT(t.major.size(), 11);
+	CHECK_INT(t.minor.size(), 40);
+	CHECK_STR(FplFormatTick(3, t), L"3");
+
+	t = FplMakeTicks(-1, 1, 400, 80);
+	CHECK_NEAR(t.step, 0.5);
+	CHECK_INT(t.major.size(), 5);
+	CHECK_STR(FplFormatTick(-0.5, t), L"\x2212" L"0.5");
+	CHECK_STR(FplFormatTick(0, t), L"0");
+	CHECK_STR(FplFormatTick(1, t), L"1.0");
+
+	// tenths are exact (3 / 10, not 3 * 0.1)
+	t = FplMakeTicks(0, 1, 500, 50);
+	CHECK_NEAR(t.step, 0.1);
+	CHECK(t.major[3] == 0.3);
+	CHECK_STR(FplFormatTick(t.major[3], t), L"0.3");
+	CHECK_NEAR(t.minor.front(), 0.02);
+
+	t = FplMakeTicks(0, 20, 500, 50);
+	CHECK_NEAR(t.step, 2);
+	CHECK_NEAR(t.minor.front(), 0.5);
+
+	// pi
+	t = FplMakeTicks(-2 * Pi, 2 * Pi, 800, 80, true);
+	CHECK(t.pi);
+	CHECK_NEAR(t.step, Pi / 2);
+	CHECK_INT(t.major.size(), 9);
+	const wchar_t* labels[] = { L"\x2212" L"2\x03C0", L"\x2212" L"3\x03C0/2", L"\x2212\x03C0", L"\x2212\x03C0/2", L"0",
+		L"\x03C0/2", L"\x03C0", L"3\x03C0/2", L"2\x03C0" };
+	for (size_t i = 0; i < t.major.size() && i < 9; i++)
+		CHECK_STR(FplFormatTick(t.major[i], t), labels[i]);
+	CHECK_NEAR(t.minor.front(), -7 * Pi / 4);
+	t = FplMakeTicks(0, 2 * Pi, 600, 50, true);
+	CHECK_NEAR(t.step, Pi / 6);
+	CHECK_STR(FplFormatTick(t.major[3], t), L"\x03C0/2");
+	CHECK_STR(FplFormatTick(t.major[4], t), L"2\x03C0/3");
+	t = FplMakeTicks(0, 100 * Pi, 500, 50, true);
+	CHECK_NEAR(t.step, 10 * Pi);
+	CHECK_STR(FplFormatTick(t.major[2], t), L"20\x03C0");
+	// too fine for pi: decimals
+	t = FplMakeTicks(0, 0.1, 500, 50, true);
+	CHECK(!t.pi);
+	CHECK_NEAR(t.step, 0.01);
+
+	// large and small
+	t = FplMakeTicks(0, 1e8, 500, 50);
+	CHECK_NEAR(t.step, 1e7);
+	CHECK_STR(FplFormatTick(1e8, t), L"10\x2078");
+	CHECK_STR(FplFormatTick(2e7, t), L"2\x00D7" L"10\x2077");
+	CHECK_STR(FplFormatTick(-3e7, t), L"\x2212" L"3\x00D7" L"10\x2077");
+	t = FplMakeTicks(0, 1e-5, 500, 50);
+	CHECK_STR(FplFormatTick(2e-6, t), L"0.000002");
+	t = FplMakeTicks(0, 1e-6, 500, 50);
+	CHECK_STR(FplFormatTick(2e-7, t), L"2\x00D7" L"10\x207B\x2077");
+	t = FplMakeTicks(0, 5e6, 500, 100);
+	CHECK_STR(FplFormatTick(2.5e6, t), L"2500000");
+	// zoomed in far from zero: fixed decimals
+	t = FplMakeTicks(5, 5.0001, 500, 50);
+	CHECK_STR(FplFormatTick(t.major[1], t), L"5.00001");
+
+	CHECK(FplMakeTicks(1, 1, 500, 50).major.empty());
+	CHECK(FplMakeTicks(0, NaN, 500, 50).major.empty());
+}
+
+TEST(Clipping) {
+	std::vector<FplPolyline> in = { { { -100, 50 }, { 200, 50 } } };
+	auto out = FplClip(in, 0, 0, 100, 100);
+	CHECK_INT(out.size(), 1);
+	CHECK_NEAR(out[0][0].x, 0);
+	CHECK_NEAR(out[0][1].x, 100);
+	// out and back in: two pieces
+	in = { { { 50, 50 }, { 50, 150 }, { 60, 150 }, { 60, 50 } } };
+	out = FplClip(in, 0, 0, 100, 100);
+	CHECK_INT(out.size(), 2);
+	CHECK_NEAR(out[0][1].y, 100);
+	CHECK_NEAR(out[1][0].y, 100);
+	// all outside
+	in = { { { -10, -10 }, { -5, -20 } } };
+	CHECK(FplClip(in, 0, 0, 100, 100).empty());
+	// inside stays whole
+	in = { { { 1, 1 }, { 2, 2 }, { 3, 1 } } };
+	out = FplClip(in, 0, 0, 100, 100);
+	CHECK_INT(out.size(), 1);
+	CHECK_INT(out[0].size(), 3);
+}
+
+TEST(SampleFunctions) {
+	auto v = View();
+	// a parabola: one piece, every chord close to the curve
+	auto g = Geometry(L"x^2/4 - 3", v);
+	CHECK_INT(g.lines.size(), 1);
+	CHECK(InFarBox(g, v));
+	double worst = 0;
+	for (auto& line : g.lines) {
+		for (size_t i = 0; i + 1 < line.size(); i++) {
+			auto a = v.ToPlane(line[i]), b = v.ToPlane(line[i + 1]);
+			double xm = (a.x + b.x) / 2;
+			double ym = v.ToScreenY(xm * xm / 4 - 3);
+			double chord = (v.ToScreenY(a.y) + v.ToScreenY(b.y)) / 2;
+			worst = std::max(worst, std::abs(ym - chord));
+		}
+	}
+	CHECK(worst < 0.5);
+	auto first = v.ToPlane(g.lines[0].front());
+	CHECK_NEAR(first.x, -10);
+	CHECK(g.evals < 20000);
+
+	// tan: 7 branches, none joined across an asymptote
+	g = Geometry(L"tan x", v);
+	CHECK_INT(g.lines.size(), 7);
+	bool joined = false;
+	for (auto& line : g.lines)
+		for (size_t i = 0; i + 1 < line.size(); i++)
+			if ((line[i].y < 0 && line[i + 1].y > v.height) || (line[i].y > v.height && line[i + 1].y < 0))
+				joined = true;
+	CHECK(!joined);
+	CHECK(InFarBox(g, v));
+
+	// steps: a piece per step, each flat
+	g = Geometry(L"floor x", v);
+	CHECK_INT(g.lines.size(), 20);
+	bool flat = true;
+	for (auto& line : g.lines)
+		for (auto& p : line)
+			flat = flat && std::abs(p.y - line[0].y) < 1e-9;
+	CHECK(flat);
+	// a step's piece reaches its jump
+	auto piece = g.lines.size() > 10 ? g.lines[10] : FplPolyline{ { 0, 0 } };
+	CHECK_NEAR_TOL(v.ToPlaneX(piece.front().x), 0, 1e-9);
+	CHECK_NEAR_TOL(v.ToPlaneX(piece.back().x), 1, 1e-9);
+
+	// continuous, however steep: one piece
+	CHECK_INT(Geometry(L"abs x", v).lines.size(), 1);
+	CHECK_INT(Geometry(L"cbrt x", v).lines.size(), 1);
+	CHECK_INT(Geometry(L"atan(1000x)", v).lines.size(), 1);
+	CHECK_INT(Geometry(L"sign x", v).lines.size(), 2);
+	CHECK_INT(Geometry(L"1/x", v).lines.size(), 2);
+	CHECK_INT(Geometry(L"1/x^2", v).lines.size(), 2);
+
+	// where the domain stops: the ends found
+	g = Geometry(L"sqrt x", v);
+	CHECK_INT(g.lines.size(), 1);
+	auto start = v.ToPlane(g.lines[0].front());
+	CHECK_NEAR_TOL(start.x, 0, 1e-12);
+	CHECK_NEAR_TOL(start.y, 0, 1e-5);
+	g = Geometry(L"sqrt(25 - x^2)", v);
+	CHECK_INT(g.lines.size(), 1);
+	auto left = v.ToPlane(g.lines[0].front()), right = v.ToPlane(g.lines[0].back());
+	CHECK_NEAR_TOL(left.x, -5, 1e-9);
+	CHECK_NEAR_TOL(right.x, 5, 1e-9);
+	CHECK_NEAR_TOL(left.y, 0, 1e-4);
+	CHECK_NEAR_TOL(right.y, 0, 1e-4);
+	// a restricted domain
+	g = Geometry(L"x {0 < x < 2}", v);
+	CHECK_INT(g.lines.size(), 1);
+	CHECK_NEAR_TOL(v.ToPlaneX(g.lines[0].front().x), 0, 1e-9);
+	CHECK_NEAR_TOL(v.ToPlaneX(g.lines[0].back().x), 2, 1e-9);
+	CHECK_INT(Geometry(L"ln x", v).lines.size(), 1);
+	CHECK(Geometry(L"sqrt(-1 - x^2)", v).lines.empty());
+
+	// parameters
+	g = Geometry(L"a x", v);
+	auto p = v.ToPlane(g.lines[0].back());
+	CHECK_NEAR(p.y, 2 * p.x);
+
+	// x = f(y)
+	g = Geometry(L"x = y^2 - 4", v);
+	CHECK_INT(g.lines.size(), 1);
+	auto q = v.ToPlane(g.lines[0][5]);
+	CHECK_NEAR_TOL(q.x, q.y * q.y - 4, 1e-9);
+
+	// the budget holds sin(1/x) back
+	FplSampleOptions o;
+	o.maxEvals = 5000;
+	g = Geometry(L"sin(1/x)", v, o);
+	CHECK(g.evals < 5000 + 800);
+	CHECK(!g.lines.empty());
+}
+
+TEST(SampleCurves) {
+	auto v = View();
+	auto g = Geometry(L"(5 cos t, 5 sin t)", v);
+	CHECK_INT(g.lines.size(), 1);
+	auto& line = g.lines[0];
+	CHECK_NEAR_TOL(line.front().x, line.back().x, 1e-9);
+	CHECK_NEAR_TOL(line.front().y, line.back().y, 1e-9);
+	bool round = true;
+	for (auto& s : line) {
+		auto p = v.ToPlane(s);
+		round = round && std::abs(std::hypot(p.x, p.y) - 5) < 1e-9;
+	}
+	CHECK(round);
+
+	// polar
+	g = Geometry(L"r = 2 + 2cos theta", v);
+	CHECK_INT(g.lines.size(), 1);
+	auto p = v.ToPlane(g.lines[0].front());
+	CHECK_NEAR(p.x, 4);
+	CHECK_NEAR_TOL(p.y, 0, 1e-12);
+	// a range of its own
+	FplSampleOptions o;
+	o.thetaMin = 0;
+	o.thetaMax = Pi;
+	g = Geometry(L"r = 3", v, o);
+	p = v.ToPlane(g.lines[0].back());
+	CHECK_NEAR_TOL(p.x, -3, 1e-12);
+
+	// a curve leaving the view, grown by its size (y from -30 to 30), and coming back: clipped into three pieces
+	g = Geometry(L"(t, 50 sin t)", View(-1, 7, -10, 10));
+	CHECK_INT(g.lines.size(), 3);
+	CHECK(InFarBox(g, View(-1, 7, -10, 10)));
+
+	// the generic curve
+	auto lines = FplSampleCurve([](double t) { return FplPoint{ t, t < 0 ? NaN : t }; }, -5, 5, 10, v);
+	CHECK_INT(lines.size(), 1);
+	CHECK_NEAR_TOL(v.ToPlaneX(lines[0].front().x), 0, 1e-12);
+}
+
+TEST(SampleImplicit) {
+	auto v = View();
+	auto g = Geometry(L"x^2 + y^2 = 25", v);
+	CHECK_INT(g.lines.size(), 1);
+	auto& ring = g.lines[0];
+	CHECK(ring.size() > 100);
+	CHECK_NEAR(ring.front().x, ring.back().x);
+	CHECK_NEAR(ring.front().y, ring.back().y);
+	double worst = 0;
+	for (auto& s : ring) {
+		auto p = v.ToPlane(s);
+		worst = std::max(worst, std::abs(std::hypot(p.x, p.y) - 5));
+	}
+	CHECK(worst < 1e-6);
+
+	// two loops
+	g = Geometry(L"(x^2 + y^2 - 4)((x - 6)^2 + y^2 - 1) = 0", v);
+	CHECK_INT(g.lines.size(), 2);
+
+	// a hyperbola's two open branches
+	g = Geometry(L"xy = 1", v);
+	CHECK_INT(g.lines.size(), 2);
+	for (auto& l : g.lines)
+		CHECK(Dist2(l.front(), l.back()) > 100);
+
+	// no lines along asymptotes: every point is on the curve
+	g = Geometry(L"y - tan x = 0", v);
+	CHECK(!g.lines.empty());
+	bool onCurve = true;
+	for (auto& l : g.lines) {
+		for (auto& s : l) {
+			auto p = v.ToPlane(s);
+			onCurve = onCurve && std::abs(p.y - std::tan(p.x)) < 1e-4 * (1 + std::abs(std::tan(p.x)));
+		}
+	}
+	CHECK(onCurve);
+
+	// theta = 1 (atan2): the ray, not the branch cut on the negative x axis
+	g = Geometry(L"theta = 1", v);
+	CHECK(!g.lines.empty());
+	bool ray = true;
+	for (auto& l : g.lines)
+		for (auto& s : l)
+			ray = ray && v.ToPlaneX(s.x) > -0.1;
+	CHECK(ray);
+
+	// the saddle of x^2 = y^2: points on the diagonals
+	g = Geometry(L"x^2 = y^2", v);
+	CHECK(!g.lines.empty());
+	bool diagonal = true;
+	for (auto& l : g.lines)
+		for (auto& s : l) {
+			auto p = v.ToPlane(s);
+			diagonal = diagonal && std::abs(std::abs(p.x) - std::abs(p.y)) < 1e-6;
+		}
+	CHECK(diagonal);
+
+	// nothing
+	CHECK(Geometry(L"x^2 + y^2 = -1", v).lines.empty());
+}
+
+TEST(SampleRegions) {
+	auto v = View();
+	double s = v.ScaleX();
+	auto g = Geometry(L"x^2 + y^2 < 25", v);
+	CHECK(g.dashed);
+	CHECK_INT(g.lines.size(), 1);
+	double area = 0;
+	bool sameWay = true;
+	for (auto& p : g.fills) {
+		double a = SignedArea(p);
+		sameWay = sameWay && a > 0;
+		area += a;
+	}
+	CHECK(sameWay);
+	CHECK_NEAR_TOL(area, Pi * 25 * s * s, 1e-3);
+	g = Geometry(L"x^2 + y^2 >= 25", v);
+	CHECK(!g.dashed);
+	area = 0;
+	for (auto& p : g.fills)
+		area += SignedArea(p);
+	// everything else in the grid, which reaches a cell past the view on every side
+	double cell = 8, gw = std::ceil(v.width / cell) * cell + 2 * cell, gh = std::ceil(v.height / cell) * cell + 2 * cell;
+	CHECK_NEAR_TOL(area, gw * gh - Pi * 25 * s * s, 1e-3);
+
+	// y < 0: from the line down to the far box's bottom
+	g = Geometry(L"y < 0", v);
+	CHECK_INT(g.fills.size(), 1);
+	CHECK_NEAR_TOL(std::abs(SignedArea(g.fills[0])), v.width * 1.5 * v.height, 1e-9);
+	g = Geometry(L"y > x^2", v);
+	CHECK_INT(g.fills.size(), 1);
+	CHECK(!g.lines.empty());
+	// x > 0: to the right
+	g = Geometry(L"x > 0", v);
+	CHECK_INT(g.fills.size(), 1);
+	CHECK_NEAR_TOL(std::abs(SignedArea(g.fills[0])), 1.5 * v.width * v.height, 1e-9);
+	// polar
+	g = Geometry(L"r < 3", v);
+	area = 0;
+	for (auto& p : g.fills)
+		area += SignedArea(p);
+	CHECK_NEAR_TOL(area, Pi * 9 * s * s, 2e-3);
+	// equations have no fills
+	CHECK(Geometry(L"x^2 + y^2 = 25", v).fills.empty());
+}
+
+TEST(SampleOthers) {
+	auto v = View();
+	auto g = Geometry(L"(1, a)", v);
+	CHECK_INT(g.points.size(), 1);
+	CHECK_NEAR(g.points[0].x, v.ToScreenX(1));
+	CHECK_NEAR(g.points[0].y, v.ToScreenY(2));
+	g = Geometry(L"c = 2", v);
+	CHECK(g.lines.empty() && g.points.empty());
+	g = Geometry(L"2 +", v);
+	CHECK(g.lines.empty());
+	CHECK(Geometry(L"x", View(1, 1)).lines.empty());
+
+	// the derivative comes with the expression
+	auto e = FplBuild(L"x^3", g_Params);
+	double sl[8];
+	Slots(sl, 2, 0);
+	CHECK_NEAR(e.df.Eval(sl), 12);
+	e = FplBuild(L"x = sin y", g_Params);
+	Slots(sl, 0, 0);
+	CHECK_NEAR(e.df.Eval(sl), 1);
+	CHECK(FplBuild(L"(cos t, sin t)", g_Params).df.Empty());
+}
+
+static bool Has(const std::vector<FplFeature>& fs, FplFeatureKind kind, double x, double y = NaN,
+	double tol = 1e-12) {
+	for (auto& f : fs)
+		if (f.kind == kind && Near(f.x, x, tol) && (std::isnan(y) || Near(f.y, y, tol)))
+			return true;
+	return false;
+}
+
+static int Count(const std::vector<FplFeature>& fs, FplFeatureKind kind) {
+	int n = 0;
+	for (auto& f : fs)
+		n += f.kind == kind;
+	return n;
+}
+
+TEST(Analysis) {
+	std::function<double(double)> cosine = [](double x) { return std::cos(x); };
+	CHECK_NEAR_TOL(FplBrent(cosine, 0, 3, 1, std::cos(3.0)), Pi / 2, 1e-15);
+
+	using K = FplFeatureKind;
+	auto fs = FplFindFeatures(Fn(L"x^3 - x"), Fn(L"x^3 - x", true), -2, 2, 401, 1e-9);
+	CHECK_INT(Count(fs, K::Root), 3);
+	CHECK(Has(fs, K::Root, -1));
+	CHECK(Has(fs, K::Root, 0));
+	CHECK(Has(fs, K::Root, 1));
+	double c = 1 / std::sqrt(3.0);
+	CHECK(Has(fs, K::Maximum, -c, c - c * c * c));
+	CHECK(Has(fs, K::Minimum, c, c * c * c - c));
+	CHECK(Has(fs, K::YIntercept, 0, 0));
+	CHECK_INT(fs.size(), 6);
+	for (size_t i = 1; i < fs.size(); i++)
+		CHECK(fs[i - 1].x <= fs[i].x);
+	// by differences
+	auto fd = FplFindFeatures(Fn(L"x^3 - x"), nullptr, -2, 2, 401, 1e-9);
+	CHECK_INT(fd.size(), 6);
+	CHECK(Has(fd, K::Maximum, -c, NaN, 1e-8));
+
+	// asymptotes and steps are not roots
+	fs = FplFindFeatures(Fn(L"tan x"), Fn(L"tan x", true), -3, 3, 300, 1e-9);
+	CHECK_INT(Count(fs, K::Root), 1);
+	CHECK(Has(fs, K::Root, 0));
+	fs = FplFindFeatures(Fn(L"1/x"), Fn(L"1/x", true), -3, 3, 301, 1e-9);
+	CHECK(fs.empty());
+	fs = FplFindFeatures(Fn(L"floor x - 0.5"), Fn(L"floor x - 0.5", true), -3, 3, 301, 1e-9);
+	CHECK_INT(Count(fs, K::Root), 0);
+	// a pole is not an extremum
+	fs = FplFindFeatures(Fn(L"1/x^2"), Fn(L"1/x^2", true), -3, 3, 301, 1e-9);
+	CHECK(fs.empty());
+	// a corner is
+	fs = FplFindFeatures(Fn(L"abs(x - 1/3)"), Fn(L"abs(x - 1/3)", true), -3, 3, 300, 1e-9);
+	CHECK(Has(fs, K::Minimum, 1.0 / 3, 0, 1e-12));
+	CHECK(Has(fs, K::Root, 1.0 / 3, 0, 1e-12));
+	// touching zero
+	fs = FplFindFeatures(Fn(L"(x - 1/3)^2"), Fn(L"(x - 1/3)^2", true), -3, 3, 300, 1e-9);
+	CHECK_INT(Count(fs, K::Root), 1);
+	CHECK(Has(fs, K::Root, 1.0 / 3, 0, 1e-12));
+	CHECK(Has(fs, K::Minimum, 1.0 / 3, NaN, 1e-12));
+	// sin over a few periods
+	fs = FplFindFeatures(Fn(L"sin x"), Fn(L"sin x", true), -10, 10, 400, 1e-9);
+	CHECK_INT(Count(fs, K::Root), 7);
+	CHECK_INT(Count(fs, K::Maximum), 3);
+	CHECK_INT(Count(fs, K::Minimum), 3);
+	CHECK(Has(fs, K::Root, -3 * Pi, 0, 1e-14));
+	CHECK(Has(fs, K::Maximum, Pi / 2, 1, 1e-12));
+	// undefined pieces
+	fs = FplFindFeatures(Fn(L"sqrt(x) - 1"), Fn(L"sqrt(x) - 1", true), -3, 3, 300, 1e-9);
+	CHECK_INT(fs.size(), 2);
+	CHECK(Has(fs, K::YIntercept, 0, -1));
+	CHECK(Has(fs, K::Root, 1));
+
+	// intersections
+	auto is = FplFindIntersections(Fn(L"sin x"), Fn(L"cos x"), 0, 2 * Pi, 300, 1e-9);
+	CHECK_INT(is.size(), 2);
+	CHECK(Has(is, K::Intersection, Pi / 4, std::sqrt(0.5), 1e-14));
+	CHECK(Has(is, K::Intersection, 5 * Pi / 4, -std::sqrt(0.5), 1e-14));
+	// tangent
+	is = FplFindIntersections(Fn(L"x^2"), Fn(L"2x - 1"), -3, 3, 301, 1e-9);
+	CHECK_INT(is.size(), 1);
+	CHECK(Has(is, K::Intersection, 1, 1, 1e-7));
+	// parallel
+	CHECK(FplFindIntersections(Fn(L"x"), Fn(L"x + 1"), -3, 3, 300, 1e-9).empty());
+}
+
+TEST(SampleSpeed) {
+	auto v = View(-10, 10, -10, 10, 1600, 1000);
+	auto e = FplBuild(L"sin(x) exp(-x^2/40) + x/5", g_Params);
+	auto t0 = std::chrono::steady_clock::now();
+	auto g = FplSample(e, ParamSlots(), v);
+	auto t1 = std::chrono::steady_clock::now();
+	e = FplBuild(L"sin(x^2 + y^2) = 0.5", g_Params);
+	auto g2 = FplSample(e, ParamSlots(), v);
+	auto t2 = std::chrono::steady_clock::now();
+	wprintf(L"        function: %.2f ms (%zu evaluations, %zu points); implicit: %.2f ms (%zu evaluations, %zu lines)\n",
+		std::chrono::duration<double, std::milli>(t1 - t0).count(), g.evals, Points(g.lines),
+		std::chrono::duration<double, std::milli>(t2 - t1).count(), g2.evals, g2.lines.size());
+	CHECK(!g.lines.empty());
+	CHECK(!g2.lines.empty());
+}
+
 int wmain() {
+	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
 	Run_Precedence();
 	Run_ImplicitProducts();
@@ -748,6 +1322,16 @@ int wmain() {
 	Run_Printing();
 	Run_Positions();
 	Run_Speed();
+	Run_Viewport();
+	Run_Ticks();
+	Run_Clipping();
+	Run_SampleFunctions();
+	Run_SampleCurves();
+	Run_SampleImplicit();
+	Run_SampleRegions();
+	Run_SampleOthers();
+	Run_Analysis();
+	Run_SampleSpeed();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

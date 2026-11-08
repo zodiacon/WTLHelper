@@ -96,11 +96,15 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="src\FunctionPlotExpr.h" />
+    <ClInclude Include="src\FunctionPlotModel.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\FunctionPlotAnalysis.cpp" />
+    <ClCompile Include="src\FunctionPlotAxes.cpp" />
     <ClCompile Include="src\FunctionPlotCalc.cpp" />
     <ClCompile Include="src\FunctionPlotEval.cpp" />
     <ClCompile Include="src\FunctionPlotParse.cpp" />
+    <ClCompile Include="src\FunctionPlotSample.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

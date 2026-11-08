@@ -228,6 +228,7 @@ struct FplExpression {
 	FplKind kind = FplKind::Function;
 	FplRel rel = FplRel::Eq;
 	FplProgram f, g;			// g only for Parametric and Point
+	FplProgram df;				// Function's df/dx, FunctionOfY's df/dy (empty if it can't be derived)
 	std::wstring name;			// Definition's
 	FplError error;
 };
