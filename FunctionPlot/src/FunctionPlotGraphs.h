@@ -4,6 +4,7 @@
 // order, sampling every visible graph for a view, the features of a function (roots, extrema, intersections with the
 // other functions), and what a trace lands on.
 
+#include "FunctionPlot3D.h"
 #include "FunctionPlotModel.h"
 
 #include <cstdint>
@@ -38,6 +39,7 @@ struct FplGraph {
 									// theta, as y = f(x), x = f(y), a curve, r = f(theta))
 	int slot = -1;					// a definition's slot
 	FplGeometry geometry;			// from the last Sample
+	FplMesh mesh;					// from the last Build3D
 	std::vector<FplFeature> features;	// from the last FindFeatures (a function's only)
 
 	bool Drawable() const { return !definition && !expr.error && !(flags & FplGraphHidden); }
@@ -83,6 +85,10 @@ public:
 
 	// Samples every drawable graph; the others' geometry is cleared.
 	void Sample(const FplViewport& view, const FplSampleOptions& options = {});
+	// The drawable graphs' meshes for a 3D box: surfaces (z = F(x, y), parametric), curves as tubes (space curves, and
+	// the 2D curves on the z = 0 plane), points as spheres. Implicit curves, regions and vector fields have none.
+	void Build3D(const FplBox3& box);
+
 	// Roots, extrema and the y intercept of a function graph over the view, and where it meets the other drawable
 	// functions (Intersection), into its features. Others get none.
 	void FindFeatures(int graph, const FplViewport& view);

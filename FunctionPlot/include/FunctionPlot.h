@@ -70,6 +70,22 @@ enum FPLKIND {
 	FPLK_DEFINITION,           // "c = 2a": defines c for the other graphs; "g(a, b) = a b" (a function of others)
 	FPLK_SURFACE,              // z = F(x, y): contours and, with FPLGF_HEATMAP, a heat map
 	FPLK_VECTORFIELD,          // (P(x, y), Q(x, y)): arrows
+	FPLK_SPACECURVE,           // (x(t), y(t), z(t)): 3D only
+	FPLK_PARAMSURFACE,         // (x(u, v), y(u, v), z(u, v)): 3D only; u and v over the graph's range
+	FPLK_POINT3D,              // (a, b, c): 3D only
+};
+
+// 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D
+// curves and points on its z = 0 plane.
+enum FPLMODE {
+	FPLM_2D,
+	FPLM_3D,
+};
+
+struct FPLVIEW3D {
+	double xMin, xMax, yMin, yMax, zMin, zMax;
+	float  yaw;                // radians around z from the +x axis
+	float  pitch;              // radians above the xy plane
 };
 
 // The errors (FPLGRAPHINFO::error), FplErrorCode's values.
@@ -156,6 +172,7 @@ struct FPLTRACE {
 #define FPLN_PARAMCHANGED   (FPLN_FIRST - 1)   // NMFPLPARAM; the user moved a slider
 #define FPLN_TRACE          (FPLN_FIRST - 2)   // NMFPLTRACE; the traced point changed (or tracing stopped)
 #define FPLN_GRAPHTOGGLED   (FPLN_FIRST - 3)   // NMFPLGRAPH; the user showed or hid a graph in the legend
+#define FPLN_VIEW3DCHANGED  (FPLN_FIRST - 4)   // NMFPLVIEW3D; the user orbited, panned or zoomed the 3D view
 
 struct NMFPLVIEW {
 	NMHDR   hdr;
@@ -177,6 +194,11 @@ struct NMFPLGRAPH {
 	NMHDR hdr;
 	UINT  id;
 	BOOL  hidden;
+};
+
+struct NMFPLVIEW3D {
+	NMHDR     hdr;
+	FPLVIEW3D view;
 };
 
 // ---- Control class --------------------------------------------------------------------------
@@ -218,9 +240,14 @@ public:
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
 		MESSAGE_HANDLER(WM_TIMER, OnTimer)
+		MESSAGE_HANDLER(WM_FPL_PAINT3D, OnPaint3D)
 	END_MSG_MAP()
 
 	enum : UINT_PTR { AnimationTimer = 1 };
+	enum : UINT { WM_FPL_PAINT3D = WM_USER + 130 };   // the 3D view's window asks for a frame
+
+	// in 3D the frames are drawn in a window of their own over the control: invalidating the control redraws it too
+	BOOL Invalidate(BOOL bErase = TRUE);
 
 	// ---- Graphs ----
 	BOOL AddGraph(const FPLGRAPH& graph);      // false if the id is taken (or 0)
@@ -257,6 +284,14 @@ public:
 	BOOL ClientToPlane(POINT pt, double& x, double& y) const;
 	POINT PlaneToClient(double x, double y) const;
 
+	// ---- 3D ----
+	BOOL SetMode(FPLMODE mode);                // FALSE if 3D can't start (no Direct3D 11, not even WARP)
+	FPLMODE GetMode() const;
+	void SetView3D(const FPLVIEW3D& view);
+	FPLVIEW3D GetView3D() const;
+	void ResetView3D();                        // x, y and z from -10 to 10, the camera where it starts
+	BOOL IsSoftwareRendering() const;          // 3D on WARP, the software rasterizer
+
 	// ---- Tracing and features ----
 	BOOL GetTrace(FPLTRACE& trace) const;
 	void ClearTrace();
@@ -269,9 +304,10 @@ public:
 	BOOL IsPanelCollapsed() const;
 
 	// ---- Export ----
-	// The view as a PNG, scale times its size in DIPs (COM must be initialized on the thread: WIC).
+	// The view as a PNG, scale times its size in DIPs (COM must be initialized on the thread: WIC); in 3D, the frame
+	// as it's shown (scale is ignored).
 	BOOL ExportPng(LPCWSTR pszPath, float scale = 1);
-	// The view as SVG: the grid, the axes and their labels, the graphs (not heat maps) and the legend.
+	// The view as SVG: the grid, the axes and their labels, the graphs (not heat maps) and the legend. 2D only.
 	BOOL ExportSvg(LPCWSTR pszPath);
 
 	// ---- Look ----
@@ -302,6 +338,7 @@ private:
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnPaint3D(UINT, WPARAM, LPARAM, BOOL&);
 
 	// FunctionPlotCtrl.cpp
 	void Rebuild();                            // texts, names or the angle unit changed
@@ -334,6 +371,11 @@ private:
 	void PaintLabels();
 	void PaintTrace();
 	void PaintPanel();
+	void Paint3D(bool present);
+	void PaintTicks3D();
+	bool Ensure3D();                           // the renderer and the meshes on the GPU
+	void Upload3D();
+	void NotifyView3D();
 
 	std::unique_ptr<FplState> m_State;
 };

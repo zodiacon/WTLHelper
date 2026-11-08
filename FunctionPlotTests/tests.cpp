@@ -6,9 +6,11 @@
 // functions, degrees, derivatives against differences, simplifying and printing), and the 2D model (the view, ticks
 // and labels, clipping, sampling functions, curves, implicit curves and regions, roots, extrema and intersections), and the
 // control's graphs (definitions, sampling, features, tracing, coordinates), user functions
-// and d/dx, surfaces (heat maps, contours), vector fields and the SVG export.
+// and d/dx, surfaces (heat maps, contours), vector fields and the SVG export, and 3D (the
+// box, the camera, meshes, tubes and the graphs' meshes).
 
 #include "FunctionPlotExpr.h"
+#include "FunctionPlot3D.h"
 #include "FunctionPlotGraphs.h"
 #include "FunctionPlotModel.h"
 
@@ -125,7 +127,7 @@ static double F(std::wstring_view text, double x = 0, double y = 0, bool degrees
 	auto e = FplBuild(text, g_Params, degrees);
 	if (e.error)
 		return Failed;
-	double s[8];
+	double s[16];
 	Slots(s, x, y);
 	return e.f.Eval(s);
 }
@@ -134,7 +136,7 @@ static double G(std::wstring_view text, double x = 0) {
 	auto e = FplBuild(text, g_Params);
 	if (e.error || e.g.Empty())
 		return Failed;
-	double s[8];
+	double s[16];
 	Slots(s, x, 0);
 	return e.g.Eval(s);
 }
@@ -186,7 +188,7 @@ static double Derivative(std::wstring_view text, double x, const wchar_t* var = 
 	auto prog = FplCompile(r.ast, d, g_Params);
 	if (prog.Empty())
 		return Failed;
-	double s[8];
+	double s[16];
 	Slots(s, x, 0);
 	return prog.Eval(s);
 }
@@ -442,7 +444,7 @@ TEST(Classify) {
 	CHECK_INT(BuildError(L"sin \x03B8").code, FplErrorCode::NotAPlot);
 	CHECK_INT(BuildError(L"x + y").code, FplErrorCode::NotAPlot);
 	CHECK_INT(BuildError(L"2 = 3").code, FplErrorCode::NotAPlot);
-	CHECK_INT(BuildError(L"(1, 2, 3)").code, FplErrorCode::BadPoint);
+	CHECK_INT(BuildError(L"(1, 2, 3, 4)").code, FplErrorCode::BadPoint);
 	e = FplBuild(L"(x, t)", g_Params);
 	CHECK_INT(e.error.code, FplErrorCode::VariableNotAllowed);
 	CHECK_STR(e.error.name, L"x");
@@ -543,7 +545,7 @@ TEST(CompiledMatchesTree) {
 		auto prog = FplCompile(r.ast, def.expr[0], g_Params);
 		CHECK(!prog.Empty());
 		for (double x : xs) {
-			double s[8];
+			double s[16];
 			Slots(s, x, 0);
 			double a = prog.Eval(s), b = Tree(r.ast, def.expr[0], x);
 			if (!Near(a, b, 1e-12))
@@ -586,7 +588,7 @@ TEST(Compiling) {
 		deep = L"1 + (2*" + deep + L")";
 	r = FplParse(deep, o);
 	p = FplCompile(r.ast, r.root, params);
-	double s[8] = { 1 };
+	double s[16] = { 1 };
 	CHECK_NEAR(p.Eval(s), Tree(r.ast, r.root, 1));
 	CHECK(FplProgram().Empty());
 	CHECK(std::isnan(FplProgram().Eval(s)));
@@ -719,7 +721,7 @@ TEST(Positions) {
 
 TEST(Speed) {
 	auto e = FplBuild(L"sin(x) exp(-x^2/4) + x^3 - a x", g_Params);
-	double s[8];
+	double s[16];
 	Slots(s, 0, 0);
 	const int n = 2'000'000;
 	double sum = 0;
@@ -764,7 +766,7 @@ static FplGeometry Geometry(std::wstring_view text, const FplViewport& v, const 
 static std::function<double(double)> Fn(std::wstring_view text, bool derivative = false) {
 	auto e = std::make_shared<FplExpression>(FplBuild(text, g_Params));
 	return [e, derivative](double x) {
-		double s[8];
+		double s[16];
 		Slots(s, x, 0);
 		return derivative ? e->df.Eval(s) : e->f.Eval(s);
 	};
@@ -1196,7 +1198,7 @@ TEST(SampleOthers) {
 
 	// the derivative comes with the expression
 	auto e = FplBuild(L"x^3", g_Params);
-	double sl[8];
+	double sl[16];
 	Slots(sl, 2, 0);
 	CHECK_NEAR(e.df.Eval(sl), 12);
 	e = FplBuild(L"x = sin y", g_Params);
@@ -1586,7 +1588,7 @@ TEST(UserFunctionCalls) {
 	CHECK_INT(e.kind, FplKind::Parametric);
 	e = FplBuild(L"c'(t)", {}, false, &fns);
 	CHECK_INT(e.kind, FplKind::Parametric);
-	double sl[8] = {};
+	double sl[16] = {};
 	CHECK_NEAR(e.f.Eval(sl), 0);
 	CHECK_NEAR(e.g.Eval(sl), 1);
 	// the app's parameters in a body
@@ -1611,7 +1613,7 @@ TEST(DerivativeSyntax) {
 	CHECK_NEAR(UF(L"r = d/dtheta (theta^2)", none, 3), 6);
 	auto e = FplBuild(L"(d/dt cos t, d/dt sin t)", {});
 	CHECK_INT(e.kind, FplKind::Parametric);
-	double sl[8] = {};
+	double sl[16] = {};
 	CHECK_NEAR(e.g.Eval(sl), 1);
 	// partial: other variables are constants
 	e = FplBuild(L"d/dx (x y) = 1", {});
@@ -1687,7 +1689,7 @@ TEST(Surfaces) {
 	auto e = FplBuild(L"z = x^2 + y^2", {});
 	CHECK_INT(e.kind, FplKind::Surface);
 	CHECK(!e.error);
-	double sl[8] = {};
+	double sl[16] = {};
 	sl[FplSlotX] = 3;
 	sl[FplSlotY] = 4;
 	CHECK_NEAR(e.f.Eval(sl), 25);
@@ -1846,6 +1848,211 @@ TEST(Svg) {
 	CHECK(FplWriteSvg(plot, View(1, 1), style).empty());
 }
 
+// ---- 3D -----------------------------------------------------------------------------
+
+TEST(Kinds3D) {
+	auto e = FplBuild(L"(cos t, sin t, t/4)", {});
+	CHECK_INT(e.kind, FplKind::SpaceCurve);
+	double sl[16] = {};
+	sl[FplSlotT] = 0;
+	CHECK_NEAR(e.f.Eval(sl), 1);
+	CHECK_NEAR(e.h.Eval(sl), 0);
+	e = FplBuild(L"(cos u sin v, sin u sin v, cos v)", {});
+	CHECK_INT(e.kind, FplKind::ParametricSurface);
+	sl[FplSlotU] = 0;
+	sl[FplSlotV] = Pi / 2;
+	CHECK_NEAR(e.f.Eval(sl), 1);
+	CHECK_NEAR_TOL(e.h.Eval(sl), 0, 1e-15);
+	CHECK_INT(FplBuild(L"(1, 2, 3)", {}).kind, FplKind::Point3D);
+	CHECK_INT(FplBuild(L"(u, t, 1)", {}).error.code, FplErrorCode::VariableNotAllowed);
+	CHECK_INT(FplBuild(L"(x, y, 1)", {}).error.code, FplErrorCode::VariableNotAllowed);
+	CHECK_INT(FplBuild(L"(u, v)", {}).error.code, FplErrorCode::VariableNotAllowed);
+	CHECK_INT(FplBuild(L"y = u x", {}).error.code, FplErrorCode::VariableNotAllowed);
+	// u and v are variables now: no slider for them
+	CHECK_INT(FplBuild(L"y = 2u", {}).error.code, FplErrorCode::VariableNotAllowed);
+	// the slots: the parameters after them
+	std::vector<std::wstring> p = { L"a" };
+	e = FplBuild(L"(a u, v, 0)", p);
+	double s2[16] = {};
+	s2[FplFirstParam] = 3;
+	s2[FplSlotU] = 2;
+	CHECK_NEAR(e.f.Eval(s2), 6);
+}
+
+TEST(BoxAndCamera) {
+	FplBox3 box;
+	auto b = box.ToBox(10, -10, 0);
+	CHECK_NEAR(b.x, 1);
+	CHECK_NEAR(b.y, -1);
+	CHECK_NEAR(b.z, 0);
+	CHECK_NEAR(box.ToBox(0, 0, 1e300).z, 4);
+	CHECK(std::isnan(box.ToBox(0, 0, NaN).z));
+	auto back = box.ToSpace({ 0.5f, 0, -1 });
+	CHECK_NEAR(back.x, 5);
+	CHECK_NEAR(back.z, -10);
+	box.Zoom(2);
+	CHECK_NEAR(box.xMax, 5);
+	CHECK_NEAR(box.zMin, -5);
+	box.Pan(1, -2);
+	CHECK_NEAR(box.xMin, -4);
+	CHECK_NEAR(box.yMax, 3);
+	CHECK(box.Valid());
+
+	FplCamera cam;
+	cam.yaw = 0;
+	cam.pitch = 0;
+	auto eye = cam.Eye();
+	CHECK_NEAR(eye.x, cam.distance);
+	CHECK_NEAR_TOL(eye.z, 0, 1e-6);
+	// the center in the middle of the screen; up is up, and +y is to the right looking from +x
+	FplPoint s;
+	CHECK(cam.Project({ 0, 0, 0 }, 800, 600, s));
+	CHECK_NEAR_TOL(s.x, 400, 1e-3);
+	CHECK_NEAR_TOL(s.y, 300, 1e-3);
+	FplPoint up, right;
+	cam.Project({ 0, 0, 0.5f }, 800, 600, up);
+	cam.Project({ 0, 0.5f, 0 }, 800, 600, right);
+	CHECK(up.y < 300);
+	CHECK_NEAR_TOL(up.x, 400, 1e-3);
+	CHECK(right.x > 400);
+	// nearer looks bigger
+	FplPoint nearPt, farPt;
+	cam.Project({ 1, 0.5f, 0 }, 800, 600, nearPt);
+	cam.Project({ -1, 0.5f, 0 }, 800, 600, farPt);
+	CHECK(nearPt.x - 400 > farPt.x - 400);
+	// behind the camera
+	CHECK(!cam.Project({ 10, 0, 0 }, 800, 600, s));
+	// depth: nearer is smaller
+	float c1[4], c2[4];
+	auto vp = cam.ViewProjection(800.0f / 600);
+	vp.Transform({ 1, 0, 0 }, c1);
+	vp.Transform({ -1, 0, 0 }, c2);
+	CHECK(c1[2] / c1[3] < c2[2] / c2[3]);
+	CHECK(c1[2] / c1[3] > 0 && c2[2] / c2[3] < 1);
+	// orbiting stops short of the pole
+	cam.Orbit(0.5f, 10);
+	CHECK(cam.pitch < 1.5708f);
+	CHECK_NEAR_TOL(cam.yaw, 0.5, 1e-6);
+	cam.Orbit(7, -20);
+	CHECK(cam.pitch > -1.5708f);
+	CHECK(std::abs(cam.yaw) <= 3.1416f);
+}
+
+TEST(Meshes3D) {
+	FplBox3 box;
+	// a plane: (n + 1)^2 vertices, 2n^2 triangles, normals up (or down), its height for the color
+	auto m = FplSurfaceMesh([](double, double) { return 5.0; }, box, 10);
+	CHECK_INT(m.vertices.size(), 121);
+	CHECK_INT(m.indices.size(), 600);
+	CHECK_NEAR_TOL(std::abs(m.vertices[60].normal.z), 1, 1e-6);
+	CHECK_NEAR_TOL(m.vertices[60].pos.z, 0.5, 1e-6);
+	CHECK_NEAR_TOL(m.vertices[60].value, 0.75, 1e-6);
+	// a tilted plane's normal
+	m = FplSurfaceMesh([](double x, double) { return x; }, box, 10);
+	auto n = m.vertices[60].normal;
+	CHECK_NEAR_TOL(std::abs(n.x), std::sqrt(0.5), 1e-5);
+	CHECK_NEAR_TOL(std::abs(n.z), std::sqrt(0.5), 1e-5);
+	// undefined for x < 0: the cells there left out
+	m = FplSurfaceMesh([](double x, double) { return std::sqrt(x); }, box, 10);
+	CHECK_INT(m.indices.size(), 300);
+	// a jump: the cells across it left out, not the steep ones
+	m = FplSurfaceMesh([](double x, double) { return std::floor(x / 3) * 3; }, box, 10);
+	CHECK(m.indices.size() < 600);
+	CHECK(m.indices.size() >= 600 - 7 * 60);
+	m = FplSurfaceMesh([](double x, double) { return 20 * std::atan(x); }, box, 10);
+	CHECK_INT(m.indices.size(), 600);
+	// a sphere's points are on it, a radius 5 sphere in a box of +-10 is 0.5 in the cube
+	auto sphere = FplParametricMesh([](double u, double v) {
+		return FplPoint3{ 5 * std::cos(u) * std::sin(v), 5 * std::sin(u) * std::sin(v), 5 * std::cos(v) };
+	}, box, 0, 2 * Pi, 0, Pi, 24);
+	CHECK_INT(sphere.vertices.size(), 625);
+	CHECK(!sphere.Empty());
+	bool on = true;
+	for (auto& v : sphere.vertices)
+		on = on && std::abs(std::sqrt(v.pos.x * v.pos.x + v.pos.y * v.pos.y + v.pos.z * v.pos.z) - 0.5f) < 1e-5f;
+	CHECK(on);
+
+	// a helix: one piece; broken where undefined
+	auto lines = FplSampleCurve3([](double t) { return FplPoint3{ 5 * std::cos(t), 5 * std::sin(t), t }; }, box, 0, 6, 100);
+	CHECK_INT(lines.size(), 1);
+	CHECK_INT(lines[0].size(), 101);
+	lines = FplSampleCurve3([](double t) { return FplPoint3{ t, 0, t < 0 ? NaN : t }; }, box, -5, 5, 100);
+	CHECK_INT(lines.size(), 1);
+	lines = FplSampleCurve3([](double t) { return FplPoint3{ t, 0, std::tan(t) }; }, box, -3, 3, 300);
+	CHECK_INT(lines.size(), 3);
+	// a tube: sides vertices per point, each its radius from the line
+	auto tube = FplTubes({ { { 0, 0, 0 }, { 0.5f, 0, 0 }, { 0.5f, 0.5f, 0 } } }, 0.1f, 8);
+	CHECK_INT(tube.vertices.size(), 24);
+	CHECK_INT(tube.indices.size(), 2 * 8 * 6);
+	CHECK_NEAR_TOL(std::hypot(tube.vertices[3].pos.y, tube.vertices[3].pos.z), 0.1, 1e-6);
+	CHECK(FplTubes({ { { 0, 0, 0 } } }, 0.1f).Empty());
+	auto ball = FplSphere({ 0.5f, 0, 0 }, 0.2f, 12);
+	bool round = true;
+	for (auto& v : ball.vertices)
+		round = round && std::abs(std::hypot(v.pos.x - 0.5f, std::hypot(v.pos.y, v.pos.z)) - 0.2f) < 1e-5f;
+	CHECK(round);
+	auto edges = FplBoxEdges();
+	CHECK_INT(edges.vertices.size(), 8);
+	CHECK_INT(edges.indices.size(), 24);
+	FplMesh all = ball;
+	FplAppend(all, tube);
+	CHECK_INT(all.vertices.size(), ball.vertices.size() + 24);
+	CHECK_INT(all.indices.back(), ball.vertices.size() + tube.indices.back());
+
+	// ticks along the edges toward the camera, with the axes' names
+	FplCamera cam;
+	auto ticks = FplBoxTicks(box, cam);
+	int names = 0;
+	for (auto& t : ticks)
+		names += t.name;
+	CHECK_INT(names, 3);
+	CHECK(ticks.size() > 12);
+	auto eye = cam.Eye();
+	bool toward = true;
+	for (auto& t : ticks)
+		if (!t.name && t.at.z == -1 && std::abs(t.at.x) > 1)
+			toward = toward && (t.at.x > 0) == (eye.x > 0);
+	CHECK(toward);
+}
+
+TEST(Graphs3D) {
+	auto plot = MakePlot({ L"z = x y / 10", L"(cos u sin v, sin u sin v, cos v)", L"(5cos t, 5sin t, t)", L"(1, 2, 3)",
+		L"y = x", L"(2, 1)", L"x^2 + y^2 = 4", L"c = 2", L"(1, 2, 30)", L"y = 2 +" });
+	FplBox3 box;
+	plot.Build3D(box);
+	CHECK_INT(plot.graphs[0].mesh.vertices.size(), 97 * 97);
+	CHECK(!plot.graphs[0].mesh.Empty());
+	CHECK_INT(plot.graphs[1].mesh.vertices.size(), 65 * 65);
+	CHECK(!plot.graphs[2].mesh.Empty());		// a tube
+	CHECK(!plot.graphs[3].mesh.Empty());		// a sphere
+	auto& ball = plot.graphs[3].mesh.vertices;
+	FplVec3 center = box.ToBox(1, 2, 3);
+	CHECK_NEAR_TOL(std::hypot(ball[0].pos.x - center.x, std::hypot(ball[0].pos.y - center.y, ball[0].pos.z - center.z)),
+		0.01 + 0.005 * 2.5, 1e-5);
+	CHECK(!plot.graphs[4].mesh.Empty());		// y = x on the floor's z = 0
+	bool flat = true;
+	for (auto& v : plot.graphs[4].mesh.vertices)
+		flat = flat && std::abs(v.pos.z) < 0.02f;
+	CHECK(flat);
+	CHECK(!plot.graphs[5].mesh.Empty());
+	CHECK(plot.graphs[6].mesh.Empty());			// implicit curves aren't drawn in 3D
+	CHECK(plot.graphs[7].mesh.Empty());
+	CHECK(plot.graphs[8].mesh.Empty());			// outside the box
+	CHECK(plot.graphs[9].mesh.Empty());
+	// hidden graphs have none; a parametric range
+	plot.graphs[0].flags = FplGraphHidden;
+	plot.graphs[2].hasRange = true;
+	plot.graphs[2].tMin = 0;
+	plot.graphs[2].tMax = 1;
+	plot.Build3D(box);
+	CHECK(plot.graphs[0].mesh.Empty());
+	// t up to 1: z up to 1 (0.1 in the cube), and the tube's radius
+	float top = -1;
+	for (auto& v : plot.graphs[2].mesh.vertices)
+		top = std::max(top, v.pos.z);
+	CHECK(top < 0.1f + 0.0126f && top > 0.1f);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -1889,6 +2096,10 @@ int wmain() {
 	Run_Surfaces();
 	Run_VectorFields();
 	Run_Svg();
+	Run_Kinds3D();
+	Run_BoxAndCamera();
+	Run_Meshes3D();
+	Run_Graphs3D();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

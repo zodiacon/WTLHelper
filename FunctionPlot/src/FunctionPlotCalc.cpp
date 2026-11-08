@@ -12,6 +12,8 @@ unsigned VarBit(std::wstring_view name) {
 	if (name == L"x") return FplVarX;
 	if (name == L"y") return FplVarY;
 	if (name == L"z") return FplVarZ;
+	if (name == L"u") return FplVarU;
+	if (name == L"v") return FplVarV;
 	if (name == L"t") return FplVarT;
 	if (name == L"r") return FplVarR;
 	if (name == FplTheta) return FplVarTheta;
@@ -23,6 +25,8 @@ const wchar_t* VarName(unsigned bit) {
 		case FplVarX: return L"x";
 		case FplVarY: return L"y";
 		case FplVarZ: return L"z";
+		case FplVarU: return L"u";
+		case FplVarV: return L"v";
 		case FplVarT: return L"t";
 		case FplVarR: return L"r";
 		default: return FplTheta;
@@ -124,6 +128,23 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 	}
 	const FplNode top = ast[root];
 
+	if (top.op == FplOp::Tuple && top.kids.size() == 3) {
+		// 3D: (x(t), y(t), z(t)), (x(u, v), y(u, v), z(u, v)), (a, b, c)
+		unsigned vars = FplVariablesOf(ast, root);
+		const unsigned uv = FplVarU | FplVarV;
+		if ((vars & FplVarT) && (vars & ~FplVarT)) {
+			NotAllowed(def, ast, root, ~unsigned(FplVarT));
+			return def;
+		}
+		if (vars & ~(FplVarT | uv)) {
+			NotAllowed(def, ast, root, ~unsigned(FplVarT | uv));
+			return def;
+		}
+		def.kind = (vars & FplVarT) ? FplKind::SpaceCurve : (vars & uv) ? FplKind::ParametricSurface : FplKind::Point3D;
+		for (int k = 0; k < 3; k++)
+			def.expr[k] = top.kids[k];
+		return def;
+	}
 	if (top.op == FplOp::Tuple) {
 		if (top.kids.size() != 2) {
 			def.error.code = FplErrorCode::BadPoint;
@@ -209,8 +230,8 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 
 	// Anything else in x and y is F(x, y) rel 0, with theta and r as atan2(y, x) and hypot(x, y).
 	unsigned vars = lv | rv;
-	if (vars & (FplVarT | FplVarZ)) {
-		NotAllowed(def, ast, root, FplVarT | FplVarZ);
+	if (vars & (FplVarT | FplVarZ | FplVarU | FplVarV)) {
+		NotAllowed(def, ast, root, FplVarT | FplVarZ | FplVarU | FplVarV);
 		return def;
 	}
 	if (!(vars & (FplVarX | FplVarY | FplVarR | FplVarTheta))) {

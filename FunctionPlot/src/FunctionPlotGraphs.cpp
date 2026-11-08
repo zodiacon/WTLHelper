@@ -217,6 +217,84 @@ void FplPlot::Sample(const FplViewport& view, const FplSampleOptions& options) {
 	}
 }
 
+void FplPlot::Build3D(const FplBox3& box) {
+	constexpr double TwoPi = 6.283185307179586;
+	double* s = m_Slots.data();
+	for (auto& g : graphs) {
+		g.mesh = {};
+		if (!g.Drawable() || !box.Valid())
+			continue;
+		auto& e = g.expr;
+		const double t0 = g.hasRange ? g.tMin : 0, t1 = g.hasRange ? g.tMax : TwoPi;
+		const float radius = 0.005f * g.width, dot = 0.01f + 0.005f * g.width;
+		auto tubes = [&](const std::function<FplPoint3(double)>& f, double a, double b) {
+			g.mesh = FplTubes(FplSampleCurve3(f, box, a, b, 1024), radius);
+		};
+		auto sphere = [&](FplPoint3 p) {
+			FplVec3 c = box.ToBox(p);
+			if (std::isfinite(c.x) && std::isfinite(c.y) && std::isfinite(c.z) && std::abs(c.x) <= 1 &&
+				std::abs(c.y) <= 1 && std::abs(c.z) <= 1)
+				g.mesh = FplSphere(c, dot);
+		};
+		switch (e.kind) {
+			case FplKind::Surface:
+				g.mesh = FplSurfaceMesh([&](double x, double y) {
+					s[FplSlotX] = x;
+					s[FplSlotY] = y;
+					return e.f.Eval(s);
+				}, box, 96);
+				break;
+			case FplKind::ParametricSurface:
+				g.mesh = FplParametricMesh([&](double u, double v) {
+					s[FplSlotU] = u;
+					s[FplSlotV] = v;
+					return FplPoint3{ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) };
+				}, box, t0, t1, t0, t1, 64);
+				break;
+			case FplKind::SpaceCurve:
+				tubes([&](double t) {
+					s[FplSlotT] = t;
+					return FplPoint3{ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) };
+				}, t0, t1);
+				break;
+			case FplKind::Point3D:
+				sphere({ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) });
+				break;
+			// the 2D kinds that are curves or points, on the z = 0 plane
+			case FplKind::Function:
+				tubes([&](double x) {
+					s[FplSlotX] = x;
+					return FplPoint3{ x, e.f.Eval(s), 0 };
+				}, box.xMin, box.xMax);
+				break;
+			case FplKind::FunctionOfY:
+				tubes([&](double y) {
+					s[FplSlotY] = y;
+					return FplPoint3{ e.f.Eval(s), y, 0 };
+				}, box.yMin, box.yMax);
+				break;
+			case FplKind::Polar:
+				tubes([&](double theta) {
+					s[FplSlotTheta] = theta;
+					double r = e.f.Eval(s);
+					return FplPoint3{ r * std::cos(theta), r * std::sin(theta), 0 };
+				}, t0, t1);
+				break;
+			case FplKind::Parametric:
+				tubes([&](double t) {
+					s[FplSlotT] = t;
+					return FplPoint3{ e.f.Eval(s), e.g.Eval(s), 0 };
+				}, t0, t1);
+				break;
+			case FplKind::Point:
+				sphere({ e.f.Eval(s), e.g.Eval(s), 0 });
+				break;
+			default:
+				break;
+		}
+	}
+}
+
 double FplPlot::Eval(int graph, double v) const {
 	auto& g = graphs[graph];
 	if (g.expr.error || (g.expr.kind != FplKind::Function && g.expr.kind != FplKind::FunctionOfY))

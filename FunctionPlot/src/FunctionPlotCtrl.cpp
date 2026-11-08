@@ -18,7 +18,8 @@ static_assert(FPLGF_HIDDEN == FplGraphHidden && FPLGF_DASHED == FplGraphDashed &
 	FPLGF_NOFEATURES == FplGraphNoFeatures && FPLGF_HEATMAP == FplGraphHeatmap && FPLGF_NOCONTOURS == FplGraphNoContours);
 static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int)FplKind::Definition &&
 	FPLK_IMPLICIT == (int)FplKind::Implicit && FPLK_SURFACE == (int)FplKind::Surface &&
-	FPLK_VECTORFIELD == (int)FplKind::VectorField);
+	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
+	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 
@@ -59,6 +60,13 @@ LRESULT CFunctionPlotCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CFunctionPlotCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	KillTimer(AnimationTimer);
 	DiscardTarget();
+	m_State->gpu.clear();
+	m_State->boxEdges = m_State->floorGrid = {};
+	m_State->renderer.Reset();
+	if (m_State->view3D) {
+		::DestroyWindow(m_State->view3D);
+		m_State->view3D = nullptr;
+	}
 	bHandled = FALSE;
 	return 0;
 }
@@ -76,6 +84,10 @@ LRESULT CFunctionPlotCtrl::OnSize(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	s.client = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	if (s.target)
 		s.target->Resize(D2D1::SizeU(s.client.cx, s.client.cy));
+	if (s.view3D)
+		::SetWindowPos(s.view3D, nullptr, 0, 0, s.client.cx, s.client.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+	if (s.renderer.Ready())
+		s.renderer.Resize(s.client.cx, s.client.cy, (float)s.dpi);
 	double w = ToDips(s.client.cx), h = ToDips(s.client.cy);
 	if (w <= 0 || h <= 0)
 		return 0;
@@ -115,6 +127,8 @@ LRESULT CFunctionPlotCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	s.dpi = ::GetDpiForWindow(m_hWnd);
 	if (s.target)
 		s.target->SetDpi((float)s.dpi, (float)s.dpi);
+	if (s.renderer.Ready())
+		s.renderer.Resize(s.client.cx, s.client.cy, (float)s.dpi);
 	Invalidate();
 	bHandled = FALSE;
 	return 0;
@@ -489,6 +503,11 @@ void CFunctionPlotCtrl::ValuesChanged() {
 
 void CFunctionPlotCtrl::Resample() {
 	auto& s = *m_State;
+	if (s.mode3D) {
+		s.plot.Build3D(s.box);
+		s.gpuStale = true;
+		return;
+	}
 	if (!s.viewSet)
 		return;
 	s.plot.Sample(s.view);
@@ -583,6 +602,105 @@ void CFunctionPlotCtrl::NotifyView() {
 	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
 }
 
+// ---- 3D --------------------------------------------------------------------------------
+
+BOOL CFunctionPlotCtrl::SetMode(FPLMODE mode) {
+	auto& s = *m_State;
+	const bool to3D = mode == FPLM_3D;
+	if (to3D == s.mode3D)
+		return TRUE;
+	ClearTrace();
+	s.drag = FplDrag::None;
+	// a window has one way of presenting at a time: the Direct2D target or the swap chain
+	s.brushes.clear();
+	if (to3D) {
+		DiscardTarget();
+		s.mode3D = true;
+		if (IsWindow() && !Ensure3D()) {
+			s.mode3D = false;
+			return FALSE;
+		}
+		Resample();
+	}
+	else {
+		s.gpu.clear();
+		s.boxEdges = s.floorGrid = {};
+		s.renderer.Reset();
+		if (s.view3D) {
+			::DestroyWindow(s.view3D);
+			s.view3D = nullptr;
+		}
+		s.mode3D = false;
+		for (auto& g : s.plot.graphs)
+			g.mesh = {};
+		Resample();
+	}
+	if (IsWindow())
+		Invalidate();
+	return TRUE;
+}
+
+BOOL CFunctionPlotCtrl::Invalidate(BOOL bErase) {
+	if (m_State && m_State->view3D)
+		::InvalidateRect(m_State->view3D, nullptr, FALSE);
+	return CWindow::Invalidate(bErase);
+}
+
+LRESULT CFunctionPlotCtrl::OnPaint3D(UINT, WPARAM, LPARAM, BOOL&) {
+	if (m_State->mode3D)
+		Paint3D(true);
+	return 0;
+}
+
+FPLMODE CFunctionPlotCtrl::GetMode() const {
+	return m_State->mode3D ? FPLM_3D : FPLM_2D;
+}
+
+void CFunctionPlotCtrl::SetView3D(const FPLVIEW3D& view) {
+	auto& s = *m_State;
+	FplBox3 box{ view.xMin, view.xMax, view.yMin, view.yMax, view.zMin, view.zMax };
+	if (!box.Valid())
+		return;
+	s.box = box;
+	s.camera.yaw = 0;
+	s.camera.pitch = 0;
+	s.camera.Orbit(view.yaw, view.pitch);
+	if (s.mode3D) {
+		Resample();
+		if (IsWindow())
+			Invalidate();
+	}
+}
+
+FPLVIEW3D CFunctionPlotCtrl::GetView3D() const {
+	auto& s = *m_State;
+	return { s.box.xMin, s.box.xMax, s.box.yMin, s.box.yMax, s.box.zMin, s.box.zMax, s.camera.yaw, s.camera.pitch };
+}
+
+void CFunctionPlotCtrl::ResetView3D() {
+	auto& s = *m_State;
+	s.box = {};
+	s.camera = {};
+	if (s.mode3D) {
+		Resample();
+		if (IsWindow())
+			Invalidate();
+	}
+}
+
+BOOL CFunctionPlotCtrl::IsSoftwareRendering() const {
+	return m_State->renderer.Ready() && m_State->renderer.IsWarp();
+}
+
+void CFunctionPlotCtrl::NotifyView3D() {
+	if (!IsWindow())
+		return;
+	NMFPLVIEW3D nm{};
+	nm.hdr = { m_hWnd, (UINT_PTR)GetDlgCtrlID(), FPLN_VIEW3DCHANGED };
+	nm.view = GetView3D();
+	::SendMessageW(GetParent(), WM_NOTIFY, nm.hdr.idFrom, (LPARAM)&nm);
+}
+
 // ---- Tracing ---------------------------------------------------------------------------
 
 BOOL CFunctionPlotCtrl::GetTrace(FPLTRACE& trace) const {
@@ -657,7 +775,7 @@ void CFunctionPlotCtrl::NotifyTrace() {
 
 void CFunctionPlotCtrl::UpdateTrace(POINT pt, bool dragging) {
 	auto& s = *m_State;
-	if (GetStyle() & FPLS_NOTRACE)
+	if ((GetStyle() & FPLS_NOTRACE) || s.mode3D)
 		return;
 	FplPoint p = { ToDips(pt.x), ToDips(pt.y) };
 	FplTraceHit hit;
@@ -836,17 +954,53 @@ BOOL CFunctionPlotCtrl::IsPanelCollapsed() const {
 
 // ---- Export ----------------------------------------------------------------------------
 
+namespace {
+
+bool SavePng(IWICImagingFactory* wic, IWICBitmap* bitmap, LPCWSTR path, UINT width, UINT height) {
+	ComPtr<IWICStream> stream;
+	ComPtr<IWICBitmapEncoder> encoder;
+	ComPtr<IWICBitmapFrameEncode> frame;
+	return SUCCEEDED(wic->CreateStream(stream.GetAddressOf())) &&
+		SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+		SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf())) &&
+		SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+		SUCCEEDED(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr)) &&
+		SUCCEEDED(frame->Initialize(nullptr)) &&
+		SUCCEEDED(frame->SetSize(width, height)) &&
+		SUCCEEDED(frame->WriteSource(bitmap, nullptr)) &&
+		SUCCEEDED(frame->Commit()) &&
+		SUCCEEDED(encoder->Commit());
+}
+
+}  // namespace
+
 BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
 	auto& s = *m_State;
 	if (!pszPath || !s.view.Valid())
 		return FALSE;
-	scale = std::clamp(scale, 0.25f, 8.0f);
-	const UINT width = (UINT)std::ceil(s.view.width * scale), height = (UINT)std::ceil(s.view.height * scale);
 	ComPtr<IWICImagingFactory> wic;
 	ComPtr<IWICBitmap> bitmap;
+	if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf()))))
+		return FALSE;
+
+	if (s.mode3D) {
+		// the frame as it's shown: drawn, and read back before it's presented
+		std::vector<uint32_t> pixels;
+		UINT width = 0, height = 0;
+		Paint3D(false);
+		bool captured = s.renderer.Ready() && s.renderer.Capture(pixels, width, height);
+		if (s.renderer.Ready())
+			s.renderer.Present();
+		return captured &&
+			SUCCEEDED(wic->CreateBitmapFromMemory(width, height, GUID_WICPixelFormat32bppPBGRA, width * 4,
+				width * height * 4, (BYTE*)pixels.data(), bitmap.GetAddressOf())) &&
+			SavePng(wic.Get(), bitmap.Get(), pszPath, width, height);
+	}
+
+	scale = std::clamp(scale, 0.25f, 8.0f);
+	const UINT width = (UINT)std::ceil(s.view.width * scale), height = (UINT)std::ceil(s.view.height * scale);
 	ComPtr<ID2D1RenderTarget> target;
-	if (FAILED(::CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf()))) ||
-		FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.GetAddressOf())))
+	if (FAILED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.GetAddressOf())))
 		return FALSE;
 	const float dpi = 96 * scale;
 	auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -865,27 +1019,12 @@ BOOL CFunctionPlotCtrl::ExportPng(LPCWSTR pszPath, float scale) {
 	for (size_t i = 0; i < s.paths.size() && i < heats.size(); i++)
 		s.paths[i].heat = std::move(heats[i]);
 	s.brushes = std::move(brushes);
-	if (FAILED(hr))
-		return FALSE;
-
-	ComPtr<IWICStream> stream;
-	ComPtr<IWICBitmapEncoder> encoder;
-	ComPtr<IWICBitmapFrameEncode> frame;
-	return SUCCEEDED(wic->CreateStream(stream.GetAddressOf())) &&
-		SUCCEEDED(stream->InitializeFromFilename(pszPath, GENERIC_WRITE)) &&
-		SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.GetAddressOf())) &&
-		SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
-		SUCCEEDED(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr)) &&
-		SUCCEEDED(frame->Initialize(nullptr)) &&
-		SUCCEEDED(frame->SetSize(width, height)) &&
-		SUCCEEDED(frame->WriteSource(bitmap.Get(), nullptr)) &&
-		SUCCEEDED(frame->Commit()) &&
-		SUCCEEDED(encoder->Commit());
+	return SUCCEEDED(hr) && SavePng(wic.Get(), bitmap.Get(), pszPath, width, height);
 }
 
 BOOL CFunctionPlotCtrl::ExportSvg(LPCWSTR pszPath) {
 	auto& s = *m_State;
-	if (!pszPath || !s.view.Valid())
+	if (!pszPath || !s.view.Valid() || s.mode3D)
 		return FALSE;
 	const FPLCOLORS c = GetColors();
 	const DWORD style = GetStyle();
@@ -958,6 +1097,31 @@ LRESULT CFunctionPlotCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled
 		}
 	}
 	const bool canMove = !(GetStyle() & FPLS_NOPANZOOM);
+	if (s.mode3D) {
+		// the arrows orbit, +/- zoom the box, Home starts over
+		switch (wParam) {
+			case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+				s.camera.Orbit(wParam == VK_LEFT ? 0.2f : wParam == VK_RIGHT ? -0.2f : 0,
+					wParam == VK_UP ? 0.1f : wParam == VK_DOWN ? -0.1f : 0);
+				Invalidate();
+				NotifyView3D();
+				return 0;
+			case VK_ADD: case VK_OEM_PLUS: case VK_SUBTRACT: case VK_OEM_MINUS:
+				if (!canMove)
+					break;
+				s.box.Zoom(wParam == VK_ADD || wParam == VK_OEM_PLUS ? 1.25 : 0.8);
+				Resample();
+				Invalidate();
+				NotifyView3D();
+				return 0;
+			case VK_HOME:
+				ResetView3D();
+				NotifyView3D();
+				return 0;
+		}
+		bHandled = FALSE;
+		return 0;
+	}
 	auto& v = s.view;
 	switch (wParam) {
 		case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
@@ -1033,6 +1197,14 @@ LRESULT CFunctionPlotCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	}
 	if (hit.part == FplPanelPart::Panel)
 		return 0;
+	if (s.mode3D) {
+		// drag to orbit; Shift (or no orbiting wanted) to move the box's x and y
+		bool pan = (::GetKeyState(VK_SHIFT) < 0) && !(GetStyle() & FPLS_NOPANZOOM);
+		s.drag = pan ? FplDrag::Pan3D : FplDrag::Orbit;
+		s.dragLast = pt;
+		SetCapture();
+		return 0;
+	}
 	// on a graph: trace it; elsewhere: pan
 	if (!(GetStyle() & FPLS_NOTRACE)) {
 		FplPoint p = { ToDips(pt.x), ToDips(pt.y) };
@@ -1092,6 +1264,29 @@ LRESULT CFunctionPlotCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		case FplDrag::Slider:
 			DragSlider(s.dragRow, ToDips(pt.x));
 			return 0;
+		case FplDrag::Orbit:
+			if (pt.x != s.dragLast.x || pt.y != s.dragLast.y) {
+				s.camera.Orbit(-0.01f * ToDips(pt.x - s.dragLast.x), 0.01f * ToDips(pt.y - s.dragLast.y));
+				s.dragLast = pt;
+				Invalidate();
+				NotifyView3D();
+			}
+			return 0;
+		case FplDrag::Pan3D:
+			if (pt.x != s.dragLast.x || pt.y != s.dragLast.y) {
+				// the floor follows the mouse: screen right and up as directions on the xy plane
+				const float dx = ToDips(pt.x - s.dragLast.x), dy = ToDips(pt.y - s.dragLast.y);
+				const float side = 0.5f * std::min(ToDips(s.client.cx), ToDips(s.client.cy));
+				const double rx = -std::sin(s.camera.yaw), ry = std::cos(s.camera.yaw);
+				const double fx = -std::cos(s.camera.yaw), fy = -std::sin(s.camera.yaw);
+				const double mx = (dx * rx - dy * fx) / side, my = (dx * ry - dy * fy) / side;
+				s.box.Pan(-mx * (s.box.xMax - s.box.xMin) / 2, -my * (s.box.yMax - s.box.yMin) / 2);
+				s.dragLast = pt;
+				Resample();
+				Invalidate();
+				NotifyView3D();
+			}
+			return 0;
 		default:
 			break;
 	}
@@ -1134,7 +1329,7 @@ LRESULT CFunctionPlotCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 	}
 	auto& s = *m_State;
 	LPCWSTR cursor = IDC_ARROW;
-	if (s.drag == FplDrag::Pan)
+	if (s.drag == FplDrag::Pan || s.drag == FplDrag::Pan3D)
 		cursor = IDC_SIZEALL;
 	else if (s.drag == FplDrag::Slider || s.hotRow >= 0 || s.hotToggle)
 		cursor = IDC_HAND;
@@ -1151,6 +1346,13 @@ LRESULT CFunctionPlotCtrl::OnMouseWheel(UINT, WPARAM wParam, LPARAM lParam, BOOL
 	POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 	ScreenToClient(&pt);
 	const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+	if (s.mode3D) {
+		s.box.Zoom(std::pow(1.2, delta / 120.0));
+		Resample();
+		Invalidate();
+		NotifyView3D();
+		return 0;
+	}
 	const UINT keys = GET_KEYSTATE_WPARAM(wParam);
 	const double factor = std::pow(1.2, delta / 120.0);
 	double fx = factor, fy = factor;

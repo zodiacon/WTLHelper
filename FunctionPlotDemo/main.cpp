@@ -66,14 +66,19 @@ enum {
 	ID_DEMO_FEATURES,
 	ID_DEMO_HEATMAPS,
 	ID_DEMO_COLLAPSE,
+	ID_DEMO_3D,
 };
 
 // ---- Examples -------------------------------------------------------------------
+
+enum class Setup { None, FieldSlider, Animate };
 
 struct Example {
 	const wchar_t* name;
 	const wchar_t* text;        // the lines, as typed (code points for what isn't ASCII)
 	bool piTicks;
+	bool is3D = false;
+	Setup setup = Setup::None;
 };
 
 static const Example g_Examples[] = {
@@ -85,9 +90,14 @@ static const Example g_Examples[] = {
 	{ L"&Steps and Domains", L"y = floor x\r\ny = sqrt(9 - x^2)\r\ny = |x - 2| - 3\r\ny = x^3/10 {-4 < x < 4}\r\ny = sign(x) - 5", false },
 	{ L"&User Functions", L"f(x) = x^3/6 - x\r\nf'(x)\r\nf''(x)\r\ng(x) = f(x - a) + 1\r\ny = d/dx sin(x^2/4)", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },
-	{ L"&Vector Field", L"(y, -sin x)\r\ny^2/2 - cos x = c", false },
-	{ L"&Animation", L"x^2 + y^2 = 4\r\n(2cos p, 2sin p)\r\ny = 2sin(x - p)\r\nr = 3 + cos(5\x03B8 + 2p)", false },
+	{ L"&Vector Field", L"(y, -sin x)\r\ny^2/2 - cos x = c", false, false, Setup::FieldSlider },
+	{ L"&Animation", L"x^2 + y^2 = 4\r\n(2cos p, 2sin p)\r\ny = 2sin(x - p)\r\nr = 3 + cos(5\x03B8 + 2p)", false, false,
+		Setup::Animate },
 	{ L"&Errors", L"y = 2 +\r\ny = sin(x\r\nx = y = 1\r\ny = sin()\r\ny = 2 * * 3", false },
+	{ L"3D: Su&rfaces", L"z = 4sin(x/2)cos(y/2)\r\nz = (x^2 - y^2)/20 - 6\r\ny = 6cos(x/2)", false, true },
+	{ L"3D: Curves and S&olids", L"(5cos 4t, 5sin 4t, 3t - 9)\r\n(4cos u sin(v/2), 4sin u sin(v/2), 4cos(v/2))\r\n"
+		L"((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(0, 0, 8)", false, true },
+	{ L"3D: Animated &Wave", L"z = 3sin(sqrt(x^2 + y^2) - 2p)/(1 + sqrt(x^2 + y^2)/4)", false, true, Setup::Animate },
 };
 
 // ---- State --------------------------------------------------------------------
@@ -218,8 +228,18 @@ static std::wstring Number(double v) {
 }
 
 static void ShowView() {
-	FPLVIEW v = g_plot.GetView();
-	std::wstring text = L"x: " + Number(v.xMin) + L" to " + Number(v.xMax) + L"   y: " + Number(v.yMin) + L" to " + Number(v.yMax);
+	std::wstring text;
+	if (g_plot.GetMode() == FPLM_3D) {
+		FPLVIEW3D v = g_plot.GetView3D();
+		text = L"x: " + Number(v.xMin) + L" to " + Number(v.xMax) + L"   y: " + Number(v.yMin) + L" to " + Number(v.yMax) +
+			L"   z: " + Number(v.zMin) + L" to " + Number(v.zMax);
+		if (g_plot.IsSoftwareRendering())
+			text += L"   (WARP)";
+	}
+	else {
+		FPLVIEW v = g_plot.GetView();
+		text = L"x: " + Number(v.xMin) + L" to " + Number(v.xMax) + L"   y: " + Number(v.yMin) + L" to " + Number(v.yMax);
+	}
 	g_status.SetText(1, text.c_str());
 }
 
@@ -264,16 +284,19 @@ static void LoadExample(int index) {
 	g_plot.RemoveAllGraphs();
 	DWORD style = g_plot.GetStyle();
 	g_plot.SetWindowLong(GWL_STYLE, e.piTicks ? style | FPLS_PITICKS : style & ~FPLS_PITICKS);
+	g_plot.SetMode(e.is3D ? FPLM_3D : FPLM_2D);
+	if (e.is3D)
+		g_plot.ResetView3D();
 	g_edit.SetWindowText(e.text);   // a multiline edit sends no EN_CHANGE for this
 	SyncGraphs();
 	ShowLineError();
-	if (index == (int)std::size(g_Examples) - 2) {
+	if (e.setup == Setup::Animate) {
 		// the animation: p around a circle, playing
 		FPLPARAM p{ L"p", 0, 0, 6.283185307179586, 0, 0 };
 		g_plot.SetParameter(p);
 		g_plot.AnimateParameter(L"p", TRUE);
 	}
-	else if (index == (int)std::size(g_Examples) - 3) {
+	else if (e.setup == Setup::FieldSlider) {
 		FPLPARAM c{ L"c", 0.5, -1, 3, 0.05, 0 };
 		g_plot.SetParameter(c);
 	}
@@ -296,6 +319,7 @@ static void UpdateMenu(HMENU menu) {
 	check(ID_DEMO_HIGHCONTRAST, g_plot.IsHighContrast());
 	check(ID_DEMO_HEATMAPS, g_heatmaps);
 	check(ID_DEMO_COLLAPSE, g_plot.IsPanelCollapsed() != FALSE);
+	check(ID_DEMO_3D, g_plot.GetMode() == FPLM_3D);
 #ifdef DEMO_WTLHELPER
 	check(ID_DEMO_DARKMODE, WTLHelper::IsDarkMode());
 #endif
@@ -352,7 +376,13 @@ static void OnCommand(HWND hwnd, UINT id) {
 	}
 	switch (id) {
 		case ID_DEMO_EXIT: ::DestroyWindow(hwnd); break;
-		case ID_DEMO_HOME: g_plot.ResetView(); ShowView(); break;
+		case ID_DEMO_HOME:
+			if (g_plot.GetMode() == FPLM_3D)
+				g_plot.ResetView3D();
+			else
+				g_plot.ResetView();
+			ShowView();
+			break;
 		case ID_DEMO_ZOOMIN: g_plot.Zoom(1.5); ShowView(); break;
 		case ID_DEMO_ZOOMOUT: g_plot.Zoom(1 / 1.5); ShowView(); break;
 		case ID_DEMO_EQUAL: ToggleStyle(FPLS_EQUALSCALE); ShowView(); break;
@@ -370,6 +400,11 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_EXPORTSVG: Export(true); break;
 		case ID_DEMO_HEATMAPS: g_heatmaps = !g_heatmaps; SyncGraphs(); break;
 		case ID_DEMO_COLLAPSE: g_plot.SetPanelCollapsed(!g_plot.IsPanelCollapsed()); break;
+		case ID_DEMO_3D:
+			if (!g_plot.SetMode(g_plot.GetMode() == FPLM_3D ? FPLM_2D : FPLM_3D))
+				::MessageBoxW(hwnd, L"3D needs Direct3D 11.", L"3D", MB_ICONERROR);
+			ShowView();
+			break;
 #ifdef DEMO_WTLHELPER
 		case ID_DEMO_DARKMODE:
 			WTLHelper::SwitchToMode(WTLHelper::IsDarkMode() ? DarkModeKind::Classic : DarkModeKind::Dark, hwnd);
@@ -458,7 +493,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			if (hdr->idFrom == IDC_PLOT) {
 				switch (hdr->code) {
 					case FPLN_TRACE: ShowTrace(((NMFPLTRACE*)lParam)->trace); break;
-					case FPLN_VIEWCHANGED: ShowView(); break;
+					case FPLN_VIEWCHANGED: case FPLN_VIEW3DCHANGED: ShowView(); break;
 					case FPLN_PARAMCHANGED: ShowLineError(); break;
 				}
 			}
@@ -515,6 +550,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXIT, L"E&xit");
 
 	HMENU hView = ::CreatePopupMenu();
+	::AppendMenuW(hView, MF_STRING, ID_DEMO_3D, L"&3D\tCtrl+3");
+	::AppendMenuW(hView, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_HOME, L"&Reset View\tCtrl+Home");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ZOOMIN, L"Zoom &In\tCtrl++");
 	::AppendMenuW(hView, MF_STRING, ID_DEMO_ZOOMOUT, L"Zoom &Out\tCtrl+-");
@@ -552,6 +589,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, VK_SUBTRACT, ID_DEMO_ZOOMOUT },
 		{ FVIRTKEY, VK_F2, ID_DEMO_FEATURES },
 		{ FVIRTKEY | FCONTROL, 'L', ID_DEMO_COLLAPSE },
+		{ FVIRTKEY | FCONTROL, '3', ID_DEMO_3D },
 	};
 	HACCEL hAccel = ::CreateAcceleratorTableW(accels, (int)std::size(accels));
 

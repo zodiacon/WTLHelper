@@ -96,12 +96,15 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\FunctionPlot.h" />
+    <ClInclude Include="src\FunctionPlot3D.h" />
     <ClInclude Include="src\FunctionPlotData.h" />
     <ClInclude Include="src\FunctionPlotExpr.h" />
     <ClInclude Include="src\FunctionPlotGraphs.h" />
     <ClInclude Include="src\FunctionPlotModel.h" />
+    <ClInclude Include="src\FunctionPlotRender3D.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\FunctionPlot3D.cpp" />
     <ClCompile Include="src\FunctionPlotAnalysis.cpp" />
     <ClCompile Include="src\FunctionPlotAxes.cpp" />
     <ClCompile Include="src\FunctionPlotCalc.cpp" />
@@ -111,6 +114,7 @@
     <ClCompile Include="src\FunctionPlotGraphs.cpp" />
     <ClCompile Include="src\FunctionPlotPaint.cpp" />
     <ClCompile Include="src\FunctionPlotParse.cpp" />
+    <ClCompile Include="src\FunctionPlotRender3D.cpp" />
     <ClCompile Include="src\FunctionPlotSample.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

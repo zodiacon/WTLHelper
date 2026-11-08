@@ -108,7 +108,7 @@ struct FplAst {
 	int Cmp(FplRel rel, int a, int b);
 };
 
-// The standard variables (x y z t theta r). Any other name is a parameter. z has no slot: it's what a surface gives.
+// The standard variables (x y z t theta r u v). Any other name is a parameter. u and v are a parametric surface's.
 inline constexpr wchar_t FplTheta[] = L"\x03B8";
 bool FplIsVariable(std::wstring_view name);
 
@@ -169,12 +169,15 @@ enum class FplKind : uint8_t {
 	Definition,		// name = value with no variables; expr[0] is the value
 	Surface,		// z = F(x, y); expr[0] is F
 	VectorField,	// (P(x, y), Q(x, y)); expr[0], expr[1]
+	SpaceCurve,		// (x(t), y(t), z(t)); expr[0..2] (3D)
+	ParametricSurface,	// (x(u, v), y(u, v), z(u, v)); expr[0..2] (3D)
+	Point3D,		// (a, b, c) with no variables; expr[0..2] (3D)
 };
 
 struct FplPlotDef {
 	FplKind kind = FplKind::Function;
 	FplRel rel = FplRel::Eq;	// for Function, FunctionOfY, Polar and Implicit: y rel f(x), r rel f(theta), F rel 0
-	int expr[2] = { -1, -1 };
+	int expr[3] = { -1, -1, -1 };
 	std::wstring name;			// Definition's
 	FplError error;
 };
@@ -183,7 +186,9 @@ struct FplPlotDef {
 FplPlotDef FplClassify(FplAst& ast, int root);
 
 // Bit per standard variable, for FplVariablesOf.
-enum : unsigned { FplVarX = 1, FplVarY = 2, FplVarT = 4, FplVarTheta = 8, FplVarR = 16, FplVarZ = 32 };
+enum : unsigned {
+	FplVarX = 1, FplVarY = 2, FplVarT = 4, FplVarTheta = 8, FplVarR = 16, FplVarZ = 32, FplVarU = 64, FplVarV = 128
+};
 unsigned FplVariablesOf(const FplAst& ast, int node);
 bool FplHasNames(const FplAst& ast, int node);	// any Var at all (variables or parameters)
 
@@ -205,7 +210,10 @@ double FplEvalTree(const FplAst& ast, int node, const std::vector<std::wstring>&
 // ---- Compiled form ---------------------------------------------------------------------------------------------------
 
 // The slots a program reads: the standard variables, then the app's parameters in the order given at compile time.
-enum : int { FplSlotX = 0, FplSlotY = 1, FplSlotT = 2, FplSlotTheta = 3, FplFirstParam = 4 };
+enum : int {
+	FplSlotX = 0, FplSlotY = 1, FplSlotT = 2, FplSlotTheta = 3, FplSlotZ = 4, FplSlotU = 5, FplSlotV = 6,
+	FplFirstParam = 7
+};
 
 enum class FplCode : uint8_t {
 	Const, Load,
@@ -251,7 +259,8 @@ double FplPow(double x, double y);
 struct FplExpression {
 	FplKind kind = FplKind::Function;
 	FplRel rel = FplRel::Eq;
-	FplProgram f, g;			// g only for Parametric and Point
+	FplProgram f, g;			// g only for Parametric and Point (and the 3D kinds)
+	FplProgram h;				// the 3D kinds' z
 	FplProgram df;				// Function's df/dx, FunctionOfY's df/dy (empty if it can't be derived)
 	std::wstring name;			// Definition's
 	FplError error;

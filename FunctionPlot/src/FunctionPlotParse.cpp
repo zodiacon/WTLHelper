@@ -48,7 +48,8 @@ const FplFuncInfo& FplFuncInfoOf(FplFunc f) {
 }
 
 bool FplIsVariable(std::wstring_view name) {
-	return name == L"x" || name == L"y" || name == L"z" || name == L"t" || name == L"r" || name == FplTheta;
+	return name == L"x" || name == L"y" || name == L"z" || name == L"t" || name == L"r" || name == FplTheta ||
+		name == L"u" || name == L"v";
 }
 
 // ---- The tree --------------------------------------------------------------------------------------------------------

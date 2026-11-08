@@ -5,11 +5,13 @@
 
 #include "FunctionPlot.h"
 #include "FunctionPlotGraphs.h"
+#include "FunctionPlotRender3D.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
 
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -53,7 +55,7 @@ struct FplPanelHit {
 	int row = -1;
 };
 
-enum class FplDrag : uint8_t { None, Pan, Trace, Slider };
+enum class FplDrag : uint8_t { None, Pan, Trace, Slider, Orbit, Pan3D };
 
 // sizes, in DIPs
 constexpr float FplPanelMargin = 10, FplPanelPad = 6, FplGraphRow = 26, FplErrorLine = 16, FplSliderRow = 30;
@@ -101,6 +103,18 @@ struct FplState {
 	POINT dragLast{};
 	int dragRow = -1;
 	bool trackingLeave = false;
+
+	// 3D
+	bool mode3D = false;
+	HWND view3D = nullptr;				// the 3D frames' window: a child over the control's client area, which the
+										// mouse goes through (a flip-model swap chain on the control's own window would
+										// keep 2D's Direct2D target from showing afterwards)
+	FplBox3 box;
+	FplCamera camera;
+	FplRenderer3D renderer;
+	std::vector<FplGpuMesh> gpu;		// by graph
+	FplGpuMesh boxEdges, floorGrid;
+	bool gpuStale = true;				// the meshes changed since they were uploaded
 
 	// look
 	bool customColors = false;

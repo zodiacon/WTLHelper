@@ -96,16 +96,8 @@ ID2D1SolidColorBrush* FplState::Brush(COLORREF color) {
 
 // ---- Resources -------------------------------------------------------------------------
 
-bool CFunctionPlotCtrl::CreateTarget() {
-	auto& s = *m_State;
-	if (s.target)
-		return true;
-	const auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(),
-		(float)s.dpi, (float)s.dpi);
-	const auto hwndProps = D2D1::HwndRenderTargetProperties(m_hWnd, D2D1::SizeU(s.client.cx, s.client.cy),
-		D2D1_PRESENT_OPTIONS_IMMEDIATELY);
-	if (FAILED(FplD2DFactory()->CreateHwndRenderTarget(props, hwndProps, s.target.GetAddressOf())))
-		return false;
+// The stroke styles and text formats: the factories', for any target.
+static void MakeResources(FplState& s) {
 	if (!s.roundStroke) {
 		auto round = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
 			D2D1_LINE_JOIN_ROUND);
@@ -125,6 +117,19 @@ bool CFunctionPlotCtrl::CreateTarget() {
 		s.traceText = MakeFormat(13, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
 		s.icons = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, L"Segoe MDL2 Assets");
 	}
+}
+
+bool CFunctionPlotCtrl::CreateTarget() {
+	auto& s = *m_State;
+	if (s.target)
+		return true;
+	const auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(),
+		(float)s.dpi, (float)s.dpi);
+	const auto hwndProps = D2D1::HwndRenderTargetProperties(m_hWnd, D2D1::SizeU(s.client.cx, s.client.cy),
+		D2D1_PRESENT_OPTIONS_IMMEDIATELY);
+	if (FAILED(FplD2DFactory()->CreateHwndRenderTarget(props, hwndProps, s.target.GetAddressOf())))
+		return false;
+	MakeResources(s);
 	return true;
 }
 
@@ -324,6 +329,12 @@ void CFunctionPlotCtrl::LayoutPanel() {
 
 void CFunctionPlotCtrl::Paint() {
 	auto& s = *m_State;
+	if (s.mode3D) {
+		// the frames are the 3D view's window's to ask for (once it's there)
+		if (!s.view3D)
+			Paint3D(true);
+		return;
+	}
 	if (!CreateTarget())
 		return;
 	if (PaintTo(s.target.Get(), (float)s.dpi, false) == D2DERR_RECREATE_TARGET) {
@@ -670,5 +681,170 @@ void CFunctionPlotCtrl::PaintPanel() {
 			if (focused && (int)r == s.focusRow)
 				rt->DrawRectangle({ left + 3, top + 2, right - 3, row.rect.bottom - 2 }, text, pixel, s.dashStroke.Get());
 		}
+	}
+}
+
+// ---- 3D --------------------------------------------------------------------------------
+
+namespace {
+
+// The 3D frames' window: paints by asking the control, and lets the mouse through to it.
+LRESULT CALLBACK View3DProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	switch (msg) {
+		case WM_NCHITTEST:
+			return HTTRANSPARENT;
+		case WM_ERASEBKGND:
+			return 1;
+		case WM_PAINT: {
+			PAINTSTRUCT ps;
+			::BeginPaint(hwnd, &ps);
+			::EndPaint(hwnd, &ps);
+			::SendMessageW(::GetParent(hwnd), CFunctionPlotCtrl::WM_FPL_PAINT3D, 0, 0);
+			return 0;
+		}
+	}
+	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+HWND CreateView3D(HWND parent, SIZE size) {
+	static const ATOM atom = [] {
+		WNDCLASSEXW wc{ sizeof(wc) };
+		wc.lpfnWndProc = View3DProc;
+		wc.hInstance = ATL::_AtlBaseModule.GetModuleInstance();
+		wc.lpszClassName = L"WC_FunctionPlot3DView";
+		return ::RegisterClassExW(&wc);
+	}();
+	if (!atom)
+		return nullptr;
+	return ::CreateWindowExW(0, L"WC_FunctionPlot3DView", nullptr, WS_CHILD | WS_VISIBLE, 0, 0, size.cx,
+		size.cy, parent, nullptr, ATL::_AtlBaseModule.GetModuleInstance(), nullptr);
+}
+
+}  // namespace
+
+bool CFunctionPlotCtrl::Ensure3D() {
+	auto& s = *m_State;
+	if (!s.view3D) {
+		s.view3D = CreateView3D(m_hWnd, s.client);
+		if (!s.view3D)
+			return false;
+	}
+	if (!s.renderer.Ready()) {
+		s.gpu.clear();
+		s.boxEdges = s.floorGrid = {};
+		s.brushes.clear();
+		if (!s.renderer.Init(s.view3D, s.client.cx, s.client.cy, (float)s.dpi))
+			return false;
+		s.gpuStale = true;
+		MakeResources(s);
+	}
+	if (s.gpuStale)
+		Upload3D();
+	return true;
+}
+
+void CFunctionPlotCtrl::Upload3D() {
+	auto& s = *m_State;
+	s.gpuStale = false;
+	s.gpu.assign(s.plot.graphs.size(), {});
+	for (size_t i = 0; i < s.plot.graphs.size(); i++)
+		s.gpu[i] = s.renderer.Create(s.plot.graphs[i].mesh);
+	s.boxEdges = s.renderer.Create(FplBoxEdges());
+	// the floor's grid at the x and y ticks
+	FplMesh grid;
+	auto line = [&](FplVec3 a, FplVec3 b) {
+		uint32_t base = (uint32_t)grid.vertices.size();
+		FplVertex3 va, vb;
+		va.pos = a;
+		vb.pos = b;
+		grid.vertices.push_back(va);
+		grid.vertices.push_back(vb);
+		grid.indices.push_back(base);
+		grid.indices.push_back(base + 1);
+	};
+	FplTicks tx = FplMakeTicks(s.box.xMin, s.box.xMax, 320, 64), ty = FplMakeTicks(s.box.yMin, s.box.yMax, 320, 64);
+	for (double x : tx.major) {
+		float b = s.box.ToBox(x, 0, 0).x;
+		line({ b, -1, -1 }, { b, 1, -1 });
+	}
+	for (double y : ty.major) {
+		float b = s.box.ToBox(0, y, 0).y;
+		line({ -1, b, -1 }, { 1, b, -1 });
+	}
+	s.floorGrid = s.renderer.Create(grid);
+}
+
+void CFunctionPlotCtrl::Paint3D(bool present) {
+	auto& s = *m_State;
+	if (!Ensure3D()) {
+		// no Direct3D 11 at all: say so (a plain GDI paint)
+		if (s.view3D) {
+			::DestroyWindow(s.view3D);
+			s.view3D = nullptr;
+		}
+		HDC dc = ::GetDC(m_hWnd);
+		RECT rc;
+		GetClientRect(&rc);
+		::FillRect(dc, &rc, ::GetSysColorBrush(COLOR_WINDOW));
+		::SetBkMode(dc, TRANSPARENT);
+		::SetTextColor(dc, ::GetSysColor(COLOR_WINDOWTEXT));
+		::DrawTextW(dc, L"3D needs Direct3D 11", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		::ReleaseDC(m_hWnd, dc);
+		ValidateRect(nullptr);
+		return;
+	}
+	const FPLCOLORS c = GetColors();
+	const float w = ToDips(s.client.cx), h = ToDips(s.client.cy);
+	auto& r = s.renderer;
+	r.Begin(c.crBack, s.camera.ViewProjection(w / std::max(h, 1.0f)), s.camera.Eye());
+	if (!(GetStyle() & FPLS_NOGRID))
+		r.Draw(s.floorGrid, c.crGrid, false, true, false);
+	if (!(GetStyle() & FPLS_NOAXES))
+		r.Draw(s.boxEdges, c.crAxis, false, true, false);
+	for (size_t i = 0; i < s.plot.graphs.size() && i < s.gpu.size(); i++) {
+		auto& g = s.plot.graphs[i];
+		if (!g.Drawable())
+			continue;
+		bool surface = g.expr.kind == FplKind::Surface || g.expr.kind == FplKind::ParametricSurface;
+		r.Draw(s.gpu[i], GraphColor((int)i), surface && (g.flags & FplGraphHeatmap), false, true);
+	}
+	if (auto* dc = r.BeginOverlay()) {
+		s.rt = dc;
+		s.paintDpi = (float)s.dpi;
+		s.exporting = !present;
+		// an exported frame's text without ClearType's colored fringes
+		dc->SetTextAntialiasMode(present ? D2D1_TEXT_ANTIALIAS_MODE_DEFAULT : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+		PaintTicks3D();
+		PaintPanel();
+		r.EndOverlay();
+		s.rt = nullptr;
+		s.exporting = false;
+		// the overlay's brushes belong to its device: kept for the next frame
+	}
+	if (present && !r.Present()) {
+		// the device was lost: start again on the next paint
+		r.Reset();
+		s.gpu.clear();
+		s.brushes.clear();
+		Invalidate();
+	}
+	ValidateRect(nullptr);
+}
+
+void CFunctionPlotCtrl::PaintTicks3D() {
+	auto& s = *m_State;
+	if (GetStyle() & FPLS_NOAXES)
+		return;
+	auto* rt = s.rt;
+	const FPLCOLORS c = GetColors();
+	const float w = ToDips(s.client.cx), h = ToDips(s.client.cy);
+	auto* label = s.Brush(c.crLabel);
+	auto* name = s.Brush(c.crPanelText);
+	for (auto& t : FplBoxTicks(s.box, s.camera)) {
+		FplPoint p;
+		if (!s.camera.Project(t.at, w, h, p))
+			continue;
+		const float x = (float)p.x, y = (float)p.y;
+		Text(rt, t.text, s.labelCenter.Get(), { x - 60, y - 10, x + 60, y + 10 }, t.name ? name : label);
 	}
 }

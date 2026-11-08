@@ -141,6 +141,9 @@ int StandardSlot(std::wstring_view name) {
 	if (name == L"y") return FplSlotY;
 	if (name == L"t") return FplSlotT;
 	if (name == FplTheta) return FplSlotTheta;
+	if (name == L"z") return FplSlotZ;
+	if (name == L"u") return FplSlotU;
+	if (name == L"v") return FplSlotV;
 	return -1;
 }
 
@@ -472,6 +475,8 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 	e.f = FplCompile(parsed.ast, def.expr[0], parameters, &e.error);
 	if (!e.error && def.expr[1] >= 0)
 		e.g = FplCompile(parsed.ast, def.expr[1], parameters, &e.error);
+	if (!e.error && def.expr[2] >= 0)
+		e.h = FplCompile(parsed.ast, def.expr[2], parameters, &e.error);
 	if (!e.error && (def.kind == FplKind::Function || def.kind == FplKind::FunctionOfY)) {
 		FplError ignored;
 		int d = FplDerive(parsed.ast, def.expr[0], def.kind == FplKind::Function ? L"x" : L"y", &ignored);
