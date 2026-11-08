@@ -101,6 +101,7 @@ static const Example g_Examples[] = {
 	{ L"&Curves", L"(4cos 3t, 4sin 2t)\r\nr = 2 + 4cos 5\x03B8\r\nr = \x03B8/2\r\n(t cos t, t sin t)", false },
 	{ L"&Implicit", L"x^2 + y^2 = 16\r\ny^2 = x^3 - 4x\r\nx^2 - y^2 = 1\r\nsin x + cos y = 0.5", false },
 	{ L"I&nequalities", L"y < 4 - x^2\r\nx^2/16 + y^2/4 \x2264 1\r\ny > sin x + 2\r\nr < 2 + cos 6\x03B8", false },
+	{ L"&Between Curves", L"x^2/4 - 3 < y < 4 - x^2/2\r\n6 < x < 8\r\ny^2 - 8 \x2264 x \x2264 -y^2 - 2\r\ny = 3sin x", false },
 	{ L"&Steps and Domains", L"y = floor x\r\ny = sqrt(9 - x^2)\r\ny = |x - 2| - 3\r\ny = x^3/10 {-4 < x < 4}\r\ny = sign(x) - 5", false },
 	{ L"&User Functions", L"f(x) = x^3/6 - x\r\nf'(x)\r\nf''(x)\r\ng(x) = f(x - a) + 1\r\ny = d/dx sin(x^2/4)", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },

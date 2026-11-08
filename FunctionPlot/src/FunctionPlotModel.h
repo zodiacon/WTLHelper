@@ -176,6 +176,14 @@ std::vector<FplArrow> FplSampleField(const std::function<FplPoint(double, double
 // t from 0 to 1 to a color (a COLORREF, 0x00BBGGRR) on a perceptual scale from dark blue through green to yellow.
 uint32_t FplColormap(double t);
 
+// A heat map's color scale over lo to hi, drawn pixels DIPs tall: labels at nice values at least minSpacing apart, each
+// at a fraction of the bar from its bottom.
+struct FplColorScaleTick {
+	double fraction = 0;
+	std::wstring text;
+};
+std::vector<FplColorScaleTick> FplMakeColorScale(double lo, double hi, double pixels, double minSpacing = 36);
+
 // ---- An expression's geometry ----------------------------------------------------------------------------------------
 
 struct FplGeometry {

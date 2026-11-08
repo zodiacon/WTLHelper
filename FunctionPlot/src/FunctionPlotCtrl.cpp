@@ -24,7 +24,8 @@ static_assert(FPLK_FUNCTION == (int)FplKind::Function && FPLK_DEFINITION == (int
 	FPLK_VECTORFIELD == (int)FplKind::VectorField && FPLK_SPACECURVE == (int)FplKind::SpaceCurve &&
 	FPLK_PARAMSURFACE == (int)FplKind::ParametricSurface && FPLK_POINT3D == (int)FplKind::Point3D &&
 	FPLK_IMPLICITSURFACE == (int)FplKind::ImplicitSurface && FPLK_INTEGRAL == (int)FplKind::Integral &&
-	FPLK_REGRESSION == (int)FplKind::Regression && FPLK_SLOPEFIELD == (int)FplKind::SlopeField);
+	FPLK_REGRESSION == (int)FplKind::Regression && FPLK_BETWEEN == (int)FplKind::Between &&
+	FPLK_SLOPEFIELD == (int)FplKind::SlopeField);
 static_assert(FPLE_REDEFINED == (int)FplErrorCode::Redefined && FPLE_INTERNAL == (int)FplErrorCode::Internal);
 static_assert(FPLF_ROOT == (int)FplFeatureKind::Root && FPLF_YINTERCEPT == (int)FplFeatureKind::YIntercept);
 

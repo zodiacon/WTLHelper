@@ -530,9 +530,25 @@ public:
 		if (IsRelation(Peek()) || IsOp(Peek(), L'~')) {
 			FplRel rel = IsOp(Peek(), L'~') ? (Next(), FplRel::Fit) : RelOf(Next());
 			int rhs = Sum();
-			if (IsRelation(Peek()) || IsOp(Peek(), L'~'))
-				Fail(FplErrorCode::TooManyRelations, Peek());
-			node = Span(m_Ast.Cmp(rel, node, rhs), node, rhs);
+			if (IsRelation(Peek()) || IsOp(Peek(), L'~')) {
+				// "f < y < g": what's between two curves, the same way round with x or y alone in the middle
+				const Token& second = Peek();
+				const FplRel next = IsOp(second, L'~') ? FplRel::Fit : RelOf(second);
+				auto& middle = m_Ast[rhs];
+				const bool up = (rel == FplRel::Lt || rel == FplRel::Le) && (next == FplRel::Lt || next == FplRel::Le);
+				const bool down = (rel == FplRel::Gt || rel == FplRel::Ge) && (next == FplRel::Gt || next == FplRel::Ge);
+				if (!(up || down) || middle.op != FplOp::Var || (middle.name != L"x" && middle.name != L"y"))
+					Fail(FplErrorCode::TooManyRelations, second);
+				Next();
+				int last = Sum();
+				if (IsRelation(Peek()) || IsOp(Peek(), L'~'))
+					Fail(FplErrorCode::TooManyRelations, Peek());
+				int first = Span(m_Ast.Cmp(rel, node, rhs), node, rhs);
+				int other = Span(m_Ast.Cmp(next, rhs, last), rhs, last);
+				node = Span(m_Ast.Binary(FplOp::And, first, other), first, other);
+			}
+			else
+				node = Span(m_Ast.Cmp(rel, node, rhs), node, rhs);
 		}
 		Expect(Tk::End);
 		CheckTuples(node, true);

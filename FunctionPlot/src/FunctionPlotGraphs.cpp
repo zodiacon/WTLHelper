@@ -875,7 +875,7 @@ void FplPlot::FindCurveMeetings(int graph, const FplViewport& view) {
 			return false;
 		switch (g.expr.kind) {
 			case FplKind::Function: case FplKind::FunctionOfY: case FplKind::Polar: case FplKind::Parametric:
-			case FplKind::Implicit: case FplKind::SlopeField:
+			case FplKind::Implicit: case FplKind::SlopeField: case FplKind::Between:
 				return true;
 			default:
 				return false;
@@ -924,7 +924,7 @@ void FplPlot::FindCurveMeetings(int graph, const FplViewport& view) {
 				};
 				break;
 			default:
-				break;		// an ODE's solutions: the lines alone
+				break;		// an ODE's solutions, the sides of what's between two curves: the lines alone
 		}
 		const FplSampleOptions o = OptionsFor(static_cast<int>(&c - graphs.data()), {});
 		curve.t0 = c.expr.kind == FplKind::Polar ? o.thetaMin : o.tMin;
@@ -1424,7 +1424,7 @@ bool FplPlot::FitBounds(const FplViewport& view, double& xMin, double& xMax, dou
 					}
 					break;
 				}
-				case FplKind::Implicit: case FplKind::SlopeField:
+				case FplKind::Implicit: case FplKind::SlopeField: case FplKind::Between:
 					// what was sampled (the view grown by its size; an ODE's solution)
 					for (auto& line : g.geometry.lines)
 						for (auto& p : line) {

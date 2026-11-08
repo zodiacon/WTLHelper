@@ -867,6 +867,90 @@ FplGeometry FplSample(const FplExpression& e, std::vector<double> slots, const F
 		g.arrows = FplSampleField(field, view, options, &g.evals);
 		break;
 	}
+	case FplKind::Between: {
+		// along the variable the sides are in, evenly on the screen; the fill where lower < upper, each stretch's ends
+		// found by halving
+		const bool ofX = e.name == L"y";
+		const int slot = ofX ? FplSlotX : FplSlotY;
+		const double u0 = ofX ? view.AxisX(view.xMin) : view.AxisY(view.yMin);
+		const double u1 = ofX ? view.AxisX(view.xMax) : view.AxisY(view.yMax);
+		auto along = [&](double u) { return ofX ? view.FromAxisX(u) : view.FromAxisY(u); };
+		auto inside = [&](double u) {
+			s[slot] = along(u);
+			const double lo = e.f.Eval(s), hi = e.g.Eval(s);
+			return std::isfinite(lo) && std::isfinite(hi) && lo <= hi;
+		};
+		// a side off a log axis (not positive) is past its low edge
+		auto place = [&](double v, double side) -> FplPoint {
+			const FplPoint p = ofX ? FplPoint{ view.ToScreenX(v), view.ToScreenY(side) }
+				: FplPoint{ view.ToScreenX(side), view.ToScreenY(v) };
+			return box.Clamp(ofX ? FplPoint{ p.x, std::isfinite(p.y) ? p.y : box.bottom }
+				: FplPoint{ std::isfinite(p.x) ? p.x : box.left, p.y });
+		};
+		const double extent = ofX ? view.width : view.height, step = std::max(options.initialStep, 0.1);
+		const int samples = std::max(2, static_cast<int>(std::ceil(extent / step)));
+		const double du = (u1 - u0) / samples;
+		auto edge = [&](double in, double out) {
+			for (int k = 0; k < 40; k++) {
+				const double mid = (in + out) / 2;
+				(inside(mid) ? in : out) = mid;
+			}
+			g.evals += 40;
+			return in;
+		};
+		auto stretch = [&](double a, double b) {
+			if (!(b > a))
+				return;
+			FplPolygon top, bottom;
+			const int n = std::max(1, static_cast<int>(std::ceil((b - a) / du)));
+			top.reserve(n + 1);
+			bottom.reserve(n + 1);
+			for (int k = 0; k <= n; k++) {
+				const double v = along(a + (b - a) * k / n);
+				s[slot] = v;
+				const double lo = e.f.Eval(s), hi = e.g.Eval(s);
+				if (!std::isfinite(lo) || !std::isfinite(hi))
+					continue;
+				bottom.push_back(place(v, lo));
+				top.push_back(place(v, hi));
+			}
+			g.evals += static_cast<size_t>(n + 1) * 2;
+			if (top.size() < 2)
+				return;
+			top.insert(top.end(), bottom.rbegin(), bottom.rend());
+			g.fills.push_back(std::move(top));
+			// its two sides, adaptively, over this stretch
+			for (const FplProgram* side : { &e.f, &e.g }) {
+				std::function<FplPoint(double)> curve = [&, side](double u) -> FplPoint {
+					const double v = along(u);
+					s[slot] = v;
+					const double w = side->Eval(s);
+					return ofX ? FplPoint{ v, w } : FplPoint{ w, v };
+				};
+				auto lines = SampleRaw(curve, a, b, std::max(n, 4), view, options, &g.evals);
+				lines = FplClip(lines, box.left, box.top, box.right, box.bottom);
+				g.lines.insert(g.lines.end(), lines.begin(), lines.end());
+			}
+		};
+		double start = u0;
+		bool in = inside(u0);
+		for (int k = 1; k <= samples; k++) {
+			const double u = k == samples ? u1 : u0 + du * k;
+			const bool now = inside(u);
+			if (now != in) {
+				const double at = now ? edge(u, u - du) : edge(u - du, u);
+				if (in)
+					stretch(start, at);
+				else
+					start = at;
+				in = now;
+			}
+		}
+		if (in)
+			stretch(start, u1);
+		g.evals += static_cast<size_t>(samples) + 1;
+		break;
+	}
 	case FplKind::SlopeField: {
 		std::function<double(double, double)> F = [&](double x, double y) {
 			s[FplSlotX] = x;
@@ -1234,6 +1318,36 @@ std::vector<FplArrow> FplSampleField(const std::function<FplPoint(double, double
 		arrows.push_back({ { r.center.x - ux, r.center.y - uy }, { r.center.x + ux, r.center.y + uy }, r.m });
 	}
 	return arrows;
+}
+
+std::vector<FplColorScaleTick> FplMakeColorScale(double lo, double hi, double pixels, double minSpacing) {
+	std::vector<FplColorScaleTick> out;
+	if (!std::isfinite(lo) || !std::isfinite(hi))
+		return out;
+	auto plain = [](double v) {
+		wchar_t buf[32];
+		swprintf_s(buf, L"%.6g", v);
+		std::wstring text = buf;
+		if (!text.empty() && text[0] == L'-')
+			text[0] = wchar_t(0x2212);
+		return text;
+	};
+	// a flat surface: its one value
+	if (!(hi > lo)) {
+		out.push_back({ 0.5, plain(lo) });
+		return out;
+	}
+	FplTicks ticks = FplMakeTicks(lo, hi, pixels, minSpacing);
+	// a range with no nice value in it: its ends
+	if (ticks.major.empty()) {
+		out.push_back({ 0, plain(lo) });
+		out.push_back({ 1, plain(hi) });
+		return out;
+	}
+	out.reserve(ticks.major.size());
+	for (double v : ticks.major)
+		out.push_back({ (v - lo) / (hi - lo), FplFormatTick(v, ticks) });
+	return out;
 }
 
 uint32_t FplColormap(double t) {

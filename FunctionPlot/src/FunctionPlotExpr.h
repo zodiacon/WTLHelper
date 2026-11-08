@@ -190,6 +190,8 @@ enum class FplKind : uint8_t {
 	Integral,		// integral(f, var, lo, hi) alone, with no free variables: its area; expr[0] f (in the variable,
 					// the def's name), expr[1] lo, expr[2] hi
 	Regression,		// lhs ~ rhs: the unknown names in it fitted over lists; expr[0] lhs - rhs, expr[1] lhs
+	Between,		// f(x) < y < g(x), or f(y) < x < g(y) (name says which is in the middle): expr[0] lower, expr[1] upper;
+					// rel Lt if both are strict, else Le
 	SlopeField,		// y' = F(x, y) (FplBuild only, from FplSplitOde): its slopes, and with ", y(a) = b" (any number)
 					// the solutions through (a, b); FplExpression's f is F, its starts a and b of each
 };

@@ -34,6 +34,7 @@ constexpr wchar_t WC_FUNCTIONPLOT[] = L"WC_FunctionPlot";
 #define FPLS_EQUALSCALE    0x0040   // x and y always at the same scale (circles look round)
 #define FPLS_PITICKS       0x0080   // the x axis in multiples of pi
 #define FPLS_TANGENT       0x0100   // the tangent at a traced point of a function, and its slope
+#define FPLS_NOCOLORSCALE  0x0200   // no color scale beside a heat map
 
 // ---- Graphs -------------------------------------------------------------------
 
@@ -94,6 +95,7 @@ enum FPLKIND {
 	FPLK_IMPLICITSURFACE,      // F(x, y, z) = 0 ("x^2 + y^2 + z^2 = 25"): 3D only
 	FPLK_INTEGRAL,             // integral(f, lo, hi) alone: the area shaded, its value (FPLGRAPHINFO::value)
 	FPLK_REGRESSION,           // y1 ~ m x1 + b: m and b fitted to lists (GetValue); FPLGRAPHINFO::value is R squared
+	FPLK_BETWEEN,              // f(x) < y < g(x) or f(y) < x < g(y): the region between two curves
 	FPLK_SLOPEFIELD,           // y' = F(x, y): its slopes; with ", y(a) = b" the solution through (a, b) too (a and b
 	                           // parameters alone: the point can be dragged)
 };
@@ -473,6 +475,7 @@ private:
 	void PaintTrace();                         // 2D and 3D
 	void PaintGraphLabels();
 	void PaintBox();
+	void PaintColorScales();
 	void PaintPanel();
 	void Paint3D(bool present);
 	void PaintTicks3D();

@@ -181,6 +181,27 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 		return def;
 	}
 
+	if (top.op == FplOp::And && top.kids.size() == 2 && ast[top.kids[0]].op == FplOp::Cmp && ast[top.kids[1]].op == FplOp::Cmp) {
+		// f < y < g: its sides in the other variable, lower first
+		const FplNode first = ast[top.kids[0]], second = ast[top.kids[1]];
+		const std::wstring middle = ast[first.kids[1]].name;
+		const unsigned other = middle == L"y" ? FplVarX : FplVarY;
+		const bool up = first.rel == FplRel::Lt || first.rel == FplRel::Le;
+		const int lower = up ? first.kids[0] : second.kids[1], upper = up ? second.kids[1] : first.kids[0];
+		for (int side : { lower, upper })
+			if (FplVariablesOf(ast, side) & ~other) {
+				NotAllowed(def, ast, side, ~other);
+				return def;
+			}
+		const bool strict = (first.rel == FplRel::Lt || first.rel == FplRel::Gt) &&
+			(second.rel == FplRel::Lt || second.rel == FplRel::Gt);
+		def.kind = FplKind::Between;
+		def.rel = strict ? FplRel::Lt : FplRel::Le;
+		def.name = middle;
+		def.expr[0] = lower;
+		def.expr[1] = upper;
+		return def;
+	}
 	if (top.op != FplOp::Cmp) {
 		// A bare expression is y = f(x).
 		unsigned vars = FplVariablesOf(ast, root);

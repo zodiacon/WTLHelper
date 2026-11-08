@@ -386,6 +386,7 @@ HRESULT CFunctionPlotCtrl::PaintTo(ID2D1RenderTarget* target, float dpi, bool ex
 		PaintContourLabels();
 		PaintLabels();
 		PaintGraphLabels();
+		PaintColorScales();
 		PaintTrace();
 		PaintBox();
 		PaintPanel();
@@ -576,6 +577,79 @@ void CFunctionPlotCtrl::PaintGraphLabels() {
 		if (x < s.panel.right && s.panel.bottom > 6)
 			x = s.panel.right + 40;
 		place(s.axisTitles[1], x, 6, title);
+	}
+}
+
+// A bar of the colors beside each heat map (2D) or each surface colored by height (3D), at the right, with its values.
+void CFunctionPlotCtrl::PaintColorScales() {
+	auto& s = *m_State;
+	if ((GetStyle() & FPLS_NOCOLORSCALE))
+		return;
+	auto* rt = s.rt;
+	const FPLCOLORS c = GetColors();
+	const float w = ToDips(s.client.cx), h = ToDips(s.client.cy);
+	const float barWidth = 14, barHeight = std::min(220.0f, h * 0.4f), slot = 76;
+	struct Scale {
+		int graph;
+		double lo, hi;
+		float opacity;
+	};
+	std::vector<Scale> scales;
+	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
+		auto& g = s.plot.graphs[i];
+		if (!g.Drawable())
+			continue;
+		if (s.mode3D) {
+			const bool surface = g.expr.kind == FplKind::Surface || g.expr.kind == FplKind::ParametricSurface ||
+				g.expr.kind == FplKind::ImplicitSurface;
+			// colored by height in the box, every one alike: one bar says it
+			if (surface && (g.flags & FplGraphHeatmap) && scales.empty())
+				scales.push_back({ (int)i, s.box.zMin, s.box.zMax, 1 });
+		}
+		else if (!g.geometry.heatmap.Empty())
+			scales.push_back({ (int)i, g.geometry.heatmap.lo, g.geometry.heatmap.hi,
+				g.fillOpacity >= 0 ? g.fillOpacity : 0.85f });
+	}
+	if (scales.empty() || barHeight < 60)
+		return;
+	const float pixel = 96.0f / s.paintDpi;
+	float right = w - 12;
+	const float top = 14;
+	for (auto& scale : scales) {
+		const float left = right - barWidth;
+		// not over the panel; nor past the left, with many
+		if (left - slot + barWidth < (s.panel.right > s.panel.left ? s.panel.right : 0))
+			break;
+		// its labels readable over a heat map (3D's background is plain, and a patch would fade the box's ticks)
+		if (!s.mode3D) {
+			auto* patch = s.Brush(c.crBack);
+			patch->SetOpacity(0.75f);
+			rt->FillRoundedRectangle({ { right - slot + 4, top - 8, right + 6, top + barHeight + 8 }, 4, 4 }, patch);
+			patch->SetOpacity(1);
+		}
+		// the colors, a strip per pixel or two, drawn over the background as the map is
+		const int strips = std::clamp((int)(barHeight / 2), 16, 128);
+		rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+		for (int k = 0; k < strips; k++) {
+			const float y0 = top + barHeight * k / strips, y1 = top + barHeight * (k + 1) / strips;
+			auto* strip = s.Brush(FplColormap(1 - (k + 0.5) / strips));
+			strip->SetOpacity(scale.opacity);
+			rt->FillRectangle({ left, y0, right, y1 + pixel }, strip);
+			strip->SetOpacity(1);
+		}
+		rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+		rt->DrawRectangle({ left, top, right, top + barHeight }, s.Brush(c.crAxis), pixel);
+		// whose it is, with more than one
+		if (scales.size() > 1)
+			rt->FillRectangle({ left, top - 5, right, top - 2 }, s.Brush(GraphColor(scale.graph)));
+		auto* label = s.Brush(c.crLabel);
+		auto* axis = s.Brush(c.crAxis);
+		for (auto& tick : FplMakeColorScale(scale.lo, scale.hi, barHeight)) {
+			const float y = top + barHeight * (1 - (float)tick.fraction);
+			rt->DrawLine({ left - 3, y }, { left, y }, axis, pixel);
+			Text(rt, tick.text, s.labelRight.Get(), { left - slot, y - 9, left - 5, y + 9 }, label);
+		}
+		right -= slot;
 	}
 }
 
@@ -1019,6 +1093,7 @@ void CFunctionPlotCtrl::Paint3D(bool present) {
 		// an exported frame's text without ClearType's colored fringes
 		dc->SetTextAntialiasMode(present ? D2D1_TEXT_ANTIALIAS_MODE_DEFAULT : D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 		PaintTicks3D();
+		PaintColorScales();
 		PaintTrace();
 		PaintPanel();
 		r.EndOverlay();

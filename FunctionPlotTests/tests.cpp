@@ -15,9 +15,15 @@
 #include "FunctionPlot3D.h"
 #include "FunctionPlotGraphs.h"
 #include "FunctionPlotModel.h"
+#include "FunctionPlotShaders.h"
+
+#pragma comment(lib, "d3d11.lib")
+
 #include "FunctionPlotWorker.h"
 
 #include <windows.h>
+#include <d3d11.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <chrono>
@@ -383,7 +389,10 @@ TEST(Errors) {
 	CHECK_STR(e.name, L"#");
 	CHECK_INT(ParseError(L"2 * * 3").code, FplErrorCode::UnexpectedToken);
 	CHECK_INT(ParseError(L"y = x = 2").code, FplErrorCode::TooManyRelations);
-	CHECK_INT(ParseError(L"0 < y < 1").code, FplErrorCode::TooManyRelations);
+	CHECK_INT(ParseError(L"0 < y > 1").code, FplErrorCode::TooManyRelations);
+	CHECK_INT(ParseError(L"0 < a < 1").code, FplErrorCode::TooManyRelations);
+	CHECK_INT(ParseError(L"0 < y < 1 < 2").code, FplErrorCode::TooManyRelations);
+	CHECK_INT(ParseError(L"0 = y < 1").code, FplErrorCode::TooManyRelations);
 	CHECK_INT(ParseError(L"2*(1,2)").code, FplErrorCode::MisplacedPoint);
 	CHECK_INT(ParseError(L"y = (1,2)").code, FplErrorCode::MisplacedPoint);
 	CHECK_INT(ParseError(L"max()").code, FplErrorCode::UnexpectedToken);
@@ -3259,6 +3268,284 @@ TEST(SurfaceLines) {
 	CHECK_NEAR_TOL(back.graphs[0].opacity, 0.5, 1e-6);
 }
 
+TEST(Shaders) {
+	// the failure this catches shows nowhere else: a shader that doesn't compile leaves every plot in 2D
+	Microsoft::WRL::ComPtr<ID3DBlob> vs;
+	for (auto& e : FplShaderEntries) {
+		std::string errors;
+		auto code = FplCompileShader(e.entry, e.target, &errors);
+		CHECK(code != nullptr);
+		if (!code)
+			printf("  %s: %s\n", e.entry, errors.c_str());
+		if (std::string(e.entry) == "VS")
+			vs = code;
+	}
+	// a bad entry says so
+	std::string errors;
+	CHECK(FplCompileShader("NoSuchEntry", "ps_4_0", &errors) == nullptr);
+	CHECK(!errors.empty());
+	// the vertices fit the vertex shader, and every shader makes one, on the software device
+	Microsoft::WRL::ComPtr<ID3D11Device> device;
+	HRESULT hr = ::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
+		device.GetAddressOf(), nullptr, nullptr);
+	CHECK(SUCCEEDED(hr));
+	if (FAILED(hr) || !vs)
+		return;
+	Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;
+	CHECK(SUCCEEDED(device->CreateInputLayout(FplVertexLayout, FplVertexLayoutCount, vs->GetBufferPointer(),
+		vs->GetBufferSize(), layout.GetAddressOf())));
+	for (auto& e : FplShaderEntries) {
+		auto code = FplCompileShader(e.entry, e.target);
+		if (!code)
+			continue;
+		if (e.target[0] == 'v') {
+			Microsoft::WRL::ComPtr<ID3D11VertexShader> shader;
+			CHECK(SUCCEEDED(device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf())));
+		}
+		else {
+			Microsoft::WRL::ComPtr<ID3D11PixelShader> shader;
+			CHECK(SUCCEEDED(device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, shader.GetAddressOf())));
+		}
+	}
+}
+
+TEST(LogAxesKinds) {
+	// what's drawn from the view's cells on log axes
+	FplViewport v = View(0.1, 100, 0.1, 100, 600, 600);
+	v.logX = v.logY = true;
+	// an implicit curve lies on itself: x y = 10 is a straight line here
+	auto plot = MakePlot({ L"x y = 10", L"y < x/2", L"x^2 + y^2 < 25", L"z = log(x) log(y)", L"(y, x)" });
+	plot.graphs[3].flags |= FplGraphHeatmap;
+	plot.Sample(v);
+	double worst = 0;
+	CHECK(!plot.graphs[0].geometry.lines.empty());
+	for (auto& line : plot.graphs[0].geometry.lines)
+		for (auto& p : line) {
+			if (p.x < 0 || p.x > 600 || p.y < 0 || p.y > 600)
+				continue;
+			FplPoint q = v.ToPlane(p);
+			worst = std::max(worst, std::abs(q.x * q.y - 10));
+		}
+	CHECK(worst < 1e-3);
+	// a function's region is cut along its curve, a circle's reaches the low edges
+	CHECK(!plot.graphs[1].geometry.fills.empty());
+	CHECK(!plot.graphs[2].geometry.fills.empty());
+	CHECK(!plot.graphs[2].geometry.lines.empty());
+	// the heat map's value at a cell is the function's at that place on the log axes
+	auto& heat = plot.graphs[3].geometry.heatmap;
+	CHECK(!heat.Empty());
+	CHECK(heat.lo < 0 && heat.hi > 0);
+	const int r = heat.rows / 4, c = heat.cols * 3 / 4;
+	const double hx = v.ToPlaneX((c + 0.5) * heat.cell), hy = v.ToPlaneY((r + 0.5) * heat.cell);
+	CHECK_NEAR_TOL(heat.values[(size_t)r * heat.cols + c], std::log10(hx) * std::log10(hy), 1e-4);
+	// contours: each on its level
+	CHECK(!plot.graphs[3].geometry.contours.empty());
+	worst = 0;
+	for (auto& contour : plot.graphs[3].geometry.contours)
+		for (auto& line : contour.lines)
+			for (auto& p : line) {
+				if (p.x < 0 || p.x > 600 || p.y < 0 || p.y > 600)
+					continue;
+				FplPoint q = v.ToPlane(p);
+				worst = std::max(worst, std::abs(std::log10(q.x) * std::log10(q.y) - contour.level));
+			}
+	CHECK(worst < 1e-2);
+	// a field's arrows are even on the screen
+	auto& arrows = plot.graphs[4].geometry.arrows;
+	CHECK(arrows.size() > 16);
+	std::vector<double> xs;
+	for (auto& a : arrows)
+		xs.push_back(std::round(((a.from.x + a.to.x) / 2) * 100) / 100);
+	std::sort(xs.begin(), xs.end());
+	xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+	double smallest = 1e9, largest = 0;
+	for (size_t k = 1; k < xs.size(); k++) {
+		smallest = std::min(smallest, xs[k] - xs[k - 1]);
+		largest = std::max(largest, xs[k] - xs[k - 1]);
+	}
+	CHECK(smallest > 0);
+	CHECK(largest < smallest * 1.01);
+	// a polar curve leaves a log y axis where y isn't positive
+	FplViewport lv = View(-10, 10, 0.01, 1000, 600, 600);
+	lv.logY = true;
+	auto polar = MakePlot({ L"r = 3" });
+	polar.Sample(lv);
+	CHECK(!polar.graphs[0].geometry.lines.empty());
+	bool finite = true;
+	for (auto& line : polar.graphs[0].geometry.lines)
+		for (auto& p : line)
+			finite = finite && std::isfinite(p.x) && std::isfinite(p.y);
+	CHECK(finite);
+}
+
+TEST(BetweenCurves) {
+	// kinds, which side is which, however it's written
+	std::vector<std::wstring> none;
+	auto e = FplBuild(L"x^2 < y < 4", none);
+	CHECK(!e.error);
+	CHECK(e.kind == FplKind::Between);
+	CHECK(e.name == L"y");
+	CHECK(e.rel == FplRel::Lt);
+	double slots[FplFirstParam] = {};
+	slots[FplSlotX] = 1;
+	CHECK_NEAR(e.f.Eval(slots), 1.0);
+	CHECK_NEAR(e.g.Eval(slots), 4.0);
+	e = FplBuild(L"4 > y > x^2", none);		// the same, downward
+	CHECK(!e.error && e.kind == FplKind::Between);
+	CHECK_NEAR(e.f.Eval(slots), 1.0);
+	CHECK_NEAR(e.g.Eval(slots), 4.0);
+	e = FplBuild(std::wstring(L"0 \x2264 y < 1"), none);
+	CHECK(!e.error && e.rel == FplRel::Le);
+	e = FplBuild(L"y^2 < x < 4", none);
+	CHECK(!e.error && e.kind == FplKind::Between);
+	CHECK(e.name == L"x");
+	e = FplBuild(L"1 < x < 3", none);		// a band
+	CHECK(!e.error && e.kind == FplKind::Between);
+	// the sides may only use the other variable
+	e = FplBuild(L"y < y < 2", none);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(e.error.name == L"y");
+	CHECK_INT(e.error.pos, 0);
+	e = FplBuild(L"t < y < 2", none);
+	CHECK(e.error.code == FplErrorCode::VariableNotAllowed);
+	e = FplBuild(L"1 < y < q", none);
+	CHECK(e.error.code == FplErrorCode::UnknownName);
+	// it prints so it reads back
+	auto parsed = FplParse(L"x^2 < y < 4");
+	CHECK(!parsed.error);
+	auto again = FplParse(FplToString(parsed.ast, parsed.root));
+	CHECK(!again.error);
+	CHECK(again.ast[again.root].op == FplOp::And);
+
+	// the fill and its sides: the parabola's cap from -2 to 2, its ends where the sides meet
+	FplViewport v = View(-5, 5, -5, 5, 500, 500);
+	auto plot = MakePlot({ L"x^2 < y < 4", L"1 < x < 3", L"y = 5" });
+	plot.Sample(v);
+	auto& g = plot.graphs[0].geometry;
+	CHECK_INT(g.fills.size(), 1);
+	CHECK(g.dashed);
+	CHECK_INT(g.lines.size(), 2);
+	double minX = 1e9, maxX = -1e9;
+	bool within = true;
+	for (auto& p : g.fills[0]) {
+		FplPoint q = v.ToPlane(p);
+		minX = std::min(minX, q.x);
+		maxX = std::max(maxX, q.x);
+		within = within && q.y >= q.x * q.x - 1e-6 && q.y <= 4 + 1e-6;
+	}
+	CHECK(within);
+	CHECK_NEAR_TOL(minX, -2, 1e-6);
+	CHECK_NEAR_TOL(maxX, 2, 1e-6);
+	// the band runs the view's whole height
+	auto& band = plot.graphs[1].geometry;
+	CHECK_INT(band.fills.size(), 1);
+	CHECK_INT(band.lines.size(), 2);
+	double minY = 1e9, maxY = -1e9;
+	for (auto& p : band.fills[0]) {
+		FplPoint q = v.ToPlane(p);
+		minY = std::min(minY, q.y);
+		maxY = std::max(maxY, q.y);
+		within = within && q.x >= 1 - 1e-6 && q.x <= 3 + 1e-6;
+	}
+	CHECK(within);
+	CHECK_NEAR_TOL(minY, -5, 1e-6);
+	CHECK_NEAR_TOL(maxY, 5, 1e-6);
+	// lower over upper draws nothing; apart stretches are apart; holes in the domain break it
+	plot = MakePlot({ L"4 < y < x^2 - 100", L"-sin(x) < y < sin(x)", L"-1 < y < sqrt(x)", L"x < y < x" });
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.fills.empty());
+	CHECK(plot.graphs[0].geometry.lines.empty());
+	CHECK_INT(plot.graphs[1].geometry.fills.size(), 2);		// 0 to pi, and -2pi+... to -pi in view
+	CHECK_INT(plot.graphs[2].geometry.fills.size(), 1);
+	minX = 1e9;
+	for (auto& p : plot.graphs[2].geometry.fills[0])
+		minX = std::min(minX, v.ToPlane(p).x);
+	CHECK_NEAR_TOL(minX, 0, 1e-6);
+	// not strict, not dashed; hidden, nothing
+	plot = MakePlot({ L"-1 <= y <= 1" });
+	plot.Sample(v);
+	CHECK(!plot.graphs[0].geometry.dashed);
+	// log axes: a side that isn't positive reaches the low edge
+	FplViewport lv = View(0.1, 100, 0.1, 100, 600, 600);
+	lv.logX = lv.logY = true;
+	plot = MakePlot({ L"-1 < y < x", L"1 < y < x" });
+	plot.Sample(lv);
+	CHECK_INT(plot.graphs[0].geometry.fills.size(), 1);
+	bool finite = true;
+	for (auto& p : plot.graphs[0].geometry.fills[0])
+		finite = finite && std::isfinite(p.x) && std::isfinite(p.y);
+	CHECK(finite);
+	// from x = 1 on only, the second
+	minX = 1e9;
+	for (auto& p : plot.graphs[1].geometry.fills[0])
+		minX = std::min(minX, lv.ToPlane(p).x);
+	CHECK_NEAR_TOL(minX, 1, 1e-6);
+	// traced, intersected and fitted by its sides
+	plot = MakePlot({ L"x^2 < y < 4", L"y = 2" });
+	plot.Sample(v);
+	auto hit = plot.Nearest(v.ToScreen({ 1, 4 }), v, 6, 6);
+	CHECK_INT(hit.graph, 0);
+	plot.FindFeatures(0, v);
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Intersection, std::sqrt(2.0), 2, 1e-3));
+	CHECK(Has(plot.graphs[0].features, FplFeatureKind::Intersection, -std::sqrt(2.0), 2, 1e-3));
+	double x0, x1, y0, y1;
+	CHECK(plot.FitBounds(v, x0, x1, y0, y1));
+	CHECK(x0 < -2 && x1 > 2);
+	// the definitions' pass leaves it alone; a parameter may be a side
+	plot = MakePlot({ L"a < y < b" }, { Param(L"a", -1), Param(L"b", 1) });
+	CHECK(!plot.graphs[0].expr.error);
+	plot.Sample(v);
+	CHECK_INT(plot.graphs[0].geometry.fills.size(), 1);
+	// the saved state's text is read again
+	FplSavedState st;
+	FplGraph one;
+	one.id = 1;
+	one.text = L"x^2 < y < 4";
+	st.graphs.push_back(one);
+	FplSavedState back;
+	CHECK(FplLoadState(FplSaveState(st), back));
+	CHECK(back.graphs[0].text == L"x^2 < y < 4");
+}
+
+TEST(ColorScale) {
+	auto t = FplMakeColorScale(-1, 1, 200);
+	CHECK(t.size() >= 3);
+	bool inside = true;
+	for (size_t k = 0; k < t.size(); k++)
+		inside = inside && t[k].fraction >= 0 && t[k].fraction <= 1 && (k == 0 || t[k].fraction > t[k - 1].fraction);
+	CHECK(inside);
+	// 0 in the middle, labeled as the axes are
+	bool zero = false;
+	for (auto& k : t)
+		zero = zero || (k.text == L"0" && std::abs(k.fraction - 0.5) < 1e-9);
+	CHECK(zero);
+	CHECK(FplMakeColorScale(0, 1000, 200, 36).size() <= 6);
+	// at least spaced as asked
+	t = FplMakeColorScale(0, 1, 100, 40);
+	bool spaced = true;
+	for (size_t k = 1; k < t.size(); k++)
+		spaced = spaced && (t[k].fraction - t[k - 1].fraction) * 100 >= 40 - 1e-9;
+	CHECK(spaced);
+	// a flat surface: its one value; nothing for no numbers
+	t = FplMakeColorScale(3, 3, 200);
+	CHECK_INT(t.size(), 1);
+	CHECK_STR(t[0].text, L"3");
+	t = FplMakeColorScale(-2.5, -2.5, 200);
+	CHECK_STR(t[0].text, std::wstring(1, wchar_t(0x2212)) + L"2.5");
+	// no nice value in the range: its ends
+	t = FplMakeColorScale(1.21, 1.29, 20, 36);
+	CHECK_INT(t.size(), 2);
+	if (t.size() == 2) {
+		CHECK_NEAR(t[0].fraction, 0.0);
+		CHECK_NEAR(t[1].fraction, 1.0);
+		CHECK_STR(t[1].text, L"1.29");
+	}
+	CHECK(FplMakeColorScale(NaN, 1, 200).empty());
+	// the colors run from viridis's dark to its yellow
+	const uint32_t low = FplColormap(0), high = FplColormap(1);
+	CHECK((low & 0xFF) < 100 && (high & 0xFF) > 200);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -3324,6 +3611,10 @@ int wmain() {
 	Run_Odes();
 	Run_CurveIntersections();
 	Run_SurfaceLines();
+	Run_Shaders();
+	Run_LogAxesKinds();
+	Run_BetweenCurves();
+	Run_ColorScale();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;
