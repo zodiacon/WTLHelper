@@ -176,6 +176,194 @@ double Lcm(double a, double b) {
 	return g == 0 ? 0 : std::abs(std::round(a)) / g * std::abs(std::round(b));
 }
 
+// ---- Special functions, over the standard library's, which take non-negative orders and arguments.
+
+bool IsWhole(double v) {
+	return std::floor(v) == v;
+}
+
+double OddSign(double order) {
+	return std::fmod(std::abs(order), 2.0) == 1 ? -1 : 1;
+}
+
+double BesselYPositive(double order, double x) {
+	return x > 0 ? std::cyl_neumann(order, x) : x == 0 ? -std::numeric_limits<double>::infinity() : NaN;
+}
+
+double BesselKPositive(double order, double x) {
+	return x > 0 ? std::cyl_bessel_k(order, x) : x == 0 ? std::numeric_limits<double>::infinity() : NaN;
+}
+
+double BesselJ(double order, double x) {
+	if (std::isnan(order) || std::isnan(x))
+		return NaN;
+	if (x < 0)
+		return IsWhole(order) ? OddSign(order) * BesselJ(order, -x) : NaN;
+	if (order >= 0)
+		return std::cyl_bessel_j(order, x);
+	const double v = -order;
+	if (IsWhole(v))
+		return OddSign(v) * std::cyl_bessel_j(v, x);
+	return std::cos(v * std::numbers::pi) * std::cyl_bessel_j(v, x) - std::sin(v * std::numbers::pi) * BesselYPositive(v, x);
+}
+
+double BesselY(double order, double x) {
+	if (std::isnan(order) || std::isnan(x))
+		return NaN;
+	if (order >= 0)
+		return BesselYPositive(order, x);
+	const double v = -order;
+	if (IsWhole(v))
+		return OddSign(v) * BesselYPositive(v, x);
+	return x > 0 ? std::sin(v * std::numbers::pi) * std::cyl_bessel_j(v, x) + std::cos(v * std::numbers::pi) * BesselYPositive(v, x) : NaN;
+}
+
+double BesselI(double order, double x) {
+	if (std::isnan(order) || std::isnan(x))
+		return NaN;
+	if (x < 0)
+		return IsWhole(order) ? OddSign(order) * BesselI(order, -x) : NaN;
+	const double v = std::abs(order);
+	if (order >= 0 || IsWhole(v))
+		return std::cyl_bessel_i(v, x);
+	return x > 0 ? std::cyl_bessel_i(v, x) + 2 / std::numbers::pi * std::sin(v * std::numbers::pi) * std::cyl_bessel_k(v, x) : NaN;
+}
+
+double BesselK(double order, double x) {
+	if (std::isnan(order) || std::isnan(x))
+		return NaN;
+	return BesselKPositive(std::abs(order), x);
+}
+
+// Airy's solutions: by their power series near 0 and Bessel functions of order 1/3 or 2/3 away from it.
+struct AiryValues {
+	double ai, bi;
+};
+
+AiryValues Airy(double x, bool derivative) {
+	if (std::isnan(x))
+		return { NaN, NaN };
+	const double third = 1.0 / 3, order = derivative ? 2.0 / 3 : third, root3 = std::sqrt(3.0), pi = std::numbers::pi;
+	if (std::abs(x) <= 1) {
+		const double c1 = 0.355028053887817239, c2 = 0.258819403792806798;
+		// f = 1 + x^3/6 + ..., g = x + x^4/12 + ..., each term from the last by y'' = x y
+		double f = 1, g = x, df = 0, dg = 1, termF = 1, termG = x;
+		for (int k = 0; k < 20; k++) {
+			termF *= x * x * x / ((3.0 * k + 2) * (3.0 * k + 3));
+			termG *= x * x * x / ((3.0 * k + 3) * (3.0 * k + 4));
+			f += termF;
+			g += termG;
+			if (x != 0) {
+				df += termF * (3.0 * k + 3) / x;
+				dg += termG * (3.0 * k + 4) / x;
+			}
+		}
+		return derivative ? AiryValues{ c1 * df - c2 * dg, root3 * (c1 * df + c2 * dg) }
+			: AiryValues{ c1 * f - c2 * g, root3 * (c1 * f + c2 * g) };
+	}
+	const double a = std::abs(x), zeta = 2.0 / 3 * a * std::sqrt(a);
+	if (x > 0) {
+		const double k = std::cyl_bessel_k(order, zeta), i = std::cyl_bessel_i(order, zeta);
+		const double both = 2 * i + 2 / pi * std::sin(order * pi) * k;
+		if (derivative)
+			return { -x / (pi * root3) * k, x / root3 * both };
+		return { std::sqrt(x / 3) / pi * k, std::sqrt(x / 3) * both };
+	}
+	const double plus = BesselJ(order, zeta), minus = BesselJ(-order, zeta);
+	if (derivative)
+		return { a / 3 * (plus - minus), a / root3 * (minus + plus) };
+	return { std::sqrt(a) / 3 * (plus + minus), std::sqrt(a / 3) * (minus - plus) };
+}
+
+double Beta(double a, double b) {
+	if (std::isnan(a) || std::isnan(b))
+		return NaN;
+	if (a > 0 && b > 0)
+		return std::beta(a, b);
+	return std::tgamma(a) * std::tgamma(b) / std::tgamma(a + b);
+}
+
+double Zeta(double s) {
+	return std::isnan(s) ? s : s == 1 ? NaN : std::riemann_zeta(s);
+}
+
+// Halley's method on w e^w = x, from a start on the right branch.
+double Lambert(double x, double w) {
+	for (int i = 0; i < 64; i++) {
+		const double e = std::exp(w), f = w * e - x;
+		if (f == 0)
+			break;
+		const double next = w - f / (e * (w + 1) - (w + 2) * f / (2 * w + 2));
+		if (!std::isfinite(next) || std::abs(next - w) <= 1e-15 * (1 + std::abs(next))) {
+			if (std::isfinite(next))
+				w = next;
+			break;
+		}
+		w = next;
+	}
+	return w;
+}
+
+double LambertW(double x) {
+	const double least = -1 / std::numbers::e;
+	if (std::isnan(x) || x < least * (1 + 1e-14))
+		return NaN;
+	if (x <= least)
+		return -1;
+	if (std::isinf(x))
+		return x;
+	if (x == 0)
+		return 0;
+	// near the branch point by its series, else by logarithms
+	const double p = std::sqrt(2 * (std::numbers::e * x + 1));
+	const double start = x < 1 ? -1 + p - p * p / 3 : std::log(x) - (x > 3 ? std::log(std::log(x)) : 0);
+	return Lambert(x, start);
+}
+
+double LambertWm1(double x) {
+	const double least = -1 / std::numbers::e;
+	if (std::isnan(x) || x < least * (1 + 1e-14) || x > 0)
+		return NaN;
+	if (x <= least)
+		return -1;
+	if (x == 0)
+		return -std::numeric_limits<double>::infinity();
+	const double p = std::sqrt(2 * (std::numbers::e * x + 1));
+	const double start = x < -0.25 ? -1 - p - p * p / 3 : std::log(-x) - std::log(-std::log(-x));
+	return Lambert(x, start);
+}
+
+// By the parameter m = k^2; below 0 by the imaginary modulus transformation.
+double EllipK(double m) {
+	if (std::isnan(m) || m > 1)
+		return NaN;
+	if (m == 1)
+		return std::numeric_limits<double>::infinity();
+	if (m < 0)
+		return std::comp_ellint_1(std::sqrt(m / (m - 1))) / std::sqrt(1 - m);
+	return std::comp_ellint_1(std::sqrt(m));
+}
+
+double EllipE(double m) {
+	if (std::isnan(m) || m > 1)
+		return NaN;
+	if (m < 0)
+		return std::comp_ellint_2(std::sqrt(m / (m - 1))) * std::sqrt(1 - m);
+	return std::comp_ellint_2(std::sqrt(m));
+}
+
+double EllipF(double phi, double m) {
+	if (std::isnan(phi) || std::isnan(m) || m < 0 || m > 1 || std::isinf(phi) || (m == 1 && std::abs(phi) >= std::numbers::pi / 2))
+		return NaN;
+	return std::ellint_1(std::sqrt(m), phi);
+}
+
+double EllipEInc(double phi, double m) {
+	if (std::isnan(phi) || std::isnan(m) || m < 0 || m > 1 || std::isinf(phi))
+		return NaN;
+	return std::ellint_2(std::sqrt(m), phi);
+}
+
 double (*Func1(FplFunc f))(double) {
 	switch (f) {
 		case FplFunc::Sin: return [](double x) { return std::sin(x); };
@@ -205,6 +393,15 @@ double (*Func1(FplFunc f))(double) {
 		case FplFunc::SincD2: return SincD2;
 		case FplFunc::Normpdf: return Normpdf;
 		case FplFunc::Normcdf: return Normcdf;
+		case FplFunc::AiryAi: return [](double x) { return Airy(x, false).ai; };
+		case FplFunc::AiryBi: return [](double x) { return Airy(x, false).bi; };
+		case FplFunc::AiryAiD: return [](double x) { return Airy(x, true).ai; };
+		case FplFunc::AiryBiD: return [](double x) { return Airy(x, true).bi; };
+		case FplFunc::Zeta: return Zeta;
+		case FplFunc::LambertW: return LambertW;
+		case FplFunc::LambertWm1: return LambertWm1;
+		case FplFunc::EllipK: return EllipK;
+		case FplFunc::EllipE: return EllipE;
 		case FplFunc::Asin: return [](double x) { return std::asin(x); };
 		case FplFunc::Acos: return [](double x) { return std::acos(x); };
 		case FplFunc::Atan: return [](double x) { return std::atan(x); };
@@ -242,6 +439,13 @@ double (*Func2(FplFunc f))(double, double) {
 		case FplFunc::NPr: return NPr;
 		case FplFunc::Gcd: return Gcd;
 		case FplFunc::Lcm: return Lcm;
+		case FplFunc::Beta: return Beta;
+		case FplFunc::BesselJ: return BesselJ;
+		case FplFunc::BesselY: return BesselY;
+		case FplFunc::BesselI: return BesselI;
+		case FplFunc::BesselK: return BesselK;
+		case FplFunc::EllipF: return EllipF;
+		case FplFunc::EllipEInc: return EllipEInc;
 		default: return nullptr;
 	}
 }

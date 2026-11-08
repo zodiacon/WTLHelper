@@ -636,10 +636,6 @@ void CFunctionPlotCtrl::Resample() {
 	}
 	if (!s.viewSet)
 		return;
-	FplSampleOptions coarse;
-	coarse.cellSize = 16;
-	coarse.cellDepth = 1;
-	coarse.heatCell = 12;
 	// the view moved: what a heavy graph last showed in full can stretch to it until its new full version comes
 	std::vector<std::shared_ptr<FplGraphPaths>> stale(s.plot.graphs.size());
 	if (async && viewOnly)
@@ -654,7 +650,7 @@ void CFunctionPlotCtrl::Resample() {
 	std::vector<bool> full(s.plot.graphs.size());
 	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
 		if (async && s.plot.IsHeavy((int)i, false)) {
-			s.plot.SampleGraph((int)i, s.view, coarse);
+			s.plot.SampleGraph((int)i, s.view, s.plot.CoarseOptions((int)i, s.view));
 			submit((int)i, false);
 		}
 		else {

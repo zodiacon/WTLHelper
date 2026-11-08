@@ -644,6 +644,41 @@ private:
 				const int top = k[0], c = k[1], rest = Sub(top, c);
 				return Mul(node, Sub(Mul(psi(top), D(top)), Mul(psi(rest), Sub(D(top), D(c)))));
 			}
+			case FplFunc::Beta: {
+				auto psi = [&](int a) { return Call(FplFunc::Digamma, a); };
+				const int a = k[0], b = k[1], both = Add(a, b);
+				return Mul(node, Add(Mul(Sub(psi(a), psi(both)), D(a)), Mul(Sub(psi(b), psi(both)), D(b))));
+			}
+			case FplFunc::BesselJ: case FplFunc::BesselY: case FplFunc::BesselI: case FplFunc::BesselK: {
+				// by the recurrences; of the order there's no closed form
+				if (Depends(k[0])) {
+					failed = true;
+					return Num(0);
+				}
+				const int below = m_Ast.Call(n.func, { Sub(k[0], Num(1)), k[1] });
+				const int above = m_Ast.Call(n.func, { Add(k[0], Num(1)), k[1] });
+				const int half = n.func == FplFunc::BesselI ? Add(below, above) : n.func == FplFunc::BesselK
+					? Neg(Add(below, above)) : Sub(below, above);
+				return Mul(Div(half, Num(2)), D(k[1]));
+			}
+			case FplFunc::AiryAi: return chain(Call(FplFunc::AiryAiD, u));
+			case FplFunc::AiryBi: return chain(Call(FplFunc::AiryBiD, u));
+			case FplFunc::AiryAiD: return chain(Mul(u, Call(FplFunc::AiryAi, u)));
+			case FplFunc::AiryBiD: return chain(Mul(u, Call(FplFunc::AiryBi, u)));
+			case FplFunc::LambertW: case FplFunc::LambertWm1:
+				return chain(Div(Num(1), Mul(Call(FplFunc::Exp, node), Add(Num(1), node))));
+			case FplFunc::EllipK:
+				return chain(Div(Sub(Call(FplFunc::EllipE, u), Mul(Sub(Num(1), u), node)), Mul(Mul(Num(2), u), Sub(Num(1), u))));
+			case FplFunc::EllipE:
+				return chain(Div(Sub(node, Call(FplFunc::EllipK, u)), Mul(Num(2), u)));
+			case FplFunc::EllipF: case FplFunc::EllipEInc: {
+				if (Depends(k[1])) {
+					failed = true;
+					return Num(0);
+				}
+				const int root = Call(FplFunc::Sqrt, Sub(Num(1), Mul(k[1], Sq(Call(FplFunc::Sin, k[0])))));
+				return n.func == FplFunc::EllipF ? Div(D(k[0]), root) : Mul(root, D(k[0]));
+			}
 			case FplFunc::Sinc: return chain(Call(FplFunc::SincD1, u));
 			case FplFunc::SincD1: return chain(Call(FplFunc::SincD2, u));
 			case FplFunc::Normpdf: return chain(Neg(Mul(u, node)));

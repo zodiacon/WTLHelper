@@ -112,6 +112,7 @@ static const Example g_Examples[] = {
 	{ L"&User Functions", L"f(x) = x^3/6 - x\r\nf'(x)\r\nf''(x)\r\ng(x) = f(x - a) + 1\r\ny = d/dx sin(x^2/4)", false },
 	{ L"Waves and Steps", L"y = square(x) + 5\r\ny = triangle(x) + 2.5\r\ny = sawtooth(x)\r\ny = step(x - 1) - 2.5\r\ny = 2sinc(2x) - 5", false },
 	{ L"Normal Distribution", L"y = 10normpdf(x, m, s)\r\ny = 3normcdf(x, m, s)\r\nm: -4..4\r\ns: 0.2..3", false },
+	{ L"Special Functions", L"y = 2besselj(0, x)\r\ny = 2airyai(x) - 3\r\ny = zeta(x) + 3\r\ny = lambertw(x) - 6\r\ny = ellipk(x/10) + 4", false },
 	{ L"Series", L"y = sum(sin((2k - 1)x)/(2k - 1), k, 1, n) + 3\r\ny = sum(x^k/k!, k, 0, n) - 3\r\nn: 1..30, 1", false },
 	{ L"Substitutions", L"a = x - 1\r\nb = a^2\r\ny = 3a\r\ny = b/2 - 4\r\nx^2 + a^2 + y^2 = 16\r\ny' = -a y, y(0) = 3", false },
 	{ L"S&urfaces", L"z = sin x + cos y", false },

@@ -3,12 +3,20 @@
 #include "FunctionPlotGraphs.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iterator>
 #include <cstdio>
 #include <limits>
 
 namespace {
+
+const double SlowEval = 8e-6;			// seconds: about 8 ms for a curve's thousand evaluations
+const double TooSlowToAnalyze = 50e-6;
+
+bool IsCurveKind(FplKind kind) {
+	return kind == FplKind::Function || kind == FplKind::FunctionOfY || kind == FplKind::Polar || kind == FplKind::Parametric;
+}
 
 constexpr double NaN = std::numeric_limits<double>::quiet_NaN();
 
@@ -785,7 +793,7 @@ FplSampleOptions FplPlot::OptionsFor(int graph, const FplSampleOptions& base) co
 	FplSampleOptions o = base;
 	o.heatmap = (g.flags & FplGraphHeatmap) != 0;
 	o.contours = !(g.flags & FplGraphNoContours);
-	o.singularities = !(g.flags & FplGraphNoSingular);
+	o.singularities = base.singularities && !(g.flags & FplGraphNoSingular);
 	o.odeRange = g.hasRange;
 	if (g.hasRange) {
 		o.tMin = o.thetaMin = g.tMin;
@@ -800,8 +808,49 @@ bool FplPlot::IsHeavy(int graph, bool in3D) const {
 	auto& g = graphs[graph];
 	if (!g.Drawable() || g.Listed())
 		return false;
-	return in3D ? g.expr.kind == FplKind::ImplicitSurface
-		: g.expr.kind == FplKind::Implicit || g.expr.kind == FplKind::Surface;
+	if (in3D)
+		return g.expr.kind == FplKind::ImplicitSurface || (g.expr.kind == FplKind::Surface && EvalCost(graph) > SlowEval);
+	if (g.expr.kind == FplKind::Implicit || g.expr.kind == FplKind::Surface)
+		return true;
+	return IsCurveKind(g.expr.kind) && EvalCost(graph) > SlowEval;
+}
+
+double FplPlot::EvalCost(int graph) const {
+	auto& e = graphs[graph].expr;
+	if (!e.f.HasSubPrograms() && !e.g.HasSubPrograms())
+		return 0;
+	std::vector<double> slots = m_Slots;
+	slots[FplSlotX] = slots[FplSlotY] = slots[FplSlotT] = slots[FplSlotTheta] = 1.234;
+	// the better of two, as a first run may be held up
+	double best = std::numeric_limits<double>::infinity();
+	for (int i = 0; i < 2; i++) {
+		const auto start = std::chrono::steady_clock::now();
+		volatile double value = e.f.Empty() ? 0 : e.f.Eval(slots.data());
+		if (!e.g.Empty())
+			value = e.g.Eval(slots.data());
+		(void)value;
+		best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+	}
+	return best;
+}
+
+FplSampleOptions FplPlot::CoarseOptions(int graph, const FplViewport& view) const {
+	FplSampleOptions o;
+	o.cellSize = 16;
+	o.cellDepth = 1;
+	o.heatCell = 12;
+	auto& g = graphs[graph];
+	if (!IsCurveKind(g.expr.kind))
+		return o;
+	const double cost = EvalCost(graph);
+	const int samples = std::clamp(cost > 0 ? static_cast<int>(0.006 / cost) : 125, 16, 125);
+	const double extent = g.expr.kind == FplKind::FunctionOfY ? view.height : view.width;
+	o.initialStep = extent / samples;
+	o.curveSamples = samples;
+	o.maxDepth = 0;
+	o.tolerance = o.maxChord = o.jump = 1e9;
+	o.singularities = false;
+	return o;
 }
 
 void FplPlot::SampleGraph(int graph, const FplViewport& view, const FplSampleOptions& options) {
@@ -951,7 +1000,7 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 				s[FplSlotX] = x;
 				s[FplSlotY] = y;
 				return e.f.Eval(s);
-			}, box, 96);
+			}, box, implicitCells < 48 ? 24 : 96);	// (a coarse version of a slow one too)
 			break;
 		case FplKind::ParametricSurface:
 			mesh = FplParametricMesh([&](double u, double v) {
@@ -1078,6 +1127,9 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 	g.features.clear();
 	if (!g.Drawable() || (g.flags & FplGraphNoFeatures) || !view.Valid() || g.Listed())
 		return;
+	// each is a scan of thousands of evaluations
+	if (EvalCost(graph) > TooSlowToAnalyze)
+		return;
 	FindCurveMeetings(graph, view);
 	if (g.expr.kind != FplKind::Function) {
 		SortFeatures(g);
@@ -1114,6 +1166,8 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 	for (size_t h = 0; h < graphs.size(); h++) {
 		auto& other = graphs[h];
 		if (static_cast<int>(h) == graph || !other.Drawable() || other.expr.kind != FplKind::Function || other.Listed())
+			continue;
+		if (EvalCost(static_cast<int>(h)) > TooSlowToAnalyze)
 			continue;
 		std::function<double(double)> fo = [this, h](double x) { return Eval(static_cast<int>(h), x); };
 		if (view.logX)

@@ -199,6 +199,12 @@ public:
 	// Worth sampling on another thread: implicit curves and regions and surfaces in 2D, implicit surfaces in 3D (not
 	// listed ones, which go element by element here).
 	bool IsHeavy(int graph, bool in3D) const;
+	// Seconds one evaluation takes, measured now, if the graph has an integral, a sum or a product, whose cost can't be seen
+	// from its size (else 0). A curve past about 8 microseconds is heavy, and past 50 its features aren't looked for.
+	double EvalCost(int graph) const;
+	// How to sample a heavy graph at once, on the UI thread: a surface or implicit curve on large cells, a slow curve as many
+	// straight lines as about 6 ms of evaluations make, with no refining or analysis.
+	FplSampleOptions CoarseOptions(int graph, const FplViewport& view) const;
 	// The drawable graphs' meshes for a 3D box: surfaces (z = F(x, y), parametric), curves as tubes (space curves, and
 	// the 2D curves on the z = 0 plane), points as spheres. An ODE's solutions, implicit curves and regions' boundaries
 	// too, and what's between two curves' sides (their slopes, arrows and fills stay 2D's); vector fields have none.

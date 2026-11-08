@@ -26,6 +26,12 @@ const FplFuncInfo g_Funcs[] = {
 	{ L"step", 1, 1 },
 	{ L"sinc", 1, 1 }, { L"sinc'", 1, 1 }, { L"sinc''", 1, 1 },		// (primes: no name typed is these; printed, they read back)
 	{ L"normpdf", 1, 3 }, { L"normcdf", 1, 3 },
+	{ L"beta", 2, 2 },
+	{ L"besselj", 2, 2 }, { L"bessely", 2, 2 }, { L"besseli", 2, 2 }, { L"besselk", 2, 2 },
+	{ L"airyai", 1, 1 }, { L"airybi", 1, 1 }, { L"airyai'", 1, 1 }, { L"airybi'", 1, 1 },
+	{ L"zeta", 1, 1 },
+	{ L"lambertw", 1, 1 }, { L"lambertwm1", 1, 1 },
+	{ L"ellipk", 1, 1 }, { L"ellipe", 1, 2 }, { L"ellipf", 2, 2 }, { L"ellipe", 2, 2 },	// (the last by Expand; printed, it reads back)
 	{ L"frac", 1, 1 }, { L"clamp", 3, 3 }, { L"deg", 1, 1 }, { L"rad", 1, 1 },
 };
 static_assert(std::size(g_Funcs) == size_t(FplFunc::Count));
@@ -145,6 +151,7 @@ std::wstring FplError::Message() const {
 		case FplErrorCode::BadInitial: return L"A higher-order equation needs y(a) = b, y'(a) = c and so on, at one a";
 		case FplErrorCode::OdeOrder: return L"Equations go up to the fifth order";
 		case FplErrorCode::ReservedName: return L"'" + name + L"' is a variable: pick another name";
+		case FplErrorCode::BadIndex: return L"The second argument of '" + name + L"' is its index: a name such as k";
 		case FplErrorCode::Internal: return L"Internal error";
 	}
 	return {};
@@ -178,6 +185,8 @@ const std::wstring_view g_YieldingNames[] = {
 		L"trunc", L"lgamma", L"erfc", L"nCr", L"nPr", L"ncr", L"npr", L"gcd", L"lcm", L"step", L"heaviside", L"sinc",
 		L"normpdf", L"normcdf", L"frac", L"clamp", L"deg", L"rad", L"log10", L"arcsec", L"arccsc", L"arccot", L"arsech", L"arcsch",
 		L"arcoth", L"arcsech", L"arccsch", L"arccoth", L"cosec", L"tg", L"ctg", L"arctg", L"arcctg", L"prod", L"product",
+	L"beta", L"besselj", L"bessely", L"besseli", L"besselk", L"airyai", L"airybi", L"zeta", L"lambertw", L"lambertwm1",
+	L"ellipk", L"ellipe", L"ellipf",
 };
 
 bool IsYieldingName(std::wstring_view s) {
@@ -185,7 +194,7 @@ bool IsYieldingName(std::wstring_view s) {
 }
 
 // Short ones that read as products too (tg is t g; (t, tg) was a curve): functions only when called with parentheses.
-const std::wstring_view g_CallOnlyNames[] = { L"tg", L"ctg", L"deg", L"rad", L"gcd", L"lcm", L"ncr", L"npr", L"nCr", L"nPr" };
+const std::wstring_view g_CallOnlyNames[] = { L"tg", L"ctg", L"deg", L"rad", L"gcd", L"lcm", L"ncr", L"npr", L"nCr", L"nPr", L"beta", L"zeta" };
 
 bool IsCallOnlyName(std::wstring_view s) {
 	return std::find(std::begin(g_CallOnlyNames), std::end(g_CallOnlyNames), s) != std::end(g_CallOnlyNames);
@@ -251,14 +260,19 @@ public:
 			size_t from = m_Text.find_first_not_of(L' ', commas[0] + 1), to = commas[1];
 			while (to > from && m_Text[to - 1] == L' ')
 				to--;
-			if (from >= to || !IsLetter(m_Text[from]))
+			bool plain = from < to && IsLetter(m_Text[from]);
+			for (size_t c = from; plain && c < to; c++)
+				plain = IsLetter(m_Text[c]) || IsDigit(m_Text[c]);
+			if (!plain) {
+				// said now: the parse would first trip over the body's name, which is only known if this is one
+				if (m_BadIndex.code == FplErrorCode::None) {
+					const bool product = symbol ? m_Text[i] == L'\x220F' : m_Text[i] == L'p';
+					m_BadIndex = { FplErrorCode::BadIndex, int(std::min(from, commas[1])), int(from < to ? to - from : 1),
+						product ? L"prod" : L"sum" };
+				}
 				continue;
+			}
 			const std::wstring_view name = m_Text.substr(from, to - from);
-			bool plain = true;
-			for (wchar_t c : name)
-				plain = plain && (IsLetter(c) || IsDigit(c));
-			if (!plain)
-				continue;
 			m_Indexes.push_back(name);
 			if (name == L"q")
 				m_PlainQ = true;
@@ -299,6 +313,10 @@ public:
 
 	bool Run(std::vector<Token>& tokens, FplError& error) {
 		tokens.clear();
+		if (m_BadIndex.code != FplErrorCode::None) {
+			error = m_BadIndex;
+			return false;
+		}
 		if (!Scan(tokens, error))
 			return false;
 		if (m_PlainQ)
@@ -688,6 +706,7 @@ private:
 	std::wstring_view m_OwnName;
 	bool m_WeakQ = false;
 	std::vector<std::wstring_view> m_Indexes;
+	FplError m_BadIndex;
 	const std::vector<std::wstring>* m_Params;
 	const std::vector<FplUserFunction>* m_Functions;
 };
@@ -1008,6 +1027,10 @@ private:
 			case FplFunc::Log:
 				if (args.size() == 2)
 					return div(m_Ast.Call(FplFunc::Ln, { args[0] }), m_Ast.Call(FplFunc::Ln, { args[1] }));
+				break;
+			case FplFunc::EllipE:
+				if (args.size() == 2)
+					return m_Ast.Call(FplFunc::EllipEInc, std::move(args));
 				break;
 			case FplFunc::Normpdf: case FplFunc::Normcdf: {
 				if (args.size() == 1)

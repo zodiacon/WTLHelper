@@ -40,6 +40,7 @@ enum class FplErrorCode : uint8_t {
 	BadInitial,			// a higher-order ODE's conditions aren't y(a) = b, y'(a) = c ... at one a
 	OdeOrder,			// y'''''' = ...: past the fifth order
 	ReservedName,		// u(x) = ..., u = x - 1: a variable can't name a function or a substitution; name is the name
+	BadIndex,			// sum(f, 2, 1, 3): the second argument of a sum or product isn't a name; name is the function
 	Internal,
 };
 
@@ -89,6 +90,13 @@ enum class FplFunc : uint8_t {
 	Step,					// 0 below 0, 1 from 0
 	Sinc, SincD1, SincD2,	// sin(x)/x, 1 at 0; its derivatives, which a formula would lose near 0
 	Normpdf, Normcdf,		// the standard normal's: (x, mean, sd) is written in terms of them in the parse
+	Beta,					// beta(a, b)
+	BesselJ, BesselY, BesselI, BesselK,		// besselj(order, x): any real order; negative x for whole orders
+	AiryAi, AiryBi, AiryAiD, AiryBiD,		// and their derivatives, which print with primes
+	Zeta,					// no derivative here
+	LambertW, LambertWm1,	// the branches W0 and W-1
+	EllipK, EllipE,			// complete, of the parameter m = k^2
+	EllipF, EllipEInc,		// incomplete: ellipf(phi, m), ellipe(phi, m), phi in radians
 	// written in terms of others in the parse, never evaluated
 	Frac, Clamp, Deg, Rad,
 	Count
@@ -293,6 +301,7 @@ public:
 	bool UsesSlot(int slot) const { return slot < 64 && (m_Slots >> slot) & 1; }
 	bool Reads(int slot) const;		// any slot (UsesSlot only knows the first 64)
 	bool IsConstant() const { return m_Slots == 0; }
+	bool HasSubPrograms() const { return !m_Subs.empty(); }	// an integral, a sum or a product: its cost isn't its size
 	size_t Size() const { return m_Code.size(); }
 
 private:

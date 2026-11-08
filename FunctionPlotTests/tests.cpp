@@ -5524,7 +5524,7 @@ TEST(SumsAndProducts) {
 	CHECK_NEAR(at(L"sum(k, k, 2, 2)", 0), 2);
 	CHECK_NEAR(at(L"sum(k, k, -2, 2)", 0), 0);
 	// too many, undefined limits or terms
-	CHECK_NEAR(at(L"sum(1, k, 1, 99999)", 0), 99999);
+	CHECK_NEAR(at(L"sum(1, k, 1, 100000)", 0), 100000);
 	CHECK(std::isnan(at(L"sum(1, k, 1, 100001)", 0)));
 	CHECK(std::isnan(at(L"sum(1, k, 1, sqrt(x))", -1)));
 	CHECK(std::isnan(at(L"sum(sqrt(k), k, -1, 1)", 0)));
@@ -5566,8 +5566,18 @@ TEST(SumsAndProducts) {
 	CHECK_INT(outside.error.pos, 4);
 	CHECK(FplBuild(L"y = sum(k, k, 1, k)", none).error.code == FplErrorCode::UnknownName);
 	CHECK(FplBuild(L"y = sum(x, x, 1, 3)", none).error.code == FplErrorCode::ReservedName);
-	CHECK(FplBuild(L"y = sum(x, 2, 1, 3)", none).error.code == FplErrorCode::UnexpectedToken);
-	CHECK(FplBuild(L"y = sum(k, 2, 1, 3)", none).error.code == FplErrorCode::UnknownName);		// k isn't an index then
+	// an index that isn't a name is said to be that, wherever it is, whatever the rest is
+	for (const wchar_t* text : { L"y = sum(k, 2, 1, 3)", L"y = sum(x, 2, 1, 3)", L"y = sum(k, 2k, 1, 3)", L"y = 1 + sum(k, 2, 1, 3)" }) {
+		auto bad = FplBuild(text, none);
+		CHECK(bad.error.code == FplErrorCode::BadIndex);
+		CHECK_STR(bad.error.name, L"sum");
+		CHECK(text[bad.error.pos] == L'2');
+		CHECK(bad.error.Message().find(L"index") != std::wstring::npos);
+	}
+	auto badProduct = FplBuild(L"y = prod(k, 2, 1, 3)", none);
+	CHECK(badProduct.error.code == FplErrorCode::BadIndex);
+	CHECK_STR(badProduct.error.name, L"prod");
+	CHECK(FplBuild(L"y = sum(x, , 1, 3)", none).error.code == FplErrorCode::BadIndex);
 	CHECK(FplBuild(L"y = prod(2, 2)", none).error.code == FplErrorCode::ArgCount);
 	CHECK(FplBuild(L"y = sum(3)", none).error.code == FplErrorCode::NotAList);
 	// sum of a list is as it was; prod gives way to the user's
@@ -5833,6 +5843,277 @@ TEST(ReadmeMatchesParser) {
 		CHECK(std::find(yielding.begin(), yielding.end(), name) != yielding.end());
 }
 
+TEST(SlowCurves) {
+	FplViewport v = View(-10, 10, -8, 8, 1000, 800);
+	// a plain curve isn't, however long; nor a short sum's programs are hidden from the clock
+	auto plain = MakePlot({ L"y = sin x + cos x + tan x + exp x + sin 2x + cos 2x + sin 3x + cos 3x" });
+	CHECK(!plain.graphs[0].expr.f.HasSubPrograms());
+	CHECK_NEAR(plain.EvalCost(0), 0.0);
+	CHECK(!plain.IsHeavy(0, false));
+	// a long sum is, for each kind of curve
+	const wchar_t* slow = L"sum(sin(k x)/k, k, 1, 20000)";
+	auto plot = MakePlot({ (std::wstring(L"y = ") + slow).c_str(), L"x = sum(sin(k y)/k, k, 1, 20000)",
+		L"r = 3 + sum(sin(k \x03B8)/k, k, 1, 20000)", L"(sum(sin(k t)/k, k, 1, 20000), t)", L"y = sum(sin(k x)/k, k, 1, 3)",
+		L"y = integral(sum(sin(k t)/k, k, 1, 20), t, 0, x)", L"z = sum(sin(k x)/k, k, 1, 20000)" });
+	for (auto& g : plot.graphs)
+		CHECK(!g.expr.error);
+	CHECK(plot.graphs[0].expr.f.HasSubPrograms());
+	CHECK(plot.graphs[4].expr.f.HasSubPrograms());
+	for (int i : { 0, 1, 2, 3, 5 }) {
+		CHECK(plot.EvalCost(i) > 8e-6);
+		CHECK(plot.IsHeavy(i, false));
+		CHECK(!plot.IsHeavy(i, true));
+	}
+	CHECK(plot.IsHeavy(6, false));
+	CHECK(plot.IsHeavy(6, true));
+	// sampled at once: few evaluations, unrefined, no analysis, still the curve
+	for (int i : { 0, 1, 2, 3 }) {
+		auto coarse = plot.CoarseOptions(i, v);
+		CHECK(coarse.maxDepth == 0);
+		CHECK(!coarse.singularities);
+		plot.SampleGraph(i, v, coarse);
+		auto& g = plot.graphs[i].geometry;
+		CHECK(!g.lines.empty());
+		CHECK(g.evals <= 300);
+		CHECK(g.evals >= 16);
+	}
+	// its flags still count for the full one, and a surface's cells are the coarse ones
+	CHECK(plot.OptionsFor(0, {}).singularities);
+	CHECK_NEAR(plot.CoarseOptions(6, v).cellSize, 16.0);
+	auto implicit = MakePlot({ L"x^2 + y^2 = 4" });
+	CHECK_NEAR(implicit.CoarseOptions(0, v).cellSize, 16.0);
+	CHECK(implicit.IsHeavy(0, false));
+	// the thread's result is the whole curve: as sampling it here is
+	auto medium = MakePlot({ L"y = sum(sin(k x)/k, k, 1, 200)" });
+	FplJob job;
+	job.graph = 0;
+	job.generation = 7;
+	job.expr = medium.graphs[0].expr;
+	job.slots = medium.Slots();
+	job.view = v;
+	job.options = medium.OptionsFor(0, {});
+	auto result = FplWorker::Run(job);
+	medium.SampleGraph(0, v);
+	CHECK_INT(result.generation, 7);
+	CHECK_INT(result.geometry.lines.size(), medium.graphs[0].geometry.lines.size());
+	CHECK_INT(result.geometry.evals, medium.graphs[0].geometry.evals);
+	// and a slow surface's mesh on the thread, 96 by 96 as ever
+	auto surface = MakePlot({ L"z = sum(sin(k x)/k, k, 1, 5)" });
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	FplJob meshJob;
+	meshJob.graph = 0;
+	meshJob.expr = surface.graphs[0].expr;
+	meshJob.slots = surface.Slots();
+	meshJob.mesh = true;
+	meshJob.box = box;
+	auto meshed = FplWorker::Run(meshJob);
+	surface.Build3D(box);
+	CHECK_INT(meshed.triangles.indices.size(), surface.graphs[0].mesh.indices.size());
+	surface.Build3DGraph(0, box, 16);
+	CHECK(surface.graphs[0].mesh.indices.size() < meshed.triangles.indices.size());
+	// features: found for a quick sum; not looked for on a very slow one, or against one
+	auto quick = MakePlot({ L"y = sum(x^k, k, 1, 2) - 2" });
+	quick.Sample(v);
+	quick.FindFeatures(0, v);
+	CHECK(!quick.graphs[0].features.empty());
+	auto two = MakePlot({ L"y = sum(sin(k x)/k, k, 1, 100000)", L"y = x" });
+	two.FindFeatures(0, v);
+	CHECK(two.graphs[0].features.empty());
+	two.FindFeatures(1, v);
+	for (auto& f : two.graphs[1].features)
+		CHECK(f.kind != FplFeatureKind::Intersection);
+}
+
+TEST(SpecialFunctions) {
+	std::vector<std::wstring> none;
+	auto at = [&](const std::wstring& text, double x) {
+		auto e = FplBuild(L"y = " + text, none);
+		CHECK(!e.error);
+		double slots[FplFirstParam] = {};
+		slots[FplSlotX] = x;
+		return e.error ? NaN : e.f.Eval(slots);
+	};
+	const double close = 1e-9;
+	// beta
+	CHECK_NEAR_TOL(at(L"beta(2, 3)", 0), 1.0 / 12, close);
+	CHECK_NEAR_TOL(at(L"beta(0.5, 0.5)", 0), Pi, close);
+	CHECK_NEAR_TOL(at(L"beta(x, 3)", 2.5), std::tgamma(2.5) * 2 / std::tgamma(5.5), close);
+	CHECK_NEAR_TOL(at(L"beta(-0.5, 2)", 0), std::tgamma(-0.5) * 1 / std::tgamma(1.5), close);
+	// Bessel at known values
+	CHECK_NEAR_TOL(at(L"besselj(0, 1)", 0), 0.7651976865579666, close);
+	CHECK_NEAR_TOL(at(L"besselj(1, 1)", 0), 0.44005058574493355, close);
+	CHECK_NEAR_TOL(at(L"bessely(0, 1)", 0), 0.08825696421567696, close);
+	CHECK_NEAR_TOL(at(L"besseli(0, 1)", 0), 1.2660658777520084, close);
+	CHECK_NEAR_TOL(at(L"besselk(0, 1)", 0), 0.42102443824070834, close);
+	CHECK_NEAR_TOL(at(L"besselj(0, 0)", 0), 1, close);
+	CHECK_NEAR_TOL(at(L"besselj(2, 0)", 0), 0, close);
+	CHECK_NEAR_TOL(at(L"besselj(0.5, 2)", 0), std::sqrt(2 / (Pi * 2)) * std::sin(2.0), close);	// half orders are elementary
+	CHECK_NEAR_TOL(at(L"besselj(-0.5, 2)", 0), std::sqrt(2 / (Pi * 2)) * std::cos(2.0), close);
+	CHECK_NEAR_TOL(at(L"bessely(0.5, 2)", 0), -std::sqrt(2 / (Pi * 2)) * std::cos(2.0), close);
+	CHECK_NEAR_TOL(at(L"bessely(-0.5, 2)", 0), std::sqrt(2 / (Pi * 2)) * std::sin(2.0), close);
+	CHECK_NEAR_TOL(at(L"besseli(0.5, 2)", 0), std::sqrt(2 / (Pi * 2)) * std::sinh(2.0), close);
+	CHECK_NEAR_TOL(at(L"besseli(-0.5, 2)", 0), std::sqrt(2 / (Pi * 2)) * std::cosh(2.0), close);
+	CHECK_NEAR_TOL(at(L"besselk(0.5, 2)", 0), std::sqrt(Pi / 4) * std::exp(-2.0), close);
+	CHECK_NEAR_TOL(at(L"besselk(-0.5, 2)", 0), at(L"besselk(0.5, 2)", 0), close);
+	// whole orders below 0 and x below 0
+	CHECK_NEAR_TOL(at(L"besselj(-1, 1)", 0), -0.44005058574493355, close);
+	CHECK_NEAR_TOL(at(L"besselj(-2, 1)", 0), at(L"besselj(2, 1)", 0), close);
+	CHECK_NEAR_TOL(at(L"besselj(1, -1)", 0), -0.44005058574493355, close);
+	CHECK_NEAR_TOL(at(L"besselj(2, -1)", 0), at(L"besselj(2, 1)", 0), close);
+	CHECK_NEAR_TOL(at(L"bessely(-1, 1)", 0), -at(L"bessely(1, 1)", 0), close);
+	CHECK_NEAR_TOL(at(L"besseli(1, -1)", 0), -at(L"besseli(1, 1)", 0), close);
+	CHECK(std::isnan(at(L"besselj(0.5, -1)", 0)));
+	CHECK(std::isnan(at(L"bessely(0, -1)", 0)));
+	CHECK(std::isnan(at(L"besseli(0.5, -1)", 0)));
+	CHECK(std::isnan(at(L"besselk(0, -1)", 0)));
+	CHECK(at(L"bessely(0, 0)", 0) < -1e300);
+	CHECK(at(L"besselk(0, 0)", 0) > 1e300);
+	// far out, without complaint
+	CHECK(std::abs(at(L"besselj(0, 1000000)", 0)) < 0.01);
+	CHECK(std::isfinite(at(L"bessely(3, 1000)", 0)));
+	// Airy at known values, through the changes of method
+	CHECK_NEAR_TOL(at(L"airyai(0)", 0), 0.35502805388781723, close);
+	CHECK_NEAR_TOL(at(L"airybi(0)", 0), 0.6149266274460007, close);
+	CHECK_NEAR_TOL(at(L"airyai(1)", 0), 0.13529242, 1e-7);
+	CHECK_NEAR_TOL(at(L"airybi(1)", 0), 1.2074235950, 1e-8);
+	CHECK_NEAR_TOL(at(L"airyai(-1)", 0), 0.53556088329, 1e-9);
+	CHECK_NEAR_TOL(at(L"airybi(-1)", 0), 0.10399738949, 1e-9);
+	CHECK_NEAR_TOL(at(L"airyai(-2)", 0), 0.22740742820, 1e-9);
+	CHECK_NEAR_TOL(at(L"airybi(-2)", 0), -0.41230258795, 1e-9);
+	CHECK_NEAR_TOL(at(L"airyai'(0)", 0), -0.25881940379, 1e-9);
+	CHECK_NEAR_TOL(at(L"airyai'(0)", 0), -1 / (std::cbrt(3.0) * std::tgamma(1.0 / 3)), 1e-12);
+	CHECK_NEAR_TOL(at(L"airybi'(0)", 0), std::pow(3.0, 1.0 / 6) / std::tgamma(1.0 / 3), 1e-12);
+	for (double edge : { 1.0, -1.0 }) {
+		CHECK_NEAR_TOL(at(L"airyai(x)", edge - 1e-9), at(L"airyai(x)", edge + 1e-9), 1e-8);
+		CHECK_NEAR_TOL(at(L"airybi(x)", edge - 1e-9), at(L"airybi(x)", edge + 1e-9), 1e-8);
+		CHECK_NEAR_TOL(at(L"airyai'(x)", edge - 1e-9), at(L"airyai'(x)", edge + 1e-9), 1e-8);
+		CHECK_NEAR_TOL(at(L"airybi'(x)", edge - 1e-9), at(L"airybi'(x)", edge + 1e-9), 1e-8);
+	}
+	// the equation they solve, and their Wronskian, all over
+	for (double v : { -8.0, -3.3, -1.5, -0.5, 0.0, 0.5, 1.5, 3.3, 6.0 }) {
+		const double h = 1e-4;
+		auto second = [&](const wchar_t* f) { return (at(f, v + h) - 2 * at(f, v) + at(f, v - h)) / (h * h); };
+		CHECK_NEAR_TOL(second(L"airyai(x)"), v * at(L"airyai(x)", v), 1e-5);
+		CHECK_NEAR_TOL(second(L"airybi(x)"), v * at(L"airybi(x)", v), 1e-3 * (1 + std::abs(at(L"airybi(x)", v))));
+		CHECK_NEAR_TOL(at(L"airyai(x)", v) * at(L"airybi'(x)", v) - at(L"airyai'(x)", v) * at(L"airybi(x)", v), 1 / Pi, 1e-9);
+	}
+	CHECK(at(L"airyai(x)", 50) < 1e-50);
+	// zeta
+	CHECK_NEAR_TOL(at(L"zeta(2)", 0), Pi * Pi / 6, close);
+	CHECK_NEAR_TOL(at(L"zeta(4)", 0), Pi * Pi * Pi * Pi / 90, close);
+	CHECK_NEAR_TOL(at(L"zeta(0)", 0), -0.5, close);
+	CHECK_NEAR_TOL(at(L"zeta(-1)", 0), -1.0 / 12, close);
+	CHECK_NEAR_TOL(at(L"zeta(-2)", 0), 0, close);
+	CHECK(std::isnan(at(L"zeta(1)", 0)));
+	CHECK(FplBuild(L"y = zeta'(x)", none).error.code == FplErrorCode::NotDifferentiable);
+	CHECK(!FplBuild(L"y = zeta(x)", none).error);		// its analysis goes by differences
+	// Lambert W: what it's the inverse of, on both branches, up to the branch point
+	CHECK_NEAR_TOL(at(L"lambertw(1)", 0), 0.5671432904097838, close);
+	CHECK_NEAR_TOL(at(L"lambertw(0)", 0), 0, close);
+	CHECK_NEAR_TOL(at(L"lambertw(e)", 0), 1, close);
+	CHECK_NEAR_TOL(at(L"lambertwm1(-0.2)", 0), -2.542641357773526, close);
+	for (double v : { -0.3678, -0.3, -0.1, -1e-5, 1e-5, 0.1, 1.0, 2.0, 2.9, 3.1, 10.0, 1e5, 1e100 }) {
+		const double w = at(L"lambertw(x)", v);
+		CHECK(w >= -1);
+		CHECK_NEAR_TOL(w * std::exp(w), v, 1e-9 * (std::abs(v) + 1e-6));
+	}
+	for (double v : { -0.3678, -0.3, -0.25001, -0.2499, -0.1, -1e-5, -1e-100 }) {
+		const double w = at(L"lambertwm1(x)", v);
+		CHECK(w <= -1);
+		CHECK_NEAR_TOL(w * std::exp(w), v, 1e-9 * std::abs(v));
+	}
+	CHECK_NEAR_TOL(at(L"lambertw(-1/e)", 0), -1, 1e-6);
+	CHECK_NEAR_TOL(at(L"lambertwm1(-1/e)", 0), -1, 1e-6);
+	CHECK(std::isnan(at(L"lambertw(-1)", 0)));
+	CHECK(std::isnan(at(L"lambertwm1(-1)", 0)));
+	CHECK(std::isnan(at(L"lambertwm1(1)", 0)));
+	CHECK_NEAR_TOL(at(L"lambertw'(x)", 0), 1, close);		// through 0, where w/(x(1 + w)) isn't defined
+	// elliptic: by their own integrals, by m not k
+	CHECK_NEAR_TOL(at(L"ellipk(0)", 0), Pi / 2, close);
+	CHECK_NEAR_TOL(at(L"ellipe(0)", 0), Pi / 2, close);
+	CHECK_NEAR_TOL(at(L"ellipe(1)", 0), 1, close);
+	CHECK_NEAR_TOL(at(L"ellipk(0.5)", 0), 1.8540746773013719, close);
+	CHECK_NEAR_TOL(at(L"ellipe(0.5)", 0), 1.3506438810476755, close);
+	for (double m : { -2.0, -0.5, 0.3, 0.5, 0.9 }) {
+		const std::wstring mm = std::to_wstring(m);
+		CHECK_NEAR_TOL(at(L"ellipk(" + mm + L")", 0), at(L"integral(1/sqrt(1 - (" + mm + L") sin(x)^2), 0, pi/2)", 0), 1e-7);
+		CHECK_NEAR_TOL(at(L"ellipe(" + mm + L")", 0), at(L"integral(sqrt(1 - (" + mm + L") sin(x)^2), 0, pi/2)", 0), 1e-7);
+	}
+	for (double phi : { 0.3, 1.0, 1.5 }) {
+		const std::wstring p = std::to_wstring(phi);
+		CHECK_NEAR_TOL(at(L"ellipf(" + p + L", 0.5)", 0), at(L"integral(1/sqrt(1 - 0.5 sin(x)^2), 0, " + p + L")", 0), 1e-7);
+		CHECK_NEAR_TOL(at(L"ellipe(" + p + L", 0.5)", 0), at(L"integral(sqrt(1 - 0.5 sin(x)^2), 0, " + p + L")", 0), 1e-7);
+	}
+	CHECK_NEAR_TOL(at(L"ellipf(pi/2, 0.5)", 0), at(L"ellipk(0.5)", 0), close);
+	CHECK_NEAR_TOL(at(L"ellipe(pi/2, 0.5)", 0), at(L"ellipe(0.5)", 0), close);
+	CHECK(at(L"ellipk(1)", 0) > 1e300);
+	CHECK(std::isnan(at(L"ellipk(1.5)", 0)));
+	CHECK(std::isnan(at(L"ellipe(1.5)", 0)));
+	CHECK(std::isnan(at(L"ellipf(1, 1.5)", 0)));
+	CHECK(std::isnan(at(L"ellipf(1, -1)", 0)));
+	CHECK(FplBuild(L"y = ellipe(1, 2, 3)", none).error.code == FplErrorCode::ArgCount);
+	CHECK(FplBuild(L"y = besselj(1)", none).error.code == FplErrorCode::ArgCount);
+
+	// compiled and the slow tree; derivatives against differences; printed and read back
+	struct Case { const wchar_t* text; double x; };
+	const Case cases[] = {
+		{ L"beta(x, 2)", 1.5 }, { L"beta(3, 2x)", 1.5 }, { L"beta(x, x)", 1.5 },
+		{ L"besselj(1, x)", 2.3 }, { L"besselj(0, x)", 2.3 }, { L"besselj(0.5, 2x)", 2.3 }, { L"besselj(-1.5, x)", 2.3 },
+		{ L"bessely(0, x)", 2.3 }, { L"bessely(2.5, x)", 2.3 }, { L"besseli(1, x)", 2.3 }, { L"besseli(0, x)", 2.3 },
+		{ L"besselk(1, x)", 2.3 }, { L"besselk(0, x)", 2.3 },
+		{ L"airyai(x)", 0.5 }, { L"airyai(x)", -3 }, { L"airyai(x)", 3 }, { L"airybi(x)", 0.5 }, { L"airybi(x)", -3 }, { L"airybi(2x)", 1.5 },
+		{ L"lambertw(x)", 2.3 }, { L"lambertw(x)", -0.1 }, { L"lambertwm1(x)", -0.1 },
+		{ L"ellipk(x)", 0.5 }, { L"ellipe(x)", 0.5 }, { L"ellipk(x)", -0.5 }, { L"ellipe(x)", -0.5 }, { L"ellipf(x, 0.5)", 0.7 }, { L"ellipe(x, 0.5)", 0.7 },
+		{ L"ellipf(2x, 0.5)", 0.3 },
+	};
+	for (auto& c : cases) {
+		FplParseOptions options;
+		auto r = FplParse(c.text, options);
+		CHECK(!r.error);
+		if (r.error)
+			continue;
+		auto program = FplCompile(r.ast, r.root, none);
+		double values[FplFirstParam] = {};
+		values[FplSlotX] = c.x;
+		const double value = program.Eval(values);
+		CHECK(std::isfinite(value));
+		CHECK_NEAR_TOL(Tree(r.ast, r.root, c.x), value, 1e-9 * (1 + std::abs(value)));
+		FplError error;
+		int d = FplDerive(r.ast, r.root, L"x", &error);
+		CHECK(d >= 0);
+		if (d < 0)
+			continue;
+		auto derivative = FplCompile(r.ast, d, none);
+		const double h = 1e-5;
+		values[FplSlotX] = c.x + h;
+		const double up = program.Eval(values);
+		values[FplSlotX] = c.x - h;
+		const double down = program.Eval(values);
+		values[FplSlotX] = c.x;
+		CHECK_NEAR_TOL(derivative.Eval(values), (up - down) / (2 * h), 2e-5 * (1 + std::abs(value)));
+		auto again = FplParse(FplToString(r.ast, r.root), options);
+		CHECK(!again.error);
+		if (!again.error)
+			CHECK_NEAR_TOL(FplCompile(again.ast, again.root, none).Eval(values), value, 1e-9 * (1 + std::abs(value)));
+	}
+	CHECK(FplBuild(L"y = d/dx besselj(x, 2)", none).error.code == FplErrorCode::NotDifferentiable);
+	CHECK(FplBuild(L"y = d/dx ellipf(1, x)", none).error.code == FplErrorCode::NotDifferentiable);
+	CHECK(!FplBuild(L"y = d/dx besselj(a, x)", { L"a" }).error);
+	CHECK_NEAR_TOL(at(L"d/dx d/dx airyai(x)", 2), 2 * at(L"airyai(x)", 2), 1e-9);	// y'' = x y, by the derivatives
+	// the names give way
+	CHECK(!FplBuild(L"y = beta x", { L"beta" }).error);
+	CHECK(FplBuild(L"y = beta", none).error.code == FplErrorCode::UnknownName);
+	auto plot = MakePlot({ L"zeta = 2", L"y = zeta x" });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[1].expr.error);
+	// it draws
+	FplViewport v = View();
+	plot = MakePlot({ L"y = besselj(0, x)", L"y = airyai(x)", L"y = zeta(x)", L"y = lambertw(x)", L"y = ellipk(x)" });
+	plot.Sample(v);
+	for (auto& g : plot.graphs)
+		CHECK(!g.geometry.lines.empty());
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -5925,6 +6206,8 @@ int wmain() {
 	Run_TicksInState();
 	Run_HeatmapsInSvg();
 	Run_ReadmeMatchesParser();
+	Run_SlowCurves();
+	Run_SpecialFunctions();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

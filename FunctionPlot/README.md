@@ -67,6 +67,15 @@ A function with one argument doesn't need parentheses: `sin 2x` is `sin(2x)`, an
 | `erf(x)`, `erfc(x)` | The error function and 1 - erf(x), which stays accurate for large x |
 | `sinc(x)` | sin(x)/x, and 1 at 0. Not the sin(πx)/(πx) of signal processing |
 
+| `beta(a, b)` | Γ(a) Γ(b) / Γ(a + b) |
+| `besselj(n, x)`, `bessely(n, x)` | Bessel functions of the first and second kinds, of any real order n. Negative x needs a whole order, and `bessely` positive x |
+| `besseli(n, x)`, `besselk(n, x)` | The modified ones. The same limits, with `besselk` as `bessely` |
+| `airyai(x)`, `airybi(x)` | Airy functions, the solutions of y'' = x y |
+| `zeta(s)` | The Riemann zeta function, undefined at 1. It has no derivative here |
+| `lambertw(x)`, `lambertwm1(x)` | The Lambert W function: the w with w e^w = x, on the branch from -1 up, and on the one from -1 down, for x from -1/e to 0 |
+| `ellipk(m)`, `ellipe(m)` | Complete elliptic integrals of the first and second kinds, of the parameter m = k², as in MATLAB and SciPy, not the modulus k |
+| `ellipf(φ, m)`, `ellipe(φ, m)` | The incomplete ones, with φ always in radians and m from 0 to 1. A derivative only by φ |
+
 ### Combinatorics
 
 | Function | Meaning |
@@ -118,6 +127,8 @@ A standard deviation of zero or less is undefined. Pick other names than `mean` 
 
 The index can be any name except a variable's, and it means nothing outside its sum: `y = sum(x^k/k!, k, 0, 8)`. The limits are rounded to whole numbers and can be parameters. An empty sum is 0 and an empty product 1. More than 100,000 terms is undefined.
 
+A curve with a long sum, or anything else that takes a while to work out, is drawn roughly at once and in full a moment later, and tracing doesn't find its roots and extrema if it's very slow.
+
 A step-like function has a derivative of 0: `sign`, `floor`, `ceil`, `round`, `trunc`, `step`, `square`, `gcd` and `lcm`. A function of more than one argument can't take primes (use `d/dx`), and `sinc` has them up to the second.
 
 ### Lists
@@ -140,9 +151,9 @@ For a list such as `L = [1, 2, 3]`:
 
 Most of the newer names can still be your own. If a parameter or function has the name, or a line defines it (`step = 2`, `square(x) = x^2`), it's yours in every line. These are the names:
 
-`square triangle sawtooth asec acsc acot sech csch coth asech acsch acoth trunc lgamma erfc nCr nPr ncr npr gcd lcm step heaviside sinc normpdf normcdf frac clamp deg rad log10 arcsec arccsc arccot arsech arcsch arcoth arcsech arccsch arccoth cosec tg ctg arctg arcctg prod product`
+`square triangle sawtooth asec acsc acot sech csch coth asech acsch acoth trunc lgamma erfc nCr nPr ncr npr gcd lcm step heaviside sinc normpdf normcdf frac clamp deg rad log10 arcsec arccsc arccot arsech arcsch arcoth arcsech arccsch arccoth cosec tg ctg arctg arcctg prod product beta besselj bessely besseli besselk airyai airybi zeta lambertw lambertwm1 ellipk ellipe ellipf`
 
-The shorter ones read as products of letters unless they're called with parentheses, so `(t, tg)` is still t times g: `tg ctg deg rad gcd lcm nCr nPr ncr npr`. The other function names can't be redefined.
+The shorter ones read as products of letters unless they're called with parentheses, so `(t, tg)` is still t times g: `tg ctg deg rad gcd lcm nCr nPr ncr npr beta zeta`. The other function names can't be redefined.
 
 ## Numbers and variables
 

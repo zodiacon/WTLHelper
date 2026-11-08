@@ -48,7 +48,15 @@ FplJobResult FplWorker::Run(const FplJob& job) {
 	r.generation = job.generation;
 	r.mesh = job.mesh;
 	r.view = job.view;
-	if (job.mesh) {
+	if (job.mesh && job.expr.kind == FplKind::Surface) {
+		std::vector<double> slots = job.slots;
+		r.triangles = FplSurfaceMesh([&](double x, double y) {
+			slots[FplSlotX] = x;
+			slots[FplSlotY] = y;
+			return job.expr.f.Eval(slots.data());
+		}, job.box, 96);
+	}
+	else if (job.mesh) {
 		std::vector<double> slots = job.slots;
 		r.triangles = FplImplicitMesh([&](double x, double y, double z) {
 			slots[FplSlotX] = x;
