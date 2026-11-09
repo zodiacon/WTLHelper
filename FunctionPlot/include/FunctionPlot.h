@@ -308,6 +308,9 @@ public:
 	BOOL SetGraph(const FPLGRAPH& graph);      // the masked members of the graph with the id
 	BOOL GetGraph(FPLGRAPH& graph) const;      // the masked members of the graph with the id
 	BOOL GetGraphInfo(UINT id, FPLGRAPHINFO& info) const;
+	// A graph's text for other programs, as it's drawn in the legend: LaTeX, or a MathML document. Empty if it doesn't read.
+	CString GetGraphLatex(UINT id) const;
+	CString GetGraphMathML(UINT id) const;
 	BOOL RemoveGraph(UINT id);
 	void RemoveAllGraphs();
 	int GetGraphCount() const;

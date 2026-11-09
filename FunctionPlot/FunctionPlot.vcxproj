@@ -117,6 +117,7 @@
     <ClCompile Include="src\FunctionPlotGraphs.cpp" />
     <ClCompile Include="src\FunctionPlotMath.cpp" />
     <ClCompile Include="src\FunctionPlotMathDraw.cpp" />
+    <ClCompile Include="src\FunctionPlotMathText.cpp" />
     <ClCompile Include="src\FunctionPlotPaint.cpp" />
     <ClCompile Include="src\FunctionPlotParse.cpp" />
     <ClCompile Include="src\FunctionPlotRender3D.cpp" />

@@ -62,9 +62,9 @@ public:
 				// sin^2 x, with the power on the name
 				if (IsClassicCall(m_Ast[k[0]]))
 					return Call(m_Ast[k[0]], size, Strip(k[1]));
-				return Script(Node(k[0], size), Node(Strip(k[1]), Script(size)), size, true);
+				return Script(Whole(k[0], size), Node(Strip(k[1]), Script(size)), size, true);
 			case FplOp::Fact: {
-				Box box = Node(k[0], size);
+				Box box = Whole(k[0], size);
 				Append(box, Text(L"!", size, false), 0.02 * size);
 				return box;
 			}
@@ -95,7 +95,7 @@ public:
 				Box bottom = Text(L"d", Smaller(size), false);
 				Append(bottom, Name(n.name, 0, Smaller(size)));
 				Box box = Fraction(top, bottom, size);
-				Append(box, Node(k[0], size), 0.1 * size);
+				Append(box, Operand(k[0], size), 0.1 * size);
 				return box;
 			}
 			case FplOp::Named: {
@@ -113,6 +113,24 @@ private:
 	static double Smaller(double size) { return std::max(size * FractionScale, MinSize); }
 	static double Script(double size) { return std::max(size * ScriptScale, MinSize); }
 	static double Stroke(double size) { return std::max(0.055 * size, 0.7); }
+
+	// What a sum, a product, an integral or d/dx applies to. Their own argument's parentheses aren't kept in the tree, and without
+	// them "the product of 1 + x/k" would read as 1 added to a product.
+	Box Operand(int node, double size) {
+		auto op = m_Ast[node].op;
+		if (op == FplOp::Add || op == FplOp::Sub)
+			return Wrap(Node(node, size), Delim::Paren, size);
+		return Node(node, size);
+	}
+
+	// What's applied to all of a sum, a product, an integral or d/dx: on its own, a power or a factor after one would look like
+	// part of what it's applied to.
+	Box Whole(int node, double size) {
+		auto op = m_Ast[node].op;
+		if (op == FplOp::Series || op == FplOp::Integral || op == FplOp::Deriv)
+			return Wrap(Node(node, size), Delim::Paren, size);
+		return Node(node, size);
+	}
 
 	// what parentheses are only there to group: a fraction and a power show that themselves
 	int Strip(int node) const {
@@ -191,7 +209,7 @@ private:
 	}
 
 	Box Product(const FplNode& n, double size) {
-		Box box = Node(n.kids[0], size);
+		Box box = Whole(n.kids[0], size);
 		if (!n.implicit) {
 			Append(box, Text(std::wstring(1, Dot), size, false), 0.12 * size);
 			Append(box, Node(n.kids[1], size), 0.12 * size);
@@ -435,7 +453,7 @@ private:
 		Place(box, hi, at, -0.7 * size);
 		Place(box, lo, at, 0.42 * size);
 		box.w = at + std::max(lo.w, hi.w);
-		Append(box, Node(k[0], size), 0.1 * size);
+		Append(box, Operand(k[0], size), 0.1 * size);
 		Append(box, Text(L"d", size, false), 0.14 * size);
 		Append(box, Name(n.name, 0, size));
 		return box;
@@ -455,7 +473,7 @@ private:
 		Place(box, lo, (width - lo.w) / 2, sign.desc + 0.14 * size + lo.asc);
 		Place(box, hi, (width - hi.w) / 2, -sign.asc + 0.14 * size - hi.desc);
 		box.w = width;
-		Append(box, Node(k[0], size), 0.12 * size);
+		Append(box, Operand(k[0], size), 0.12 * size);
 		return box;
 	}
 

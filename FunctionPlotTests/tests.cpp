@@ -6269,6 +6269,19 @@ TEST(MathDisplay) {
 	CHECK_STR(said(L"prod(k, k, 1, 3)"), L"\x220Fk=13k");
 	CHECK_STR(said(L"integral(x^2, 0, 1)"), L"\x222B" L"10x2dx");
 	CHECK_STR(said(L"integral(t, t, 0, x)"), L"\x222Bx0tdt");
+	// what they apply to keeps its grouping: a product of 1 + x isn't 1 plus a product
+	CHECK_STR(said(L"prod(1 + x, k, 1, 3)"), L"\x220Fk=13|1+x|");
+	CHECK_STR(said(L"sum(x - k, k, 1, 3)"), L"\x2211k=13|x" + minus + L"k|");
+	CHECK_STR(said(L"integral(x + 1, 0, 1)"), L"\x222B" L"10|x+1|dx");
+	CHECK_STR(said(L"d/dx (x + 1)"), L"ddx||x+1|");
+	CHECK_STR(said(L"sum(k x, k, 1, 3)"), L"\x2211k=13kx");
+	// and what's applied to all of one stays outside it
+	CHECK_STR(said(L"sum(k, k, 1, 3)^2"), L"|\x2211k=13k|2");
+	CHECK_STR(said(L"sum(k, k, 1, 3) x"), L"|\x2211k=13k|x");
+	CHECK_STR(said(L"sum(k, k, 1, 3)!"), L"|\x2211k=13k|!");
+	CHECK_STR(said(L"integral(x, 0, 1) * 2"), L"|\x222B" L"10xdx|" + dot + L"2");
+	CHECK_STR(said(L"2 sum(k, k, 1, 3)"), L"2\x2211k=13k");
+	CHECK_STR(said(L"sum(k, k, 1, 3) + 1"), L"\x2211k=13k+1");
 
 	// it doesn't read: no layout
 	FplMathLayout none;
@@ -6383,6 +6396,138 @@ TEST(MathDisplay) {
 	CHECK(svg.find(">x +<") != std::string::npos);		// one with an error stays as typed
 }
 
+TEST(CostOverTheView) {
+	// an integral from 0 looks cheap near 0 and isn't at the far end: the view decides
+	auto plot = MakePlot({ L"y = integral(sin(t^2), t, 0, x)", L"y = sin x", L"(integral(sin(s^2), s, 0, t), t)" });
+	FplViewport wide = View(-10, 10, -8, 8, 1000, 800), narrow = View(-0.01, 0.01, -8, 8, 1000, 800);
+	double wideCost = 0, narrowCost = 1e9;
+	for (int i = 0; i < 5; i++) {
+		wideCost = std::max(wideCost, plot.EvalCost(0, &wide));
+		narrowCost = std::min(narrowCost, plot.EvalCost(0, &narrow));
+	}
+	CHECK(wideCost > 3 * narrowCost);
+	CHECK(plot.IsHeavy(0, false, &wide));
+	CHECK(plot.EvalCost(0) > 0);		// no view: the usual one
+	CHECK_NEAR(plot.EvalCost(1, &wide), 0.0);
+	CHECK(!plot.IsHeavy(1, false, &wide));
+	// the coarse version is few evaluations by that cost, and still a curve
+	auto coarse = plot.CoarseOptions(0, wide);
+	CHECK(coarse.maxDepth == 0);
+	plot.SampleGraph(0, wide, coarse);
+	CHECK(!plot.graphs[0].geometry.lines.empty());
+	CHECK(plot.graphs[0].geometry.evals <= 300);
+	// a range is what a curve in t is timed over; it stops counting once it's clearly slow
+	auto slow = MakePlot({ L"y = sum(sin(k x)/k, k, 1, 50000)" });
+	auto start = std::chrono::steady_clock::now();
+	const double cost = slow.EvalCost(0, &wide);
+	const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+	CHECK(cost > 8e-6);
+	CHECK(took < cost * 4.5);			// not all five places
+}
+
+TEST(LatexAndMathML) {
+	auto tex = [](const wchar_t* text) { return FplToLatex(text); };
+	CHECK_STR(tex(L"sqrt(x^2 + y^2)"), L"\\sqrt{x^{2} + y^{2}}");
+	CHECK_STR(tex(L"y = 2x"), L"y = 2x");
+	CHECK_STR(tex(L"y = 2*x"), L"y = 2 \\cdot x");
+	CHECK_STR(tex(L"x - 1"), L"x-1");
+	CHECK_STR(tex(L"(x + 1)/(x - 1)"), L"\\frac{x + 1}{x-1}");
+	CHECK_STR(tex(L"(x + 1)^2"), L"\\left(x + 1\\right)^{2}");
+	CHECK_STR(tex(L"2^(x + 1)"), L"2^{x + 1}");
+	CHECK_STR(tex(L"(x + 1)(x - 1)"), L"\\left(x + 1\\right)\\left(x-1\\right)");
+	CHECK_STR(tex(L"[x]"), L"\\left[x\\right]");
+	// names: functions, a space before a letter after a command, subscripts, words, greek
+	CHECK_STR(tex(L"sin x"), L"\\sin x");
+	CHECK_STR(tex(L"sin(x + 1)"), L"\\sin\\left(x + 1\\right)");
+	CHECK_STR(tex(L"sin^2 x"), L"\\sin^{2} x");
+	CHECK_STR(tex(L"asin(x)"), L"\\sin^{-1} x");
+	CHECK_STR(tex(L"log2(x)"), L"\\log_{2} x");
+	CHECK_STR(tex(L"log(x, 3)"), L"\\log_{3} x");
+	CHECK_STR(tex(L"sin'(x)"), L"\\sin' x");
+	CHECK_STR(tex(L"gamma(x)"), L"\\operatorname{gamma}\\left(x\\right)");
+	CHECK_STR(tex(L"atan2(y, x)"), L"\\operatorname{atan2}\\left(y,x\\right)");
+	CHECK_STR(tex(L"pi x"), L"\\pi x");
+	CHECK_STR(tex(L"r = 2 + cos 3q"), L"r = 2 + \\cos 3\\theta");
+	CHECK_STR(tex(L"y1 + x2"), L"y_{1} + x_{2}");
+	CHECK_STR(tex(L"y = abc"), L"y = \\mathrm{abc}");
+	CHECK_STR(tex(L"e^x"), L"e^{x}");
+	CHECK_STR(tex(L"exp(x)"), L"e^{x}");
+	// the rest
+	CHECK_STR(tex(L"root(3, x)"), L"\\sqrt[3]{x}");
+	CHECK_STR(tex(L"|x|"), L"\\left|x\\right|");
+	CHECK_STR(tex(L"floor(x)"), L"\\left\\lfloor x\\right\\rfloor");
+	CHECK_STR(tex(L"ceil(x)"), L"\\left\\lceil x\\right\\rceil");
+	CHECK_STR(tex(L"x!"), L"x!");
+	CHECK_STR(tex(L"x^2 <= 1"), L"x^{2} \\le 1");
+	CHECK_STR(tex(L"x^2 < y < 4"), L"x^{2} < y < 4");
+	CHECK_STR(tex(L"sum(x^k/k!, k, 0, n)"), L"\\sum_{k = 0}^{n} \\frac{x^{k}}{k!}");
+	CHECK_STR(tex(L"prod(k, k, 1, 3)"), L"\\prod_{k = 1}^{3} k");
+	CHECK_STR(tex(L"prod(1 + x, k, 1, 3)"), L"\\prod_{k = 1}^{3} \\left(1 + x\\right)");
+	CHECK_STR(tex(L"sum(k, k, 1, 3)^2"), L"\\left(\\sum_{k = 1}^{3} k\\right)^{2}");
+	CHECK_STR(tex(L"sum(k, k, 1, 3) x"), L"\\left(\\sum_{k = 1}^{3} k\\right)x");
+	CHECK_STR(tex(L"integral(x + 1, 0, 1)"), L"\\int_{0}^{1} \\left(x + 1\\right) \\, \\mathrm{d} x");
+	CHECK_STR(tex(L"d/dx (x + 1)"), L"\\frac{\\mathrm{d}}{\\mathrm{d}x}\\left(x + 1\\right)");
+	CHECK(FplToMathML(L"prod(1 + x, k, 1, 3)").find(L"<mo stretchy=\"true\">(</mo>") != std::wstring::npos);
+	CHECK_STR(tex(L"integral(x^2, 0, 1)"), L"\\int_{0}^{1} x^{2} \\, \\mathrm{d} x");
+	CHECK_STR(tex(L"d/dx x^3"), L"\\frac{\\mathrm{d}}{\\mathrm{d}x}x^{3}");
+	CHECK_STR(tex(L"{x < 0: -x, x^2}"), L"\\begin{cases} -x & x < 0 \\\\ x^{2} \\end{cases}");
+	CHECK_STR(tex(L"x^2 {0 < x < 2}"), L"x^{2}\\left\\{0 < x < 2\\right\\}");
+	CHECK_STR(tex(L"y' = -x/y, y(0) = 3"), L"y' = \\frac{-x}{y},\\quad y\\left(0\\right) = 3");
+	CHECK_STR(tex(L"(cos t, sin t)"), L"\\left(\\cos t,\\sin t\\right)");
+	CHECK_STR(tex(L"L = [1, 2, 3]"), L"L = \\left[1,2,3\\right]");
+	CHECK_STR(tex(L"y1 ~ m x1"), L"y_{1} \\sim mx_{1}");
+	// with a plot's names; nothing for what doesn't read
+	auto plot = MakePlot({ L"f(x) = x^2", L"y = f(2x) + 1" });
+	CHECK_STR(FplToLatex(L"y = f(2x) + 1", plot.DisplayOptions()), L"y = f\\left(2x\\right) + 1");
+	CHECK_STR(FplToMathML(L"x +"), L"");
+	CHECK_STR(tex(L"x +"), L"");
+	CHECK_STR(tex(L""), L"");
+
+	// MathML: a document, what's in it, and escaped
+	auto mml = [](const wchar_t* text) { return FplToMathML(text); };
+	const std::wstring head = L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\">";
+	CHECK(mml(L"x").find(head) == 0);
+	CHECK_STR(mml(L"x"), head + L"<mi>x</mi></math>");
+	CHECK_STR(mml(L"2"), head + L"<mn>2</mn></math>");
+	CHECK_STR(mml(L"x < 2"), head + L"<mrow><mi>x</mi><mo>&lt;</mo><mn>2</mn></mrow></math>");
+	CHECK(mml(L"1/x").find(L"<mfrac><mrow><mn>1</mn></mrow><mrow><mi>x</mi></mrow></mfrac>") != std::wstring::npos);
+	CHECK(mml(L"x^2").find(L"<msup><mrow><mi>x</mi></mrow><mrow><mn>2</mn></mrow></msup>") != std::wstring::npos);
+	CHECK(mml(L"sqrt(x)").find(L"<msqrt><mi>x</mi></msqrt>") != std::wstring::npos);
+	CHECK(mml(L"root(3, x)").find(L"<mroot><mrow><mi>x</mi></mrow><mrow><mn>3</mn></mrow></mroot>") != std::wstring::npos);
+	CHECK(mml(L"y1").find(L"<msub>") != std::wstring::npos);
+	CHECK(mml(L"sin x").find(L"mathvariant=\"normal\">sin</mi><mo>&#x2061;</mo>") != std::wstring::npos);
+	CHECK(mml(L"sum(k, k, 1, 3)").find(L"<munderover><mo>&#x2211;</mo>") != std::wstring::npos);
+	CHECK(mml(L"integral(x, 0, 1)").find(L"<msubsup><mo>&#x222B;</mo>") != std::wstring::npos);
+	CHECK(mml(L"{x < 0: -x, x^2}").find(L"<mtable") != std::wstring::npos);
+	CHECK(mml(L"y'").find(L"&#x2032;") != std::wstring::npos);
+	// every kind is balanced: each element that opens closes, in order
+	for (const wchar_t* text : { L"sqrt(x^2 + y^2)/2", L"sum(x^k/k!, k, 0, n)", L"integral(sin t, t, 0, x)", L"{x < 0: -x, x^2}", L"y' = -x/y, y(0) = 3",
+		L"floor(x) + |x| + root(3, x)", L"d/dx x^3", L"x^2 {0 < x < 2}", L"f(x) = sin^2 x + log(x, 3)", L"L = [1, 2]" }) {
+		const std::wstring doc = FplToMathML(text);
+		CHECK(!doc.empty());
+		std::vector<std::wstring> stack;
+		bool balanced = true;
+		for (size_t i = doc.find(L'<'); i != std::wstring::npos; i = doc.find(L'<', i + 1)) {
+			const size_t end = doc.find(L'>', i);
+			balanced = balanced && end != std::wstring::npos;
+			if (end == std::wstring::npos)
+				break;
+			std::wstring tag = doc.substr(i + 1, end - i - 1);
+			if (tag.back() == L'/')
+				continue;
+			if (tag[0] == L'/') {
+				balanced = balanced && !stack.empty() && stack.back() == tag.substr(1);
+				if (!stack.empty())
+					stack.pop_back();
+			}
+			else
+				stack.push_back(tag.substr(0, tag.find(L' ')));
+		}
+		CHECK(balanced);
+		CHECK(stack.empty());
+	}
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -6479,6 +6624,8 @@ int wmain() {
 	Run_SpecialFunctions();
 	Run_AnimationSpeed();
 	Run_MathDisplay();
+	Run_CostOverTheView();
+	Run_LatexAndMathML();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

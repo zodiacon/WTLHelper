@@ -89,6 +89,8 @@ enum {
 	ID_DEMO_ANIMATE,
 	ID_DEMO_SLOWTRANSITIONS,
 	ID_DEMO_MATHLEGEND,
+	ID_DEMO_COPYLATEX,
+	ID_DEMO_COPYMATHML,
 };
 
 // ---- Examples -------------------------------------------------------------------
@@ -599,6 +601,36 @@ static void UpdatePreview() {
 	LayoutLeftPane();
 }
 
+// All the lines, one to a line, as LaTeX or MathML: what doesn't read is left out.
+static std::wstring LinesAsMath(bool latex) {
+	std::wstring out;
+	for (int i = 0; i < g_plot.GetGraphCount(); i++) {
+		const UINT id = g_plot.GetGraphId(i);
+		CString text = latex ? g_plot.GetGraphLatex(id) : g_plot.GetGraphMathML(id);
+		if (!text.IsEmpty())
+			out += std::wstring(text) + L"\r\n";
+	}
+	return out;
+}
+
+static bool CopyCaretLine(bool latex) {
+	const UINT id = (UINT)CaretLine() + 1;
+	CString text = latex ? g_plot.GetGraphLatex(id) : g_plot.GetGraphMathML(id);
+	if (text.IsEmpty() || !::OpenClipboard(g_main))
+		return false;
+	::EmptyClipboard();
+	const size_t bytes = (text.GetLength() + 1) * sizeof(wchar_t);
+	HGLOBAL global = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+	if (global) {
+		memcpy(::GlobalLock(global), (LPCWSTR)text, bytes);
+		::GlobalUnlock(global);
+		if (!::SetClipboardData(CF_UNICODETEXT, global))
+			::GlobalFree(global);
+	}
+	::CloseClipboard();
+	return global != nullptr;
+}
+
 static LRESULT CALLBACK LeftPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	switch (msg) {
 		case WM_SIZE:
@@ -982,6 +1014,8 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_ANIMATE: ToggleStyle(FPLS_NOANIMATION | FPLS_ALWAYSANIMATE); break;
 		case ID_DEMO_SLOWTRANSITIONS: g_plot.SetTransitionTime(g_plot.GetTransitionTime() == 220 ? 1500 : 220); break;
 		case ID_DEMO_MATHLEGEND: ToggleStyle(FPLS_PLAINLEGEND); break;
+		case ID_DEMO_COPYLATEX: CopyCaretLine(true); break;
+		case ID_DEMO_COPYMATHML: CopyCaretLine(false); break;
 		case ID_DEMO_LOGX: g_plot.SetLogAxes(!g_plot.IsLogX(), g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_LOGY: g_plot.SetLogAxes(g_plot.IsLogX(), !g_plot.IsLogY()); ShowView(); break;
 		case ID_DEMO_COPY:
@@ -1209,7 +1243,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				auto is = [](LPCWSTR ext) {
 					return g_exportPath.size() > 4 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 4, ext) == 0;
 				};
-				BOOL ok = is(L".svg") ? g_plot.ExportSvg(g_exportPath.c_str())
+				// the lines as LaTeX or MathML, UTF-8
+				auto writeLines = [](bool latex) {
+					const std::wstring text = LinesAsMath(latex);
+					const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0, nullptr, nullptr);
+					std::string utf8(bytes, '\0');
+					::WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), utf8.data(), bytes, nullptr, nullptr);
+					FILE* f = nullptr;
+					if (_wfopen_s(&f, g_exportPath.c_str(), L"wb") || !f)
+						return FALSE;
+					const bool wrote = fwrite(utf8.data(), 1, utf8.size(), f) == utf8.size();
+					return fclose(f) == 0 && wrote ? TRUE : FALSE;
+				};
+				BOOL ok = is(L".tex") ? writeLines(true) : is(L".mml") ? writeLines(false) : is(L".svg") ? g_plot.ExportSvg(g_exportPath.c_str())
 					: is(L".bmp") ? PrintToBitmap(g_exportPath.c_str())
 					: g_exportPath.size() > 6 && _wcsicmp(g_exportPath.c_str() + g_exportPath.size() - 6, L".fplot") == 0 ? SavePlot(g_exportPath.c_str())
 					: g_plot.ExportPng(g_exportPath.c_str(), 1);
@@ -1322,6 +1368,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTPNG, L"Export &PNG...");
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXPORTSVG, L"Export &SVG...");
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_COPY, L"&Copy Plot\tCtrl+Shift+C");
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_COPYLATEX, L"Copy Line as &LaTeX");
+	::AppendMenuW(hFile, MF_STRING, ID_DEMO_COPYMATHML, L"Copy Line as &MathML");
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_PRINT, L"P&rint...\tCtrl+P");
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_DEMO_EXIT, L"E&xit");

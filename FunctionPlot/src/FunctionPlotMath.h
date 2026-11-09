@@ -40,5 +40,9 @@ FplMathLayout FplLayoutMath(const FplAst& ast, int root, double size, const FplM
 bool FplFitMath(std::wstring_view text, FplParseOptions options, std::initializer_list<double> sizes, double maxWidth,
 	const FplMathMeasure& measure, FplMathLayout& layout);
 
+// A text as LaTeX ("\sqrt{x^{2} + y^{2}}") or a MathML document (<math>...), showing what the layout shows. Empty if it doesn't read.
+std::wstring FplToLatex(std::wstring_view text, const FplParseOptions& options = {});
+std::wstring FplToMathML(std::wstring_view text, const FplParseOptions& options = {});
+
 // Its texts in order, with '|' for a stroke: for tests.
 std::wstring FplDescribeMath(const FplMathLayout& layout);

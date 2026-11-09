@@ -804,7 +804,7 @@ FplSampleOptions FplPlot::OptionsFor(int graph, const FplSampleOptions& base) co
 	return o;
 }
 
-bool FplPlot::IsHeavy(int graph, bool in3D) const {
+bool FplPlot::IsHeavy(int graph, bool in3D, const FplViewport* view) const {
 	if (graph < 0 || graph >= static_cast<int>(graphs.size()))
 		return false;
 	auto& g = graphs[graph];
@@ -814,7 +814,7 @@ bool FplPlot::IsHeavy(int graph, bool in3D) const {
 		return g.expr.kind == FplKind::ImplicitSurface || (g.expr.kind == FplKind::Surface && EvalCost(graph) > SlowEval);
 	if (g.expr.kind == FplKind::Implicit || g.expr.kind == FplKind::Surface)
 		return true;
-	return IsCurveKind(g.expr.kind) && EvalCost(graph) > SlowEval;
+	return IsCurveKind(g.expr.kind) && EvalCost(graph, view) > SlowEval;
 }
 
 FplParseOptions FplPlot::DisplayOptions() const {
@@ -828,23 +828,38 @@ FplParseOptions FplPlot::DisplayOptions() const {
 	return options;
 }
 
-double FplPlot::EvalCost(int graph) const {
-	auto& e = graphs[graph].expr;
+double FplPlot::EvalCost(int graph, const FplViewport* view) const {
+	auto& g = graphs[graph];
+	auto& e = g.expr;
 	if (!e.f.HasSubPrograms() && !e.g.HasSubPrograms())
 		return 0;
 	std::vector<double> slots = m_Slots;
-	slots[FplSlotX] = slots[FplSlotY] = slots[FplSlotT] = slots[FplSlotTheta] = 1.234;
-	// the better of two, as a first run may be held up
-	double best = std::numeric_limits<double>::infinity();
-	for (int i = 0; i < 2; i++) {
+	// what the graph's variable covers
+	double xLo = -10, xHi = 10, yLo = -10, yHi = 10;
+	if (view && view->Valid()) {
+		xLo = view->xMin, xHi = view->xMax, yLo = view->yMin, yHi = view->yMax;
+	}
+	const double tLo = g.hasRange ? g.tMin : 0, tHi = g.hasRange ? g.tMax : 6.283185307179586;
+	// (not on the ends or a round number, where an integral's nothing or a function's undefined)
+	static const double Places[] = { 0.03, 0.27, 0.5, 0.73, 0.97 };
+	double total = 0;
+	int count = 0;
+	for (double place : Places) {
+		slots[FplSlotX] = xLo + (xHi - xLo) * place;
+		slots[FplSlotY] = yLo + (yHi - yLo) * (1 - place);
+		slots[FplSlotT] = slots[FplSlotTheta] = tLo + (tHi - tLo) * place;
 		const auto start = std::chrono::steady_clock::now();
 		volatile double value = e.f.Empty() ? 0 : e.f.Eval(slots.data());
 		if (!e.g.Empty())
 			value = e.g.Eval(slots.data());
 		(void)value;
-		best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+		total += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+		count++;
+		// a thousand of these would be far past a redraw already
+		if (total > 200e-6)
+			break;
 	}
-	return best;
+	return total / count;
 }
 
 FplSampleOptions FplPlot::CoarseOptions(int graph, const FplViewport& view) const {
@@ -855,7 +870,7 @@ FplSampleOptions FplPlot::CoarseOptions(int graph, const FplViewport& view) cons
 	auto& g = graphs[graph];
 	if (!IsCurveKind(g.expr.kind))
 		return o;
-	const double cost = EvalCost(graph);
+	const double cost = EvalCost(graph, &view);
 	const int samples = std::clamp(cost > 0 ? static_cast<int>(0.006 / cost) : 125, 16, 125);
 	const double extent = g.expr.kind == FplKind::FunctionOfY ? view.height : view.width;
 	o.initialStep = extent / samples;
@@ -1141,7 +1156,7 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 	if (!g.Drawable() || (g.flags & FplGraphNoFeatures) || !view.Valid() || g.Listed())
 		return;
 	// each is a scan of thousands of evaluations
-	if (EvalCost(graph) > TooSlowToAnalyze)
+	if (EvalCost(graph, &view) > TooSlowToAnalyze)
 		return;
 	FindCurveMeetings(graph, view);
 	if (g.expr.kind != FplKind::Function) {
@@ -1180,7 +1195,7 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 		auto& other = graphs[h];
 		if (static_cast<int>(h) == graph || !other.Drawable() || other.expr.kind != FplKind::Function || other.Listed())
 			continue;
-		if (EvalCost(static_cast<int>(h)) > TooSlowToAnalyze)
+		if (EvalCost(static_cast<int>(h), &view) > TooSlowToAnalyze)
 			continue;
 		std::function<double(double)> fo = [this, h](double x) { return Eval(static_cast<int>(h), x); };
 		if (view.logX)

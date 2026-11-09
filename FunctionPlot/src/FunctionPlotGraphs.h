@@ -203,10 +203,12 @@ public:
 	FplSampleOptions OptionsFor(int graph, const FplSampleOptions& base) const;
 	// Worth sampling on another thread: implicit curves and regions and surfaces in 2D, implicit surfaces in 3D (not
 	// listed ones, which go element by element here).
-	bool IsHeavy(int graph, bool in3D) const;
-	// Seconds one evaluation takes, measured now, if the graph has an integral, a sum or a product, whose cost can't be seen
-	// from its size (else 0). A curve past about 8 microseconds is heavy, and past 50 its features aren't looked for.
-	double EvalCost(int graph) const;
+	bool IsHeavy(int graph, bool in3D, const FplViewport* view = nullptr) const;
+	// Seconds an evaluation takes on average, measured now at a few places over the view (an integral's cost grows with its
+	// limits, so one place can look cheap), if the graph has an integral, a sum or a product, whose cost can't be seen from
+	// its size (else 0). It stops counting once that's clearly slow. A curve past about 8 microseconds is heavy, and past 50
+	// its features aren't looked for.
+	double EvalCost(int graph, const FplViewport* view = nullptr) const;
 	// For drawing a text as mathematics with the names this plot knows.
 	FplParseOptions DisplayOptions() const;
 	// How to sample a heavy graph at once, on the UI thread: a surface or implicit curve on large cells, a slow curve as many

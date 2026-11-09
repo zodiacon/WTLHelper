@@ -641,7 +641,7 @@ void CFunctionPlotCtrl::Resample() {
 	std::vector<std::shared_ptr<FplGraphPaths>> stale(s.plot.graphs.size());
 	if (async && viewOnly)
 		for (size_t i = 0; i < s.plot.graphs.size() && i < s.paths.size(); i++) {
-			if (!s.plot.IsHeavy((int)i, false))
+			if (!s.plot.IsHeavy((int)i, false, &s.view))
 				continue;
 			if (s.paths[i].stale)
 				stale[i] = std::move(s.paths[i].stale);
@@ -650,7 +650,7 @@ void CFunctionPlotCtrl::Resample() {
 		}
 	std::vector<bool> full(s.plot.graphs.size());
 	for (size_t i = 0; i < s.plot.graphs.size(); i++) {
-		if (async && s.plot.IsHeavy((int)i, false)) {
+		if (async && s.plot.IsHeavy((int)i, false, &s.view)) {
 			s.plot.SampleGraph((int)i, s.view, s.plot.CoarseOptions((int)i, s.view));
 			submit((int)i, false);
 		}
@@ -1514,6 +1514,18 @@ int CFunctionPlotCtrl::NextSlider(bool back) const {
 }
 
 // ---- Animation -------------------------------------------------------------------------
+
+CString CFunctionPlotCtrl::GetGraphLatex(UINT id) const {
+	auto& plot = m_State->plot;
+	const int i = plot.FindGraph(id);
+	return i < 0 ? CString() : CString(FplToLatex(plot.graphs[i].text, plot.DisplayOptions()).c_str());
+}
+
+CString CFunctionPlotCtrl::GetGraphMathML(UINT id) const {
+	auto& plot = m_State->plot;
+	const int i = plot.FindGraph(id);
+	return i < 0 ? CString() : CString(FplToMathML(plot.graphs[i].text, plot.DisplayOptions()).c_str());
+}
 
 BOOL CFunctionPlotCtrl::SetAnimationSpeed(LPCWSTR pszName, double seconds) {
 	const int i = pszName ? m_State->plot.FindParam(pszName) : -1;
