@@ -127,6 +127,20 @@ void FplPlot::Build() {
 		options.weakQ = options.weakQ || (p.name == L"q" && (p.flags & FplParamAuto));
 	m_PlainQ = options.plainQ;
 	m_WeakQ = options.weakQ;
+	// A line "name = ..." defines the name if it can't read as anything else because of the name itself: cost = 3 (as cos t = 3)
+	// or energy = 3 (e n e r g y). What reads stays what it was: xy = 2 and sinx = 0.5 are equations. So do short names with x or
+	// y (ax = 2 is a line once there's an a), and what's only missing a name further on (cosx = a).
+	m_OwnNames.clear();
+	for (auto& g : graphs) {
+		const std::wstring head = FplDefinitionHead(g.text);
+		if (head.empty() || (head.size() < 4 && head.find_first_of(L"xy") != std::wstring::npos))
+			continue;
+		// the name by itself is what can't read (what follows it may only be waiting for another line to be known)
+		const FplExpression alone = FplBuild(L"y = " + head, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ, options.weakQ);
+		if (alone.error || FplBuild(g.text, m_Names, degrees, &m_Functions, &m_ListNames, options.plainQ, options.weakQ).error.code == FplErrorCode::NotAPlot)
+			m_OwnNames.push_back(head);
+	}
+	options.ownNames = &m_OwnNames;
 	std::vector<FplError> functionErrors(graphs.size());
 	auto taken = [&](const std::wstring& name) {
 		if (std::find(m_Names.begin(), m_Names.end(), name) != m_Names.end())
@@ -824,6 +838,7 @@ FplParseOptions FplPlot::DisplayOptions() const {
 	options.lists = &m_ListNames;
 	options.plainQ = m_PlainQ;
 	options.weakQ = m_WeakQ;
+	options.ownNames = &m_OwnNames;
 	options.display = true;
 	return options;
 }

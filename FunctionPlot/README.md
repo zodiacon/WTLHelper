@@ -179,6 +179,8 @@ A name made of known names is their product, so `xy` is x times y and `sinx` is 
 | `ax`, `kt`, `abc`, `axy`, `sina` | A product: each unknown letter is a parameter |
 | `speed`, `rate`, `gain` | One name: four letters or more, with no `x` or `y` and no longer known name inside |
 
+A line `name = ...` defines the name when it can't read any other way, so `cost = 3` and `energy = 3` work, and later lines use that name whole. What does read stays what it was: `xy = 2` and `sinx = 0.5` are equations, and a parameter with such a name needs another name.
+
 A slider elsewhere doesn't change that: with a parameter `a`, `rate` is still one name, not r·a·t·e. Letters that are all parameters, like `abcd` with a slider for each, are their product.
 
  The name of a Greek letter, such as `alpha` or `mu`, is one name unless its letters are all known names, and shows as the letter.

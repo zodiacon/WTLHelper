@@ -172,6 +172,8 @@ struct FplParseOptions {
 	bool plainQ = false;
 	// A parameter q that was only added for another line (FPLPF_AUTO) doesn't take it from a line with r and no other variable.
 	bool weakQ = false;
+	// Names a line defines though they'd split otherwise ("cost = 3", which as cos t = 3 reads as nothing): FplPlot finds them.
+	const std::vector<std::wstring>* ownNames = nullptr;
 	// What was typed rather than what it means, for drawing it: no expansions, inlining or derivatives; primes on names, commas at
 	// the top and names nothing knows are kept (FunctionPlotMath.h).
 	bool display = false;
@@ -399,5 +401,8 @@ FplExpression FplBuild(std::wstring_view text, const std::vector<std::wstring>& 
 // The names the parser knows as functions, and those of them that give way to the user's or need parentheses (the README
 // lists them; a test holds it to these).
 std::vector<std::wstring> FplFunctionNames();
+// The name a line starts by defining ("cost = 3", "cost(a) = a^2"), if it has that shape and the name isn't one known whole, as
+// sin or pi are, or one letter. Empty if not.
+std::wstring FplDefinitionHead(std::wstring_view text);
 std::vector<std::wstring> FplYieldingNames();
 std::vector<std::wstring> FplCallOnlyNames();

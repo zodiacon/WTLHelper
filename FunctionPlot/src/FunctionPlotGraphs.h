@@ -286,6 +286,7 @@ private:
 	FplMesh Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells);
 	bool m_MeshIncomplete = false;
 	bool m_PlainQ = false, m_WeakQ = false;	// what Build found q to be
+	std::vector<std::wstring> m_OwnNames;	// the names lines define that would otherwise split (cost = 3)
 	FplMesh m_FillMesh;				// what Mesh3D made of a region's fills
 	FplMesh m_FieldMesh;			// and of a field's slopes or arrows
 	float m_FieldOpacity = 1;

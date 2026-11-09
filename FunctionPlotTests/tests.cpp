@@ -6954,6 +6954,85 @@ TEST(WordNames) {
 	CHECK_INT(layout.items.size(), 2);
 }
 
+TEST(LinesDefiningNames) {
+	auto value = [](FplPlot& plot, int graph, double x) {
+		auto slots = plot.Slots();
+		slots[FplSlotX] = x;
+		return plot.graphs[graph].expr.f.Eval(slots.data());
+	};
+	// a name that would split, and read as nothing: defined, and used whole elsewhere, in any order
+	for (const wchar_t* name : { L"cost", L"energy", L"spin", L"body", L"sine", L"axis" }) {
+		auto plot = MakePlot({ (std::wstring(name) + L" = 3").c_str(), (std::wstring(L"y = ") + name + L" x").c_str() });
+		CHECK(plot.graphs[0].definition);
+		CHECK(!plot.graphs[1].expr.error);
+		CHECK_NEAR(plot.DefinitionValue(0), 3.0);
+		CHECK_NEAR(value(plot, 1, 2), 6.0);
+		auto backwards = MakePlot({ (std::wstring(L"y = 2") + name).c_str(), (std::wstring(name) + L" = 3").c_str() });
+		CHECK(backwards.graphs[1].definition);
+		CHECK(!backwards.graphs[0].expr.error);
+		CHECK_NEAR(value(backwards, 0, 2), 6.0);
+	}
+	// from another definition; as a substitution; as a function
+	auto plot = MakePlot({ L"cost = 2 price", L"price = 3", L"y = cost" });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[2].expr.error);
+	CHECK_NEAR(value(plot, 2, 0), 6.0);
+	plot = MakePlot({ L"cost = x - 1", L"y = 2cost" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR(value(plot, 1, 3), 4.0);
+	plot = MakePlot({ L"cost(a) = a^2", L"y = cost(x) + 1" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR(value(plot, 1, 3), 10.0);
+	plot = MakePlot({ L"energy(a) = 2a", L"y = energy(x)" });
+	CHECK(!plot.graphs[1].expr.error);
+	CHECK_NEAR(value(plot, 1, 3), 6.0);
+
+	// what reads stays what it was: equations
+	for (const wchar_t* text : { L"xy = 2", L"sinx = 0.5", L"x = 3", L"y = 3", L"xxy = 1" }) {
+		auto reads = MakePlot({ text });
+		CHECK(!reads.graphs[0].expr.error);
+		CHECK(!reads.graphs[0].definition);
+	}
+	plot = MakePlot({ L"xy = 2" });
+	CHECK(plot.graphs[0].expr.kind == FplKind::Implicit);
+	plot = MakePlot({ L"sinx = 0.5" });
+	CHECK(plot.graphs[0].expr.kind == FplKind::Implicit);
+	// short ones with x or y ask for their letters, and read as lines once they're known
+	plot = MakePlot({ L"ax = 2" });
+	CHECK_STR(plot.graphs[0].expr.error.name, L"a");
+	plot = MakePlot({ L"ax = 2" }, { Param(L"a", 1) });
+	CHECK(!plot.graphs[0].expr.error);
+	CHECK(!plot.graphs[0].definition);
+	// an error past the name isn't the name's: it's the letter that's asked for
+	plot = MakePlot({ L"cosx = b" });
+	CHECK_STR(plot.graphs[0].expr.error.name, L"b");
+	CHECK(!plot.graphs[0].definition);
+	// mistakes stay mistakes: known whole, one letter
+	CHECK(MakePlot({ L"sin = 2" }).graphs[0].expr.error.code != FplErrorCode::None);
+	CHECK(MakePlot({ L"pi = 3" }).graphs[0].expr.error.code != FplErrorCode::None);
+	// a second definition is still that
+	plot = MakePlot({ L"cost = 3", L"cost = 4" });
+	CHECK(plot.graphs[1].expr.error.code == FplErrorCode::Redefined);
+	// the display reads it whole
+	FplMathMeasure measure = [](const std::wstring& text, double size, bool) { return text.size() * size * 0.5; };
+	plot = MakePlot({ L"cost = 3", L"y = cost x" });
+	FplMathLayout layout;
+	CHECK(FplFitMath(L"y = cost x", plot.DisplayOptions(), { 20 }, 0, measure, layout));
+	CHECK_STR(FplDescribeMath(layout), L"y=costx");
+	CHECK(FplFitMath(L"cost = 3", plot.DisplayOptions(), { 20 }, 0, measure, layout));
+	CHECK_STR(FplDescribeMath(layout), L"cost=3");
+	// the head's shape
+	CHECK_STR(FplDefinitionHead(L"cost = 3"), L"cost");
+	CHECK_STR(FplDefinitionHead(L"  cost(a) = 3"), L"cost");
+	CHECK_STR(FplDefinitionHead(L"sin = 2"), L"");
+	CHECK_STR(FplDefinitionHead(L"pi = 3"), L"");
+	CHECK_STR(FplDefinitionHead(L"x = 3"), L"");
+	CHECK_STR(FplDefinitionHead(L"cost + 1 = 3"), L"");
+	CHECK_STR(FplDefinitionHead(L"cost < 3"), L"");
+	CHECK_STR(FplDefinitionHead(L"y' = 3"), L"");
+	CHECK_STR(FplDefinitionHead(L""), L"");
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -7057,6 +7136,7 @@ int wmain() {
 	Run_DefinitionValues();
 	Run_VectorFields3D();
 	Run_WordNames();
+	Run_LinesDefiningNames();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

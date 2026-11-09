@@ -284,7 +284,7 @@ public:
 	void WeakQ() { m_WeakQ = true; }
 
 	// "step = 2", "step(x) = ...": a line that defines one of the names that yield.
-	void FindOwnName() {
+	void FindOwnName(const std::vector<std::wstring>* ownNames = nullptr) {
 		size_t i = m_Text.find_first_not_of(L' ');
 		if (i == m_Text.npos || !IsLetter(m_Text[i]))
 			return;
@@ -292,7 +292,7 @@ public:
 		while (end < m_Text.size() && (IsLetter(m_Text[end]) || IsDigit(m_Text[end])))
 			end++;
 		const std::wstring_view name = m_Text.substr(i, end - i);
-		if (!IsYieldingName(name))
+		if (!IsYieldingName(name) && !(ownNames && std::find(ownNames->begin(), ownNames->end(), name) != ownNames->end()))
 			return;
 		size_t next = m_Text.find_first_not_of(L' ', end);
 		if (next != m_Text.npos && m_Text[next] == L'(') {
@@ -311,6 +311,10 @@ public:
 			m_OwnName = name;
 	}
 	void PlainQ() { m_PlainQ = true; }
+	void OwnNames(const std::vector<std::wstring>* names) {
+		if (names)
+			FindOwnName(names);
+	}
 
 	bool Run(std::vector<Token>& tokens, FplError& error) {
 		tokens.clear();
@@ -1533,6 +1537,7 @@ FplParseResult FplParse(std::wstring_view text, const FplParseOptions& options) 
 		lexer.PlainQ();
 	if (options.weakQ)
 		lexer.WeakQ();
+	lexer.OwnNames(options.ownNames);
 	if (!lexer.Run(tokens, result.error))
 		return result;
 	Parser parser(std::move(tokens), result.ast, result.error, options);
@@ -1584,6 +1589,7 @@ FplFunctionDefinition FplParseFunction(std::wstring_view text, const FplParseOpt
 	FplError ignored;
 	Lexer lexer(text, options.parameters, options.functions);
 	lexer.PlainQ();		// q(x) = ... and f(q) = ... name their own (its body may still use q as theta)
+	lexer.OwnNames(options.ownNames);
 	if (!lexer.Run(tokens, ignored))
 		return d;
 	// name ( p, ... ) =
@@ -1671,4 +1677,42 @@ std::vector<std::wstring> FplYieldingNames() {
 
 std::vector<std::wstring> FplCallOnlyNames() {
 	return { std::begin(g_CallOnlyNames), std::end(g_CallOnlyNames) };
+}
+
+std::wstring FplDefinitionHead(std::wstring_view text) {
+	size_t i = text.find_first_not_of(L' ');
+	if (i == text.npos || !IsLetter(text[i]))
+		return {};
+	size_t end = i;
+	while (end < text.size() && IsLetter(text[end]))
+		end++;
+	const std::wstring_view name = text.substr(i, end - i);
+	if (name.size() < 2)
+		return {};
+	size_t next = text.find_first_not_of(L' ', end);
+	if (next != text.npos && text[next] == L'(') {
+		int depth = 0;
+		for (; next < text.size(); next++) {
+			if (text[next] == L'(')
+				depth++;
+			else if (text[next] == L')' && --depth == 0)
+				break;
+		}
+		if (next >= text.size())
+			return {};
+		next = text.find_first_not_of(L' ', next + 1);
+	}
+	if (next == text.npos || text[next] != L'=')
+		return {};
+	// known whole: sin = 2 and pi = 3 are mistakes, not definitions
+	std::vector<std::wstring> none;
+	Lexer lexer(name, &none);
+	std::vector<Token> tokens;
+	FplError error;
+	if (!lexer.Run(tokens, error) || tokens.size() != 2 || tokens[0].type != Tk::Name || tokens[0].kind != NameKind::Unknown) {
+		// (what splits into several tokens isn't known whole)
+		if (tokens.size() <= 2 && !tokens.empty() && tokens[0].type == Tk::Name && tokens[0].kind != NameKind::Unknown)
+			return {};
+	}
+	return std::wstring(name);
 }
