@@ -75,6 +75,7 @@ struct FplPanelRow {
 	bool stopped = false;				// an ODE's solution ran out of steps
 	std::shared_ptr<FplMathDrawing> math;	// a graph's text as mathematics (none: as it was typed)
 	float main = FplGraphRow;			// a graph's first line: its height
+	bool noValue = false;				// a definition that's only a number needs no value after it
 };
 
 enum class FplPanelPart : uint8_t { None, Panel, Graph, Slider, Play, Toggle };

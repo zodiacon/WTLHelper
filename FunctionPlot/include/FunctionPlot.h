@@ -112,6 +112,7 @@ enum FPLKIND {
 	FPLK_ODESYSTEM,            // x' = P, y' = Q (of x, y, t), ", (a, b)" (any number): without t arrows, and trajectories
 	                           // through the points from t = 0 (FPLGM_RANGE: only over that t)
 	FPLK_ODESYSTEM3D,          // x' = P, y' = Q, z' = R (of x, y, z, t), ", (a, b, c)": trajectories as tubes: 3D only
+	FPLK_VECTORFIELD3D,        // (P, Q, R) of x, y and z: arrows through the box: 3D only
 };
 
 // 2D draws the plane; 3D a box the user orbits (Direct3D 11), with surfaces, space curves and points, and the 2D

@@ -150,6 +150,7 @@ static const Example g_Examples[] = {
 		L"x^2 + y^2 - z^2/4 = 1", false, true },
 	{ L"3D: &Gyroid", L"sin(x/2)cos(y/2) + sin(y/2)cos(z/2) + sin(z/2)cos(x/2) = 0", false, true },
 	{ L"3D: See-&Through", L"x^2 + y^2 + z^2 = 36\r\nz = (x^2 - y^2)/12\r\n((7 + 2cos v)cos u, (7 + 2cos v)sin u, 2sin v)\r\n(5cos 4t, 5sin 4t, 3t - 9)", false, true, Setup::Glass },
+	{ L"3D: Vector Field", L"(-y, x, z/4)\r\nx^2 + y^2 + z^2 = 9", false, true },
 	{ L"3D: Fields on the Plane", L"(y, -x)\r\ny' = x - y, y(-6) = 4\r\nz = -7 - (x^2 + y^2)/30", false, true },
 	{ L"3D: Points and &Regions", L"(a, b, c)\r\nx^2 + y^2 < 25\r\nx^2/4 - 8 < y < -x^2/8 - 1\r\ny = 3sin x\r\nx' = -y + z/10, y' = x, z' = -z/4, (d, 0, 7)", false, true },
 	{ L"3D: &Lorenz Attractor", L"x' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1, 1, 20)\r\nx' = 10(y - x), y' = x(28 - z) - y, z' = x y - 8z/3, (1.01, 1, 20)", false, true, Setup::Lorenz },

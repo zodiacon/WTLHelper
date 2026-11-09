@@ -770,3 +770,110 @@ FplMesh FplFlatSegments(const std::vector<std::pair<FplPoint, FplPoint>>& segmen
 	}
 	return mesh;
 }
+
+namespace {
+
+// A cylinder and a cone around a line in the cube, with flat shading for each side's normal.
+void AddArrow(FplMesh& mesh, FplVec3 from, FplVec3 to, float radius) {
+	const FplVec3 d = { to.x - from.x, to.y - from.y, to.z - from.z };
+	const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+	if (!(length > 0))
+		return;
+	const FplVec3 axis = { d.x / length, d.y / length, d.z / length };
+	// two directions across it
+	FplVec3 other = std::abs(axis.z) < 0.9f ? FplVec3{ 0, 0, 1 } : FplVec3{ 1, 0, 0 };
+	FplVec3 a = { axis.y * other.z - axis.z * other.y, axis.z * other.x - axis.x * other.z, axis.x * other.y - axis.y * other.x };
+	const float na = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+	a = { a.x / na, a.y / na, a.z / na };
+	const FplVec3 b = { axis.y * a.z - axis.z * a.y, axis.z * a.x - axis.x * a.z, axis.x * a.y - axis.y * a.x };
+	const float head = std::min(length * 0.4f, radius * 7);
+	const FplVec3 neck = { to.x - axis.x * head, to.y - axis.y * head, to.z - axis.z * head };
+	const int sides = 6;
+	const uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
+	auto add = [&](FplVec3 pos, FplVec3 normal) {
+		FplVertex3 v;
+		v.pos = pos;
+		v.normal = normal;
+		v.value = std::clamp((pos.z + 1) / 2, 0.0f, 1.0f);
+		mesh.vertices.push_back(v);
+	};
+	for (int i = 0; i < sides; i++) {
+		const float t = 2 * Pi * i / sides, c = std::cos(t), s = std::sin(t);
+		const FplVec3 n = { a.x * c + b.x * s, a.y * c + b.y * s, a.z * c + b.z * s };
+		add({ from.x + n.x * radius, from.y + n.y * radius, from.z + n.z * radius }, n);
+		add({ neck.x + n.x * radius, neck.y + n.y * radius, neck.z + n.z * radius }, n);
+		const float wide = radius * 2.8f;
+		add({ neck.x + n.x * wide, neck.y + n.y * wide, neck.z + n.z * wide }, n);
+	}
+	add(to, axis);
+	const uint32_t tip = base + sides * 3;
+	for (int i = 0; i < sides; i++) {
+		const uint32_t j = (i + 1) % sides;
+		const uint32_t s0 = base + i * 3, n0 = s0 + 1, w0 = s0 + 2, s1 = base + j * 3, n1 = s1 + 1, w1 = s1 + 2;
+		mesh.indices.insert(mesh.indices.end(), { s0, s1, n1, s0, n1, n0, w0, w1, tip });
+	}
+}
+
+}  // namespace
+
+FplMesh FplFieldMesh3(const std::function<FplPoint3(double, double, double)>& field, const FplBox3& box, int perSide) {
+	FplMesh mesh;
+	if (!box.Valid())
+		return mesh;
+	// the points: multiples of a nice step, by the axes' own ticks
+	// (not on the box's faces, where they'd be cut in half)
+	const double spacing = 100.0 / (std::max(perSide, 2) + 1);
+	auto inside = [&](double lo, double hi) {
+		std::vector<double> ticks = FplMakeTicks(lo, hi, 100, spacing).major;
+		const double margin = (hi - lo) * 1e-6;
+		ticks.erase(std::remove_if(ticks.begin(), ticks.end(), [&](double t) { return t <= lo + margin || t >= hi - margin; }), ticks.end());
+		return ticks;
+	};
+	const std::vector<double> xs = inside(box.xMin, box.xMax), ys = inside(box.yMin, box.yMax), zs = inside(box.zMin, box.zMax);
+	if (xs.empty() || ys.empty() || zs.empty())
+		return mesh;
+	// in the cube's units: a box of different ranges stretches a vector as it does the space
+	const float sx = static_cast<float>(2 / (box.xMax - box.xMin)), sy = static_cast<float>(2 / (box.yMax - box.yMin)),
+		sz = static_cast<float>(2 / (box.zMax - box.zMin));
+	struct Arrow {
+		FplVec3 at, v;
+		float size;
+	};
+	std::vector<Arrow> arrows;
+	arrows.reserve(xs.size() * ys.size() * zs.size());
+	std::vector<float> sizes;
+	sizes.reserve(arrows.capacity());
+	for (double x : xs)
+		for (double y : ys)
+			for (double z : zs) {
+				const FplPoint3 p = field(x, y, z);
+				if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+					continue;
+				const FplVec3 v = { static_cast<float>(p.x) * sx, static_cast<float>(p.y) * sy, static_cast<float>(p.z) * sz };
+				const float size = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+				if (!(size > 0) || !std::isfinite(size))
+					continue;
+				arrows.push_back({ box.ToBox(x, y, z), v, size });
+				sizes.push_back(size);
+			}
+	if (arrows.empty())
+		return mesh;
+	const size_t at = std::min(sizes.size() - 1, sizes.size() * 95 / 100);
+	std::nth_element(sizes.begin(), sizes.begin() + at, sizes.end());
+	const float reference = sizes[at];
+	// short of the nearest next point in any direction
+	auto gap = [](const std::vector<double>& ticks, float scale) {
+		return ticks.size() > 1 ? static_cast<float>(ticks[1] - ticks[0]) * scale : 2.0f;
+	};
+	const float longest = 0.85f * std::min({ gap(xs, sx), gap(ys, sy), gap(zs, sz) });
+	mesh.vertices.reserve(arrows.size() * 19);
+	mesh.indices.reserve(arrows.size() * 54);
+	for (auto& arrow : arrows) {
+		const float length = longest * std::clamp(arrow.size / reference, 0.2f, 1.0f);
+		const float k = 0.5f * length / arrow.size;
+		const FplVec3 half = { arrow.v.x * k, arrow.v.y * k, arrow.v.z * k };
+		AddArrow(mesh, { arrow.at.x - half.x, arrow.at.y - half.y, arrow.at.z - half.z },
+			{ arrow.at.x + half.x, arrow.at.y + half.y, arrow.at.z + half.z }, 0.006f);
+	}
+	return mesh;
+}

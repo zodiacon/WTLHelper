@@ -239,6 +239,7 @@ enum class FplKind : uint8_t {
 					// trajectories through them from t = 0; f is P, g is Q, its starts a and b of each
 	OdeSystem3D,	// x' = P, y' = Q, z' = R (of x, y, z and t) with "(a, b, c)" points: the trajectories as tubes; f,
 					// g and h, its starts a, b and c of each (3D)
+	VectorField3D,	// (P, Q, R) of x, y and z: arrows through the box; expr[0..2] (3D)
 };
 
 struct FplPlotDef {

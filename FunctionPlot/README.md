@@ -143,6 +143,10 @@ For a list such as `L = [1, 2, 3]`:
 | `sum(L)`, `count(L)` | |
 | `min(L)`, `max(L)` | |
 
+## What can be drawn
+
+Besides functions, curves and equations, a tuple of three is drawn in 3D by its variables: `(x(t), y(t), z(t))` a curve, `(x(u, v), y(u, v), z(u, v))` a surface, `(a, b, c)` a point, and `(P, Q, R)` of x, y and z a vector field, as arrows through the box.
+
 ## Your own functions
 
 `f(x) = x^2 - 1` defines a function that any other line can use, as `f(2x)`, `f'(x)` or `2fx`. It also draws, if its one parameter is `x`, `y`, `t` or `θ`.

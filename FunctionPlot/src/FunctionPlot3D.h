@@ -112,6 +112,11 @@ std::vector<FplTick3> FplBoxTicks(const FplBox3& box, const FplCamera& camera);
 // staircase rows to the box's height, which the region's boundary tube covers.
 FplMesh FplFillMesh(const std::vector<FplPolygon>& polygons, const FplBox3& box, int rows = 400);
 
+// A field's arrows through the box: on points a nice step apart in each direction, about perSide of them, so they stay put as
+// the box moves, each centered on its point, solid. Lengths by magnitude in the cube's units against the 95th percentile, at
+// least a fifth of the longest, which stays short of the next point. What's undefined or zero has none.
+FplMesh FplFieldMesh3(const std::function<FplPoint3(double, double, double)>& field, const FplBox3& box, int perSide = 9);
+
 // Line segments flat on the z = 0 plane, given in the plane's coordinates, as quads halfWidth to each side in the box's units.
 FplMesh FplFlatSegments(const std::vector<std::pair<FplPoint, FplPoint>>& segments, const FplBox3& box, float halfWidth);
 

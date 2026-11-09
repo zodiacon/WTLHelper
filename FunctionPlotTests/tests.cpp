@@ -1902,7 +1902,7 @@ TEST(Kinds3D) {
 	CHECK_NEAR_TOL(e.h.Eval(sl), 0, 1e-15);
 	CHECK_INT(FplBuild(L"(1, 2, 3)", {}).kind, FplKind::Point3D);
 	CHECK_INT(FplBuild(L"(u, t, 1)", {}).error.code, FplErrorCode::VariableNotAllowed);
-	CHECK_INT(FplBuild(L"(x, y, 1)", {}).error.code, FplErrorCode::VariableNotAllowed);
+	CHECK(FplBuild(L"(x, y, 1)", {}).kind == FplKind::VectorField3D);
 	CHECK_INT(FplBuild(L"(u, v)", {}).error.code, FplErrorCode::VariableNotAllowed);
 	CHECK_INT(FplBuild(L"y = u x", {}).error.code, FplErrorCode::VariableNotAllowed);
 	// u and v are variables now: no slider for them
@@ -6717,6 +6717,149 @@ TEST(MathSymbols) {
 	CHECK(FplToMathML(L"mod(x, 3)").find(L"<mo>mod</mo>") != std::wstring::npos);
 }
 
+TEST(DefinitionValues) {
+	auto plot = MakePlot({ L"a = 2", L"b = -0.5", L"c = (3)", L"d = 2a", L"f = pi", L"g = 1/2", L"y = x", L"h = 1 + 1" });
+	CHECK(plot.DefinitionIsNumber(0));
+	CHECK(plot.DefinitionIsNumber(1));
+	CHECK(plot.DefinitionIsNumber(2));
+	CHECK(!plot.DefinitionIsNumber(3));
+	CHECK(!plot.DefinitionIsNumber(4));		// its value says something
+	CHECK(!plot.DefinitionIsNumber(5));
+	CHECK(!plot.DefinitionIsNumber(6));		// not a definition
+	CHECK(!plot.DefinitionIsNumber(7));
+	CHECK(!plot.DefinitionIsNumber(99));
+	CHECK(!plot.DefinitionIsNumber(-1));
+}
+
+TEST(VectorFields3D) {
+	std::vector<std::wstring> none;
+	// what a tuple of three is
+	for (const wchar_t* text : { L"(-y, x, z)", L"(x, 0, 0)", L"(0, y, 1)", L"(sin y, cos z, x y)", L"(1, 2, z)" }) {
+		auto e = FplBuild(text, none);
+		CHECK(!e.error);
+		CHECK(e.kind == FplKind::VectorField3D);
+	}
+	CHECK(FplBuild(L"(cos t, sin t, t)", none).kind == FplKind::SpaceCurve);
+	CHECK(FplBuild(L"(u, v, u v)", none).kind == FplKind::ParametricSurface);
+	CHECK(FplBuild(L"(1, 2, 3)", none).kind == FplKind::Point3D);
+	CHECK(FplBuild(L"(y, -x)", none).kind == FplKind::VectorField);
+	CHECK(FplBuild(L"(x, t, 1)", none).error.code == FplErrorCode::VariableNotAllowed);
+	CHECK(FplBuild(L"(x, u, 1)", none).error.code == FplErrorCode::VariableNotAllowed);
+	// with parameters
+	CHECK(FplBuild(L"(a y, x, z)", { L"a" }).kind == FplKind::VectorField3D);
+
+	FplBox3 box{ -10, 10, -10, 10, -10, 10 };
+	// a constant one: an arrow on each point, the same length, along it
+	auto mesh = FplFieldMesh3([](double, double, double) { return FplPoint3{ 1, 0, 0 }; }, box);
+	CHECK(!mesh.Empty());
+	CHECK_INT(mesh.vertices.size() % 19, 0);
+	const size_t arrows = mesh.vertices.size() / 19;
+	CHECK_INT(arrows, 9 * 9 * 9);			// -8 to 8 by 2: none on the faces
+	CHECK(mesh.indices.size() == arrows * 54);
+	bool indexed = true;
+	for (uint32_t i : mesh.indices)
+		indexed = indexed && i < mesh.vertices.size();
+	CHECK(indexed);
+	// each arrow's tip is the 19th vertex; its tail's middle the first ring's
+	auto arrowOf = [&](const FplMesh& m, size_t k, FplVec3& from, FplVec3& to) {
+		from = { 0, 0, 0 };
+		for (int side = 0; side < 6; side++) {
+			auto& p = m.vertices[k * 19 + side * 3].pos;
+			from.x += p.x / 6, from.y += p.y / 6, from.z += p.z / 6;
+		}
+		to = m.vertices[k * 19 + 18].pos;
+	};
+	double firstLength = 0;
+	bool along = true, sameLength = true, centered = true, inside = true;
+	const double step = 0;
+	(void)step;
+	for (size_t k = 0; k < arrows; k++) {
+		FplVec3 from, to;
+		arrowOf(mesh, k, from, to);
+		const double dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+		const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (k == 0)
+			firstLength = length;
+		sameLength = sameLength && std::abs(length - firstLength) < 1e-4;
+		along = along && dx > 0 && std::abs(dy) < 1e-4 && std::abs(dz) < 1e-4;
+		// its middle is on a multiple of the step: in space, a whole number
+		const double middle = ((from.x + to.x) / 2 + 1) * 10 - 10;
+		centered = centered && std::abs(middle - std::round(middle)) < 1e-3;
+		inside = inside && std::abs(from.x) <= 1 && std::abs(to.x) <= 1 && std::abs(from.y) <= 1 && std::abs(from.z) <= 1;
+	}
+	CHECK(along);
+	CHECK(sameLength);
+	CHECK(centered);
+	CHECK(inside);
+	CHECK(firstLength > 0);
+	CHECK(firstLength < 2.5 * 2 / 10);		// short of the next point
+	// lengths follow the magnitude, within their limits; zero and undefined have none
+	auto varied = FplFieldMesh3([](double x, double, double) { return FplPoint3{ std::abs(x), 0, 0 }; }, box);
+	double shortest = 1e9, tallest = 0;
+	for (size_t k = 0; k < varied.vertices.size() / 19; k++) {
+		FplVec3 from, to;
+		arrowOf(varied, k, from, to);
+		const double length = to.x - from.x;
+		shortest = std::min(shortest, length);
+		tallest = std::max(tallest, length);
+	}
+	CHECK(tallest > 2 * shortest);
+	CHECK(shortest >= tallest * 0.19);
+	CHECK(FplFieldMesh3([](double, double, double) { return FplPoint3{ 0, 0, 0 }; }, box).Empty());
+	CHECK(FplFieldMesh3([](double, double, double) { return FplPoint3{ NaN, 0, 0 }; }, box).Empty());
+	CHECK(FplFieldMesh3([](double, double, double) { return FplPoint3{ 1, 0, 0 }; }, FplBox3{ 1, 1, 0, 1, 0, 1 }).Empty());
+	auto partly = FplFieldMesh3([](double x, double, double) { return FplPoint3{ x > 0 ? 1.0 : NaN, 0, 0 }; }, box);
+	CHECK(!partly.Empty());
+	CHECK(partly.vertices.size() < mesh.vertices.size());
+	// a pole doesn't shrink everything else to nothing
+	auto pole = FplFieldMesh3([](double x, double y, double z) { return FplPoint3{ x == 0 && y == 0 && z == 0 ? 1e9 : 1.0, 0, 0 }; }, box);
+	FplVec3 from, to;
+	arrowOf(pole, 0, from, to);
+	CHECK_NEAR_TOL(to.x - from.x, firstLength, 1e-4);
+	// the points stay put as the box moves: moved by a whole number of steps, the same arrows are where they were
+	FplBox3 moved{ -8, 12, -10, 10, -10, 10 };
+	auto shifted = FplFieldMesh3([](double, double, double) { return FplPoint3{ 1, 0, 0 }; }, moved);
+	bool stable = true;
+	for (size_t k = 0; k < shifted.vertices.size() / 19; k++) {
+		arrowOf(shifted, k, from, to);
+		const double middle = ((from.x + to.x) / 2 + 1) * 10 - 8;
+		stable = stable && std::abs(middle - std::round(middle)) < 1e-3;
+	}
+	CHECK(stable);
+	// a stretched box stretches it: along z in a tall box the same field is shorter in the cube
+	FplBox3 tall{ -10, 10, -10, 10, -100, 100 };
+	auto diagonal = FplFieldMesh3([](double, double, double) { return FplPoint3{ 1, 0, 1 }; }, tall);
+	arrowOf(diagonal, 0, from, to);
+	CHECK(std::abs(to.z - from.z) < 0.2 * std::abs(to.x - from.x));
+
+	// through the graphs: a mesh in 3D, nothing in 2D, picked; hidden none; a list's together
+	auto plot = MakePlot({ L"(-y, x, z)", L"y = x" });
+	plot.Build3D(box);
+	CHECK(!plot.graphs[0].mesh.Empty());
+	CHECK(plot.graphs[0].fieldMesh.Empty());
+	FplViewport v = View();
+	plot.Sample(v);
+	CHECK(plot.graphs[0].geometry.lines.empty());
+	CHECK(plot.graphs[0].geometry.arrows.empty());
+	FplCamera cam;
+	const FplPoint3 a = { 2, 0, 0 };
+	(void)a;
+	plot.graphs[0].flags |= FplGraphHidden;
+	plot.Build3D(box);
+	CHECK(plot.graphs[0].mesh.Empty());
+	auto listed = MakePlot({ L"L = [1, 2]", L"(L, 0, z)" });
+	auto single = MakePlot({ L"(1, 0, z)" });
+	listed.Build3D(box);
+	single.Build3D(box);
+	CHECK(listed.graphs[1].mesh.indices.size() > single.graphs[0].mesh.indices.size());
+	// the time a redraw of one takes is small; a parameter moves it
+	auto param = MakePlot({ L"(a y, x, z)" }, { Param(L"a", 2) });
+	param.Build3D(box);
+	CHECK(!param.graphs[0].mesh.Empty());
+	// shown in the legend's math, and saved as text
+	CHECK_STR(FplToLatex(L"(-y, x, z)"), L"\\left(-y,x,z\\right)");
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -6817,6 +6960,8 @@ int wmain() {
 	Run_LatexAndMathML();
 	Run_SlowFeatures();
 	Run_MathSymbols();
+	Run_DefinitionValues();
+	Run_VectorFields3D();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

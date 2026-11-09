@@ -211,6 +211,8 @@ public:
 	double EvalCost(int graph, const FplViewport* view = nullptr) const;
 	// For drawing a text as mathematics with the names this plot knows.
 	FplParseOptions DisplayOptions() const;
+	// A definition that's only a number, c = 2 or c = -0.5, whose value would say the same thing again.
+	bool DefinitionIsNumber(int graph) const;
 	// How to sample a heavy graph at once, on the UI thread: a surface or implicit curve on large cells, a slow curve as many
 	// straight lines as about 6 ms of evaluations make, with no refining or analysis.
 	FplSampleOptions CoarseOptions(int graph, const FplViewport& view) const;

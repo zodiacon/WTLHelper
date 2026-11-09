@@ -132,9 +132,16 @@ FplPlotDef FplClassify(FplAst& ast, int root) {
 	const FplNode top = ast[root];
 
 	if (top.op == FplOp::Tuple && top.kids.size() == 3) {
-		// 3D: (x(t), y(t), z(t)), (x(u, v), y(u, v), z(u, v)), (a, b, c)
+		// 3D: (x(t), y(t), z(t)), (x(u, v), y(u, v), z(u, v)), (a, b, c), and a field of x, y and z
 		unsigned vars = FplVariablesOf(ast, root);
 		const unsigned uv = FplVarU | FplVarV;
+		const unsigned space = FplVarX | FplVarY | FplVarZ;
+		if ((vars & space) && !(vars & ~space)) {
+			def.kind = FplKind::VectorField3D;
+			for (int k = 0; k < 3; k++)
+				def.expr[k] = top.kids[k];
+			return def;
+		}
 		if ((vars & FplVarT) && (vars & ~FplVarT)) {
 			NotAllowed(def, ast, root, ~unsigned(FplVarT));
 			return def;

@@ -337,8 +337,9 @@ void CFunctionPlotCtrl::LayoutPanel() {
 			row.note = !row.error && g.expr.kind == FplKind::Regression;
 			row.stopped = !row.error && (s.mode3D ? g.incomplete3D : g.geometry.incomplete);
 			// the text as mathematics, if it reads and fits, with room left for a value after it
+			row.noValue = s.plot.DefinitionIsNumber((int)i);
 			if (!(style & FPLS_PLAINLEGEND) && !row.error) {
-				const bool hasValue = g.definition || g.listDefinition || g.expr.kind == FplKind::Integral;
+				const bool hasValue = (g.definition && !row.noValue) || g.listDefinition || g.expr.kind == FplKind::Integral;
 				const double room = width - 36 - (hasValue ? 70 : 0);
 				const std::wstring key = g.text + L'\n' + std::to_wstring((int)room);
 				if (s.mathCache.size() > 256)
@@ -372,6 +373,22 @@ void CFunctionPlotCtrl::LayoutPanel() {
 			const float mid = y + FplSliderRow / 2;
 			row.play = { left + 6, mid - 11, left + 28, mid + 11 };
 			row.track = { left + 76, mid - 2, right - 66, mid + 2 };
+			// its name as the legend shows it (a Greek letter, a subscript), if it fits beside the track
+			if (!(style & FPLS_PLAINLEGEND)) {
+				const std::wstring key = s.plot.params[i].name + L'\x0001';
+				auto found = s.mathCache.find(key);
+				if (found == s.mathCache.end()) {
+					FplParseOptions options = s.plot.DisplayOptions();
+					options.plainQ = true;		// a slider's q is that, whatever a line's q is
+					options.weakQ = false;
+					FplMathLayout layout;
+					std::shared_ptr<FplMathDrawing> drawing;
+					if (FplFitMath(s.plot.params[i].name, options, { 14, 12, 10 }, row.track.left - row.play.right - 12, FplDWriteMeasure(), layout))
+						drawing = FplMakeMathDrawing(std::move(layout));
+					found = s.mathCache.emplace(key, std::move(drawing)).first;
+				}
+				row.math = found->second;
+			}
 			s.rows.push_back(row);
 			y += FplSliderRow;
 		}
@@ -1032,8 +1049,10 @@ void CFunctionPlotCtrl::PaintPanel() {
 			}
 			std::wstring label = row.math ? std::wstring() : g.text;
 			if (g.definition && !g.expr.error) {
-				double value = s.plot.DefinitionValue(row.index);
-				label += L"   = " + FplFormatCoordinate(value, 1e-6);
+				if (!row.noValue) {
+					double value = s.plot.DefinitionValue(row.index);
+					label += L"   = " + FplFormatCoordinate(value, 1e-6);
+				}
 			}
 			else if (g.expr.kind == FplKind::Integral && !g.expr.error) {
 				double value = s.plot.IntegralValue(row.index);
@@ -1076,8 +1095,12 @@ void CFunctionPlotCtrl::PaintPanel() {
 			auto* accent = s.Brush(c.crPalette[1]);
 			// Play / Pause
 			Text(rt, p.animating ? L"\xE769" : L"\xE768", s.icons.Get(), row.play, accent);
-			const wchar_t* greek = (GetStyle() & FPLS_PLAINLEGEND) ? nullptr : FplGreekSymbol(p.name);
-			Text(rt, greek ? std::wstring(greek) : p.name, s.panelText.Get(), { row.play.right + 4, top, row.track.left - 8, top + FplSliderRow }, text);
+			if (row.math) {
+				auto& layout = row.math->layout;
+				FplDrawMath(rt, *row.math, row.play.right + 4, mid + (float)(layout.ascent - layout.descent) / 2, text, s.roundStroke.Get());
+			}
+			else
+				Text(rt, p.name, s.panelText.Get(), { row.play.right + 4, top, row.track.left - 8, top + FplSliderRow }, text);
 			// the track, filled up to the value
 			const double t = p.max > p.min ? std::clamp((p.value - p.min) / (p.max - p.min), 0.0, 1.0) : 0;
 			const float tx = row.track.left + (float)t * (row.track.right - row.track.left);

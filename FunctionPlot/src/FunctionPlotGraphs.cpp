@@ -828,6 +828,20 @@ FplParseOptions FplPlot::DisplayOptions() const {
 	return options;
 }
 
+bool FplPlot::DefinitionIsNumber(int graph) const {
+	if (graph < 0 || graph >= static_cast<int>(graphs.size()) || !graphs[graph].definition)
+		return false;
+	auto parsed = FplParse(graphs[graph].text, DisplayOptions());
+	if (parsed.error || parsed.root < 0 || parsed.ast[parsed.root].op != FplOp::Cmp)
+		return false;
+	int node = parsed.ast[parsed.root].kids[1];
+	while (parsed.ast[node].op == FplOp::Group || parsed.ast[node].op == FplOp::Neg)
+		node = parsed.ast[node].kids[0];
+	auto& n = parsed.ast[node];
+	// (not pi, whose value says something; a number's text starts with a digit or a point)
+	return n.op == FplOp::Num && (n.name.empty() || (n.name[0] >= L'0' && n.name[0] <= L'9') || n.name[0] == L'.');
+}
+
 double FplPlot::EvalCost(int graph, const FplViewport* view) const {
 	auto& g = graphs[graph];
 	auto& e = g.expr;
@@ -1029,6 +1043,14 @@ FplMesh FplPlot::Mesh3D(const FplGraph& g, const FplBox3& box, int implicitCells
 				s[FplSlotY] = y;
 				return e.f.Eval(s);
 			}, box, implicitCells < 48 ? 24 : 96);	// (a coarse version of a slow one too)
+			break;
+		case FplKind::VectorField3D:
+			mesh = FplFieldMesh3([&](double x, double y, double z) {
+				s[FplSlotX] = x;
+				s[FplSlotY] = y;
+				s[FplSlotZ] = z;
+				return FplPoint3{ e.f.Eval(s), e.g.Eval(s), e.h.Eval(s) };
+			}, box);
 			break;
 		case FplKind::ParametricSurface:
 			mesh = FplParametricMesh([&](double u, double v) {
