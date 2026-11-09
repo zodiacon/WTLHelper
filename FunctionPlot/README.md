@@ -169,7 +169,19 @@ The shorter ones read as products of letters unless they're called with parenthe
 | `x`, `y`, `z`, `t`, `r`, `u`, `v` | Variables |
 | `theta` or `θ` | The angle. Also `q`, unless `q` is your own name or its line has a variable other than `r`. A slider the app only added for another line (`FPLPF_AUTO`) leaves `q` as the angle in a line with `r` |
 
-Any other name is a parameter, which the app defines. The demo adds a slider for each one. The name of a Greek letter, such as `alpha` or `mu`, is one name unless its letters are all known names, and shows as the letter.
+Any other name is a parameter, which the app defines. The demo adds a slider for each one.
+
+A name made of known names is their product, so `xy` is x times y and `sinx` is sin x, unless a parameter or function has that whole name. A name with unknown letters is read as follows:
+
+| Written | Read as |
+|---|---|
+| `xy`, `2x`, `sinx`, `pix` | Known names multiplied |
+| `ax`, `kt`, `abc`, `axy`, `sina` | A product: each unknown letter is a parameter |
+| `speed`, `rate`, `gain` | One name: four letters or more, with no `x` or `y` and no longer known name inside |
+
+A slider elsewhere doesn't change that: with a parameter `a`, `rate` is still one name, not r·a·t·e. Letters that are all parameters, like `abcd` with a slider for each, are their product.
+
+ The name of a Greek letter, such as `alpha` or `mu`, is one name unless its letters are all known names, and shows as the letter.
 
 ## Operators
 

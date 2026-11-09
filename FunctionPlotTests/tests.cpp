@@ -6860,6 +6860,100 @@ TEST(VectorFields3D) {
 	CHECK_STR(FplToLatex(L"(-y, x, z)"), L"\\left(-y,x,z\\right)");
 }
 
+TEST(WordNames) {
+	std::vector<std::wstring> none;
+	auto at = [&](const wchar_t* text, double x, double y, std::vector<std::wstring> names = {}, std::vector<double> values = {}) {
+		auto e = FplBuild(text, names);
+		CHECK(!e.error);
+		std::vector<double> slots(FplFirstParam + names.size());
+		slots[FplSlotX] = x;
+		slots[FplSlotY] = y;
+		for (size_t i = 0; i < values.size(); i++)
+			slots[FplFirstParam + i] = values[i];
+		return e.error ? NaN : e.f.Eval(slots.data());
+	};
+	// xy is x times y, unless a parameter has the name
+	CHECK(FplBuild(L"z = xy", none).kind == FplKind::Surface);
+	CHECK_NEAR(at(L"z = xy", 3, 4), 12.0);
+	CHECK_NEAR(at(L"z = xy", 3, 4, { L"xy" }, { 100 }), 100.0);
+	CHECK_NEAR(at(L"z = xyx", 3, 4), 36.0);
+	// as a function of that name does
+	auto plot = MakePlot({ L"xy(x) = 2x", L"y = xy(x)" });
+	CHECK(!plot.graphs[1].expr.error);
+
+	// a word is one name, to ask for, to be given or to define, wherever it's written
+	for (const wchar_t* name : { L"speed", L"rate", L"gain", L"mass", L"time", L"angle", L"width", L"height", L"abcd" }) {
+		auto e = FplBuild(std::wstring(L"y = ") + name + L" x", none);
+		CHECK(e.error.code == FplErrorCode::UnknownName);
+		CHECK_STR(e.error.name, name);
+		CHECK_INT(e.error.pos, 4);
+		CHECK_INT(e.error.len, wcslen(name));
+		CHECK(!FplBuild(std::wstring(L"y = ") + name + L" x", { name }).error);
+		CHECK(!FplBuild(std::wstring(L"y = 2") + name, { name }).error);
+	}
+	CHECK_NEAR(at(L"y = 2speed x", 3, 0, { L"speed" }, { 5 }), 30.0);
+	plot = MakePlot({ L"speed = 3", L"y = speed x" });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[1].expr.error);
+	auto values = plot.Slots();
+	values[FplSlotX] = 2;
+	CHECK_NEAR(plot.graphs[1].expr.f.Eval(values.data()), 6.0);
+	plot = MakePlot({ L"speed = x - 1", L"y = 2speed" });
+	CHECK(!plot.graphs[1].expr.error);
+	plot = MakePlot({ L"rate(a) = a^2", L"y = rate(x)" });
+	CHECK(!plot.graphs[1].expr.error);
+
+	// products as people write them, each unknown letter asked for: short ones, and with x or y
+	for (auto& c : std::vector<std::pair<const wchar_t*, const wchar_t*>>{ { L"y = ax", L"a" }, { L"y = 2ax", L"a" }, { L"y = kt", L"k" },
+		{ L"y = abc", L"a" }, { L"y = axy", L"a" }, { L"y = abxy", L"a" }, { L"y = abcx", L"a" }, { L"y = wxyz", L"w" }, { L"y = amp", L"a" } }) {
+		auto e = FplBuild(c.first, none);
+		CHECK(e.error.code == FplErrorCode::UnknownName);
+		CHECK_STR(e.error.name, c.second);
+	}
+	CHECK_NEAR(at(L"y = abcx", 3, 0, { L"a", L"b", L"c" }, { 2, 5, 7 }), 210.0);
+	// with a known name of several letters in it too
+	CHECK(FplBuild(L"y = sinb", none).error.name == L"b");
+	CHECK(FplBuild(L"y = cosab", none).error.name == L"a");
+	CHECK_NEAR(at(L"y = sinb", 0, 0, { L"b" }, { 0.5 }), std::sin(0.5));
+	// all known: a product, however long, or its letters' parameters
+	CHECK_NEAR(at(L"y = abcd", 0, 0, { L"a", L"b", L"c", L"d" }, { 1, 2, 3, 4 }), 24.0);
+	CHECK_NEAR(at(L"y = xxxx", 2, 0), 16.0);
+	CHECK_NEAR(at(L"y = 2 sinx", 0.5, 0), 2 * std::sin(0.5));
+	CHECK_NEAR(at(L"y = pix", 2, 0), 2 * Pi);
+	// a slider elsewhere doesn't change what a word means, though its letters are then all known
+	auto word = FplBuild(L"y = rate x", { L"a" });
+	CHECK(word.error.code == FplErrorCode::UnknownName);
+	CHECK_STR(word.error.name, L"rate");
+	CHECK(FplBuild(L"y = time x", { L"i", L"m" }).error.name == L"time");
+	CHECK(FplBuild(L"y = beta x", { L"a", L"b" }).error.name == L"beta");
+	CHECK(FplBuild(L"y = zeta x", { L"a" }).error.name == L"zeta");
+	CHECK(FplBuild(L"y = eta x", { L"a" }).error.name == L"eta");
+	CHECK(!FplBuild(L"y = rate x", { L"a", L"rate" }).error);
+	plot = MakePlot({ L"rate = 2", L"y = rate a x" }, { Param(L"a", 3) });
+	CHECK(plot.graphs[0].definition);
+	CHECK(!plot.graphs[1].expr.error);
+	// what's only parameters, only variables and constants, or short, or has x or y, is the product it was
+	CHECK_NEAR(at(L"y = abab", 0, 0, { L"a", L"b" }, { 2, 3 }), 36.0);
+	CHECK_NEAR(at(L"z = eeee", 0, 0), std::pow(std::numbers::e, 4));
+	CHECK_NEAR(at(L"y = axxa", 3, 0, { L"a" }, { 2 }), 36.0);
+	CHECK_NEAR(at(L"y = ae", 0, 0, { L"a" }, { 2 }), 2 * std::numbers::e);
+	// other names as they were: Greek ones, with digits, functions, a substitution's
+	CHECK(FplBuild(L"y = alpha x", none).error.name == L"alpha");
+	CHECK(FplBuild(L"y = speed1", none).error.name == L"speed1");
+	CHECK_NEAR(at(L"y = sqrt(x)", 4, 0), 2.0);
+	CHECK(FplBuild(L"y = sqrt", none).error.code == FplErrorCode::MissingArgument);
+	// drawn upright as a word, and exported as one
+	FplMathMeasure measure = [](const std::wstring& text, double size, bool) { return text.size() * size * 0.5; };
+	FplMathLayout layout;
+	FplParseOptions options;
+	CHECK(FplFitMath(L"speed x", options, { 20 }, 0, measure, layout));
+	CHECK_STR(FplDescribeMath(layout), L"speedx");
+	CHECK(!layout.items[0].italic);
+	CHECK_STR(FplToLatex(L"speed x"), L"\\mathrm{speed}x");
+	CHECK(FplFitMath(L"xy", options, { 20 }, 0, measure, layout));
+	CHECK_INT(layout.items.size(), 2);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -6962,6 +7056,7 @@ int wmain() {
 	Run_MathSymbols();
 	Run_DefinitionValues();
 	Run_VectorFields3D();
+	Run_WordNames();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

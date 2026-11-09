@@ -678,6 +678,22 @@ private:
 						best[i] = b;
 				}
 			}
+			// Its letters all known doesn't make a word a product when they only happen to be: with a slider a, "rate" isn't r a t e,
+			// nor with a and b "beta" b e t a, or a slider on one line would change what another means. Letters that are all
+			// parameters, or all variables and constants, are a product as written (abcd, tttt).
+			if (best[0].unknown == 0 && s.find_first_of(L"xy") == s.npos && (n >= 4 || (n == 3 && FplGreekSymbol(s)))) {
+				bool single = true, parameter = false, other = false;
+				for (size_t i = 0; i < n; i += best[i].len) {
+					single = single && best[i].len == 1;
+					Lookup(s.substr(i, best[i].len), probe);
+					parameter = parameter || probe.kind == NameKind::Param;
+					other = other || probe.kind == NameKind::Var || probe.kind == NameKind::Const;
+				}
+				if (single && parameter && other) {
+					tokens.push_back(std::move(t));
+					return;
+				}
+			}
 			if (best[0].unknown == 0) {
 				for (size_t i = 0; i < n; i += best[i].len) {
 					Token part;
@@ -690,6 +706,15 @@ private:
 			}
 			// a Greek letter's name that doesn't read as known names is that name (alpha, mu), not its letters each a parameter
 			if (FplGreekSymbol(s)) {
+				tokens.push_back(std::move(t));
+				return;
+			}
+			// So is a word: four letters or more, with no x or y and no known name of several letters in it (speed, rate, gain).
+			// What's shorter or has them is what people write as a product: ax, kt, abc, axy, sina.
+			bool word = n >= 4 && s.find_first_of(L"xy") == s.npos;
+			for (size_t i = 0; word && i < n; i += best[i].len)
+				word = best[i].len == 1;
+			if (word) {
 				tokens.push_back(std::move(t));
 				return;
 			}
