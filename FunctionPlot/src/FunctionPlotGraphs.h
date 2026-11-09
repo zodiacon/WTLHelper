@@ -227,7 +227,11 @@ public:
 	// functions (Intersection), into its features. Any graph with a curve (x = f(y), polar, parametric, implicit, an
 	// ODE's solutions, regions' boundaries) also gets where it meets the others' curves in the view, from what was
 	// sampled last. Others get none.
-	void FindFeatures(int graph, const FplViewport& view);
+	// A function too slow to scan here keeps what it has (evenIfSlow: scans it anyway): its features come from the sampling thread,
+	// through FplFunctionFeatures and SetFeatures.
+	void FindFeatures(int graph, const FplViewport& view, bool evenIfSlow = false);
+	bool IsTooSlowToAnalyze(int graph, const FplViewport& view) const;
+	void SetFeatures(int graph, std::vector<FplFeature> features);
 
 	// y = f(x) or x = f(y) of a function graph (NaN for other kinds).
 	double Eval(int graph, double v) const;
@@ -336,6 +340,9 @@ struct FplSvgStyle {
 };
 std::string FplWriteSvg(const FplPlot& plot, const FplViewport& view, const FplSvgStyle& style);
 // A PNG of rows of RGBA bytes (straight alpha), uncompressed: small enough for a heat map, and needing no codec.
+// A function's own roots, extrema and y intercept over the view, needing nothing of the plot: for the sampling thread.
+std::vector<FplFeature> FplFunctionFeatures(const FplExpression& expr, std::vector<double> slots, const FplViewport& view);
+
 std::string FplEncodePng(int width, int height, const std::vector<uint8_t>& rgba);
 
 // A traced coordinate with as many decimals as a DIP needs at this scale (unitsPerDip), plus one; trailing zeros

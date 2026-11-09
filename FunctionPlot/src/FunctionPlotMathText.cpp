@@ -9,7 +9,7 @@
 
 namespace {
 
-const wchar_t Theta = 0x03B8, PiSign = 0x03C0, TauSign = 0x03C4;
+const wchar_t PiSign = 0x03C0, TauSign = 0x03C4;
 
 class Writer {
 public:
@@ -21,6 +21,7 @@ public:
 	virtual std::wstring Row(const std::vector<std::wstring>& parts) = 0;
 	virtual std::wstring Apply(const std::wstring& head, const std::wstring& argument) = 0;	// sin x
 	virtual std::wstring Frac(const std::wstring& top, const std::wstring& bottom) = 0;
+	virtual std::wstring Binomial(const std::wstring& top, const std::wstring& bottom) = 0;
 	virtual std::wstring Sup(const std::wstring& base, const std::wstring& power) = 0;
 	virtual std::wstring Sub(const std::wstring& base, const std::wstring& index) = 0;
 	virtual std::wstring Primes(const std::wstring& base, int count) = 0;
@@ -233,8 +234,21 @@ private:
 			case FplFunc::Log2: name = L"log"; break;
 			default: break;
 		}
-		std::wstring head = m_W.Function(name);
+		const FplFuncSymbol symbol = FplSymbolOf(n.func);
+		if (n.func == FplFunc::NCr)
+			return m_W.Binomial(Node(Strip(k[0])), Node(Strip(k[1])));
+		if (n.func == FplFunc::Mod)
+			return m_W.Row({ Operand(k[0]), m_W.Operator(L"mod"), Operand(k[1]) });
+		std::wstring head = !*symbol.text ? m_W.Function(name) : symbol.italic ? m_W.Name(symbol.text) : m_W.Function(symbol.text);
 		std::vector<int> args = k;
+		if (n.func == FplFunc::BesselJ || n.func == FplFunc::BesselY || n.func == FplFunc::BesselI || n.func == FplFunc::BesselK) {
+			head = m_W.Sub(head, Node(Strip(args[0])));
+			args.erase(args.begin());
+		}
+		else if (n.func == FplFunc::LambertWm1)
+			head = m_W.Sub(head, m_W.Row({ Operator(Op::Minus), m_W.Number(L"1") }));
+		else if (n.func == FplFunc::Lgamma)
+			head = m_W.Row({ m_W.Function(L"ln"), head });
 		if (n.func == FplFunc::Log2)
 			head = m_W.Sub(head, m_W.Number(L"2"));
 		else if (n.func == FplFunc::Log && args.size() == 2) {
@@ -263,12 +277,14 @@ public:
 	std::wstring Number(const std::wstring& text) override { return text; }
 
 	std::wstring Name(const std::wstring& name) override {
+		if (const wchar_t* greek = FplGreekSymbol(name))
+			return Name(greek);
 		if (name.size() > 1)
 			return L"\\mathrm{" + name + L"}";
 		if (name.empty())
 			return name;
-		if (const wchar_t* greek = Greek(name[0]))
-			return greek;
+		if (const wchar_t* word = FplGreekWord(name[0]))
+			return std::wstring(L"\\") + word;
 		return name;
 	}
 
@@ -279,6 +295,11 @@ public:
 		for (auto own : Own)
 			if (name == own)
 				return L"\\" + name;
+		if (name.size() == 1) {
+			if (const wchar_t* word = FplGreekWord(name[0]))
+				return std::wstring(L"\\") + word;
+			return L"\\mathrm{" + name + L"}";
+		}
 		return L"\\operatorname{" + name + L"}";
 	}
 
@@ -288,6 +309,7 @@ public:
 		if (op == L"ge") return L"\\ge";
 		if (op == L"sim") return L"\\sim";
 		if (op == L"space") return L"\\quad";
+		if (op == L"mod") return L"\\bmod";
 		return op;
 	}
 
@@ -312,6 +334,7 @@ public:
 
 	std::wstring Apply(const std::wstring& head, const std::wstring& argument) override { return head + L" " + argument; }
 	std::wstring Frac(const std::wstring& top, const std::wstring& bottom) override { return L"\\frac{" + top + L"}{" + bottom + L"}"; }
+	std::wstring Binomial(const std::wstring& top, const std::wstring& bottom) override { return L"\\binom{" + top + L"}{" + bottom + L"}"; }
 	std::wstring Sup(const std::wstring& base, const std::wstring& power) override { return base + L"^{" + power + L"}"; }
 	std::wstring Sub(const std::wstring& base, const std::wstring& index) override { return base + L"_{" + index + L"}"; }
 	std::wstring Primes(const std::wstring& base, int count) override { return base + std::wstring(count, L'\''); }
@@ -349,15 +372,6 @@ public:
 	std::wstring Top(const std::wstring& inner) override { return inner; }
 
 private:
-	static const wchar_t* Greek(wchar_t c) {
-		switch (c) {
-			case Theta: return L"\\theta";
-			case PiSign: return L"\\pi";
-			case TauSign: return L"\\tau";
-			default: return nullptr;
-		}
-	}
-
 	static std::wstring Delim(wchar_t c) {
 		switch (c) {
 			case L'{': return L"\\{";
@@ -390,8 +404,10 @@ public:
 	std::wstring Number(const std::wstring& text) override { return L"<mn>" + text + L"</mn>"; }
 
 	std::wstring Name(const std::wstring& name) override {
-		// one letter is italic by itself; a word is set upright
-		if (name.size() > 1)
+		if (const wchar_t* greek = FplGreekSymbol(name))
+			return Name(greek);
+		// one letter is italic by itself, but for a capital Greek one; a word is set upright
+		if (name.size() > 1 || (name.size() == 1 && name[0] >= 0x391 && name[0] <= 0x3A9))
 			return L"<mi mathvariant=\"normal\">" + Escape(name) + L"</mi>";
 		return L"<mi>" + Escape(name) + L"</mi>";
 	}
@@ -405,6 +421,7 @@ public:
 		if (op == L"ge") return L"<mo>&#x2265;</mo>";
 		if (op == L"sim") return L"<mo>&#x223C;</mo>";
 		if (op == L"space") return L"<mspace width=\"1em\"/>";
+		if (op == L"mod") return L"<mo>mod</mo>";
 		return L"<mo>" + Escape(op) + L"</mo>";
 	}
 
@@ -417,6 +434,9 @@ public:
 
 	std::wstring Apply(const std::wstring& head, const std::wstring& argument) override { return Row({ head, argument }); }
 	std::wstring Frac(const std::wstring& top, const std::wstring& bottom) override { return L"<mfrac>" + One(top) + One(bottom) + L"</mfrac>"; }
+	std::wstring Binomial(const std::wstring& top, const std::wstring& bottom) override {
+		return L"<mrow><mo stretchy=\"true\">(</mo><mfrac linethickness=\"0\">" + One(top) + One(bottom) + L"</mfrac><mo stretchy=\"true\">)</mo></mrow>";
+	}
 	std::wstring Sup(const std::wstring& base, const std::wstring& power) override { return L"<msup>" + One(base) + One(power) + L"</msup>"; }
 	std::wstring Sub(const std::wstring& base, const std::wstring& index) override { return L"<msub>" + One(base) + One(index) + L"</msub>"; }
 

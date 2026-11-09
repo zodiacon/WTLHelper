@@ -552,6 +552,16 @@ BOOL CFunctionPlotCtrl::GetDegrees() const {
 
 // ---- Building and sampling -------------------------------------------------------------
 
+// A traced function too slow to scan here: its features come with the next full sampling.
+void CFunctionPlotCtrl::RequestSlowFeatures() {
+	auto& s = *m_State;
+	if (!s.worker || s.mode3D || s.featuresGraph < 0 || s.featuresGraph >= (int)s.plot.graphs.size() ||
+		s.plot.graphs[s.featuresGraph].expr.kind != FplKind::Function || !s.plot.IsTooSlowToAnalyze(s.featuresGraph, s.view))
+		return;
+	s.viewOnly = true;		// what's shown stays, as nothing about it changed
+	Resample();
+}
+
 void CFunctionPlotCtrl::Rebuild() {
 	auto& s = *m_State;
 	EndTransition();
@@ -618,6 +628,9 @@ void CFunctionPlotCtrl::Resample() {
 		job.options = s.plot.OptionsFor(i, {});
 		job.mesh = mesh;
 		job.box = s.box;
+		// the traced function's features, if they're too slow to find here
+		job.features = !mesh && i == s.featuresGraph && !(GetStyle() & FPLS_NOTRACE) && s.plot.graphs[i].expr.kind == FplKind::Function &&
+			!(s.plot.graphs[i].flags & FplGraphNoFeatures) && s.plot.IsTooSlowToAnalyze(i, s.view);
 		s.worker->Submit(std::move(job));
 	};
 	if (s.mode3D) {
@@ -896,6 +909,8 @@ LRESULT CFunctionPlotCtrl::OnSampled(UINT, WPARAM, LPARAM, BOOL&) {
 			BuildGeometry(r.graph);
 			s.paths[r.graph].full = true;
 			s.paths[r.graph].view = r.view;
+			if (r.hasFeatures)
+				s.plot.SetFeatures(r.graph, std::move(r.features));
 		}
 	}
 	if (changed) {
@@ -1290,7 +1305,7 @@ int CFunctionPlotCtrl::GetFeatures(UINT id, FPLFEATURE* features, int max) const
 	FplPlot& plot = const_cast<FplPlot&>(s.plot);
 	std::vector<FplFeature> saved = plot.graphs[i].features;
 	if (i != s.featuresGraph)
-		plot.FindFeatures(i, s.view);
+		plot.FindFeatures(i, s.view, true);		// (it was asked for: however long it takes)
 	auto& found = plot.graphs[i].features;
 	int n = (int)found.size();
 	for (int k = 0; k < n && k < max && features; k++)
@@ -1347,6 +1362,7 @@ void CFunctionPlotCtrl::ApplyTraceHit(const FplTraceHit& hit) {
 			s.plot.graphs[s.featuresGraph].features.clear();
 		s.featuresGraph = hit.graph;
 		s.plot.FindFeatures(hit.graph, s.view);
+		RequestSlowFeatures();
 	}
 	// pinned: the mouse moving doesn't take it away
 	s.traceDragged = true;
@@ -1424,6 +1440,7 @@ void CFunctionPlotCtrl::UpdateTrace(POINT pt, bool dragging) {
 			s.plot.graphs[s.featuresGraph].features.clear();
 		s.featuresGraph = hit.graph;
 		s.plot.FindFeatures(hit.graph, s.view);
+		RequestSlowFeatures();
 		hit = dragging ? s.plot.TraceAt(hit.graph, p, s.view, FplSnapDistance)
 			: s.plot.Nearest(p, s.view, FplTraceDistance, FplSnapDistance, true);
 		Invalidate();

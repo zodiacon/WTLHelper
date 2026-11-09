@@ -1,6 +1,7 @@
 // Function plot expressions: the tree, the function table, error messages, the lexer and the parser.
 
 #include "FunctionPlotExpr.h"
+#include "FunctionPlotMath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -685,6 +686,11 @@ private:
 					Lookup(s.substr(i, best[i].len), part);
 					tokens.push_back(std::move(part));
 				}
+				return;
+			}
+			// a Greek letter's name that doesn't read as known names is that name (alpha, mu), not its letters each a parameter
+			if (FplGreekSymbol(s)) {
+				tokens.push_back(std::move(t));
 				return;
 			}
 			bool hinted = false;

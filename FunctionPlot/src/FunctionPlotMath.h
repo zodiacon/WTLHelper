@@ -40,6 +40,17 @@ FplMathLayout FplLayoutMath(const FplAst& ast, int root, double size, const FplM
 bool FplFitMath(std::wstring_view text, FplParseOptions options, std::initializer_list<double> sizes, double maxWidth,
 	const FplMathMeasure& measure, FplMathLayout& layout);
 
+// A Greek letter by name: "alpha" gives the letter, or null; and back, a letter's TeX name.
+const wchar_t* FplGreekSymbol(std::wstring_view word);
+const wchar_t* FplGreekWord(wchar_t letter);
+
+// A function's usual symbol, where it has one: gamma is a capital gamma, airyai is Ai. Empty text if not.
+struct FplFuncSymbol {
+	const wchar_t* text = L"";
+	bool italic = false;
+};
+FplFuncSymbol FplSymbolOf(FplFunc func);
+
 // A text as LaTeX ("\sqrt{x^{2} + y^{2}}") or a MathML document (<math>...), showing what the layout shows. Empty if it doesn't read.
 std::wstring FplToLatex(std::wstring_view text, const FplParseOptions& options = {});
 std::wstring FplToMathML(std::wstring_view text, const FplParseOptions& options = {});

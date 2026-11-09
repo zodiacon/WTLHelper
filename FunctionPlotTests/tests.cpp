@@ -6226,7 +6226,7 @@ TEST(MathDisplay) {
 	CHECK_STR(said(L"sin(x)"), L"sinx");
 	CHECK_STR(said(L"sin 2x"), L"sin2x");
 	CHECK_STR(said(L"sin(x + 1)"), L"sin|x+1|");
-	CHECK_STR(said(L"gamma(x)"), L"gamma|x|");
+	CHECK_STR(said(L"gamma(x)"), L"\x0393|x|");
 	CHECK_STR(said(L"atan2(y, x)"), L"atan2|y,x|");
 	CHECK_STR(said(L"sin^2 x"), L"sin2x");
 	CHECK_STR(said(L"sin^-1 x"), L"sin" + minus + L"1x");
@@ -6444,7 +6444,7 @@ TEST(LatexAndMathML) {
 	CHECK_STR(tex(L"log2(x)"), L"\\log_{2} x");
 	CHECK_STR(tex(L"log(x, 3)"), L"\\log_{3} x");
 	CHECK_STR(tex(L"sin'(x)"), L"\\sin' x");
-	CHECK_STR(tex(L"gamma(x)"), L"\\operatorname{gamma}\\left(x\\right)");
+	CHECK_STR(tex(L"gamma(x)"), L"\\Gamma\\left(x\\right)");
 	CHECK_STR(tex(L"atan2(y, x)"), L"\\operatorname{atan2}\\left(y,x\\right)");
 	CHECK_STR(tex(L"pi x"), L"\\pi x");
 	CHECK_STR(tex(L"r = 2 + cos 3q"), L"r = 2 + \\cos 3\\theta");
@@ -6526,6 +6526,195 @@ TEST(LatexAndMathML) {
 		CHECK(balanced);
 		CHECK(stack.empty());
 	}
+}
+
+TEST(SlowFeatures) {
+	FplViewport v = View(-10, 10, -8, 8, 1000, 800);
+	// the thread's: as the plot finds them for a function that's quick enough to compare
+	auto quick = MakePlot({ L"y = sum(x^k, k, 1, 2) - 2" });
+	quick.Sample(v);
+	quick.FindFeatures(0, v);
+	CHECK(!quick.graphs[0].features.empty());
+	auto theirs = FplFunctionFeatures(quick.graphs[0].expr, quick.Slots(), v);
+	CHECK_INT(theirs.size(), quick.graphs[0].features.size());
+	CHECK(Has(theirs, FplFeatureKind::Root, 1, 0, 1e-9));
+	CHECK(Has(theirs, FplFeatureKind::Root, -2, 0, 1e-9));
+	// through a job, with the curve, and only when it's asked for
+	FplJob job;
+	job.graph = 0;
+	job.expr = quick.graphs[0].expr;
+	job.slots = quick.Slots();
+	job.view = v;
+	job.options = quick.OptionsFor(0, {});
+	auto without = FplWorker::Run(job);
+	CHECK(!without.hasFeatures);
+	CHECK(without.features.empty());
+	job.features = true;
+	auto with = FplWorker::Run(job);
+	CHECK(with.hasFeatures);
+	CHECK(!with.geometry.lines.empty());
+	CHECK_INT(with.features.size(), theirs.size());
+	job.mesh = true;
+	job.box = FplBox3{ -10, 10, -10, 10, -10, 10 };
+	CHECK(!FplWorker::Run(job).hasFeatures);
+	// other kinds have none of these, and log axes are in x's own values
+	auto other = MakePlot({ L"x = y^2 - 1" });
+	CHECK(FplFunctionFeatures(other.graphs[0].expr, other.Slots(), v).empty());
+	FplViewport logs = View(1, 100, 0.1, 10, 800, 800);
+	logs.logX = true;
+	auto logged = MakePlot({ L"y = log(x) - 1" });
+	CHECK(Has(FplFunctionFeatures(logged.graphs[0].expr, logged.Slots(), logs), FplFeatureKind::Root, 10, 0, 1e-6));
+	// too slow to scan here: what it has stays until the thread's arrive, sorted; asking for them scans anyway
+	auto slow = MakePlot({ L"y = sum(x^k/k!, k, 0, 3) + 0 sum(sin(j x), j, 1, 100000) - 3", L"y = x - 1" });
+	CHECK(slow.IsTooSlowToAnalyze(0, v));
+	CHECK(!slow.IsTooSlowToAnalyze(1, v));
+	std::vector<FplFeature> arrived = { { FplFeatureKind::Root, 5, 0 }, { FplFeatureKind::Root, 1, 0 } };
+	slow.SetFeatures(0, arrived);
+	CHECK_NEAR(slow.graphs[0].features[0].x, 1.0);
+	slow.FindFeatures(0, v);
+	CHECK_INT(slow.graphs[0].features.size(), 2);
+	slow.SetFeatures(7, arrived);			// no such graph
+	// the other function doesn't look for meetings with it
+	slow.FindFeatures(1, v);
+	for (auto& f : slow.graphs[1].features)
+		CHECK(f.kind != FplFeatureKind::Intersection);
+}
+
+TEST(MathSymbols) {
+	FplMathMeasure measure = [](const std::wstring& text, double size, bool) { return text.size() * size * 0.5; };
+	auto said = [&](const wchar_t* text) {
+		FplMathLayout out;
+		CHECK(FplFitMath(text, {}, { 20 }, 0, measure, out));
+		return FplDescribeMath(out);
+	};
+	auto italicOf = [&](const wchar_t* text) {
+		FplMathLayout out;
+		CHECK(FplFitMath(text, {}, { 20 }, 0, measure, out));
+		return !out.items.empty() && out.items[0].italic;
+	};
+	const std::wstring minus(1, wchar_t(0x2212));
+	// Greek names: as a letter, with a subscript, primes; capitals upright; what isn't a letter's name stays a word
+	CHECK_STR(said(L"alpha"), L"\x03B1");
+	CHECK_STR(said(L"y = mu x"), L"y=\x03BCx");
+	CHECK_STR(said(L"alpha1"), L"\x03B1" L"1");
+	CHECK_STR(said(L"sigma^2"), L"\x03C3" L"2");
+	CHECK_STR(said(L"Omega"), L"\x03A9");
+	CHECK_STR(said(L"omega"), L"\x03C9");
+	CHECK(italicOf(L"omega"));
+	CHECK(!italicOf(L"Omega"));
+	CHECK(italicOf(L"x"));
+	CHECK_STR(said(L"abc"), L"abc");
+	CHECK(!italicOf(L"abc"));
+	CHECK(FplGreekSymbol(L"alpha") != nullptr);
+	CHECK(FplGreekSymbol(L"alph") == nullptr);
+	CHECK(FplGreekSymbol(L"") == nullptr);
+	CHECK(std::wstring(FplGreekWord(0x3B1)) == L"alpha");
+	CHECK(std::wstring(FplGreekWord(0x3A9)) == L"Omega");
+	CHECK(FplGreekWord(L'x') == nullptr);
+	// to the parser it's one name, to ask for or define, rather than its letters each a parameter
+	std::vector<std::wstring> none;
+	for (const wchar_t* name : { L"alpha", L"beta", L"mu", L"sigma", L"Omega", L"delta", L"xi" }) {
+		auto e = FplBuild(std::wstring(L"y = ") + name + L" x", none);
+		CHECK(e.error.code == FplErrorCode::UnknownName);
+		CHECK_STR(e.error.name, name);
+		CHECK_INT(e.error.pos, 4);
+		CHECK_INT(e.error.len, wcslen(name));
+	}
+	auto defined = MakePlot({ L"alpha = 3", L"y = alpha x" });
+	CHECK(defined.graphs[0].definition);
+	CHECK(!defined.graphs[1].expr.error);
+	auto values = defined.Slots();
+	values[FplSlotX] = 2;
+	CHECK_NEAR(defined.graphs[1].expr.f.Eval(values.data()), 6.0);
+	auto withParam = FplBuild(L"y = alpha x", { L"alpha" });
+	CHECK(!withParam.error);
+	// where its letters are all known it's a product, as ever; other names are as they were
+	CHECK(!FplBuild(L"y = xi", { L"i" }).error);
+	CHECK(FplBuild(L"y = xi", { L"i" }).kind == FplKind::Function);
+	CHECK(!FplBuild(L"r = a l", { L"a", L"l" }).error);
+	CHECK(FplBuild(L"y = abc", none).error.name == L"a");
+	CHECK(FplBuild(L"y = 2ax", none).error.name == L"a");
+	// a parameter by that name
+	auto plot = MakePlot({ L"y = beta x" }, { Param(L"beta", 2) });
+	FplMathLayout named;
+	CHECK(FplFitMath(L"y = beta x", plot.DisplayOptions(), { 20 }, 0, measure, named));
+	CHECK_STR(FplDescribeMath(named), L"y=\x03B2x");
+	// functions by their symbols
+	CHECK_STR(said(L"gamma(x)"), L"\x0393|x|");
+	CHECK_STR(said(L"lgamma(x)"), L"ln\x0393|x|");
+	CHECK_STR(said(L"digamma(x)"), L"\x03C8|x|");
+	CHECK_STR(said(L"beta(a, b)"), L"B|a,b|");
+	CHECK_STR(said(L"zeta(s)"), L"\x03B6|s|");
+	CHECK_STR(said(L"airyai(x)"), L"Ai|x|");
+	CHECK_STR(said(L"airybi(x)"), L"Bi|x|");
+	CHECK_STR(said(L"besselj(0, x)"), L"J0|x|");
+	CHECK_STR(said(L"bessely(n, x)"), L"Yn|x|");
+	CHECK_STR(said(L"besseli(1, x)"), L"I1|x|");
+	CHECK_STR(said(L"besselk(1, x)"), L"K1|x|");
+	CHECK_STR(said(L"lambertw(x)"), L"W|x|");
+	CHECK_STR(said(L"lambertwm1(x)"), L"W" + minus + L"1|x|");
+	CHECK_STR(said(L"ellipk(m)"), L"K|m|");
+	CHECK_STR(said(L"ellipe(m)"), L"E|m|");
+	CHECK_STR(said(L"ellipf(a, m)"), L"F|a,m|");
+	CHECK_STR(said(L"ellipe(a, m)"), L"E|a,m|");
+	CHECK_STR(said(L"step(x)"), L"H|x|");
+	CHECK_STR(said(L"normpdf(x)"), L"\x03C6|x|");
+	CHECK_STR(said(L"normcdf(x, m, s)"), L"\x03A6|x,m,s|");
+	CHECK_STR(said(L"sign(x)"), L"sgn|x|");
+	CHECK_STR(said(L"nPr(5, 2)"), L"P|5,2|");
+	CHECK_STR(said(L"nCr(5, 2)"), L"|52|");
+	CHECK_STR(said(L"mod(x, 3)"), L"xmod3");
+	CHECK_STR(said(L"mod(x + 1, 3)"), L"|x+1|mod3");
+	// which are italic, and primes on them
+	CHECK(italicOf(L"besselj(0, x)"));
+	CHECK(!italicOf(L"gamma(x)"));
+	CHECK(!italicOf(L"airyai(x)"));
+	CHECK_STR(said(L"airyai'(x)"), L"Ai\x2032|x|");
+	// a binomial's parts one over the other, centered, with no bar
+	FplMathLayout binomial;
+	CHECK(FplFitMath(L"nCr(10, 2)", {}, { 20 }, 0, measure, binomial));
+	const FplMathItem* n = nullptr;
+	const FplMathItem* r = nullptr;
+	int strokes = 0;
+	for (auto& item : binomial.items) {
+		if (item.isLine)
+			strokes++;
+		else if (item.text == L"10")
+			n = &item;
+		else if (item.text == L"2")
+			r = &item;
+	}
+	CHECK_INT(strokes, 2);
+	CHECK(n && r && n->y < r->y);
+
+	// LaTeX
+	auto tex = [](const wchar_t* text) { return FplToLatex(text); };
+	CHECK_STR(tex(L"alpha + Omega"), L"\\alpha + \\Omega");
+	CHECK_STR(tex(L"mu x"), L"\\mu x");
+	CHECK_STR(tex(L"alpha1"), L"\\alpha_{1}");
+	CHECK_STR(tex(L"\x03B1"), L"\\alpha");
+	CHECK_STR(tex(L"gamma(x)"), L"\\Gamma\\left(x\\right)");
+	CHECK_STR(tex(L"lgamma(x)"), L"\\ln\\Gamma\\left(x\\right)");
+	CHECK_STR(tex(L"digamma(x)"), L"\\psi\\left(x\\right)");
+	CHECK_STR(tex(L"zeta(s)"), L"\\zeta\\left(s\\right)");
+	CHECK_STR(tex(L"beta(a, b)"), L"\\mathrm{B}\\left(a,b\\right)");
+	CHECK_STR(tex(L"airyai(x)"), L"\\operatorname{Ai}\\left(x\\right)");
+	CHECK_STR(tex(L"besselj(0, x)"), L"J_{0}\\left(x\\right)");
+	CHECK_STR(tex(L"lambertwm1(x)"), L"W_{-1}\\left(x\\right)");
+	CHECK_STR(tex(L"ellipk(m)"), L"K\\left(m\\right)");
+	CHECK_STR(tex(L"nCr(n, 2)"), L"\\binom{n}{2}");
+	CHECK_STR(tex(L"nPr(n, 2)"), L"P\\left(n,2\\right)");
+	CHECK_STR(tex(L"mod(x, 3)"), L"x\\bmod3");
+	CHECK_STR(tex(L"mod(x, y)"), L"x\\bmod y");
+	CHECK_STR(tex(L"normcdf(x)"), L"\\Phi\\left(x\\right)");
+	CHECK_STR(tex(L"sign(x)"), L"\\operatorname{sgn}\\left(x\\right)");
+	// MathML
+	CHECK(FplToMathML(L"alpha").find(L"<mi>\x03B1</mi>") != std::wstring::npos);
+	CHECK(FplToMathML(L"Omega").find(L"<mi mathvariant=\"normal\">\x03A9</mi>") != std::wstring::npos);
+	CHECK(FplToMathML(L"gamma(x)").find(L"mathvariant=\"normal\">\x0393</mi>") != std::wstring::npos);
+	CHECK(FplToMathML(L"besselj(0, x)").find(L"<msub><mrow><mi>J</mi></mrow>") != std::wstring::npos);
+	CHECK(FplToMathML(L"nCr(n, 2)").find(L"linethickness=\"0\"") != std::wstring::npos);
+	CHECK(FplToMathML(L"mod(x, 3)").find(L"<mo>mod</mo>") != std::wstring::npos);
 }
 
 int wmain() {
@@ -6626,6 +6815,8 @@ int wmain() {
 	Run_MathDisplay();
 	Run_CostOverTheView();
 	Run_LatexAndMathML();
+	Run_SlowFeatures();
+	Run_MathSymbols();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

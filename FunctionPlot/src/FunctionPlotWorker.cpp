@@ -67,6 +67,10 @@ FplJobResult FplWorker::Run(const FplJob& job) {
 	}
 	else
 		r.geometry = FplSample(job.expr, job.slots, job.view, job.options);
+	if (job.features && !job.mesh) {
+		r.features = FplFunctionFeatures(job.expr, job.slots, job.view);
+		r.hasFeatures = true;
+	}
 	return r;
 }
 

@@ -22,6 +22,7 @@ struct FplJob {
 	FplViewport view;
 	FplSampleOptions options;
 	bool mesh = false;				// 3D: an implicit surface's mesh over box, cells a side
+	bool features = false;			// a slow function's features too, which the UI thread has no time for
 	FplBox3 box;
 	int cells = 48;
 };
@@ -33,6 +34,8 @@ struct FplJobResult {
 	FplGeometry geometry;
 	FplMesh triangles;
 	FplViewport view;
+	bool hasFeatures = false;
+	std::vector<FplFeature> features;
 };
 
 class FplWorker {

@@ -218,7 +218,7 @@ static bool ValidName(const wchar_t* name) {
 	if (!*name || wcslen(name) > 8)
 		return false;
 	for (const wchar_t* p = name; *p; p++)
-		if (!((*p >= L'a' && *p <= L'z') || (*p >= L'A' && *p <= L'Z') || (*p >= 0x3B1 && *p <= 0x3C9)))
+		if (!((*p >= L'a' && *p <= L'z') || (*p >= L'A' && *p <= L'Z') || (*p >= 0x3B1 && *p <= 0x3C9) || (p > name && *p >= L'0' && *p <= L'9')))
 			return false;
 	return true;
 }

@@ -4,7 +4,7 @@ A math function plotter control for WTL, in 2D (Direct2D) and 3D (Direct3D 11). 
 
 This page lists what can be written in a graph's text. `include/FunctionPlot.h` has the control's API.
 
-The legend shows each graph's text as mathematics, with real roots, fractions and limits, unless the control has `FPLS_PLAINLEGEND`. `CFunctionPlotMathCtrl` shows one text the same way in a window of its own. A text that has an error, or doesn't fit, stays as it was typed. `GetGraphLatex` and `GetGraphMathML` give the same expression to paste elsewhere.
+The legend shows each graph's text as mathematics, with real roots, fractions and limits, unless the control has `FPLS_PLAINLEGEND`. `CFunctionPlotMathCtrl` shows one text the same way in a window of its own. A text that has an error, or doesn't fit, stays as it was typed. `GetGraphLatex` and `GetGraphMathML` give the same expression to paste elsewhere. They all use the usual symbols: a name like `alpha` is α, `gamma(x)` is Γ(x), `besselj(0, x)` is J₀(x), `nCr(n, r)` a binomial coefficient, and so on.
 
 ## Functions
 
@@ -129,7 +129,7 @@ A standard deviation of zero or less is undefined. Pick other names than `mean` 
 
 The index can be any name except a variable's, and it means nothing outside its sum: `y = sum(x^k/k!, k, 0, 8)`. The limits are rounded to whole numbers and can be parameters. An empty sum is 0 and an empty product 1. More than 100,000 terms is undefined.
 
-A curve with a long sum, or anything else that takes a while to work out, is drawn roughly at once and in full a moment later, and tracing doesn't find its roots and extrema if it's very slow.
+A curve with a long sum, or anything else that takes a while to work out, is drawn roughly at once and in full a moment later, and tracing finds its roots and extrema a moment later too. Its intersections with other curves aren't looked for if it's very slow.
 
 A step-like function has a derivative of 0: `sign`, `floor`, `ceil`, `round`, `trunc`, `step`, `square`, `gcd` and `lcm`. A function of more than one argument can't take primes (use `d/dx`), and `sinc` has them up to the second.
 
@@ -165,7 +165,7 @@ The shorter ones read as products of letters unless they're called with parenthe
 | `x`, `y`, `z`, `t`, `r`, `u`, `v` | Variables |
 | `theta` or `θ` | The angle. Also `q`, unless `q` is your own name or its line has a variable other than `r`. A slider the app only added for another line (`FPLPF_AUTO`) leaves `q` as the angle in a line with `r` |
 
-Any other name is a parameter, which the app defines. The demo adds a slider for each one.
+Any other name is a parameter, which the app defines. The demo adds a slider for each one. The name of a Greek letter, such as `alpha` or `mu`, is one name unless its letters are all known names, and shows as the letter.
 
 ## Operators
 

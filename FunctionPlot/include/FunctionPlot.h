@@ -460,6 +460,7 @@ private:
 
 	// FunctionPlotCtrl.cpp
 	void Rebuild();                            // texts, names or the angle unit changed
+	void RequestSlowFeatures();
 	void ValuesChanged();                      // parameters' values changed
 	void ViewChanged(bool notify);             // the view moved: sample again
 	void Resample();

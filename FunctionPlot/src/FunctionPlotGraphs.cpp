@@ -1150,13 +1150,64 @@ double FplPlot::Eval(int graph, double v) const {
 	return g.expr.f.Eval(slots.data());
 }
 
-void FplPlot::FindFeatures(int graph, const FplViewport& view) {
+std::vector<FplFeature> FplFunctionFeatures(const FplExpression& expr, std::vector<double> slots, const FplViewport& view) {
+	std::vector<FplFeature> features;
+	if (expr.error || expr.kind != FplKind::Function || !view.Valid())
+		return features;
+	std::function<double(double)> f = [&](double x) {
+		slots[FplSlotX] = x;
+		return expr.f.Eval(slots.data());
+	};
+	std::function<double(double)> df;
+	if (!expr.df.Empty()) {
+		df = [&](double x) {
+			slots[FplSlotX] = x;
+			return expr.df.Eval(slots.data());
+		};
+	}
+	const int samples = std::max(50, static_cast<int>(view.width / 3));
+	const double yTolerance = (view.yMax - view.yMin) * 1e-9;
+	double a = view.xMin, b = view.xMax;
+	if (view.logX) {
+		a = std::log10(a), b = std::log10(b);
+		auto fx = f;
+		f = [fx](double u) { return fx(std::pow(10.0, u)); };
+		if (df) {
+			auto dfx = df;
+			df = [dfx](double u) {
+				const double x = std::pow(10.0, u);
+				return dfx(x) * x * 2.302585092994046;
+			};
+		}
+	}
+	features = FplFindFeatures(f, df, a, b, samples, yTolerance);
+	if (view.logX)
+		for (auto& feature : features)
+			feature.x = std::pow(10.0, feature.x);
+	if (view.logY)
+		features.erase(std::remove_if(features.begin(), features.end(),
+			[](const FplFeature& feature) { return !(feature.y > 0); }), features.end());
+	return features;
+}
+
+bool FplPlot::IsTooSlowToAnalyze(int graph, const FplViewport& view) const {
+	return EvalCost(graph, &view) > TooSlowToAnalyze;
+}
+
+void FplPlot::SetFeatures(int graph, std::vector<FplFeature> features) {
+	if (graph < 0 || graph >= static_cast<int>(graphs.size()))
+		return;
+	graphs[graph].features = std::move(features);
+	SortFeatures(graphs[graph]);
+}
+
+void FplPlot::FindFeatures(int graph, const FplViewport& view, bool evenIfSlow) {
 	auto& g = graphs[graph];
+	// each is a scan of thousands of evaluations: what it has stays until the thread has done it
+	if (!evenIfSlow && g.Drawable() && IsTooSlowToAnalyze(graph, view))
+		return;
 	g.features.clear();
 	if (!g.Drawable() || (g.flags & FplGraphNoFeatures) || !view.Valid() || g.Listed())
-		return;
-	// each is a scan of thousands of evaluations
-	if (EvalCost(graph, &view) > TooSlowToAnalyze)
 		return;
 	FindCurveMeetings(graph, view);
 	if (g.expr.kind != FplKind::Function) {
@@ -1195,7 +1246,7 @@ void FplPlot::FindFeatures(int graph, const FplViewport& view) {
 		auto& other = graphs[h];
 		if (static_cast<int>(h) == graph || !other.Drawable() || other.expr.kind != FplKind::Function || other.Listed())
 			continue;
-		if (EvalCost(static_cast<int>(h), &view) > TooSlowToAnalyze)
+		if (!evenIfSlow && EvalCost(static_cast<int>(h), &view) > TooSlowToAnalyze)
 			continue;
 		std::function<double(double)> fo = [this, h](double x) { return Eval(static_cast<int>(h), x); };
 		if (view.logX)

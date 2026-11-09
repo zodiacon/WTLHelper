@@ -6,8 +6,23 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 
 namespace {
+
+struct GreekName {
+	const wchar_t* word;
+	wchar_t letter;
+};
+// Not the capitals that look like Latin letters, or omicron, which TeX has no names for.
+const GreekName g_Greek[] = {
+	{ L"alpha", 0x3B1 }, { L"beta", 0x3B2 }, { L"gamma", 0x3B3 }, { L"delta", 0x3B4 }, { L"epsilon", 0x3B5 }, { L"zeta", 0x3B6 },
+	{ L"eta", 0x3B7 }, { L"theta", 0x3B8 }, { L"iota", 0x3B9 }, { L"kappa", 0x3BA }, { L"lambda", 0x3BB }, { L"mu", 0x3BC },
+	{ L"nu", 0x3BD }, { L"xi", 0x3BE }, { L"pi", 0x3C0 }, { L"rho", 0x3C1 }, { L"sigma", 0x3C3 }, { L"tau", 0x3C4 },
+	{ L"upsilon", 0x3C5 }, { L"phi", 0x3C6 }, { L"chi", 0x3C7 }, { L"psi", 0x3C8 }, { L"omega", 0x3C9 },
+	{ L"Gamma", 0x393 }, { L"Delta", 0x394 }, { L"Theta", 0x398 }, { L"Lambda", 0x39B }, { L"Xi", 0x39E }, { L"Pi", 0x3A0 },
+	{ L"Sigma", 0x3A3 }, { L"Upsilon", 0x3A5 }, { L"Phi", 0x3A6 }, { L"Psi", 0x3A8 }, { L"Omega", 0x3A9 },
+};
 
 constexpr double Ascent = 0.72, Descent = 0.22;		// a text's box
 constexpr double Axis = 0.26;						// where a fraction's bar is, above the baseline
@@ -177,7 +192,12 @@ private:
 		size_t letters = 0;
 		while (letters < name.size() && !(name[letters] >= L'0' && name[letters] <= L'9'))
 			letters++;
-		Box box = Text(name.substr(0, letters), size, letters == 1);
+		std::wstring word = name.substr(0, letters);
+		if (const wchar_t* greek = FplGreekSymbol(word))
+			word = greek;
+		// a capital Greek letter stands upright
+		const bool italic = word.size() == 1 && !(word[0] >= 0x391 && word[0] <= 0x3A9);
+		Box box = Text(word, size, italic);
 		if (letters < name.size())
 			box = Script(std::move(box), Text(name.substr(letters), Script(size), false), size, false);
 		if (primes > 0)
@@ -233,13 +253,15 @@ private:
 		return n.op == FplOp::Call || n.op == FplOp::Named || (n.op == FplOp::Var && n.name.size() > 1);
 	}
 
-	Box Fraction(const Box& top, const Box& bottom, double size) {
+	Box Fraction(const Box& top, const Box& bottom, double size, bool withBar = true) {
 		const double gap = 0.11 * size, axis = Axis * size, width = std::max(top.w, bottom.w) + 0.16 * size;
 		Box box;
 		Place(box, top, (width - top.w) / 2, -axis - gap - top.desc);
 		Place(box, bottom, (width - bottom.w) / 2, -axis + gap + bottom.asc);
-		Box bar = Line({ { 0, -axis }, { width, -axis } }, size);
-		Place(box, bar, 0, 0);
+		if (withBar) {
+			Box bar = Line({ { 0, -axis }, { width, -axis } }, size);
+			Place(box, bar, 0, 0);
+		}
 		box.w = width + 0.04 * size;
 		return box;
 	}
@@ -385,7 +407,28 @@ private:
 		}
 		Box box;
 		std::vector<int> args = k;
-		if (n.func == FplFunc::Log2) {
+		const FplFuncSymbol symbol = FplSymbolOf(n.func);
+		if (n.func == FplFunc::NCr)
+			return Wrap(Fraction(Node(Strip(k[0]), Smaller(size)), Node(Strip(k[1]), Smaller(size)), size, false), Delim::Paren, size);
+		if (n.func == FplFunc::Mod) {
+			box = Operand(k[0], size);
+			Append(box, Text(L"mod", size, false), 0.22 * size);
+			Append(box, Operand(k[1], size), 0.22 * size);
+			return box;
+		}
+		if (n.func == FplFunc::BesselJ || n.func == FplFunc::BesselY || n.func == FplFunc::BesselI || n.func == FplFunc::BesselK) {
+			box = Script(Text(symbol.text, size, symbol.italic), Node(Strip(args[0]), Script(size)), size, false);
+			args.erase(args.begin());
+		}
+		else if (n.func == FplFunc::LambertWm1)
+			box = Script(Text(symbol.text, size, symbol.italic), Text(std::wstring(1, Minus) + L"1", Script(size), false), size, false);
+		else if (n.func == FplFunc::Lgamma) {
+			box = Text(L"ln", size, false);
+			Append(box, Text(symbol.text, size, symbol.italic), 0.14 * size);
+		}
+		else if (*symbol.text)
+			box = Text(symbol.text, size, symbol.italic);
+		else if (n.func == FplFunc::Log2) {
 			box = Script(Text(L"log", size, false), Text(L"2", Script(size), false), size, false);
 		}
 		else if (n.func == FplFunc::Log && args.size() == 2) {
@@ -520,4 +563,47 @@ std::wstring FplDescribeMath(const FplMathLayout& layout) {
 			out += item.text;
 	}
 	return out;
+}
+
+const wchar_t* FplGreekSymbol(std::wstring_view word) {
+	static std::wstring letters[std::size(g_Greek)];
+	for (size_t i = 0; i < std::size(g_Greek); i++)
+		if (word == g_Greek[i].word) {
+			if (letters[i].empty())
+				letters[i] = std::wstring(1, g_Greek[i].letter);
+			return letters[i].c_str();
+		}
+	return nullptr;
+}
+
+const wchar_t* FplGreekWord(wchar_t letter) {
+	for (auto& greek : g_Greek)
+		if (greek.letter == letter)
+			return greek.word;
+	return nullptr;
+}
+
+FplFuncSymbol FplSymbolOf(FplFunc func) {
+	switch (func) {
+		case FplFunc::Gamma: case FplFunc::Lgamma: return { L"\x0393", false };
+		case FplFunc::Digamma: return { L"\x03C8", true };
+		case FplFunc::Beta: return { L"B", false };
+		case FplFunc::Zeta: return { L"\x03B6", true };
+		case FplFunc::AiryAi: return { L"Ai", false };
+		case FplFunc::AiryBi: return { L"Bi", false };
+		case FplFunc::BesselJ: return { L"J", true };
+		case FplFunc::BesselY: return { L"Y", true };
+		case FplFunc::BesselI: return { L"I", true };
+		case FplFunc::BesselK: return { L"K", true };
+		case FplFunc::LambertW: case FplFunc::LambertWm1: return { L"W", true };
+		case FplFunc::EllipK: return { L"K", true };
+		case FplFunc::EllipE: return { L"E", true };
+		case FplFunc::EllipF: return { L"F", true };
+		case FplFunc::Step: return { L"H", true };
+		case FplFunc::Normpdf: return { L"\x03C6", true };
+		case FplFunc::Normcdf: return { L"\x03A6", false };
+		case FplFunc::Sign: return { L"sgn", false };
+		case FplFunc::NPr: return { L"P", true };
+		default: return {};
+	}
 }

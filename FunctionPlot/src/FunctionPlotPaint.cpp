@@ -1076,7 +1076,8 @@ void CFunctionPlotCtrl::PaintPanel() {
 			auto* accent = s.Brush(c.crPalette[1]);
 			// Play / Pause
 			Text(rt, p.animating ? L"\xE769" : L"\xE768", s.icons.Get(), row.play, accent);
-			Text(rt, p.name, s.panelText.Get(), { row.play.right + 4, top, row.track.left - 8, top + FplSliderRow }, text);
+			const wchar_t* greek = (GetStyle() & FPLS_PLAINLEGEND) ? nullptr : FplGreekSymbol(p.name);
+			Text(rt, greek ? std::wstring(greek) : p.name, s.panelText.Get(), { row.play.right + 4, top, row.track.left - 8, top + FplSliderRow }, text);
 			// the track, filled up to the value
 			const double t = p.max > p.min ? std::clamp((p.value - p.min) / (p.max - p.min), 0.0, 1.0) : 0;
 			const float tx = row.track.left + (float)t * (row.track.right - row.track.left);
