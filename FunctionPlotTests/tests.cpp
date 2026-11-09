@@ -11,6 +11,7 @@
 // regressions, the saved state, fitting the view, labels, styles, undo, the sampling thread, log axes,
 // ODEs, curves' intersections and surfaces' line grids.
 
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -7033,6 +7034,197 @@ TEST(LinesDefiningNames) {
 	CHECK_STR(FplDefinitionHead(L""), L"");
 }
 
+// The README's text, and what's in backticks in a piece of it.
+static std::wstring ReadReadme() {
+	std::filesystem::path path = std::filesystem::path(__FILE__).parent_path().parent_path() / L"FunctionPlot" / L"README.md";
+	std::ifstream file(path, std::ios::binary);
+	const std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	if (bytes.empty())
+		return {};
+	std::wstring text(::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), nullptr, 0), L'\0');
+	::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), text.data(), (int)text.size());
+	std::erase(text, L'\r');
+	return text;
+}
+
+static std::vector<std::wstring> SpansOf(std::wstring_view text) {
+	std::vector<std::wstring> spans;
+	for (size_t open = text.find(L'`'); open != text.npos; open = text.find(L'`', open + 1)) {
+		const size_t close = text.find(L'`', open + 1);
+		if (close == text.npos)
+			break;
+		std::wstring span(text.substr(open + 1, close - open - 1));
+		// a table's \| is a plain |
+		for (size_t at = span.find(L"\\|"); at != span.npos; at = span.find(L"\\|", at + 1))
+			span.erase(at, 1);
+		spans.push_back(std::move(span));
+		open = close;
+	}
+	return spans;
+}
+
+TEST(ReadmeExamples) {
+	const std::wstring doc = ReadReadme();
+	CHECK(!doc.empty());
+	if (doc.empty())
+		return;
+	std::vector<std::wstring> lines;
+	for (size_t start = 0; start < doc.size();) {
+		const size_t end = std::min(doc.find(L'\n', start), doc.size());
+		lines.push_back(doc.substr(start, end - start));
+		start = end + 1;
+	}
+	std::vector<std::wstring> none;
+	const auto say = [](const wchar_t* what, const std::wstring& text) { wprintf(L"  the README says %s: '%s'\n", what, text.c_str()); };
+	// what's written before " | " in a row with this text after it
+	const auto rowOf = [&](const wchar_t* meaning) {
+		std::vector<std::wstring> spans;
+		for (auto& line : lines) {
+			const size_t bar = line.find(L" | ", 2);
+			if (line.starts_with(L"| ") && bar != line.npos && line.compare(bar + 3, wcslen(meaning), meaning) == 0)
+				spans = SpansOf(std::wstring_view(line).substr(0, bar));
+		}
+		CHECK(!spans.empty());
+		return spans;
+	};
+	const auto paragraphWith = [&](const wchar_t* start) {
+		for (auto& line : lines)
+			if (line.starts_with(start))
+				return line;
+		CHECK(false);
+		return std::wstring();
+	};
+
+	// how names read
+	for (auto& name : rowOf(L"Known names multiplied")) {
+		const auto e = FplBuild(L"z = " + name, none);
+		if (e.error)
+			say(L"this reads", name);
+		CHECK(!e.error);
+	}
+	for (auto& name : rowOf(L"A product: each unknown letter")) {
+		const auto e = FplBuild(L"z = " + name, none);
+		const bool letter = e.error.code == FplErrorCode::UnknownName && e.error.name.size() == 1;
+		if (!letter)
+			say(L"this is a product of unknown letters", name);
+		CHECK(letter);
+		// and with them known, no name's missing (kt has its t, which z = kt can't use)
+		std::vector<std::wstring> letters;
+		for (wchar_t c : name)
+			if (FplBuild(std::wstring(1, c), none).error.code == FplErrorCode::UnknownName)
+				letters.push_back(std::wstring(1, c));
+		CHECK(FplBuild(L"z = " + name, letters).error.code != FplErrorCode::UnknownName);
+	}
+	for (auto& name : rowOf(L"One name:")) {
+		const auto e = FplBuild(L"z = " + name, none);
+		const bool whole = e.error.code == FplErrorCode::UnknownName && e.error.name == name;
+		if (!whole)
+			say(L"this is one name", name);
+		CHECK(whole);
+		CHECK(!FplBuild(L"z = " + name, { name }).error);
+	}
+	// "... unless a parameter or function has that whole name"
+	const std::wstring product = paragraphWith(L"A name made of known names");
+	for (auto& name : SpansOf(product)) {
+		CHECK(!FplBuild(L"z = " + name, none).error);
+		CHECK(FplBuild(L"z = " + name, { name }).f.UsesSlot(FplFirstParam));
+	}
+
+	// lines that define names, up to the sentence on what doesn't, and that one's equations
+	const std::wstring lineRule = paragraphWith(L"A line `name = ...`");
+	const size_t stays = lineRule.find(L"What does read");
+	CHECK(stays != lineRule.npos);
+	auto defining = SpansOf(std::wstring_view(lineRule).substr(0, stays));
+	CHECK(defining.size() >= 3);
+	for (size_t i = 1; i < defining.size(); i++) {		// (the first is the rule's own `name = ...`)
+		auto plot = MakePlot({ defining[i].c_str() });
+		if (!plot.graphs[0].definition)
+			say(L"this defines a name", defining[i]);
+		CHECK(plot.graphs[0].definition);
+		CHECK(!plot.graphs[0].expr.error);
+	}
+	auto equations = SpansOf(std::wstring_view(lineRule).substr(stays));
+	CHECK(equations.size() >= 2);
+	for (auto& text : equations) {
+		auto plot = MakePlot({ text.c_str() });
+		if (plot.graphs[0].definition || plot.graphs[0].expr.error)
+			say(L"this is an equation", text);
+		CHECK(!plot.graphs[0].definition);
+		CHECK(!plot.graphs[0].expr.error);
+	}
+
+	// "with a parameter `a`, `rate` is still one name ... like `abcd` with a slider for each, are their product"
+	const auto sliders = SpansOf(paragraphWith(L"A slider elsewhere"));
+	CHECK_INT(sliders.size(), 3);
+	if (sliders.size() == 3) {
+		CHECK_STR(FplBuild(L"z = " + sliders[1], { sliders[0] }).error.name, sliders[1]);
+		std::vector<std::wstring> each;
+		for (wchar_t c : sliders[2])
+			each.push_back(std::wstring(1, c));
+		CHECK(!FplBuild(L"z = " + sliders[2], each).error);
+	}
+
+	// "`gamma(x)` is ..., `besselj(0, x)` ...": the symbols the opening names, and "`nCr(n, r)` a binomial coefficient"
+	FplMathMeasure measure = [](const std::wstring& text, double size, bool) { return text.size() * size * 0.5; };
+	FplMathLayout layout;
+	CHECK(doc.find(L"`alpha` is \x03B1") != doc.npos);
+	CHECK(FplFitMath(L"alpha", {}, { 20 }, 0, measure, layout));
+	CHECK_STR(FplDescribeMath(layout), L"\x03B1");
+	CHECK(doc.find(L"`gamma(x)` is \x0393(x)") != doc.npos);
+	CHECK(FplFitMath(L"gamma(x)", {}, { 20 }, 0, measure, layout));
+	CHECK_STR(FplDescribeMath(layout), L"\x0393|x|");
+
+	// everything a table lists reads, in the first column of every table (the display parse knows every name, so this is the
+	// form that's checked: its parentheses, its arguments' count)
+	int checked = 0;
+	// and in the sections on functions, what's called is one
+	auto functions = FplFunctionNames();
+	functions.push_back(L"integral");
+	for (auto aggregate : FplAggregates)
+		functions.push_back(aggregate);
+	bool inFunctions = false;
+	for (auto& line : lines) {
+		if (line.starts_with(L"## "))
+			inFunctions = line == L"## Functions";
+		if (!line.starts_with(L"| `"))
+			continue;
+		size_t bar = 2;
+		for (;;) {
+			bar = line.find(L'|', bar);
+			if (bar == line.npos || line[bar - 1] != L'\\')
+				break;
+			bar++;
+		}
+		if (bar == line.npos)
+			continue;
+		for (auto& span : SpansOf(std::wstring_view(line).substr(0, bar))) {
+			// what stands for a kind, not a form to type: operators in a row, a list that goes on
+			bool alnum = false;
+			for (wchar_t c : span)
+				alnum = alnum || std::iswalnum(c);
+			if (!alnum || span.find(L"...") != span.npos)
+				continue;
+			FplParseOptions display;
+			display.display = true;
+			const auto parsed = FplParse(span, display);
+			if (parsed.error)
+				say(L"this can be written", span);
+			CHECK(!parsed.error);
+			checked++;
+			const size_t paren = span.find(L'(');
+			if (inFunctions && paren != span.npos) {
+				std::wstring name = span.substr(0, paren);
+				std::erase(name, L'\'');
+				const bool known = std::find(functions.begin(), functions.end(), name) != functions.end();
+				if (!known)
+					say(L"this is a function", span);
+				CHECK(known);
+			}
+		}
+	}
+	CHECK(checked > 80);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	Run_Numbers();
@@ -7125,6 +7317,7 @@ int wmain() {
 	Run_TicksInState();
 	Run_HeatmapsInSvg();
 	Run_ReadmeMatchesParser();
+	Run_ReadmeExamples();
 	Run_SlowCurves();
 	Run_SpecialFunctions();
 	Run_AnimationSpeed();
