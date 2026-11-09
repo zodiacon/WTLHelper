@@ -115,7 +115,10 @@ LRESULT CellGraphs::CustomDraw(NMCUSTOMDRAW* cd, int subItem, UINT_PTR item, LRE
             {
                 // the drawing takes the text out in its own copy of the cell; with nothing drawn (no data), it's
                 // taken out here
-                Cells::BackgroundScope scope(before ? m_Before : std::vector<uint32_t>(), w, h, probeY);
+                // both lvalues: with a temporary for the other, the ?: would copy m_Before into a temporary that
+                // dies before the drawing reads it
+                static const std::vector<uint32_t> none;
+                Cells::BackgroundScope scope(before ? m_Before : none, w, h, probeY);
                 Draw(m_Columns[subItem], { cd->hdr.hwndFrom, item, cd->lItemlParam, subItem }, cd->hdc, rc);
                 if (before && !scope.Used() && Cells::ReadCell(cd->hdc, rc, m_After)) {
                     Cells::CellBackground(m_Before.data(), m_After.data(), w, h, 0, probeY);

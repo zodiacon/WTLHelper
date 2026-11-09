@@ -151,6 +151,8 @@ void WriteCell(HDC hdc, const RECT& cell, const std::vector<uint32_t>& pixels);
 class BackgroundScope {
 public:
     BackgroundScope(const std::vector<uint32_t>& before, int w, int h, int probeY = -1);
+    // it keeps a pointer to `before`'s pixels: a temporary would be gone before anything is drawn
+    BackgroundScope(std::vector<uint32_t>&& before, int w, int h, int probeY = -1) = delete;
     ~BackgroundScope();
     bool Used() const;
     BackgroundScope(const BackgroundScope&) = delete;
