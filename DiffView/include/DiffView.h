@@ -415,6 +415,9 @@ public:
 	// while they're set, and the control scales them to the row. Unified, a line is the left one's, else the right's.
 
 	void    EnableGutterAdd(bool enable);
+	// Starts a comment at the caret as a click on the "+" would: DFVN_GUTTERADD for the caret's line, or the
+	// selection's lines. With EnableGutterAdd on, Ctrl+Shift+M does it. FALSE if there's no line.
+	BOOL    StartComment();
 	bool    IsGutterAddEnabled() const;
 	void    SetGutterIcon(bool right, size_t line, HICON icon);   // nullptr: none
 	void    ClearGutterIcons();

@@ -139,6 +139,19 @@ void CDiffViewCtrl::UpdateHotGutter(POINT pt) {
 	}
 }
 
+BOOL CDiffViewCtrl::StartComment() {
+	int row = CaretRow();
+	if (m_Job || row < 0 || m_Doc->left.size() + m_Doc->right.size() == 0)
+		return FALSE;
+	auto& r = m_Doc->rows[row];
+	// as the "+" of the row: unified, the right line if there is one
+	bool rightSide = m_Layout == DFVL_UNIFIED ? r.right >= 0 : m_Caret.right != FALSE;
+	if ((rightSide ? r.right : r.left) < 0)
+		return FALSE;
+	UserGutterAdd((size_t)row, rightSide);
+	return TRUE;
+}
+
 void CDiffViewCtrl::UserGutterAdd(size_t row, bool rightSide) {
 	auto& r = m_Doc->rows[row];
 	DfPos clicked{ rightSide, (size_t)(rightSide ? r.right : r.left), 0 };

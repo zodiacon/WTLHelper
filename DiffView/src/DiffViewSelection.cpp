@@ -609,6 +609,11 @@ LRESULT CDiffViewCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 				ExpandFold(row - 1, true);
 			return 0;
 		}
+		case 'M':
+			if (!ctrl || !shift || !m_GutterAdd)
+				break;
+			StartComment();
+			return 0;
 		case 'A':
 			if (!ctrl)
 				break;

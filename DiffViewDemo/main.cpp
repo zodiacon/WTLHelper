@@ -67,6 +67,7 @@ enum {
 
 	ID_DEMO_COPY = 601,
 	ID_DEMO_SELECTALL,
+	ID_DEMO_COMMENT,
 
 	ID_MERGE_ENABLE = 701,
 	ID_MERGE_ASK,
@@ -579,6 +580,7 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
+		case ID_DEMO_COMMENT: g_diff.StartComment(); break;
 		case ID_MERGE_ENABLE: g_diff.EnableMerge(g_diff.GetMergeFlags() ? 0 : DFVMF_TORIGHT | DFVMF_TOLEFT); break;
 		case ID_MERGE_ASK: g_askMerge = !g_askMerge; break;
 		case ID_MERGE_UNDO: g_diff.Undo(); UpdateTitle(); break;
@@ -729,6 +731,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	HMENU hEdit = ::CreatePopupMenu();
 	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COPY, L"&Copy\tCtrl+C");
 	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_SELECTALL, L"Select &All\tCtrl+A");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COMMENT, L"Add Co&mment\tCtrl+Shift+M");
 
 	HMENU hView = ::CreatePopupMenu();
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SIDEBYSIDE, L"&Side by Side");
@@ -780,6 +783,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	ACCEL accels[] = {
 		{ FVIRTKEY | FCONTROL, '1', ID_FILE_OPENLEFT },
 		{ FVIRTKEY | FCONTROL, '2', ID_FILE_OPENRIGHT },
+		{ FVIRTKEY | FCONTROL | FSHIFT, 'M', ID_DEMO_COMMENT },
 		{ FVIRTKEY, VK_F7, ID_GO_NEXT },
 		{ FVIRTKEY | FSHIFT, VK_F7, ID_GO_PREV },
 	};
