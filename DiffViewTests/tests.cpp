@@ -789,6 +789,103 @@ TEST(UnifiedText) {
 	CHECK_STR(DfUnifiedText(e, Letters(L"q"), DfCompute(e, Letters(L"q"))), L"--- a\n+++ b\n@@ -0,0 +1 @@\n+q\n");
 }
 
+// ---- Styled text -------------------------------------------------------------------------
+
+using StyleSpans = std::vector<DfStyleSpan>;
+using StyleSegs = std::vector<DfStyleSegment>;
+
+TEST(StyleSpans_Normalize) {
+	// already fine: unchanged
+	StyleSpans a{ { 0, 2, 1 }, { 3, 2, 2 } };
+	DfNormalizeStyleSpans(10, a);
+	CHECK((a == StyleSpans{ { 0, 2, 1 }, { 3, 2, 2 } }));
+
+	// sorted by start
+	StyleSpans b{ { 5, 1, 7 }, { 0, 3, 8 } };
+	DfNormalizeStyleSpans(10, b);
+	CHECK((b == StyleSpans{ { 0, 3, 8 }, { 5, 1, 7 } }));
+
+	// empty ones dropped, past the end dropped, the last one cut
+	StyleSpans c{ { 2, 0, 1 }, { 4, 3, 2 }, { 6, 9, 3 }, { 10, 2, 4 }, { 50, 1, 5 } };
+	DfNormalizeStyleSpans(10, c);
+	CHECK((c == StyleSpans{ { 4, 3, 2 }, { 7, 3, 3 } }));
+
+	// overlap: the one that starts first keeps the characters; one inside another is gone
+	StyleSpans d{ { 0, 6, 1 }, { 4, 6, 2 }, { 1, 2, 3 } };
+	DfNormalizeStyleSpans(20, d);
+	CHECK((d == StyleSpans{ { 0, 6, 1 }, { 6, 4, 2 } }));
+
+	// a tie: the first given wins
+	StyleSpans e{ { 2, 3, 1 }, { 2, 3, 2 } };
+	DfNormalizeStyleSpans(20, e);
+	CHECK((e == StyleSpans{ { 2, 3, 1 } }));
+
+	// no line, no spans; a length that would overflow
+	StyleSpans f{ { 0, 3, 1 } };
+	DfNormalizeStyleSpans(0, f);
+	CHECK(f.empty());
+	StyleSpans g{ { 5, UINT32_MAX, 1 } };
+	DfNormalizeStyleSpans(8, g);
+	CHECK((g == StyleSpans{ { 5, 3, 1 } }));
+	StyleSpans h;
+	DfNormalizeStyleSpans(8, h);
+	CHECK(h.empty());
+}
+
+TEST(StyleSegments) {
+	// no spans: the whole line is plain; an empty line has no segments
+	CHECK((DfStyleSegments(L"hello", {}, 4) == StyleSegs{ { 0, 5, DfNoStyle } }));
+	CHECK(DfStyleSegments(L"", {}, 4).empty());
+
+	// gaps between and after the spans are plain
+	CHECK((DfStyleSegments(L"int x = 1;", { { 0, 3, 1 }, { 8, 1, 2 } }, 4) ==
+		StyleSegs{ { 0, 3, 1 }, { 3, 8, DfNoStyle }, { 8, 9, 2 }, { 9, 10, DfNoStyle } }));
+
+	// a span ending at the end of the line, a span of the whole line
+	CHECK((DfStyleSegments(L"abc", { { 1, 2, 3 } }, 4) == StyleSegs{ { 0, 1, DfNoStyle }, { 1, 3, 3 } }));
+	CHECK((DfStyleSegments(L"abc", { { 0, 3, 3 } }, 4) == StyleSegs{ { 0, 3, 3 } }));
+
+	// neighbors of one style join
+	CHECK((DfStyleSegments(L"abcd", { { 0, 2, 5 }, { 2, 2, 5 } }, 4) == StyleSegs{ { 0, 4, 5 } }));
+	CHECK((DfStyleSegments(L"abcd", { { 0, 1, 5 }, { 1, 1, 6 }, { 2, 2, 5 } }, 4) == StyleSegs{ { 0, 1, 5 }, { 1, 2, 6 }, { 2, 4, 5 } }));
+
+	// tabs: columns, not characters; a span of a tab is as wide as the tab
+	// "\tif\tx": the tab is columns 0-3, "if" 4-5, the tab 6-7, "x" 8
+	CHECK((DfStyleSegments(L"\tif\tx", { { 1, 2, 1 }, { 4, 1, 2 } }, 4) ==
+		StyleSegs{ { 0, 4, DfNoStyle }, { 4, 6, 1 }, { 6, 8, DfNoStyle }, { 8, 9, 2 } }));
+	CHECK((DfStyleSegments(L"a\tb", { { 1, 1, 9 } }, 4) == StyleSegs{ { 0, 1, DfNoStyle }, { 1, 4, 9 }, { 4, 5, DfNoStyle } }));
+	CHECK((DfStyleSegments(L"a\tb", { { 1, 1, 9 } }, 8) == StyleSegs{ { 0, 1, DfNoStyle }, { 1, 8, 9 }, { 8, 9, DfNoStyle } }));
+
+	// the segments cover the expanded line exactly, with no gaps or overlaps (random spans)
+	srand(7);
+	for (int round = 0; round < 200; round++) {
+		std::wstring line;
+		for (int i = rand() % 30; i > 0; i--)
+			line += rand() % 5 == 0 ? L'\t' : L'a';
+		StyleSpans spans;
+		for (int i = rand() % 6; i > 0; i--)
+			spans.push_back({ (uint32_t)(rand() % 35), (uint32_t)(rand() % 8), (uint32_t)(rand() % 3) });
+		DfNormalizeStyleSpans(line.size(), spans);
+		auto segs = DfStyleSegments(line, spans, 4);
+		size_t at = 0;
+		bool ok = true;
+		for (auto& s : segs) {
+			ok = ok && s.first == at && s.last > s.first;
+			at = s.last;
+		}
+		ok = ok && at == DfColumns(line, 4);
+		CHECK(ok);
+		// each span's characters get its style
+		for (auto& span : spans) {
+			size_t col = DfColumnOf(line, span.start, 4);
+			bool found = false;
+			for (auto& s : segs)
+				found = found || (s.style == span.style && s.first <= col && col < s.last);
+			CHECK(found);
+		}
+	}
+}
+
 // ---- Entry point -------------------------------------------------------------------------
 
 int wmain() {
@@ -828,6 +925,9 @@ int wmain() {
 	Run_Merge_Undo();
 	Run_Cancel();
 	Run_UnifiedText();
+
+	Run_StyleSpans_Normalize();
+	Run_StyleSegments();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

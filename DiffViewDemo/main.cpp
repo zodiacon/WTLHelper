@@ -53,6 +53,7 @@ enum {
 	ID_VIEW_OVERVIEW,
 	ID_VIEW_EXPANDALL,
 	ID_VIEW_HIGHCONTRAST,
+	ID_VIEW_SYNTAX,
 
 	ID_COMPARE_IGNORECASE = 401,
 	ID_COMPARE_IGNORESPACECHANGE,
@@ -312,6 +313,93 @@ static void CopyToClipboard(const CString& text) {
 	::CloseClipboard();
 }
 
+// ---- Syntax highlighting ------------------------------------------------------------
+//
+// A tiny C++ tokenizer, a line at a time (no state: a block comment's later lines aren't comments), to show what
+// the control does with the spans an app gives it.
+
+enum { ST_KEYWORD, ST_STRING, ST_NUMBER, ST_COMMENT, ST_PREPROC };
+
+static bool g_syntax = true;
+static std::vector<DFVSTYLESPAN> g_spans;   // the answer to DFVN_GETLINESTYLE: stays until the notification returns
+
+static bool IsKeyword(std::wstring_view word) {
+	static const wchar_t* keywords[] = { L"if", L"else", L"for", L"while", L"do", L"return", L"break", L"continue", L"switch", L"case",
+		L"const", L"auto", L"int", L"bool", L"void", L"char", L"size_t", L"true", L"false", L"nullptr", L"class", L"struct", L"enum",
+		L"static", L"new", L"delete", L"namespace", L"using", L"template", L"typename" };
+	for (auto k : keywords) {
+		if (word == k)
+			return true;
+	}
+	return false;
+}
+
+static void Tokenize(std::wstring_view line) {
+	g_spans.clear();
+	size_t n = line.size(), i = line.find_first_not_of(L" \t");
+	if (i == std::wstring_view::npos)
+		return;
+	if (line[i] == L'#') {
+		g_spans.push_back({ i, n - i, ST_PREPROC });
+		return;
+	}
+	while (i < n) {
+		wchar_t c = line[i];
+		size_t j = i + 1;
+		if (c == L'/' && j < n && line[j] == L'/') {
+			g_spans.push_back({ i, n - i, ST_COMMENT });
+			return;
+		}
+		if (c == L'"' || c == L'\'') {
+			while (j < n && line[j] != c)
+				j += line[j] == L'\\' ? 2 : 1;
+			j = std::min(j + 1, n);
+			g_spans.push_back({ i, j - i, ST_STRING });
+		}
+		else if (iswdigit(c)) {
+			while (j < n && (iswalnum(line[j]) || line[j] == L'.'))
+				j++;
+			g_spans.push_back({ i, j - i, ST_NUMBER });
+		}
+		else if (iswalpha(c) || c == L'_') {
+			while (j < n && (iswalnum(line[j]) || line[j] == L'_'))
+				j++;
+			if (IsKeyword(line.substr(i, j - i)))
+				g_spans.push_back({ i, j - i, ST_KEYWORD });
+		}
+		i = j;
+	}
+}
+
+// the palette for the colors the control shows: light ones, or dark ones when it follows the dark mode
+static void ApplySyntax() {
+	if (!g_syntax) {
+		g_diff.SetStylePalette(nullptr, 0);
+		return;
+	}
+	bool dark = !g_customColors;
+#ifdef DEMO_WTLHELPER
+	dark = dark && WTLHelper::IsDarkMode();
+#else
+	dark = false;
+#endif
+	const DFVSTYLE light[] = {
+		{ RGB(0x00, 0x00, 0xC0), CLR_NONE, DFVSF_BOLD },                     // keyword
+		{ RGB(0xA3, 0x15, 0x15), CLR_NONE, 0 },                              // string
+		{ RGB(0x09, 0x86, 0x58), RGB(0xE8, 0xF4, 0xE4), 0 },                 // number: with a background
+		{ RGB(0x00, 0x80, 0x00), CLR_NONE, DFVSF_ITALIC },                   // comment
+		{ RGB(0x80, 0x40, 0xA0), CLR_NONE, DFVSF_BOLD | DFVSF_UNDERLINE },   // preprocessor
+	};
+	const DFVSTYLE dim[] = {
+		{ RGB(0x56, 0x9C, 0xD6), CLR_NONE, DFVSF_BOLD },
+		{ RGB(0xCE, 0x91, 0x78), CLR_NONE, 0 },
+		{ RGB(0xB5, 0xCE, 0xA8), RGB(0x2A, 0x3A, 0x2A), 0 },
+		{ RGB(0x6A, 0x99, 0x55), CLR_NONE, DFVSF_ITALIC },
+		{ RGB(0xC5, 0x86, 0xC0), CLR_NONE, DFVSF_BOLD | DFVSF_UNDERLINE },
+	};
+	g_diff.SetStylePalette(dark ? dim : light, std::size(light));
+}
+
 // ---- Commands ----------------------------------------------------------------------
 
 static void UpdateChecks(HMENU menu) {
@@ -325,6 +413,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_COLORS, g_customColors);
 	check(ID_VIEW_OVERVIEW, g_diff.IsOverviewShown());
 	check(ID_VIEW_HIGHCONTRAST, g_highContrast);
+	check(ID_VIEW_SYNTAX, g_syntax);
 	check(ID_MERGE_ENABLE, g_diff.GetMergeFlags() != 0);
 	check(ID_MERGE_ASK, g_askMerge);
 	check(ID_MERGE_BACKGROUND, g_diff.GetBackgroundThreshold() != SIZE_MAX);
@@ -365,10 +454,12 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_VIEW_COLORS:
 			g_customColors = !g_customColors;
 			g_diff.SetColors(g_customColors ? &g_colors : nullptr);
+			ApplySyntax();
 			break;
 #ifdef DEMO_WTLHELPER
 		case ID_VIEW_DARKMODE:
 			WTLHelper::SwitchToMode(WTLHelper::IsDarkMode() ? DarkModeKind::Classic : DarkModeKind::Dark, hwnd);
+			ApplySyntax();
 			break;
 #endif
 		case ID_COMPARE_IGNORECASE: ToggleOption(DFVF_IGNORECASE); break;
@@ -385,6 +476,10 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_VIEW_HIGHCONTRAST:
 			g_highContrast = !g_highContrast;
 			g_diff.ForceHighContrast(g_highContrast ? 1 : -1);
+			break;
+		case ID_VIEW_SYNTAX:
+			g_syntax = !g_syntax;
+			ApplySyntax();
 			break;
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
@@ -418,6 +513,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 			g_main = hwnd;
 			g_diff.Create(hwnd, CWindow::rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_DIFF);
 			g_diff.SetContextLines(DFV_ALLCONTEXT);
+			ApplySyntax();
 			LoadSample();
 			::DragAcceptFiles(hwnd, TRUE);
 			return 0;
@@ -455,6 +551,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 					UpdateTitle();
 					UpdateChecks(::GetMenu(hwnd));
 					break;
+				case DFVN_GETLINESTYLE: {
+					auto nm = (NMDFVLINESTYLE*)lParam;
+					Tokenize({ nm->text, nm->length });
+					nm->spans = g_spans.data();
+					nm->spanCount = g_spans.size();
+					break;
+				}
 				case DFVN_SELCHANGED:
 				case DFVN_FOLDEXPANDED:
 					UpdateTitle();
@@ -536,6 +639,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_OVERVIEW, L"&Overview");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_COLORS, L"&Custom Colors");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_HIGHCONTRAST, L"&High Contrast Drawing");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_SYNTAX, L"Syntax &Highlighting");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
 #endif

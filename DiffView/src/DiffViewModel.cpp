@@ -917,6 +917,50 @@ size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize) {
 	return DfColumns(line.substr(0, std::min(index, line.size())), tabSize);
 }
 
+// ---- Styled text ------------------------------------------------------------------------------
+
+void DfNormalizeStyleSpans(size_t lineLength, std::vector<DfStyleSpan>& spans) {
+	std::stable_sort(spans.begin(), spans.end(), [](const DfStyleSpan& a, const DfStyleSpan& b) { return a.start < b.start; });
+	size_t end = 0, count = 0;   // the last kept span's end, and how many are kept
+	for (auto span : spans) {
+		uint64_t s = std::max<uint64_t>(span.start, end);
+		uint64_t e = std::min<uint64_t>(lineLength, (uint64_t)span.start + span.length);
+		if (e <= s)
+			continue;
+		spans[count++] = { (uint32_t)s, (uint32_t)(e - s), span.style };
+		end = (size_t)e;
+	}
+	spans.resize(count);
+}
+
+std::vector<DfStyleSegment> DfStyleSegments(std::wstring_view line, const std::vector<DfStyleSpan>& spans, int tabSize) {
+	std::vector<DfStyleSegment> out;
+	size_t index = 0, column = 0, emitted = 0;
+	auto advance = [&](size_t to) {   // the column where the character at 'to' starts; 'to' never goes back
+		for (to = std::min(to, line.size()); index < to; index++)
+			column = line[index] == L'\t' ? (column / tabSize + 1) * tabSize : column + 1;
+		return column;
+	};
+	auto add = [&](size_t first, size_t last, uint32_t style) {
+		if (last <= first)
+			return;
+		if (!out.empty() && out.back().style == style && out.back().last == first)
+			out.back().last = last;
+		else
+			out.push_back({ first, last, style });
+		emitted = last;
+	};
+	for (auto& span : spans) {
+		if (span.start < index || span.start >= line.size())
+			continue;   // not normalized: overlapping or past the end
+		size_t first = advance(span.start);
+		add(emitted, first, DfNoStyle);
+		add(first, advance(std::min<size_t>(line.size(), (size_t)span.start + span.length)), span.style);
+	}
+	add(emitted, advance(line.size()), DfNoStyle);
+	return out;
+}
+
 // ---- Words and columns ----------------------------------------------------------------------
 
 namespace {

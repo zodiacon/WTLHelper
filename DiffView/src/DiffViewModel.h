@@ -7,11 +7,13 @@
 // other side and the unified diff text. Covered by DiffViewTests.
 
 #include <windows.h>
+#include <commctrl.h>   // CLR_NONE, CLR_DEFAULT
 
 #include <atomic>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // ---- Lines -------------------------------------------------------------------------------
@@ -136,6 +138,45 @@ void DfIntraLine(std::wstring_view a, std::wstring_view b, const DfOptions& opti
 size_t DfColumns(std::wstring_view line, int tabSize);                        // the line's width in columns
 void   DfExpandTabs(std::wstring_view line, int tabSize, std::wstring& out);
 size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize);       // the column where a character starts
+
+// ---- Styled text (syntax highlighting) -------------------------------------------------------
+
+constexpr uint32_t DfNoStyle = UINT32_MAX;   // plain text: no span, or a style the palette doesn't have
+
+struct DfStyleSpan {     // characters of a line (indexes into the line, tabs not expanded) and the app's style for them
+	uint32_t start = 0;
+	uint32_t length = 0;
+	uint32_t style = 0;
+	bool operator==(const DfStyleSpan&) const = default;
+};
+
+// Sorts the spans by start and makes them fit the line: spans past its end are cut or dropped, empty ones dropped,
+// and where spans overlap the one that starts first (the first given, on a tie) keeps the characters.
+void DfNormalizeStyleSpans(size_t lineLength, std::vector<DfStyleSpan>& spans);
+
+struct DfStyleSegment {  // columns of the line with its tabs expanded, [first, last)
+	size_t   first = 0;
+	size_t   last = 0;
+	uint32_t style = DfNoStyle;
+	bool operator==(const DfStyleSegment&) const = default;
+};
+
+// The line's whole width as consecutive segments: the (normalized) spans' columns, and plain ones between and after
+// them. Neighbors of one style are joined.
+std::vector<DfStyleSegment> DfStyleSegments(std::wstring_view line, const std::vector<DfStyleSpan>& spans, int tabSize);
+
+struct DfStyle {         // one entry of the palette
+	COLORREF text = CLR_DEFAULT;   // CLR_DEFAULT: the text color
+	COLORREF back = CLR_NONE;      // CLR_NONE: none
+	UINT     flags = 0;            // 1 bold, 2 italic, 4 underline
+};
+
+// The palette and the spans the app gave for the lines asked about, by side and line. With no palette nothing is asked.
+struct DfStyleStore {
+	std::vector<DfStyle> palette;
+	std::unordered_map<size_t, std::vector<DfStyleSpan>> cache[2];
+	static constexpr size_t MaxCached = 20000;   // lines per side; the cache is emptied when it gets past this
+};
 
 // ---- Rows ----------------------------------------------------------------------------------
 

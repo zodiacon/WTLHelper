@@ -118,6 +118,29 @@ struct DFVHITTEST {
 #define DFVMF_TORIGHT   0x0001   // the left lines over the right ones
 #define DFVMF_TOLEFT    0x0002
 
+// ---- Syntax highlighting ----------------------------------------------------------------
+//
+// The control has no tokenizer: the app has a palette (SetStylePalette) and answers DFVN_GETLINESTYLE for the lines
+// being painted, giving spans of characters with the index of a palette entry. A line is asked about once; its
+// spans are kept until the texts change (a merge, undo or new compare) or InvalidateStyles is called. Characters
+// no span covers, and spans whose style the palette doesn't have, are plain text.
+
+#define DFVSF_BOLD       0x0001
+#define DFVSF_ITALIC     0x0002
+#define DFVSF_UNDERLINE  0x0004
+
+struct DFVSTYLE {                       // an entry of the palette
+	COLORREF crText;                    // CLR_DEFAULT: the control's text color
+	COLORREF crBack;                    // CLR_NONE: none (a changed word's shading is drawn over it)
+	UINT     flags;                     // DFVSF_*
+};
+
+struct DFVSTYLESPAN {                   // characters of a line (an index into it: a tab is one character)
+	size_t start;
+	size_t length;
+	UINT   style;                       // index into the palette
+};
+
 // ---- Notifications -------------------------------------------------------------
 
 #define DFVN_FIRST          (0U - 3000U)   // outside the common controls ranges
@@ -127,6 +150,17 @@ struct DFVHITTEST {
 #define DFVN_MERGE          (DFVN_FIRST - 3)   // NMDFVMERGE; the user is merging a change; a non-zero return stops it
 #define DFVN_TEXTCHANGED    (DFVN_FIRST - 4)   // NMHDR; the user's merge or undo changed a text
 #define DFVN_DIFFDONE       (DFVN_FIRST - 5)   // NMHDR; a compare on the worker thread is done and shown
+#define DFVN_GETLINESTYLE   (DFVN_FIRST - 6)   // NMDFVLINESTYLE; while painting, for a line with no spans yet
+
+struct NMDFVLINESTYLE {
+	NMHDR  hdr;
+	BOOL   right;                       // in: the side
+	size_t line;                        // in: 0-based, in the text the view shows
+	LPCWSTR text;                       // in: the line, not null-terminated
+	size_t length;                      // in
+	DFVSTYLESPAN* spans;                // out: in the app's memory, which stays until the notification returns
+	size_t spanCount;                   // out: 0 (the default): plain
+};
 
 struct NMDFVMERGE {
 	NMHDR     hdr;
@@ -146,6 +180,8 @@ struct NMDFVCONTEXTMENU {
 
 struct DfDocument;
 struct DfSpan;
+struct DfStyleSegment;
+struct DfStyleStore;
 struct DfJob;
 class DfLines;
 struct DfUndoStack;
@@ -298,6 +334,19 @@ public:
 	size_t  GetBackgroundThreshold() const;
 	bool    IsComparing() const;
 
+	// ---- Syntax highlighting ------------------------------------------------------------
+	//
+	// SetStylePalette turns it on (the palette is copied; count 0 or nullptr turns it off). The styles are for
+	// the app's own use: a theme change is the app giving a palette for the new colors. The lines asked about are
+	// those of the texts the view shows, so while a compare runs on the worker thread (IsComparing) they are the
+	// previous texts: a tokenizer that needs the lines before this one should be given the line's text, as the
+	// notification does, and not rely on its own copy of the new text. After DFVN_TEXTCHANGED, tokenize again.
+	// In high contrast the palette is ignored.
+
+	void    SetStylePalette(const DFVSTYLE* styles, size_t count);
+	size_t  GetStylePaletteCount() const;
+	void    InvalidateStyles();                       // every line is asked about again when painted
+
 	// ---- Appearance -------------------------------------------------------------------
 	//
 	// The default font is Consolas, 10 points at the window's DPI; WM_SETFONT replaces it (the app then
@@ -379,7 +428,11 @@ private:
 	void    PaintTitles(WTL::CDCHandle dc, const DFVCOLORS& c);
 	void    PaintRow(WTL::CDCHandle dc, size_t row, int y, const DFVCOLORS& c, int right);
 	void    PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_view line, const std::vector<DfSpan>* spans, COLORREF text, COLORREF markBack,
-		size_t row, bool rightSide, const DFVCOLORS& c);
+		size_t row, bool rightSide, const DFVCOLORS& c, const std::vector<DfStyleSegment>* styled = nullptr);
+	// the line's styled segments (nullptr: plain); asks the app the first time
+	bool    GetLineSegments(bool rightSide, size_t line, std::wstring_view text, std::vector<DfStyleSegment>& out);
+	HFONT   StyleFont(UINT flags);                    // the font with bold, italic or underline added; flags 0: m_hFont
+	void    ForgetStyles();                           // the spans asked for (the lines changed); the palette stays
 	void    PaintNumber(WTL::CDCHandle dc, int right, int y, int line, COLORREF color);
 	void    FillHatch(WTL::CDCHandle dc, const RECT& rc, COLORREF back, COLORREF hatch);
 	bool    SelectionIn(size_t row, bool rightSide, size_t length, size_t& from, size_t& to, bool& lineBreak) const;
@@ -432,6 +485,8 @@ private:
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;
 	WTL::CFont m_UiFont;                              // the titles'
+	std::unique_ptr<DfStyleStore> m_Styles;           // the palette and the spans asked for; none until a palette is set
+	WTL::CFont m_StyleFonts[8];                       // m_hFont with the DFVSF_* flags; made when first used
 	UINT    m_Dpi = 96;
 	int     m_RowHeight = 16;
 	int     m_TextOffset = 0;

@@ -104,6 +104,7 @@
     <ClCompile Include="src\DiffViewMerge.cpp" />
     <ClCompile Include="src\DiffViewModel.cpp" />
     <ClCompile Include="src\DiffViewSelection.cpp" />
+    <ClCompile Include="src\DiffViewStyle.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
