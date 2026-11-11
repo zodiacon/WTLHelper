@@ -30,8 +30,8 @@ UINT CDiffViewCtrl::GetMergeFlags() const {
 }
 
 BOOL CDiffViewCtrl::MergeChange(size_t index, bool toRight) {
-	if (m_Job || index >= m_Doc->changeBlocks.size())
-		return FALSE;
+	if (m_Job || m_Doc->patch || index >= m_Doc->changeBlocks.size())
+		return FALSE;   // a patch's texts have lines missing
 	auto& block = m_Doc->diff.blocks[m_Doc->changeBlocks[index]];
 	DfLines left = m_Doc->left, right = m_Doc->right;
 	m_Undo->items.push_back(DfMergeWithUndo(left, right, block, toRight));
@@ -80,7 +80,7 @@ bool CDiffViewCtrl::GetMergeRect(size_t change, bool toRight, RECT* prc) const {
 }
 
 bool CDiffViewCtrl::MergeHitTest(POINT pt, int& change, bool& toRight) const {
-	if (m_Layout != DFVL_SIDEBYSIDE || !m_MergeFlags || m_Job)
+	if (m_Layout != DFVL_SIDEBYSIDE || !m_MergeFlags || m_Job || m_Doc->patch)
 		return false;
 	auto& changes = m_Doc->changeRows;
 	auto it = std::lower_bound(changes.begin(), changes.end(), m_TopRow, [](const DfChangeRows& cr, size_t row) { return cr.first < row; });
@@ -98,8 +98,8 @@ bool CDiffViewCtrl::MergeHitTest(POINT pt, int& change, bool& toRight) const {
 }
 
 void CDiffViewCtrl::PaintMerge(WTL::CDCHandle dc, const DFVCOLORS& c) {
-	if (m_Job)
-		return;   // the arrows are for the diff that's in
+	if (m_Job || m_Doc->patch)
+		return;   // the arrows are for the diff that's in, and not for a patch's
 	auto& changes = m_Doc->changeRows;
 	auto it = std::lower_bound(changes.begin(), changes.end(), m_TopRow, [](const DfChangeRows& cr, size_t row) { return cr.first < row; });
 	for (; it != changes.end() && it->first <= m_TopRow + PageRows(); ++it) {
@@ -192,7 +192,7 @@ LRESULT CDiffViewCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 // ---- The user's merges ---------------------------------------------------------------------
 
 void CDiffViewCtrl::UserMerge(size_t change, bool toRight) {
-	if (m_Job || change >= m_Doc->changeBlocks.size())
+	if (m_Job || m_Doc->patch || change >= m_Doc->changeBlocks.size())
 		return;
 	NMDFVMERGE nm{};
 	nm.change = change;

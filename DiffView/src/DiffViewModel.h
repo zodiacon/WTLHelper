@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <memory>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -110,6 +111,27 @@ struct DfDiff {
 };
 
 DfDiff DfCompute(const DfLines& left, const DfLines& right, const DfOptions& options = {});
+
+using DfRanges = std::vector<std::pair<size_t, size_t>>;   // [first, last) runs of lines
+
+// ---- Patches ---------------------------------------------------------------------------------
+
+// What a unified diff of one file gives: the hunks' lines, and the lines between them (which it doesn't have).
+struct DfPatchData {
+	std::vector<DfBlock> blocks;       // the diff, as the patch says it: equal blocks (the context, with the gaps) and changes
+	DfRanges unknown;                  // [first, last) of the lines the patch doesn't have, before and between its hunks
+	std::wstring text;                 // the patch as given
+};
+
+// Reads the hunks of the first file in a unified diff (the headers before the hunks, "diff --git", "---", "+++"
+// and the rest, are skipped; the next "diff " line ends the file). The left and right texts are the patch's lines at
+// the line numbers of the hunks' headers, the lines before and between hunks empty (they're in data.unknown). The
+// lines after the last hunk aren't known: the texts end with it. False and the reason (and the patch's line) in
+// error if it isn't a unified diff or its hunks don't add up; the outputs are then not touched.
+bool DfParsePatch(std::wstring_view patch, DfLines& left, DfLines& right, DfPatchData& data, std::wstring* error = nullptr);
+
+// The diff for blocks that are given: the pairing and the changes within lines are done as DfCompute does.
+DfDiff DfDiffFromBlocks(const std::vector<DfBlock>& blocks, const DfLines& left, const DfLines& right, const DfOptions& options = {});
 
 // The index of the block holding a line of one side (blocks with no lines on that side are skipped).
 size_t DfBlockOfLine(const DfDiff& diff, bool right, size_t line);
@@ -213,16 +235,19 @@ struct DfRow {
 	uint32_t slot = 0;           // Annotation: which of its rows this is, 0 for the first
 	uint32_t slots = 0;          // Annotation: how many rows it has
 	uint8_t  pane = 0;           // Annotation, side by side: 0 the left pane, 1 the right one, 2 both
+	bool     gap = false;        // Fold: lines the patch doesn't have; no way to show them
 };
 
 // The rows to show. With context >= 0, runs of unchanged lines keep that many lines next to a change and fold the
 // rest (a fold must hide at least two lines); expanded (by block index, may be shorter or empty) shows a block's
 // lines anyway. An annotated unchanged line stays out of the folds, with up to DfAnnotationContext lines around it,
 // and the annotation's rows come right after the row showing its line (annotations on one row: in the order given,
-// the left side's first). One whose line isn't shown (there is no such line) gets no rows.
+// the left side's first). One whose line isn't shown (there is no such line) gets no rows. Lines the text doesn't
+// have (unknown: [first, last) ranges in line numbers, inside equal blocks; the same lines on both sides) are never
+// shown: each run is a fold with gap set, which no expanding opens.
 constexpr int DfAnnotationContext = 2;
 std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context = -1, const std::vector<uint8_t>& expanded = {},
-	const std::vector<DfAnnotationSlot>& annotations = {});
+	const std::vector<DfAnnotationSlot>& annotations = {}, const DfRanges& unknown = {});
 
 // The first row of the next (or previous) changed block after (or before) the block of the given row; -1 if none.
 int DfNextChange(const std::vector<DfRow>& rows, int row, bool forward);
@@ -293,6 +318,7 @@ struct DfDocument {
 	std::vector<DfChangeRows> changeRows;   // by change, as changeBlocks
 	std::vector<int> leftRows, rightRows;   // by line: the row showing it, or the fold hiding it
 	std::vector<uint8_t> expanded;      // by block: folds the user opened
+	std::shared_ptr<DfPatchData> patch;          // the texts are a patch's: the diff is its blocks
 	std::vector<DfAnnotationSlot> annotations;   // set before BuildRows
 	std::unordered_map<uint32_t, size_t> annotationRows;   // by id: the first row of those that have rows
 	size_t  maxColumns = 0;             // the widest line of either side, tabs expanded

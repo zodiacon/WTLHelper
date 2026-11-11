@@ -196,6 +196,8 @@ void CDiffViewCtrl::SetTexts(LPCWSTR left, LPCWSTR right, int cchLeft, int cchRi
 }
 
 void CDiffViewCtrl::SetText(bool right, LPCWSTR text, int cch) {
+	if (m_Doc->patch)
+		return;   // the other side has lines missing: SetTexts, for both
 	m_Undo->items.clear();
 	DfLines lines(View(text, cch)), other = Latest().Lines(!right);
 	if (right)
@@ -259,10 +261,10 @@ void CDiffViewCtrl::CancelCompare() {
 	}
 }
 
-void CDiffViewCtrl::Compare(DfLines&& left, DfLines&& right) {
+void CDiffViewCtrl::Compare(DfLines&& left, DfLines&& right, bool keepPatch) {
 	bool comparing = m_Job != nullptr;
 	CancelCompare();
-	if (IsWindow() && left.size() + right.size() > m_BackgroundThreshold) {
+	if (IsWindow() && left.size() + right.size() > m_BackgroundThreshold && !(keepPatch && m_Doc->patch)) {
 		// the texts the thread compares are its own; the view keeps the last diff until it's done
 		auto job = std::make_shared<DfJob>();
 		job->doc->left = std::move(left);
@@ -284,6 +286,8 @@ void CDiffViewCtrl::Compare(DfLines&& left, DfLines&& right) {
 	}
 	m_Doc->left = std::move(left);
 	m_Doc->right = std::move(right);
+	if (!keepPatch)
+		m_Doc->patch.reset();   // new texts: computed again
 	ForgetStyles();   // the lines moved
 	Recompute();
 	if (comparing && IsWindow())
@@ -376,6 +380,17 @@ void CDiffViewCtrl::ExpandFold(size_t row, bool notify) {
 	auto& rows = m_Doc->rows;
 	if (row >= rows.size() || rows[row].kind != DfRowKind::Fold)
 		return;
+	if (rows[row].gap) {
+		// lines the patch doesn't have can't be shown: the app may have them
+		if (notify) {
+			NMDFVPATCHGAP nm{};
+			nm.leftLine = (size_t)rows[row].left;
+			nm.rightLine = (size_t)rows[row].right;
+			nm.lineCount = rows[row].hidden;
+			FireNotify(&nm.hdr, DFVN_PATCHGAP);
+		}
+		return;
+	}
 	auto block = rows[row].block;
 	if (m_Doc->expanded.size() <= block)
 		m_Doc->expanded.resize(block + 1);
@@ -401,7 +416,7 @@ void CDiffViewCtrl::SetOptions(UINT flags) {
 		return;
 	m_Options = flags;
 	auto& latest = Latest();
-	Compare(DfLines(latest.left), DfLines(latest.right));
+	Compare(DfLines(latest.left), DfLines(latest.right), true);   // a patch's diff stays its own
 }
 
 UINT CDiffViewCtrl::GetOptions() const {
@@ -439,7 +454,38 @@ int CDiffViewCtrl::GetChangeOfLine(bool right, size_t line) const {
 	return block < m_Doc->diff.blocks.size() ? m_Doc->ChangeOfBlock(block) : -1;
 }
 
+BOOL CDiffViewCtrl::SetPatch(LPCWSTR patch, int cch) {
+	DfLines left, right;
+	auto data = std::make_shared<DfPatchData>();
+	std::wstring error;
+	if (!DfParsePatch(View(patch, cch), left, right, *data, &error)) {
+		m_PatchError = error.c_str();
+		return FALSE;
+	}
+	m_PatchError.Empty();
+	m_Undo->items.clear();
+	CancelCompare();
+	m_Doc->left = std::move(left);
+	m_Doc->right = std::move(right);
+	m_Doc->patch = std::move(data);
+	ForgetStyles();
+	Recompute();
+	if (IsWindow())
+		Invalidate();
+	return TRUE;
+}
+
+bool CDiffViewCtrl::IsPatch() const {
+	return m_Doc->patch != nullptr;
+}
+
+ATL::CString CDiffViewCtrl::GetPatchError() const {
+	return m_PatchError;
+}
+
 ATL::CString CDiffViewCtrl::GetUnifiedDiff(int context, LPCWSTR leftName, LPCWSTR rightName) const {
+	if (m_Doc->patch)
+		return ATL::CString(m_Doc->patch->text.c_str(), (int)std::min<size_t>(m_Doc->patch->text.size(), INT_MAX));   // the lines between the hunks aren't known
 	auto text = DfUnifiedText(m_Doc->left, m_Doc->right, m_Doc->diff, context, leftName ? leftName : L"a", rightName ? rightName : L"b", L"\r\n");
 	return ATL::CString(text.c_str(), (int)std::min<size_t>(text.size(), INT_MAX));
 }
@@ -1034,7 +1080,7 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 	}
 	if (row.kind == DfRowKind::Fold) {
 		wchar_t text[64];
-		swprintf_s(text, L"\x2026  %u unchanged lines", row.hidden);
+		swprintf_s(text, row.gap ? (row.hidden == 1 ? L"\x2026  %u line not in the patch" : L"\x2026  %u lines not in the patch") : L"\x2026  %u unchanged lines", row.hidden);
 		for (int i = 0; i < panes; i++) {
 			auto pane = GetPane(i);
 			RECT r{ pane.left, y, pane.right, bottom };

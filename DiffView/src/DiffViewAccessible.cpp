@@ -381,7 +381,7 @@ private:
 	std::wstring RowName(size_t index) const {
 		auto& row = Rows()[index];
 		if (row.kind == DfRowKind::Fold)
-			return std::to_wstring(row.hidden) + L" unchanged lines";
+			return std::to_wstring(row.hidden) + (row.gap ? (row.hidden == 1 ? L" line not in the patch" : L" lines not in the patch") : L" unchanged lines");
 		if (row.kind == DfRowKind::Annotation)
 			return L"Comment";
 		if (row.kind == DfRowKind::Changed && row.left >= 0 && row.right >= 0)

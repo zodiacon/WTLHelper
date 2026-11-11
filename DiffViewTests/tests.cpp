@@ -1107,9 +1107,205 @@ TEST(CommentRange) {
 	CHECK(first == 7 && last == 7);
 }
 
+// ---- Patches -----------------------------------------------------------------------------
+
+// the blocks as text: =n for equal lines, -n+m for a change
+static std::wstring BlockScript(const std::vector<DfBlock>& blocks) {
+	std::wstring s;
+	for (auto& b : blocks) {
+		if (!s.empty())
+			s += L' ';
+		s += b.changed ? L"-" + std::to_wstring(b.leftCount) + L"+" + std::to_wstring(b.rightCount) : L"=" + std::to_wstring(b.leftCount);
+	}
+	return s;
+}
+
+static std::wstring Ranges(const DfRanges& ranges) {
+	std::wstring s;
+	for (auto& r : ranges)
+		s += (s.empty() ? L"" : L" ") + std::to_wstring(r.first) + L"-" + std::to_wstring(r.second);
+	return s;
+}
+
+TEST(Patch_Parse) {
+	// one hunk in the middle of a file: lines 1-9 unknown on both sides, the hunk at 10
+	std::wstring patch =
+		L"diff --git a/f.cpp b/f.cpp\nindex 1234..5678 100644\n--- a/f.cpp\n+++ b/f.cpp\n"
+		L"@@ -10,4 +10,5 @@ void Func() {\n"
+		L" before\n"
+		L"-old line\n"
+		L"+new line\n"
+		L"+another new\n"
+		L" after 1\n"
+		L" after 2\n";
+	DfLines left, right;
+	DfPatchData data;
+	std::wstring error;
+	CHECK(DfParsePatch(patch, left, right, data, &error));
+	if (left.size() == 0)
+		return;
+	CHECK(left.size() == 13 && right.size() == 14);
+	CHECK_STR(std::wstring(left[9]), L"before");
+	CHECK_STR(std::wstring(left[10]), L"old line");
+	CHECK_STR(std::wstring(right[11]), L"another new");
+	CHECK_STR(std::wstring(right[13]), L"after 2");
+	CHECK_STR(std::wstring(left[3]), L"");   // not in the patch
+	CHECK_STR(BlockScript(data.blocks), L"=10 -1+2 =2");
+	CHECK_STR(Ranges(data.unknown), L"0-9");
+	CHECK(data.text == patch);
+
+	// the diff is the patch's, with the lines paired
+	auto diff = DfDiffFromBlocks(data.blocks, left, right);
+	CHECK(diff.changes == 1 && diff.deleted == 1 && diff.inserted == 2);
+	CHECK(diff.leftPair[10] >= 0 && diff.rightPair[10] >= 0);   // "old line" -> "new line"
+}
+
+TEST(Patch_Hunks) {
+	// two hunks with 20 lines between, then none after; a hunk with no lines on the left (an insertion after line 3)
+	std::wstring patch =
+		L"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+		L"@@ -24,3 +24,3 @@\n x\n-y\n+Y\n z\n"
+		L"@@ -40,0 +41,2 @@\n+p\n+q\n";
+	DfLines left, right;
+	DfPatchData data;
+	std::wstring error;
+	CHECK(DfParsePatch(patch, left, right, data, &error));
+	if (left.size() == 0)
+		return;
+	// the second hunk starts at line 24 (index 23): 20 unknown lines between; the third inserts after line 40
+	CHECK_STR(Ranges(data.unknown), L"3-23 26-40");
+	CHECK_STR(BlockScript(data.blocks), L"=1 -1+1 =22 -1+1 =15 -0+2");
+	CHECK(left.size() == 40 && right.size() == 42);
+	CHECK_STR(std::wstring(right[40]), L"p");
+}
+
+TEST(Patch_Errors) {
+	DfLines left(L"keep"), right(L"keep");
+	DfPatchData data;
+	std::wstring error;
+	auto bad = [&](std::wstring_view patch) {
+		error.clear();
+		bool ok = DfParsePatch(patch, left, right, data, &error);
+		return !ok && !error.empty() && left.size() == 1 && right.size() == 1;   // not touched
+	};
+	CHECK(bad(L""));
+	CHECK(bad(L"just some text\nthat isn't a patch\n"));
+	CHECK(bad(L"@@ -1,2 +1,2 @@\n a\n"));                       // ends early
+	CHECK(bad(L"@@ -1,1 +1,2 @@\n a\n b\n"));                  // a context line the header has no room for
+	CHECK(bad(L"@@ -1,1 +1,1 @@\n?a\n"));                      // not a patch line
+	CHECK(bad(L"@@ -x +1 @@\n a\n"));
+	CHECK(bad(L"@@ -5,1 +5,1 @@\n a\n@@ -3,1 +3,1 @@\n b\n"));   // out of order
+	CHECK(bad(L"@@ -5,1 +6,1 @@\n a\n"));                      // the lines before differ in number
+	CHECK(!error.empty());
+	CHECK(error.find(L"line") != std::wstring::npos);
+}
+
+TEST(Patch_Forms) {
+	DfLines left, right;
+	DfPatchData data;
+
+	// a new file: nothing on the left
+	CHECK(DfParsePatch(L"--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n", left, right, data));
+	CHECK(left.size() == 0 && right.size() == 2 && data.unknown.empty());
+	CHECK_STR(BlockScript(data.blocks), L"-0+2");
+
+	// a deleted file
+	CHECK(DfParsePatch(L"@@ -1,2 +0,0 @@\n-one\n-two\n", left, right, data));
+	CHECK(left.size() == 2 && right.size() == 0);
+
+	// counts of 1 aren't written; CRLF line breaks; an empty line where a context line's space was trimmed
+	CHECK(DfParsePatch(L"@@ -1 +1 @@\r\n-a\r\n+b\r\n@@ -3,3 +3,3 @@\r\n x\r\n\r\n z\r\n", left, right, data));
+	CHECK(left.size() == 5 && right.size() == 5);
+	CHECK_STR(std::wstring(left[0]), L"a");
+	CHECK_STR(std::wstring(right[0]), L"b");
+	CHECK_STR(std::wstring(left[2]), L"x");
+	CHECK_STR(std::wstring(left[3]), L"");
+	CHECK_STR(std::wstring(left[4]), L"z");
+	CHECK_STR(Ranges(data.unknown), L"1-2");
+
+	// no newline at end of file, on one side or both
+	CHECK(DfParsePatch(L"@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n", left, right, data));
+	CHECK(!left.EndsWithNewline() && right.EndsWithNewline());
+	CHECK(DfParsePatch(L"@@ -1,2 +1,2 @@\n a\n b\n\\ No newline at end of file\n", left, right, data));
+	CHECK(!left.EndsWithNewline() && !right.EndsWithNewline());
+
+	// only the first file
+	CHECK(DfParsePatch(L"diff --git a/1 b/1\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/2 b/2\n@@ -1 +1 @@\n-c\n+d\n", left, right, data));
+	CHECK(left.size() == 1 && std::wstring(left[0]) == L"a");
+
+	// a line that looks like a header inside a hunk is a line
+	CHECK(DfParsePatch(L"@@ -1,2 +1,2 @@\n-@@ -1 +1 @@\n+--- x\n ctx\n", left, right, data));
+	CHECK_STR(std::wstring(left[0]), L"@@ -1 +1 @@");
+	CHECK_STR(std::wstring(right[0]), L"--- x");
+}
+
+TEST(Patch_Rows) {
+	// lines 0-9 unknown, then a hunk (3 context, a change, 3 context), then 20 unknown, then another hunk
+	std::wstring patch =
+		L"@@ -11,7 +11,7 @@\n a\n b\n c\n-d\n+D\n e\n f\n g\n"
+		L"@@ -41,3 +41,3 @@\n x\n-y\n+Y\n z\n";
+	DfLines left, right;
+	DfPatchData data;
+	CHECK(DfParsePatch(patch, left, right, data));
+	CHECK_STR(Ranges(data.unknown), L"0-10 17-40");
+	DfDocument doc;
+	doc.left = left;
+	doc.right = right;
+	doc.patch = std::make_shared<DfPatchData>(data);
+	doc.Compute({}, 4);
+	CHECK(doc.diff.changes == 2);
+
+	// every known line shown: the unknown runs are gap folds, in any layout and however much is expanded
+	doc.BuildRows(DfLayout::SideBySide, -1);
+	CHECK_STR(Rows(doc.rows), L"F10 10:10 11:11 12:12 13~13 14:14 15:15 16:16 F23 40:40 41~41 42:42");
+	CHECK(doc.rows[0].gap && !doc.rows[1].gap && doc.rows[8].gap);
+	CHECK(doc.rows[0].hidden == 10 && doc.rows[8].hidden == 23 && doc.rows[8].left == 17);
+
+	// with context: the known lines too far from a change fold as usual, the gaps stay gaps
+	doc.BuildRows(DfLayout::SideBySide, 1);
+	CHECK_STR(Rows(doc.rows), L"F10 F2 12:12 13~13 14:14 F2 F23 40:40 41~41 42:42");
+	bool gaps = true;
+	for (auto& r : doc.rows)
+		gaps = gaps && (r.kind == DfRowKind::Fold || r.gap == false);
+	CHECK(gaps);
+	CHECK(doc.rows[0].gap && !doc.rows[1].gap && !doc.rows[5].gap && doc.rows[6].gap);
+
+	// opening the known folds doesn't open a gap
+	doc.expanded.assign(doc.diff.blocks.size(), 1);
+	doc.BuildRows(DfLayout::Unified, 1);
+	CHECK_STR(Rows(doc.rows), L"F10 10:10 11:11 12:12 13~. .~13 14:14 15:15 16:16 F23 40:40 41~. .~41 42:42");
+
+	// the line-to-row maps put a gap's lines in its fold
+	CHECK(doc.RowOf(false, 3) == 0 && doc.RowOf(true, 3) == 0 && doc.RowOf(false, 20) == doc.RowOf(false, 17));
+
+	// changing the options keeps the patch's diff
+	DfOptions options;
+	options.ignoreCase = true;
+	doc.Compute(options, 4);
+	CHECK(doc.diff.changes == 2);
+}
+
+TEST(Patch_Annotations) {
+	std::wstring patch = L"@@ -11,3 +11,3 @@\n a\n-b\n+B\n c\n";
+	DfLines left, right;
+	DfPatchData data;
+	CHECK(DfParsePatch(patch, left, right, data));
+	DfDocument doc;
+	doc.left = left;
+	doc.right = right;
+	doc.patch = std::make_shared<DfPatchData>(data);
+	doc.Compute({}, 4);
+	// an annotation under a known line gets its rows; one inside the unknown lines gets none
+	doc.annotations = { { 1, true, 11, 1, false }, { 2, true, 3, 1, false } };
+	doc.BuildRows(DfLayout::SideBySide, -1);
+	CHECK_STR(Rows(doc.rows), L"F10 10:10 11~11 A1 12:12");
+	CHECK(doc.annotationRows.size() == 1 && doc.annotationRows.count(1) == 1);
+}
+
 // ---- Entry point -------------------------------------------------------------------------
 
 int wmain() {
+	setvbuf(stdout, nullptr, _IONBF, 0);   // a test that hangs shows where
 	wprintf(L"DiffView model tests\n\n");
 
 	Run_Lines_Split();
@@ -1155,6 +1351,13 @@ int wmain() {
 	Run_Annotations_Document();
 	Run_Annotations_Random();
 	Run_CommentRange();
+
+	Run_Patch_Parse();
+	Run_Patch_Hunks();
+	Run_Patch_Errors();
+	Run_Patch_Forms();
+	Run_Patch_Rows();
+	Run_Patch_Annotations();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

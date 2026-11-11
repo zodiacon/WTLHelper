@@ -39,6 +39,8 @@ enum {
 	ID_FILE_OPENRIGHT,
 	ID_FILE_SAMPLE,
 	ID_FILE_LARGE,
+	ID_FILE_SAMPLEPATCH,
+	ID_FILE_OPENPATCH,
 	ID_FILE_COPYDIFF,
 	ID_FILE_EXIT,
 
@@ -283,6 +285,8 @@ static void LoadFile(int side, LPCWSTR path) {
 		::MessageBoxW(g_main, L"The file can't be read.", path, MB_ICONERROR);
 		return;
 	}
+	if (g_diff.IsPatch())
+		g_diff.SetTexts(L"", L"");   // a side of a patch's texts has lines missing: both are new
 	g_paths[side] = path;
 	g_diff.SetText(side == 1, text.c_str(), (int)text.size());
 	g_diff.SetTitles(g_paths[0].IsEmpty() ? L"" : ::PathFindFileNameW(g_paths[0]), g_paths[1].IsEmpty() ? L"" : ::PathFindFileNameW(g_paths[1]));
@@ -300,6 +304,44 @@ static void OpenFile(int side) {
 	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
 	if (::GetOpenFileNameW(&ofn))
 		LoadFile(side, path);
+}
+
+// the sample as a patch: the hunks only (two lines of context), as a service gives a file's changes
+static void LoadSamplePatch() {
+	g_diff.SetTexts(g_sampleLeft, g_sampleRight);
+	CString patch = g_diff.GetUnifiedDiff(2, L"a/Words.cpp", L"b/Words.cpp");
+	g_paths[0] = g_paths[1] = L"";
+	if (!g_diff.SetPatch(patch)) {
+		::MessageBoxW(g_main, g_diff.GetPatchError(), L"Patch", MB_ICONERROR);
+		return;
+	}
+	g_diff.SetTitles(L"Words.cpp (old)", L"Words.cpp (new)");
+	UpdateTitle();
+}
+
+static void OpenPatch() {
+	wchar_t path[MAX_PATH] = L"";
+	OPENFILENAMEW ofn{ sizeof(ofn) };
+	ofn.hwndOwner = g_main;
+	ofn.lpstrFilter = L"Patches\0*.patch;*.diff\0All Files (*.*)\0*.*\0";
+	ofn.lpstrFile = path;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.lpstrTitle = L"Open a Patch (the hunks of one file)";
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+	if (!::GetOpenFileNameW(&ofn))
+		return;
+	std::wstring text;
+	if (!ReadText(path, text)) {
+		::MessageBoxW(g_main, L"The file can't be read.", path, MB_ICONERROR);
+		return;
+	}
+	if (!g_diff.SetPatch(text.c_str(), (int)text.size())) {
+		::MessageBoxW(g_main, g_diff.GetPatchError(), L"Not a patch", MB_ICONERROR);
+		return;
+	}
+	g_paths[0] = g_paths[1] = L"";
+	g_diff.SetTitles(::PathFindFileNameW(path), L"");
+	UpdateTitle();
 }
 
 static void CopyToClipboard(const CString& text) {
@@ -530,6 +572,8 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_FILE_OPENRIGHT: OpenFile(1); break;
 		case ID_FILE_SAMPLE: LoadSample(); break;
 		case ID_FILE_LARGE: LoadLarge(); break;
+		case ID_FILE_SAMPLEPATCH: LoadSamplePatch(); break;
+		case ID_FILE_OPENPATCH: OpenPatch(); break;
 		case ID_FILE_COPYDIFF:
 			CopyToClipboard(g_diff.GetUnifiedDiff(3, g_paths[0].IsEmpty() ? L"a" : (LPCWSTR)g_paths[0], g_paths[1].IsEmpty() ? L"b" : (LPCWSTR)g_paths[1]));
 			break;
@@ -659,6 +703,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				case DFVN_ANNOTATIONSHOW:
 					OnAnnotationShow((NMDFVANNOTATION*)lParam);
 					break;
+				case DFVN_PATCHGAP: {
+					// an app with the file would call SetTexts here (leaving the patch); this one has only the patch
+					auto nm = (NMDFVPATCHGAP*)lParam;
+					CString text;
+					text.Format(L"%zu lines the patch doesn't have (left line %zu, right line %zu).\n\nAn app with the file would show them: SetTexts with the whole file.",
+						nm->lineCount, nm->leftLine + 1, nm->rightLine + 1);
+					::MessageBoxW(hwnd, text, L"Lines not in the patch", MB_ICONINFORMATION);
+					break;
+				}
 				case DFVN_GUTTERADD:
 					OnGutterAdd((NMDFVGUTTERADD*)lParam);
 					break;
@@ -723,6 +776,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hFile, MF_STRING, ID_FILE_OPENRIGHT, L"Open &Right...\tCtrl+2");
 	::AppendMenuW(hFile, MF_STRING, ID_FILE_SAMPLE, L"&Sample");
 	::AppendMenuW(hFile, MF_STRING, ID_FILE_LARGE, L"&Large (200,000 Lines)");
+	::AppendMenuW(hFile, MF_STRING, ID_FILE_SAMPLEPATCH, L"Sample &Patch (Hunks Only)");
+	::AppendMenuW(hFile, MF_STRING, ID_FILE_OPENPATCH, L"Open P&atch...");
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);
 	::AppendMenuW(hFile, MF_STRING, ID_FILE_COPYDIFF, L"&Copy Unified Diff");
 	::AppendMenuW(hFile, MF_SEPARATOR, 0, nullptr);

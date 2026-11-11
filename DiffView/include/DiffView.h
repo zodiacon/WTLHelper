@@ -184,6 +184,14 @@ struct DFVANNOTATION {
 #define DFVN_ANNOTATIONSHOW (DFVN_FIRST - 7)   // NMDFVANNOTATION; make the window, a child of the control: hwnd
 #define DFVN_ANNOTATIONHIDE (DFVN_FIRST - 8)   // NMDFVANNOTATION; the window (hwnd) isn't needed now
 #define DFVN_GUTTERADD      (DFVN_FIRST - 9)   // NMDFVGUTTERADD; the user clicked the "+" of a line
+#define DFVN_PATCHGAP       (DFVN_FIRST - 10)  // NMDFVPATCHGAP; the user clicked lines the patch doesn't have
+
+struct NMDFVPATCHGAP {
+	NMHDR  hdr;
+	size_t leftLine;                    // the first of the lines, on each side (they differ by what the hunks before changed)
+	size_t rightLine;
+	size_t lineCount;
+};
 
 struct NMDFVGUTTERADD {
 	NMHDR  hdr;
@@ -306,6 +314,24 @@ public:
 	void    Clear();                                  // both texts empty
 	// shown above the panes (side by side) or as "left -> right" (unified); both nullptr or "": no titles
 	void    SetTitles(LPCWSTR left, LPCWSTR right);
+
+	// ---- Patches ------------------------------------------------------------------------
+	//
+	// SetPatch shows a unified diff of one file (what GitHub's API gives per file: the hunks only, with their line
+	// numbers) with no texts: the first file's hunks are read ("diff --git", "---", "+++" and the other headers
+	// before them are skipped, a later "diff " line ends them), the diff is the patch's own (not computed, so it is
+	// the one git made) and the lines before, between and after the hunks aren't known. Each run of them is a
+	// fold, "N lines not in the patch", that no expanding opens: a click, Enter or the accessible action sends
+	// DFVN_PATCHGAP, and the app can then get the file's lines and call SetTexts, which leaves patch mode. The texts
+	// (GetText) have empty lines for the unknown ones, and the line numbers are the files' own, which is what
+	// annotations, the comment notifications and the syntax callbacks use. In patch mode merging is off, the ignore
+	// options only affect the changes marked within lines, SetText (one side) does nothing, GetUnifiedDiff gives
+	// the patch as it was given, and the lines after the last hunk aren't shown (their number isn't known).
+	// FALSE (and GetPatchError says why) if it isn't a unified diff or the hunks don't add up; nothing then changes.
+
+	BOOL    SetPatch(LPCWSTR patch, int cch = -1);
+	bool    IsPatch() const;
+	ATL::CString GetPatchError() const;
 
 	// ---- The diff ----------------------------------------------------------------------
 
@@ -575,7 +601,7 @@ private:
 
 	// merging and comparing (DiffViewMerge.cpp)
 	const DfDocument& Latest() const;                 // the document being compared, or else the one shown
-	void    Compare(DfLines&& left, DfLines&& right);
+	void    Compare(DfLines&& left, DfLines&& right, bool keepPatch = false);
 	void    CancelCompare();
 	int     CenterWidth() const;
 	bool    GetMergeRect(size_t change, bool toRight, RECT* prc) const;
@@ -598,6 +624,7 @@ private:
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;
 	WTL::CFont m_UiFont;                              // the titles'
+	ATL::CString m_PatchError;
 	bool    m_GutterAdd = false;
 	size_t  m_HotGutterRow = SIZE_MAX;                // the row whose gutter has the mouse (with the "+" on)
 	bool    m_HotGutterRight = false;

@@ -579,6 +579,34 @@ namespace {
 	}
 }
 
+// The pairing of the changed lines and their changes within the lines, for blocks that are in the diff.
+static void FinishDiff(DfDiff& diff, const DfLines& left, const DfLines& right, const DfOptions& options) {
+	const size_t n = left.size(), m = right.size();
+	diff.leftPair.assign(n, -1);
+	diff.rightPair.assign(m, -1);
+	std::vector<std::pair<size_t, size_t>> pairs;
+	auto cancelled = [&] { return options.cancel && options.cancel->load(std::memory_order_relaxed); };
+	for (auto& block : diff.blocks) {
+		if (!block.changed)
+			continue;
+		diff.changes++;
+		diff.deleted += block.leftCount;
+		diff.inserted += block.rightCount;
+		if (block.leftCount > 0 && block.rightCount > 0 && !cancelled())
+			PairLines(left, right, block, options, pairs);
+	}
+	diff.pairs.reserve(pairs.size());
+	for (auto [l, r] : pairs) {
+		DfLinePair pair;
+		pair.left = l;
+		pair.right = r;
+		if (options.intraLine && !cancelled())
+			DfIntraLine(left[l], right[r], options, pair.leftSpans, pair.rightSpans);
+		diff.leftPair[l] = diff.rightPair[r] = int(diff.pairs.size());
+		diff.pairs.push_back(std::move(pair));
+	}
+}
+
 DfDiff DfCompute(const DfLines& left, const DfLines& right, const DfOptions& options) {
 	const size_t n = left.size(), m = right.size();
 
@@ -658,30 +686,214 @@ DfDiff DfCompute(const DfLines& left, const DfLines& right, const DfOptions& opt
 	}
 	SlideBlocks(diff.blocks, idsL, idsR, left, right);
 
-	diff.leftPair.assign(n, -1);
-	diff.rightPair.assign(m, -1);
-	std::vector<std::pair<size_t, size_t>> pairs;
-	auto cancelled = [&] { return options.cancel && options.cancel->load(std::memory_order_relaxed); };
-	for (auto& block : diff.blocks) {
-		if (!block.changed)
-			continue;
-		diff.changes++;
-		diff.deleted += block.leftCount;
-		diff.inserted += block.rightCount;
-		if (block.leftCount > 0 && block.rightCount > 0 && !cancelled())
-			PairLines(left, right, block, options, pairs);
-	}
-	diff.pairs.reserve(pairs.size());
-	for (auto [l, r] : pairs) {
-		DfLinePair pair;
-		pair.left = l;
-		pair.right = r;
-		if (options.intraLine && !cancelled())
-			DfIntraLine(left[l], right[r], options, pair.leftSpans, pair.rightSpans);
-		diff.leftPair[l] = diff.rightPair[r] = int(diff.pairs.size());
-		diff.pairs.push_back(std::move(pair));
-	}
+	FinishDiff(diff, left, right, options);
 	return diff;
+}
+
+DfDiff DfDiffFromBlocks(const std::vector<DfBlock>& blocks, const DfLines& left, const DfLines& right, const DfOptions& options) {
+	DfDiff diff;
+	diff.blocks = blocks;
+	FinishDiff(diff, left, right, options);
+	return diff;
+}
+
+// ---- Patches ----------------------------------------------------------------------------------
+
+namespace {
+	bool Digit(wchar_t c) {
+		return c >= L'0' && c <= L'9';
+	}
+
+	bool ReadNumber(std::wstring_view s, size_t& pos, size_t& value) {
+		if (pos >= s.size() || !Digit(s[pos]))
+			return false;
+		value = 0;
+		for (; pos < s.size() && Digit(s[pos]); pos++) {
+			value = value * 10 + (s[pos] - L'0');
+			if (value > (size_t)1 << 40)
+				return false;
+		}
+		return true;
+	}
+
+	// "@@ -a[,b] +c[,d] @@ ..."
+	bool ReadHunkHeader(std::wstring_view line, size_t& a, size_t& b, size_t& c, size_t& d) {
+		if (!line.starts_with(L"@@ -"))
+			return false;
+		size_t pos = 4;
+		b = d = 1;
+		if (!ReadNumber(line, pos, a))
+			return false;
+		if (pos < line.size() && line[pos] == L',') {
+			pos++;
+			if (!ReadNumber(line, pos, b))
+				return false;
+		}
+		if (!line.substr(pos).starts_with(L" +"))
+			return false;
+		pos += 2;
+		if (!ReadNumber(line, pos, c))
+			return false;
+		if (pos < line.size() && line[pos] == L',') {
+			pos++;
+			if (!ReadNumber(line, pos, d))
+				return false;
+		}
+		return line.substr(pos).starts_with(L" @@");
+	}
+}
+
+bool DfParsePatch(std::wstring_view patch, DfLines& left, DfLines& right, DfPatchData& out, std::wstring* error) {
+	std::vector<std::wstring_view> lines;
+	for (size_t at = 0; at < patch.size();) {
+		size_t end = patch.find(L'\n', at);
+		auto line = patch.substr(at, end == std::wstring_view::npos ? std::wstring_view::npos : end - at);
+		if (!line.empty() && line.back() == L'\r')
+			line.remove_suffix(1);
+		lines.push_back(line);
+		if (end == std::wstring_view::npos)
+			break;
+		at = end + 1;
+	}
+
+	size_t at = 0;   // the line being read
+	auto fail = [&](const wchar_t* why) {
+		if (error)
+			*error = std::wstring(why) + L" (line " + std::to_wstring(at) + L")";
+		return false;
+	};
+
+	DfPatchData data;
+	std::wstring leftText, rightText;
+	size_t lpos = 0, rpos = 0;   // lines so far on each side
+	auto equal = [&](size_t count) {
+		if (!data.blocks.empty() && !data.blocks.back().changed) {
+			data.blocks.back().leftCount += count;
+			data.blocks.back().rightCount += count;
+		}
+		else {
+			data.blocks.push_back({ false, lpos, count, rpos, count });
+		}
+		lpos += count;
+		rpos += count;
+	};
+	auto changed = [&](size_t deleted, size_t inserted) {
+		if (!data.blocks.empty() && data.blocks.back().changed) {
+			data.blocks.back().leftCount += deleted;
+			data.blocks.back().rightCount += inserted;
+		}
+		else {
+			data.blocks.push_back({ true, lpos, deleted, rpos, inserted });
+		}
+		lpos += deleted;
+		rpos += inserted;
+	};
+
+	bool any = false;
+	size_t noEolLeft = SIZE_MAX, noEolRight = SIZE_MAX;   // the line a "\ No newline" came after, on each side
+	while (at < lines.size()) {
+		auto line = lines[at++];
+		if (any && line.starts_with(L"diff "))
+			break;   // the next file
+		if (!line.starts_with(L"@@"))
+			continue;   // headers
+		size_t a, b, c, d;
+		if (!ReadHunkHeader(line, a, b, c, d))
+			return fail(L"bad hunk header");
+		if ((b > 0 && a == 0) || (d > 0 && c == 0))
+			return fail(L"a hunk starts at line 0");
+		// with no lines on a side the number is the line before
+		size_t leftStart = b == 0 ? a : a - 1, rightStart = d == 0 ? c : c - 1;
+		if (leftStart < lpos || rightStart < rpos)
+			return fail(L"hunks overlap or are out of order");
+		if (leftStart - lpos != rightStart - rpos)
+			return fail(L"hunks don't line up");
+		if (size_t gap = leftStart - lpos) {
+			data.unknown.push_back({ lpos, lpos + gap });
+			leftText.append(gap, L'\n');
+			rightText.append(gap, L'\n');
+			equal(gap);
+		}
+		size_t oldLeft = b, newLeft = d, deleted = 0, inserted = 0;
+		wchar_t last = 0;
+		auto flush = [&] {
+			if (deleted || inserted)
+				changed(deleted, inserted);
+			deleted = inserted = 0;
+		};
+		auto marker = [&] {   // "\ No newline at end of file": the line before has none
+			if (last == L'-' || last == L' ')
+				noEolLeft = last == L'-' ? lpos + deleted - 1 : lpos - 1;
+			if (last == L'+' || last == L' ')
+				noEolRight = last == L'+' ? rpos + inserted - 1 : rpos - 1;
+		};
+		while (oldLeft > 0 || newLeft > 0) {
+			if (at >= lines.size())
+				return fail(L"a hunk ends early");
+			auto text = lines[at++];
+			wchar_t kind = text.empty() ? L' ' : text[0];   // an empty line: a context line whose space was trimmed
+			if (!text.empty() && kind != L'\\')
+				text.remove_prefix(1);
+			if (kind == L' ') {
+				if (!oldLeft || !newLeft)
+					return fail(L"a hunk has more lines than its header says");
+				flush();
+				leftText.append(text).append(1, L'\n');
+				rightText.append(text).append(1, L'\n');
+				equal(1);
+				oldLeft--;
+				newLeft--;
+			}
+			else if (kind == L'-') {
+				if (!oldLeft)
+					return fail(L"a hunk has more lines than its header says");
+				leftText.append(text).append(1, L'\n');
+				deleted++;
+				oldLeft--;
+			}
+			else if (kind == L'+') {
+				if (!newLeft)
+					return fail(L"a hunk has more lines than its header says");
+				rightText.append(text).append(1, L'\n');
+				inserted++;
+				newLeft--;
+			}
+			else if (kind == L'\\') {
+				marker();
+				continue;
+			}
+			else {
+				return fail(L"a line in a hunk starts with something else than a space, - or +");
+			}
+			last = kind;
+		}
+		while (at < lines.size() && lines[at].starts_with(L"\\")) {
+			marker();
+			at++;
+		}
+		flush();
+		any = true;
+	}
+	if (!any) {
+		at = 0;
+		return fail(L"no hunks");
+	}
+	// the last line of a side with no line break
+	if (noEolLeft != SIZE_MAX && noEolLeft + 1 == lpos && !leftText.empty())
+		leftText.pop_back();
+	if (noEolRight != SIZE_MAX && noEolRight + 1 == rpos && !rightText.empty())
+		rightText.pop_back();
+
+	DfLines l(leftText), r(rightText);
+	if (l.size() != lpos || r.size() != rpos) {
+		at = 0;
+		return fail(L"a line has a carriage return in it");
+	}
+	data.text = patch;
+	left = std::move(l);
+	right = std::move(r);
+	out = std::move(data);
+	return true;
 }
 
 size_t DfBlockOfLine(const DfDiff& diff, bool right, size_t line) {
@@ -740,7 +952,7 @@ namespace {
 }
 
 std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context, const std::vector<uint8_t>& expanded,
-	const std::vector<DfAnnotationSlot>& annotations) {
+	const std::vector<DfAnnotationSlot>& annotations, const DfRanges& unknown) {
 	std::vector<DfRow> rows;
 	size_t total = 0;
 	for (auto& b : diff.blocks)
@@ -755,45 +967,69 @@ std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context,
 				rows.push_back({ DfRowKind::Equal, false, int(b.left + i), int(b.right + i), block });
 		};
 		if (!b.changed) {
-			if (context < 0 || (k < expanded.size() && expanded[k])) {
-				equal(0, b.leftCount);
-				continue;
-			}
-			// the lines kept: next to the changes around, and the annotated ones with a little around them
 			const size_t count = b.leftCount;
-			size_t before = k > 0 ? size_t(context) : 0;
-			size_t after = k + 1 < diff.blocks.size() ? size_t(context) : 0;
-			std::vector<std::pair<size_t, size_t>> keep;   // [from, to) in the block
+			// the lines of the block the patch doesn't have: never shown, a gap row for each run
+			DfRanges gaps;
+			for (auto& u : unknown) {
+				size_t from = std::max(u.first, b.left), to = std::min(u.second, b.left + count);
+				if (from < to)
+					gaps.push_back({ from - b.left, to - b.left });
+			}
+			const bool showAll = context < 0 || (k < expanded.size() && expanded[k]);
+			// the lines kept: next to the changes around, and the annotated ones with a little around them
+			DfRanges keep;   // [from, to) in the block
 			auto addKeep = [&](size_t from, size_t to) {
 				if (from < to)
 					keep.push_back({ from, to });
 			};
-			addKeep(0, std::min(before, count));
-			addKeep(count - std::min(after, count), count);
-			for (auto& a : annotations) {
-				size_t first = a.right ? b.right : b.left;
-				if (a.line < first || a.line >= first + count)
-					continue;
-				size_t i = a.line - first, reach = size_t(std::min(context, DfAnnotationContext));
-				addKeep(i - std::min(i, reach), std::min(count, i + reach + 1));
+			if (showAll) {
+				addKeep(0, count);
+			}
+			else {
+				size_t before = k > 0 ? size_t(context) : 0;
+				size_t after = k + 1 < diff.blocks.size() ? size_t(context) : 0;
+				addKeep(0, std::min(before, count));
+				addKeep(count - std::min(after, count), count);
+				for (auto& a : annotations) {
+					size_t first = a.right ? b.right : b.left;
+					if (a.line < first || a.line >= first + count)
+						continue;
+					size_t i = a.line - first, reach = size_t(std::min(context, DfAnnotationContext));
+					addKeep(i - std::min(i, reach), std::min(count, i + reach + 1));
+				}
 			}
 			std::sort(keep.begin(), keep.end());
-			size_t at = 0;
 			auto hide = [&](size_t from, size_t to) {   // a fold must hide at least two lines
 				if (to - from >= 2)
 					rows.push_back({ DfRowKind::Fold, false, int(b.left + from), int(b.right + from), block, uint32_t(to - from) });
 				else
 					equal(from, to);
 			};
-			for (size_t i = 0; i < keep.size();) {
-				size_t from = keep[i].first, to = keep[i].second;
-				for (i++; i < keep.size() && keep[i].first <= to; i++)
-					to = std::max(to, keep[i].second);
-				hide(at, from);
-				equal(from, to);
-				at = to;
+			// the known lines [from, to): shown where kept, folded elsewhere
+			auto stretch = [&](size_t from, size_t to) {
+				size_t at = from;
+				for (size_t i = 0; i < keep.size();) {
+					size_t kf = keep[i].first, kt = keep[i].second;
+					for (i++; i < keep.size() && keep[i].first <= kt; i++)
+						kt = std::max(kt, keep[i].second);
+					kf = std::max(kf, from);
+					kt = std::min(kt, to);
+					if (kf >= kt)
+						continue;
+					hide(at, kf);
+					equal(kf, kt);
+					at = kt;
+				}
+				hide(at, to);
+			};
+			size_t at = 0;
+			for (auto& gap : gaps) {
+				stretch(at, gap.first);
+				rows.push_back({ DfRowKind::Fold, false, int(b.left + gap.first), int(b.right + gap.first), block, uint32_t(gap.second - gap.first) });
+				rows.back().gap = true;
+				at = gap.second;
 			}
-			hide(at, count);
+			stretch(at, count);
 			continue;
 		}
 
@@ -1114,7 +1350,7 @@ void DfCommentRange(bool hasSelection, DfPos start, DfPos end, DfPos clicked, si
 }
 
 void DfDocument::Compute(const DfOptions& options, int tabSize) {
-	diff = DfCompute(left, right, options);
+	diff = patch ? DfDiffFromBlocks(patch->blocks, left, right, options) : DfCompute(left, right, options);
 	changeBlocks.clear();
 	changeBlocks.reserve(diff.changes);
 	for (size_t k = 0; k < diff.blocks.size(); k++)
@@ -1133,7 +1369,8 @@ void DfDocument::UpdateColumns(int tabSize) {
 
 void DfDocument::BuildRows(DfLayout rowLayout, int context) {
 	layout = rowLayout;
-	rows = DfBuildRows(diff, layout, context, expanded, annotations);
+	static const DfRanges none;
+	rows = DfBuildRows(diff, layout, context, expanded, annotations, patch ? patch->unknown : none);
 	annotationRows.clear();
 	leftRows.assign(left.size(), -1);
 	rightRows.assign(right.size(), -1);
