@@ -124,6 +124,10 @@ static std::wstring Rows(const std::vector<DfRow>& rows) {
 			s += L"F" + std::to_wstring(row.hidden);
 			continue;
 		}
+		if (row.kind == DfRowKind::Annotation) {
+			s += (row.slot == 0 ? L"A" : L"a") + std::to_wstring(row.annotation);   // a: a following row of it
+			continue;
+		}
 		s += row.left < 0 ? L"." : std::to_wstring(row.left);
 		s += row.kind == DfRowKind::Changed ? (row.paired ? L"*" : L"~") : L":";
 		s += row.right < 0 ? L"." : std::to_wstring(row.right);
@@ -789,6 +793,320 @@ TEST(UnifiedText) {
 	CHECK_STR(DfUnifiedText(e, Letters(L"q"), DfCompute(e, Letters(L"q"))), L"--- a\n+++ b\n@@ -0,0 +1 @@\n+q\n");
 }
 
+// ---- Styled text -------------------------------------------------------------------------
+
+using StyleSpans = std::vector<DfStyleSpan>;
+using StyleSegs = std::vector<DfStyleSegment>;
+
+TEST(StyleSpans_Normalize) {
+	// already fine: unchanged
+	StyleSpans a{ { 0, 2, 1 }, { 3, 2, 2 } };
+	DfNormalizeStyleSpans(10, a);
+	CHECK((a == StyleSpans{ { 0, 2, 1 }, { 3, 2, 2 } }));
+
+	// sorted by start
+	StyleSpans b{ { 5, 1, 7 }, { 0, 3, 8 } };
+	DfNormalizeStyleSpans(10, b);
+	CHECK((b == StyleSpans{ { 0, 3, 8 }, { 5, 1, 7 } }));
+
+	// empty ones dropped, past the end dropped, the last one cut
+	StyleSpans c{ { 2, 0, 1 }, { 4, 3, 2 }, { 6, 9, 3 }, { 10, 2, 4 }, { 50, 1, 5 } };
+	DfNormalizeStyleSpans(10, c);
+	CHECK((c == StyleSpans{ { 4, 3, 2 }, { 7, 3, 3 } }));
+
+	// overlap: the one that starts first keeps the characters; one inside another is gone
+	StyleSpans d{ { 0, 6, 1 }, { 4, 6, 2 }, { 1, 2, 3 } };
+	DfNormalizeStyleSpans(20, d);
+	CHECK((d == StyleSpans{ { 0, 6, 1 }, { 6, 4, 2 } }));
+
+	// a tie: the first given wins
+	StyleSpans e{ { 2, 3, 1 }, { 2, 3, 2 } };
+	DfNormalizeStyleSpans(20, e);
+	CHECK((e == StyleSpans{ { 2, 3, 1 } }));
+
+	// no line, no spans; a length that would overflow
+	StyleSpans f{ { 0, 3, 1 } };
+	DfNormalizeStyleSpans(0, f);
+	CHECK(f.empty());
+	StyleSpans g{ { 5, UINT32_MAX, 1 } };
+	DfNormalizeStyleSpans(8, g);
+	CHECK((g == StyleSpans{ { 5, 3, 1 } }));
+	StyleSpans h;
+	DfNormalizeStyleSpans(8, h);
+	CHECK(h.empty());
+}
+
+TEST(StyleSegments) {
+	// no spans: the whole line is plain; an empty line has no segments
+	CHECK((DfStyleSegments(L"hello", {}, 4) == StyleSegs{ { 0, 5, DfNoStyle } }));
+	CHECK(DfStyleSegments(L"", {}, 4).empty());
+
+	// gaps between and after the spans are plain
+	CHECK((DfStyleSegments(L"int x = 1;", { { 0, 3, 1 }, { 8, 1, 2 } }, 4) ==
+		StyleSegs{ { 0, 3, 1 }, { 3, 8, DfNoStyle }, { 8, 9, 2 }, { 9, 10, DfNoStyle } }));
+
+	// a span ending at the end of the line, a span of the whole line
+	CHECK((DfStyleSegments(L"abc", { { 1, 2, 3 } }, 4) == StyleSegs{ { 0, 1, DfNoStyle }, { 1, 3, 3 } }));
+	CHECK((DfStyleSegments(L"abc", { { 0, 3, 3 } }, 4) == StyleSegs{ { 0, 3, 3 } }));
+
+	// neighbors of one style join
+	CHECK((DfStyleSegments(L"abcd", { { 0, 2, 5 }, { 2, 2, 5 } }, 4) == StyleSegs{ { 0, 4, 5 } }));
+	CHECK((DfStyleSegments(L"abcd", { { 0, 1, 5 }, { 1, 1, 6 }, { 2, 2, 5 } }, 4) == StyleSegs{ { 0, 1, 5 }, { 1, 2, 6 }, { 2, 4, 5 } }));
+
+	// tabs: columns, not characters; a span of a tab is as wide as the tab
+	// "\tif\tx": the tab is columns 0-3, "if" 4-5, the tab 6-7, "x" 8
+	CHECK((DfStyleSegments(L"\tif\tx", { { 1, 2, 1 }, { 4, 1, 2 } }, 4) ==
+		StyleSegs{ { 0, 4, DfNoStyle }, { 4, 6, 1 }, { 6, 8, DfNoStyle }, { 8, 9, 2 } }));
+	CHECK((DfStyleSegments(L"a\tb", { { 1, 1, 9 } }, 4) == StyleSegs{ { 0, 1, DfNoStyle }, { 1, 4, 9 }, { 4, 5, DfNoStyle } }));
+	CHECK((DfStyleSegments(L"a\tb", { { 1, 1, 9 } }, 8) == StyleSegs{ { 0, 1, DfNoStyle }, { 1, 8, 9 }, { 8, 9, DfNoStyle } }));
+
+	// the segments cover the expanded line exactly, with no gaps or overlaps (random spans)
+	srand(7);
+	for (int round = 0; round < 200; round++) {
+		std::wstring line;
+		for (int i = rand() % 30; i > 0; i--)
+			line += rand() % 5 == 0 ? L'\t' : L'a';
+		StyleSpans spans;
+		for (int i = rand() % 6; i > 0; i--)
+			spans.push_back({ (uint32_t)(rand() % 35), (uint32_t)(rand() % 8), (uint32_t)(rand() % 3) });
+		DfNormalizeStyleSpans(line.size(), spans);
+		auto segs = DfStyleSegments(line, spans, 4);
+		size_t at = 0;
+		bool ok = true;
+		for (auto& s : segs) {
+			ok = ok && s.first == at && s.last > s.first;
+			at = s.last;
+		}
+		ok = ok && at == DfColumns(line, 4);
+		CHECK(ok);
+		// each span's characters get its style
+		for (auto& span : spans) {
+			size_t col = DfColumnOf(line, span.start, 4);
+			bool found = false;
+			for (auto& s : segs)
+				found = found || (s.style == span.style && s.first <= col && col < s.last);
+			CHECK(found);
+		}
+	}
+}
+
+// ---- Annotations -------------------------------------------------------------------------
+
+static DfAnnotationSlot Note(uint32_t id, bool right, size_t line, uint32_t rows = 1, bool full = false) {
+	return { id, right, line, rows, full };
+}
+
+static std::vector<DfRow> NoteRows(std::wstring_view left, std::wstring_view right, DfLayout layout, int context, const std::vector<DfAnnotationSlot>& notes) {
+	return DfBuildRows(DfCompute(Letters(left), Letters(right)), layout, context, {}, notes);
+}
+
+TEST(Annotations_Rows) {
+	// abcdef -> abcXef: a change at line 3
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, {})), L"0:0 1:1 2:2 3~3 4:4 5:5");
+
+	// under the row of the line; as many rows as it asks
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, { Note(7, true, 3, 2) })), L"0:0 1:1 2:2 3~3 A7 a7 4:4 5:5");
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, { Note(5, false, 0), Note(6, true, 5, 3) })),
+		L"0:0 A5 1:1 2:2 3~3 4:4 5:5 A6 a6 a6");
+
+	// on one row: the left side's first, then in the order given
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, { Note(1, true, 3), Note(2, false, 3), Note(3, true, 3) })),
+		L"0:0 1:1 2:2 3~3 A2 A1 A3 4:4 5:5");
+
+	// the panes: the side's own, or both; one pane when unified
+	auto rows = NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, { Note(1, false, 0), Note(2, true, 0), Note(3, true, 0, 1, true) });
+	CHECK(rows[1].pane == 0 && rows[2].pane == 1 && rows[3].pane == 2);
+	CHECK(rows[1].kind == DfRowKind::Annotation && rows[1].left < 0 && rows[1].right < 0 && rows[1].annotation == 1);
+	rows = NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, { Note(2, true, 0, 3) });
+	CHECK(rows[1].slot == 0 && rows[2].slot == 1 && rows[3].slot == 2 && rows[1].slots == 3 && rows[3].slots == 3);
+	rows = NoteRows(L"abcdef", L"abcXef", DfLayout::Unified, -1, { Note(2, true, 0, 1, true) });
+	CHECK(rows[1].pane == 0);
+
+	// unified: under the row showing the line, a changed line's own
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::Unified, -1, { Note(1, false, 3), Note(2, true, 3) })), L"0:0 1:1 2:2 3~. A1 .~3 A2 4:4 5:5");
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::Unified, -1, { Note(1, true, 1) })), L"0:0 1:1 A1 2:2 3~. .~3 4:4 5:5");
+
+	// no such line: no rows; none at all: the rows as they were
+	CHECK_STR(Rows(NoteRows(L"abcdef", L"abcXef", DfLayout::SideBySide, -1, { Note(1, true, 99), Note(2, false, 6) })), L"0:0 1:1 2:2 3~3 4:4 5:5");
+	CHECK(NoteRows(L"", L"", DfLayout::SideBySide, -1, { Note(1, false, 0) }).empty());
+
+	// zero rows asked for is one
+	CHECK_STR(Rows(NoteRows(L"ab", L"ab", DfLayout::SideBySide, -1, { Note(1, false, 0, 0) })), L"0:0 A1 1:1");
+}
+
+TEST(Annotations_Folds) {
+	const std::wstring_view a = L"abcdefghijklmnopqrst";   // 20 lines
+	const std::wstring_view b = L"abcdefghijXlmnopqrst";    // k -> X at 10
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 1, {})), L"F9 9:9 10~10 11:11 F8");
+
+	// an annotated line stays out of the folds, with as many lines around it as the context says, up to two
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 2, { Note(1, true, 3) })), L"0:0 1:1 2:2 3:3 A1 4:4 5:5 F2 8:8 9:9 10~10 11:11 12:12 F7");
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 1, { Note(1, true, 3) })), L"F2 2:2 3:3 A1 4:4 F4 9:9 10~10 11:11 F8");
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 1, { Note(1, false, 3) })), L"F2 2:2 3:3 A1 4:4 F4 9:9 10~10 11:11 F8");   // the block's lines are the same on both sides
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 0, { Note(1, true, 15) })), L"F10 10~10 F4 15:15 A1 F4");
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 5, { Note(1, true, 15) })), L"F5 5:5 6:6 7:7 8:8 9:9 10~10 11:11 12:12 13:13 14:14 15:15 A1 16:16 17:17 F2");
+
+	// annotations near each other share their lines; one on a changed line doesn't change the folds
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 1, { Note(1, true, 3), Note(2, true, 5) })), L"F2 2:2 3:3 A1 4:4 5:5 A2 6:6 F2 9:9 10~10 11:11 F8");
+	CHECK_STR(Rows(NoteRows(a, b, DfLayout::SideBySide, 1, { Note(1, true, 10) })), L"F9 9:9 10~10 A1 11:11 F8");
+}
+
+TEST(Annotations_Document) {
+	DfDocument doc;
+	doc.left = Letters(L"abcdef");
+	doc.right = Letters(L"abcXef");
+	doc.Compute({}, 4);
+	doc.annotations = { Note(7, true, 3, 2), Note(8, false, 0) };
+	doc.BuildRows(DfLayout::SideBySide, -1);
+	CHECK_STR(Rows(doc.rows), L"0:0 A8 1:1 2:2 3~3 A7 a7 4:4 5:5");
+	CHECK(doc.annotationRows.size() == 2 && doc.annotationRows[8] == 1 && doc.annotationRows[7] == 5);
+
+	// the lines' rows are the rows that show them
+	CHECK(doc.RowOf(false, 1) == 2 && doc.RowOf(true, 3) == 4 && doc.RowOf(false, 5) == 8);
+	for (bool right : { false, true })
+		for (size_t line = 0; line < 6; line++) {
+			int row = doc.RowOf(right, line);
+			CHECK(row >= 0 && (right ? doc.rows[row].right : doc.rows[row].left) == int(line));
+		}
+
+	// an annotation's rows have no line; stepping goes past them
+	DfPos pos;
+	CHECK(!doc.LineOfRow(1, false, pos) && !doc.LineOfRow(5, true, pos) && !doc.LineOfRow(6, false, pos));
+	CHECK(doc.StepRow(4, 1, true) == 7);
+	CHECK(doc.StepRow(0, 1, false) == 2);
+	CHECK(doc.StepRow(1, 0, false) == 0 || doc.StepRow(1, 0, false) == 2);   // the nearest line's row
+
+	// the change's rows stay in one run, the annotation's under it included
+	CHECK(doc.changeRows.size() == 1 && doc.changeRows[0].first == 4 && doc.changeRows[0].count == 3);
+
+	// no text in its rows, however the selection runs over them
+	doc.BuildRows(DfLayout::Unified, -1);
+	CHECK_STR(Rows(doc.rows), L"0:0 A8 1:1 2:2 3~. .~3 A7 a7 4:4 5:5");
+	CHECK_STR(doc.Text({ false, 2, 0 }, { true, 3, 1 }, L"|"), L"c|d|X");
+	CHECK_STR(doc.Text({ true, 3, 0 }, { false, 4, 1 }, L"|"), L"X|e");
+	DfPos start, end;
+	doc.All(false, start, end);
+	CHECK(start == (DfPos{ false, 0, 0 }) && end == (DfPos{ false, 5, 1 }));
+
+	// annotations at the ends: the text's ends are lines
+	doc.annotations = { Note(1, false, 0), Note(2, false, 5, 2) };
+	doc.BuildRows(DfLayout::Unified, -1);
+	CHECK(doc.rows.front().kind == DfRowKind::Equal && doc.rows.back().kind == DfRowKind::Annotation);
+	doc.All(false, start, end);
+	CHECK(start == (DfPos{ false, 0, 0 }) && end == (DfPos{ false, 5, 1 }));
+	doc.BuildRows(DfLayout::SideBySide, -1);
+	doc.All(true, start, end);
+	CHECK(start == (DfPos{ true, 0, 0 }) && end == (DfPos{ true, 5, 1 }));
+
+	// annotations only: nothing to select
+	DfDocument empty;
+	empty.annotations = { Note(1, false, 0) };
+	empty.BuildRows(DfLayout::Unified, -1);
+	CHECK(empty.rows.empty());
+}
+
+TEST(Annotations_Random) {
+	// the rows without the annotations' are the rows without annotations (all lines shown), each annotation has its
+	// rows under its line's, and the lines' rows point at their lines
+	for (int round = 0; round < 300; round++) {
+		std::wstring l, r;
+		for (int i = Random() % 14; i > 0; i--)
+			l += wchar_t(L'a' + Random() % 4);
+		for (int i = Random() % 14; i > 0; i--)
+			r += wchar_t(L'a' + Random() % 4);
+		DfDocument plain;
+		plain.left = Letters(l);
+		plain.right = Letters(r);
+		plain.Compute({}, 4);
+		auto layout = round % 2 ? DfLayout::Unified : DfLayout::SideBySide;
+		plain.BuildRows(layout, -1);
+
+		std::vector<DfAnnotationSlot> notes;
+		size_t valid = 0, extra = 0;
+		for (int i = Random() % 5; i > 0; i--) {
+			bool right = Random() % 2;
+			size_t line = Random() % (std::max(l.size(), r.size()) + 2);
+			uint32_t rows = 1 + Random() % 3;
+			notes.push_back(Note(uint32_t(100 + notes.size()), right, line, rows, Random() % 2));
+			if (line < (right ? r.size() : l.size())) {
+				valid++;
+				extra += rows;
+			}
+		}
+		DfDocument doc = plain;
+		doc.annotations = notes;
+		doc.BuildRows(layout, -1);
+		CHECK(doc.rows.size() == plain.rows.size() + extra);
+		CHECK(doc.annotationRows.size() == valid);
+
+		std::vector<DfRow> without;
+		for (auto& row : doc.rows)
+			if (row.kind != DfRowKind::Annotation)
+				without.push_back(row);
+		CHECK_STR(Rows(without), Rows(plain.rows));
+
+		bool ok = true;
+		for (auto& n : notes) {
+			auto it = doc.annotationRows.find(n.id);
+			if (n.line >= (n.right ? r.size() : l.size())) {
+				ok = ok && it == doc.annotationRows.end();
+				continue;
+			}
+			if (it == doc.annotationRows.end()) {
+				ok = false;
+				continue;
+			}
+			size_t at = it->second;
+			ok = ok && at > 0 && at + n.rows <= doc.rows.size();
+			for (uint32_t k = 0; ok && k < n.rows; k++)
+				ok = doc.rows[at + k].kind == DfRowKind::Annotation && doc.rows[at + k].annotation == n.id && doc.rows[at + k].slot == k;
+			// the row above (or above its sibling annotations) shows the line
+			size_t above = at - 1;
+			while (doc.rows[above].kind == DfRowKind::Annotation && above > 0)
+				above--;
+			ok = ok && (n.right ? doc.rows[above].right : doc.rows[above].left) == int(n.line);
+		}
+		CHECK(ok);
+
+		bool maps = true;
+		for (bool right : { false, true })
+			for (size_t line = 0; line < (right ? r.size() : l.size()); line++) {
+				int row = doc.RowOf(right, line);
+				maps = maps && row >= 0 && (right ? doc.rows[row].right : doc.rows[row].left) == int(line);
+			}
+		CHECK(maps);
+	}
+}
+
+TEST(CommentRange) {
+	size_t first, last;
+	// no selection: the line
+	DfCommentRange(false, {}, {}, { true, 7, 0 }, first, last);
+	CHECK(first == 7 && last == 7);
+	// the click inside the selection of its side: all its lines
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 7, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 5, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 9, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	// a selection ending at the start of a line doesn't include that line
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 0 }, { true, 6, 0 }, first, last);
+	CHECK(first == 5 && last == 8);
+	DfCommentRange(true, { true, 5, 3 }, { true, 5, 0 }, { true, 5, 0 }, first, last);   // within a line
+	CHECK(first == 5 && last == 5);
+	// the end before the start
+	DfCommentRange(true, { true, 9, 2 }, { true, 5, 3 }, { true, 6, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	// outside the selection, or on the other side: just the line
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 10, 0 }, first, last);
+	CHECK(first == 10 && last == 10);
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { false, 7, 0 }, first, last);
+	CHECK(first == 7 && last == 7);
+	DfCommentRange(true, { false, 5, 3 }, { true, 9, 2 }, { true, 7, 0 }, first, last);   // across sides
+	CHECK(first == 7 && last == 7);
+}
+
 // ---- Entry point -------------------------------------------------------------------------
 
 int wmain() {
@@ -828,6 +1146,15 @@ int wmain() {
 	Run_Merge_Undo();
 	Run_Cancel();
 	Run_UnifiedText();
+
+	Run_StyleSpans_Normalize();
+	Run_StyleSegments();
+
+	Run_Annotations_Rows();
+	Run_Annotations_Folds();
+	Run_Annotations_Document();
+	Run_Annotations_Random();
+	Run_CommentRange();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

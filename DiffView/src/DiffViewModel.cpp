@@ -693,7 +693,54 @@ size_t DfBlockOfLine(const DfDiff& diff, bool right, size_t line) {
 
 // ---- Rows ----------------------------------------------------------------------------------
 
-std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context, const std::vector<uint8_t>& expanded) {
+namespace {
+	// the rows of the annotations put under the rows of their lines
+	std::vector<DfRow> InsertAnnotationRows(std::vector<DfRow>&& rows, DfLayout layout, const std::vector<DfAnnotationSlot>& annotations) {
+		if (annotations.empty())
+			return std::move(rows);
+		auto key = [](bool right, size_t line) { return ((uint64_t)right << 63) | (line & INT64_MAX); };
+		std::unordered_map<uint64_t, std::vector<size_t>> under;   // the annotations (indexes) of a line, in order
+		size_t extra = 0;
+		for (size_t i = 0; i < annotations.size(); i++) {
+			under[key(annotations[i].right, annotations[i].line)].push_back(i);
+			extra += std::max<uint32_t>(1, annotations[i].rows);
+		}
+		std::vector<DfRow> out;
+		out.reserve(rows.size() + extra);
+		for (auto& row : rows) {
+			out.push_back(row);
+			if (row.kind == DfRowKind::Fold || row.kind == DfRowKind::Annotation)
+				continue;
+			for (bool right : { false, true }) {
+				int line = right ? row.right : row.left;
+				if (line < 0)
+					continue;
+				auto it = under.find(key(right, (size_t)line));
+				if (it == under.end())
+					continue;
+				for (auto index : it->second) {
+					auto& a = annotations[index];
+					uint32_t slots = std::max<uint32_t>(1, a.rows);
+					for (uint32_t slot = 0; slot < slots; slot++) {
+						DfRow r;
+						r.kind = DfRowKind::Annotation;
+						r.left = r.right = -1;
+						r.block = row.block;
+						r.annotation = a.id;
+						r.slot = slot;
+						r.slots = slots;
+						r.pane = layout == DfLayout::SideBySide ? (a.full ? 2 : a.right ? 1 : 0) : 0;
+						out.push_back(r);
+					}
+				}
+			}
+		}
+		return out;
+	}
+}
+
+std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context, const std::vector<uint8_t>& expanded,
+	const std::vector<DfAnnotationSlot>& annotations) {
 	std::vector<DfRow> rows;
 	size_t total = 0;
 	for (auto& b : diff.blocks)
@@ -708,15 +755,45 @@ std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context,
 				rows.push_back({ DfRowKind::Equal, false, int(b.left + i), int(b.right + i), block });
 		};
 		if (!b.changed) {
-			size_t before = k > 0 ? size_t(context) : 0;
-			size_t after = k + 1 < diff.blocks.size() ? size_t(context) : 0;
-			if (context < 0 || (k < expanded.size() && expanded[k]) || before + after + 2 > b.leftCount) {
+			if (context < 0 || (k < expanded.size() && expanded[k])) {
 				equal(0, b.leftCount);
 				continue;
 			}
-			equal(0, before);
-			rows.push_back({ DfRowKind::Fold, false, int(b.left + before), int(b.right + before), block, uint32_t(b.leftCount - before - after) });
-			equal(b.leftCount - after, b.leftCount);
+			// the lines kept: next to the changes around, and the annotated ones with a little around them
+			const size_t count = b.leftCount;
+			size_t before = k > 0 ? size_t(context) : 0;
+			size_t after = k + 1 < diff.blocks.size() ? size_t(context) : 0;
+			std::vector<std::pair<size_t, size_t>> keep;   // [from, to) in the block
+			auto addKeep = [&](size_t from, size_t to) {
+				if (from < to)
+					keep.push_back({ from, to });
+			};
+			addKeep(0, std::min(before, count));
+			addKeep(count - std::min(after, count), count);
+			for (auto& a : annotations) {
+				size_t first = a.right ? b.right : b.left;
+				if (a.line < first || a.line >= first + count)
+					continue;
+				size_t i = a.line - first, reach = size_t(std::min(context, DfAnnotationContext));
+				addKeep(i - std::min(i, reach), std::min(count, i + reach + 1));
+			}
+			std::sort(keep.begin(), keep.end());
+			size_t at = 0;
+			auto hide = [&](size_t from, size_t to) {   // a fold must hide at least two lines
+				if (to - from >= 2)
+					rows.push_back({ DfRowKind::Fold, false, int(b.left + from), int(b.right + from), block, uint32_t(to - from) });
+				else
+					equal(from, to);
+			};
+			for (size_t i = 0; i < keep.size();) {
+				size_t from = keep[i].first, to = keep[i].second;
+				for (i++; i < keep.size() && keep[i].first <= to; i++)
+					to = std::max(to, keep[i].second);
+				hide(at, from);
+				equal(from, to);
+				at = to;
+			}
+			hide(at, count);
 			continue;
 		}
 
@@ -761,7 +838,7 @@ std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context,
 		}
 		zip(li, lj);
 	}
-	return rows;
+	return InsertAnnotationRows(std::move(rows), layout, annotations);
 }
 
 int DfNextChange(const std::vector<DfRow>& rows, int row, bool forward) {
@@ -917,6 +994,50 @@ size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize) {
 	return DfColumns(line.substr(0, std::min(index, line.size())), tabSize);
 }
 
+// ---- Styled text ------------------------------------------------------------------------------
+
+void DfNormalizeStyleSpans(size_t lineLength, std::vector<DfStyleSpan>& spans) {
+	std::stable_sort(spans.begin(), spans.end(), [](const DfStyleSpan& a, const DfStyleSpan& b) { return a.start < b.start; });
+	size_t end = 0, count = 0;   // the last kept span's end, and how many are kept
+	for (auto span : spans) {
+		uint64_t s = std::max<uint64_t>(span.start, end);
+		uint64_t e = std::min<uint64_t>(lineLength, (uint64_t)span.start + span.length);
+		if (e <= s)
+			continue;
+		spans[count++] = { (uint32_t)s, (uint32_t)(e - s), span.style };
+		end = (size_t)e;
+	}
+	spans.resize(count);
+}
+
+std::vector<DfStyleSegment> DfStyleSegments(std::wstring_view line, const std::vector<DfStyleSpan>& spans, int tabSize) {
+	std::vector<DfStyleSegment> out;
+	size_t index = 0, column = 0, emitted = 0;
+	auto advance = [&](size_t to) {   // the column where the character at 'to' starts; 'to' never goes back
+		for (to = std::min(to, line.size()); index < to; index++)
+			column = line[index] == L'\t' ? (column / tabSize + 1) * tabSize : column + 1;
+		return column;
+	};
+	auto add = [&](size_t first, size_t last, uint32_t style) {
+		if (last <= first)
+			return;
+		if (!out.empty() && out.back().style == style && out.back().last == first)
+			out.back().last = last;
+		else
+			out.push_back({ first, last, style });
+		emitted = last;
+	};
+	for (auto& span : spans) {
+		if (span.start < index || span.start >= line.size())
+			continue;   // not normalized: overlapping or past the end
+		size_t first = advance(span.start);
+		add(emitted, first, DfNoStyle);
+		add(first, advance(std::min<size_t>(line.size(), (size_t)span.start + span.length)), span.style);
+	}
+	add(emitted, advance(line.size()), DfNoStyle);
+	return out;
+}
+
 // ---- Words and columns ----------------------------------------------------------------------
 
 namespace {
@@ -978,6 +1099,20 @@ size_t DfIndexAtColumn(std::wstring_view line, double column, int tabSize) {
 
 // ---- The control's document ------------------------------------------------------------------
 
+void DfCommentRange(bool hasSelection, DfPos start, DfPos end, DfPos clicked, size_t& first, size_t& last) {
+	first = last = clicked.line;
+	if (!hasSelection || start.right != clicked.right || end.right != clicked.right)
+		return;
+	if (start.line > end.line || (start.line == end.line && start.column > end.column))
+		std::swap(start, end);
+	if (clicked.line < start.line || clicked.line > end.line)
+		return;
+	first = start.line;
+	last = end.line;
+	if (last > first && end.column == 0)
+		last--;
+}
+
 void DfDocument::Compute(const DfOptions& options, int tabSize) {
 	diff = DfCompute(left, right, options);
 	changeBlocks.clear();
@@ -998,7 +1133,8 @@ void DfDocument::UpdateColumns(int tabSize) {
 
 void DfDocument::BuildRows(DfLayout rowLayout, int context) {
 	layout = rowLayout;
-	rows = DfBuildRows(diff, layout, context, expanded);
+	rows = DfBuildRows(diff, layout, context, expanded, annotations);
+	annotationRows.clear();
 	leftRows.assign(left.size(), -1);
 	rightRows.assign(right.size(), -1);
 	changeRows.assign(changeBlocks.size(), {});
@@ -1006,6 +1142,13 @@ void DfDocument::BuildRows(DfLayout rowLayout, int context) {
 	uint32_t changeBlock = UINT32_MAX;
 	for (size_t r = 0; r < rows.size(); r++) {
 		auto& row = rows[r];
+		if (row.kind == DfRowKind::Annotation) {
+			if (row.slot == 0)
+				annotationRows[row.annotation] = r;
+			if (change >= 0 && row.block == changeBlock)
+				changeRows[change].count++;   // under a changed row: the change's rows stay in one run
+			continue;
+		}
 		if (row.kind == DfRowKind::Fold) {
 			for (uint32_t k = 0; k < row.hidden; k++) {
 				leftRows[row.left + k] = int(r);
@@ -1042,7 +1185,7 @@ int DfDocument::RowOf(bool rightSide, size_t line) const {
 }
 
 bool DfDocument::LineOfRow(size_t row, bool rightSide, DfPos& pos) const {
-	if (row >= rows.size() || rows[row].kind == DfRowKind::Fold)
+	if (row >= rows.size() || rows[row].kind == DfRowKind::Fold || rows[row].kind == DfRowKind::Annotation)
 		return false;
 	auto& r = rows[row];
 	if (layout == DfLayout::Unified) {
@@ -1137,6 +1280,8 @@ std::wstring DfDocument::Text(DfPos a, DfPos b, std::wstring_view eol) const {
 	if (ra < 0 || rb < 0)
 		return text;
 	for (int r = ra; r <= rb; r++) {
+		if (rows[r].kind == DfRowKind::Annotation)
+			continue;   // no text of the sides
 		if (r > ra)
 			text += eol;
 		auto& row = rows[r];
@@ -1183,6 +1328,12 @@ void DfDocument::All(bool rightSide, DfPos& start, DfPos& end) const {
 			pos.column = Lines(pos.right)[pos.line].size();
 		return pos;
 	};
-	start = edge(rows.front(), false);
-	end = edge(rows.back(), true);
+	// the first and last rows that show lines (an annotation's rows are no text)
+	auto shows = [](const DfRow& row) { return row.kind != DfRowKind::Annotation; };
+	auto first = std::find_if(rows.begin(), rows.end(), shows);
+	auto last = std::find_if(rows.rbegin(), rows.rend(), shows);
+	if (first == rows.end())
+		return;
+	start = edge(*first, false);
+	end = edge(*last, true);
 }

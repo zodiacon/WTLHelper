@@ -15,6 +15,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <string_view>
 #include <vector>
 
@@ -100,6 +101,7 @@ struct DFVPOS {
 #define DFVHT_OVERVIEW  6   // the strip beside the scroll bar; row: the row there
 #define DFVHT_BELOW     7   // under the last row
 #define DFVHT_MERGE     8   // a merge arrow between the panes; change, toRight
+#define DFVHT_ANNOTATION 9  // the room of an annotation, outside its window (the gutter, the other pane); annotation
 
 struct DFVHITTEST {
 	POINT  pt;                 // in: client coords
@@ -108,6 +110,7 @@ struct DFVHITTEST {
 	DFVPOS pos;
 	int    change;             // DFVHT_MERGE: the change's index
 	BOOL   toRight;            // DFVHT_MERGE: the arrow copies the left lines to the right
+	UINT   annotation;         // DFVHT_ANNOTATION: its id
 };
 
 // ---- Merging -----------------------------------------------------------------------
@@ -118,6 +121,56 @@ struct DFVHITTEST {
 #define DFVMF_TORIGHT   0x0001   // the left lines over the right ones
 #define DFVMF_TOLEFT    0x0002
 
+// ---- Syntax highlighting ----------------------------------------------------------------
+//
+// The control has no tokenizer: the app has a palette (SetStylePalette) and answers DFVN_GETLINESTYLE for the lines
+// being painted, giving spans of characters with the index of a palette entry. A line is asked about once; its
+// spans are kept until the texts change (a merge, undo or new compare) or InvalidateStyles is called. Characters
+// no span covers, and spans whose style the palette doesn't have, are plain text.
+
+#define DFVSF_BOLD       0x0001
+#define DFVSF_ITALIC     0x0002
+#define DFVSF_UNDERLINE  0x0004
+
+struct DFVSTYLE {                       // an entry of the palette
+	COLORREF crText;                    // CLR_DEFAULT: the control's text color
+	COLORREF crBack;                    // CLR_NONE: none (a changed word's shading is drawn over it)
+	UINT     flags;                     // DFVSF_*
+};
+
+struct DFVSTYLESPAN {                   // characters of a line (an index into it: a tab is one character)
+	size_t start;
+	size_t length;
+	UINT   style;                       // index into the palette
+};
+
+// ---- Annotations ------------------------------------------------------------------------
+//
+// An annotation is room under a line of one side for a window of the app's (a review comment). The control keeps the
+// room, in whole rows (the height rounded up to the row height), and puts the window there as the view scrolls; the
+// window's own content is the app's. Windows are made on demand: the control sends DFVN_ANNOTATIONSHOW for an
+// annotation coming near the view, and the app makes its window a child of the control (the notification's
+// hdr.hwndFrom) and returns it in hwnd; DFVN_ANNOTATIONHIDE says the annotation went far from the view (or was
+// removed), and the app destroys or hides the window. So a file with hundreds of comments has a few windows. The
+// control sets the window's position, size and window region (to clip it at the view's edges): the app's window
+// leaves them alone, and reports its real height with SetAnnotationHeight (the first height is an estimate). The
+// messages the window sends its parent (WM_COMMAND, WM_NOTIFY, WM_CTLCOLOR*...) reach the control's parent.
+//
+// The line is a line of the text the view shows; after a merge, an undo or new texts the app gives the annotations
+// again (those whose line isn't there have no room, and wait). An annotated unchanged line isn't folded away, with
+// a line or two around it.
+
+#define DFVAF_FULLWIDTH  0x0001   // side by side: across both panes (else the side's pane, the other one hatched)
+
+struct DFVANNOTATION {
+	UINT   id;                          // the app's, not 0, unique
+	BOOL   right;                       // the side whose line it follows
+	size_t line;                        // 0-based
+	UINT   flags;                       // DFVAF_*
+	int    heightDips;                  // the room, an estimate until the window tells; at least 1
+	LPARAM data;                        // the app's, in the notifications
+};
+
 // ---- Notifications -------------------------------------------------------------
 
 #define DFVN_FIRST          (0U - 3000U)   // outside the common controls ranges
@@ -127,6 +180,35 @@ struct DFVHITTEST {
 #define DFVN_MERGE          (DFVN_FIRST - 3)   // NMDFVMERGE; the user is merging a change; a non-zero return stops it
 #define DFVN_TEXTCHANGED    (DFVN_FIRST - 4)   // NMHDR; the user's merge or undo changed a text
 #define DFVN_DIFFDONE       (DFVN_FIRST - 5)   // NMHDR; a compare on the worker thread is done and shown
+#define DFVN_GETLINESTYLE   (DFVN_FIRST - 6)   // NMDFVLINESTYLE; while painting, for a line with no spans yet
+#define DFVN_ANNOTATIONSHOW (DFVN_FIRST - 7)   // NMDFVANNOTATION; make the window, a child of the control: hwnd
+#define DFVN_ANNOTATIONHIDE (DFVN_FIRST - 8)   // NMDFVANNOTATION; the window (hwnd) isn't needed now
+#define DFVN_GUTTERADD      (DFVN_FIRST - 9)   // NMDFVGUTTERADD; the user clicked the "+" of a line
+
+struct NMDFVGUTTERADD {
+	NMHDR  hdr;
+	BOOL   right;                       // the side of the lines; an unchanged line in the unified layout is the right's
+	size_t firstLine;                   // 0-based; the selection's lines if the click was in it, else just the line
+	size_t lastLine;
+};
+
+struct NMDFVANNOTATION {
+	NMHDR  hdr;
+	UINT   id;
+	LPARAM data;
+	RECT   rc;                          // client coords: where the window will be (SHOW: its first size)
+	HWND   hwnd;                        // SHOW: out, the window (null: none yet, asked again later); HIDE: in
+};
+
+struct NMDFVLINESTYLE {
+	NMHDR  hdr;
+	BOOL   right;                       // in: the side
+	size_t line;                        // in: 0-based, in the text the view shows
+	LPCWSTR text;                       // in: the line, not null-terminated
+	size_t length;                      // in
+	DFVSTYLESPAN* spans;                // out: in the app's memory, which stays until the notification returns
+	size_t spanCount;                   // out: 0 (the default): plain
+};
 
 struct NMDFVMERGE {
 	NMHDR     hdr;
@@ -146,6 +228,10 @@ struct NMDFVCONTEXTMENU {
 
 struct DfDocument;
 struct DfSpan;
+struct DfRow;
+struct DfAnnotationSlot;
+struct DfStyleSegment;
+struct DfStyleStore;
 struct DfJob;
 class DfLines;
 struct DfUndoStack;
@@ -198,6 +284,12 @@ public:
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		// what an annotation's window sends its parent, which is the control
+		MESSAGE_HANDLER(WM_COMMAND, OnToParent)
+		MESSAGE_HANDLER(WM_NOTIFY, OnToParent)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnToParent)
+		MESSAGE_HANDLER(WM_MEASUREITEM, OnToParent)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnToParent)
 	END_MSG_MAP()
 
 	// ---- Texts ------------------------------------------------------------------------
@@ -298,6 +390,48 @@ public:
 	size_t  GetBackgroundThreshold() const;
 	bool    IsComparing() const;
 
+	// ---- Annotations --------------------------------------------------------------------
+	//
+	// See above. Adding, removing and changing the room builds the rows again (keeping the line at the top of the
+	// view); AddAnnotations does that once for many. The notifications can be answered by calling these.
+
+	BOOL    AddAnnotation(const DFVANNOTATION* annotation);   // FALSE: no id, or the id is there
+	size_t  AddAnnotations(const DFVANNOTATION* annotations, size_t count);   // how many were added
+	BOOL    RemoveAnnotation(UINT id);                        // HIDE first, if it has a window
+	void    ClearAnnotations();
+	BOOL    SetAnnotationHeight(UINT id, int heightDips);
+	BOOL    GetAnnotation(UINT id, DFVANNOTATION* pAnnotation) const;
+	size_t  GetAnnotationCount() const;
+	// where its window is (client coords), or would be; FALSE if it has no room (its line isn't there)
+	BOOL    GetAnnotationRect(UINT id, RECT* prc) const;
+	BOOL    EnsureAnnotationVisible(UINT id);                 // scrolls to its room
+
+	// ---- The gutter ---------------------------------------------------------------------
+	//
+	// EnableGutterAdd shows a "+" over the line number of the line under the mouse; a click on it sends
+	// DFVN_GUTTERADD (the app then makes the annotation, with AddAnnotation, and the comment's window). A click
+	// inside the selection, on a line of the selection's side, is for all the selection's lines. Icons mark lines
+	// (a comment's): the gutter has room for one at its right edge when any is set; the app keeps the icons alive
+	// while they're set, and the control scales them to the row. Unified, a line is the left one's, else the right's.
+
+	void    EnableGutterAdd(bool enable);
+	bool    IsGutterAddEnabled() const;
+	void    SetGutterIcon(bool right, size_t line, HICON icon);   // nullptr: none
+	void    ClearGutterIcons();
+
+	// ---- Syntax highlighting ------------------------------------------------------------
+	//
+	// SetStylePalette turns it on (the palette is copied; count 0 or nullptr turns it off). The styles are for
+	// the app's own use: a theme change is the app giving a palette for the new colors. The lines asked about are
+	// those of the texts the view shows, so while a compare runs on the worker thread (IsComparing) they are the
+	// previous texts: a tokenizer that needs the lines before this one should be given the line's text, as the
+	// notification does, and not rely on its own copy of the new text. After DFVN_TEXTCHANGED, tokenize again.
+	// In high contrast the palette is ignored.
+
+	void    SetStylePalette(const DFVSTYLE* styles, size_t count);
+	size_t  GetStylePaletteCount() const;
+	void    InvalidateStyles();                       // every line is asked about again when painted
+
 	// ---- Appearance -------------------------------------------------------------------
 	//
 	// The default font is Consolas, 10 points at the window's DPI; WM_SETFONT replaces it (the app then
@@ -339,6 +473,7 @@ private:
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnToParent(UINT, WPARAM, LPARAM, BOOL&);
 
 	struct Anchor {            // a line kept in view across a new diff or layout
 		bool   right = false;
@@ -379,8 +514,36 @@ private:
 	void    PaintTitles(WTL::CDCHandle dc, const DFVCOLORS& c);
 	void    PaintRow(WTL::CDCHandle dc, size_t row, int y, const DFVCOLORS& c, int right);
 	void    PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_view line, const std::vector<DfSpan>* spans, COLORREF text, COLORREF markBack,
-		size_t row, bool rightSide, const DFVCOLORS& c);
-	void    PaintNumber(WTL::CDCHandle dc, int right, int y, int line, COLORREF color);
+		size_t row, bool rightSide, const DFVCOLORS& c, const std::vector<DfStyleSegment>* styled = nullptr);
+	// the line's styled segments (nullptr: plain); asks the app the first time
+	bool    GetLineSegments(bool rightSide, size_t line, std::wstring_view text, std::vector<DfStyleSegment>& out);
+	HFONT   StyleFont(UINT flags);                    // the font with bold, italic or underline added; flags 0: m_hFont
+	void    ForgetStyles();                           // the spans asked for (the lines changed); the palette stays
+
+	// the gutter (DiffViewGutter.cpp)
+	int     GutterExtra() const;                      // width the icons and the "+" ask the gutter for
+	int     GutterAddSize() const;
+	bool    GutterAddRect(size_t row, bool rightSide, RECT* prc) const;   // the "+" of a row's line
+	bool    GutterRowAt(POINT pt, size_t& row, bool& rightSide) const;    // the row whose gutter has the point
+	bool    GutterAddAt(POINT pt, size_t& row, bool& rightSide) const;    // the point is on the "+" shown
+	void    UpdateHotGutter(POINT pt);
+	void    PaintGutterExtras(WTL::CDCHandle dc, size_t index, int y, int pane, const DFVCOLORS& c);   // pane -1: unified
+	void    UserGutterAdd(size_t row, bool rightSide);
+
+	// annotations (DiffViewAnnotations.cpp)
+	struct AnnotationState {
+		DFVANNOTATION info{};
+		HWND hwnd = nullptr;                          // the app's window, while the annotation is near the view
+		bool clipped = false;                         // its window region is set
+	};
+	AnnotationState* FindAnnotation(UINT id);
+	const AnnotationState* FindAnnotation(UINT id) const;
+	std::vector<DfAnnotationSlot> AnnotationSlots() const;   // the rows' input
+	int     AnnotationRows(int heightDips) const;
+	void    UpdateAnnotations();                      // asks for and drops windows, then puts them where they belong
+	void    PlaceAnnotationWindows();
+	HWND    FireAnnotation(UINT code, UINT id, LPARAM data, const RECT& rc, HWND hwnd);   // the window the app answered
+	void    PaintAnnotationRow(WTL::CDCHandle dc, const DfRow& row, int y, const DFVCOLORS& c);	void    PaintNumber(WTL::CDCHandle dc, int right, int y, int line, COLORREF color);
 	void    FillHatch(WTL::CDCHandle dc, const RECT& rc, COLORREF back, COLORREF hatch);
 	bool    SelectionIn(size_t row, bool rightSide, size_t length, size_t& from, size_t& to, bool& lineBreak) const;
 	int     ColumnToX(WTL::CDCHandle dc, std::wstring_view line, size_t index) const;   // from the text's origin
@@ -432,6 +595,15 @@ private:
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;
 	WTL::CFont m_UiFont;                              // the titles'
+	bool    m_GutterAdd = false;
+	size_t  m_HotGutterRow = SIZE_MAX;                // the row whose gutter has the mouse (with the "+" on)
+	bool    m_HotGutterRight = false;
+	std::unordered_map<unsigned long long, HICON> m_GutterIcons;   // by side and line
+	std::vector<AnnotationState> m_Annotations;
+	bool    m_UpdatingAnnotations = false;            // UpdateAnnotations is running (the app's answers may call it again)
+	bool    m_AnnotationsAgain = false;
+	std::unique_ptr<DfStyleStore> m_Styles;           // the palette and the spans asked for; none until a palette is set
+	WTL::CFont m_StyleFonts[8];                       // m_hFont with the DFVSF_* flags; made when first used
 	UINT    m_Dpi = 96;
 	int     m_RowHeight = 16;
 	int     m_TextOffset = 0;

@@ -61,7 +61,7 @@ CDiffViewCtrl::~CDiffViewCtrl() {
 
 LRESULT CDiffViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
-	ModifyStyle(0, WS_VSCROLL | WS_HSCROLL, SWP_FRAMECHANGED);
+	ModifyStyle(0, WS_VSCROLL | WS_HSCROLL | WS_CLIPCHILDREN, SWP_FRAMECHANGED);   // children: the annotations' windows
 	UpdateFonts();
 	UpdateMetrics();
 	UpdateScrollBarTheme();
@@ -71,6 +71,8 @@ LRESULT CDiffViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CDiffViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	CancelCompare();   // its result has no window to go to
+	for (auto& a : m_Annotations)
+		a.hwnd = nullptr;   // destroyed with the control, which has no one to tell
 	DisconnectAccessible();
 	bHandled = FALSE;
 	return 0;
@@ -102,6 +104,10 @@ void CDiffViewCtrl::UpdateFonts() {
 		wcscpy_s(lf.lfFaceName, L"Consolas");
 		m_hFont = ::CreateFontIndirectW(&lf);
 	}
+	for (auto& font : m_StyleFonts) {   // made from m_hFont again when used
+		if (!font.IsNull())
+			font.DeleteObject();
+	}
 	// the titles': the message font
 	NONCLIENTMETRICSW ncm{ sizeof(ncm) };
 	::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, m_Dpi);
@@ -132,6 +138,8 @@ void CDiffViewCtrl::UpdateMetrics() {
 	m_MarkerWidth = Scale(3);
 	if (m_HasCaret)
 		CreateSystemCaret();   // the row's height
+	if (!m_Annotations.empty() && IsWindow())
+		RebuildRows();   // the annotations' rows are of this height
 }
 
 LRESULT CDiffViewCtrl::OnSetFont(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
@@ -276,6 +284,7 @@ void CDiffViewCtrl::Compare(DfLines&& left, DfLines&& right) {
 	}
 	m_Doc->left = std::move(left);
 	m_Doc->right = std::move(right);
+	ForgetStyles();   // the lines moved
 	Recompute();
 	if (comparing && IsWindow())
 		Invalidate();
@@ -287,6 +296,7 @@ LRESULT CDiffViewCtrl::OnDiffDone(UINT, WPARAM wParam, LPARAM, BOOL&) {
 	auto anchor = GetAnchor();
 	m_Doc = std::move(m_Job->doc);
 	m_Job.reset();
+	ForgetStyles();
 	BuildRows();
 	SetAnchor(anchor);
 	ClampPositions();
@@ -315,7 +325,10 @@ CDiffViewCtrl::Anchor CDiffViewCtrl::GetAnchor() const {
 	auto& rows = m_Doc->rows;
 	if (rows.empty())
 		return {};
-	auto& row = rows[std::min(m_TopRow, rows.size() - 1)];
+	size_t index = std::min(m_TopRow, rows.size() - 1);
+	while (index > 0 && rows[index].kind == DfRowKind::Annotation)
+		index--;   // an annotation's rows are under a line: that line
+	auto& row = rows[index];
 	if (row.left >= 0)
 		return { false, (size_t)row.left };
 	return { true, (size_t)row.right };
@@ -333,6 +346,7 @@ void CDiffViewCtrl::SetAnchor(const Anchor& anchor) {
 }
 
 void CDiffViewCtrl::BuildRows() {
+	m_Doc->annotations = AnnotationSlots();
 	m_Doc->BuildRows(m_Layout == DFVL_UNIFIED ? DfLayout::Unified : DfLayout::SideBySide, m_Context);
 	NotifyRowsAccessible();
 }
@@ -580,6 +594,7 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 	pHit->pos = {};
 	pHit->change = -1;
 	pHit->toRight = FALSE;
+	pHit->annotation = 0;
 	POINT pt = pHit->pt;
 	RECT client{};
 	GetClientRect(&client);
@@ -616,15 +631,21 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 	UINT part;
 	pHit->pos = PosFromPoint(pt, rightSide, &part);
 	pHit->part = part;
+	if (m_Doc->rows[row].kind == DfRowKind::Annotation) {
+		pHit->part = DFVHT_ANNOTATION;
+		pHit->annotation = m_Doc->rows[row].annotation;
+	}
 	return TRUE;
 }
 
 int CDiffViewCtrl::GutterWidth() const {
 	int digits = std::max(3, Digits(std::max(m_Doc->left.size(), m_Doc->right.size())));
 	int numbers = m_LineNumbers ? digits * m_DigitWidth + m_Pad : 0;
-	if (m_Layout == DFVL_UNIFIED)
-		return m_MarkerWidth + m_Pad + 2 * numbers + m_DigitWidth + 2 * m_Pad;   // two numbers, then the sign
-	return m_MarkerWidth + m_Pad + numbers + m_Pad;
+	int width = m_Layout == DFVL_UNIFIED ? m_MarkerWidth + m_Pad + 2 * numbers + m_DigitWidth + 2 * m_Pad   // two numbers, then the sign
+		: m_MarkerWidth + m_Pad + numbers + m_Pad;
+	if (m_GutterAdd && !m_LineNumbers)
+		width = std::max(width, m_MarkerWidth + m_Pad + GutterAddSize() + m_Pad);   // the "+" has no number to go over
+	return width + GutterExtra();
 }
 
 CDiffViewCtrl::Pane CDiffViewCtrl::GetPane(int index) const {
@@ -679,6 +700,7 @@ void CDiffViewCtrl::UpdateScrollBars() {
 	si.nPos = m_Left;
 	SetScrollInfo(SB_HORZ, &si, TRUE);
 	UpdateCaret();
+	UpdateAnnotations();   // the rows or the view moved
 }
 
 void CDiffViewCtrl::ScrollTo(size_t topRow, int left) {
@@ -1006,6 +1028,10 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 		FillSolid(dc, { p1.right, y, right, bottom }, c.crBack);
 	}
 
+	if (row.kind == DfRowKind::Annotation) {
+		PaintAnnotationRow(dc, row, y, c);
+		return;
+	}
 	if (row.kind == DfRowKind::Fold) {
 		wchar_t text[64];
 		swprintf_s(text, L"\x2026  %u unchanged lines", row.hidden);
@@ -1038,7 +1064,10 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 		auto& lines = rightSide ? m_Doc->right : m_Doc->left;
 		COLORREF back = !changed ? c.crBack : rightSide ? c.crInsertedBack : c.crDeletedBack;
 		FillSolid(dc, text, back);
-		PaintText(dc, text, lines[line], spansOf(rightSide, line), c.crText, rightSide ? c.crInsertedMark : c.crDeletedMark, index, rightSide, c);
+		std::vector<DfStyleSegment> segments;
+		bool styled = GetLineSegments(rightSide, (size_t)line, lines[line], segments);
+		PaintText(dc, text, lines[line], spansOf(rightSide, line), c.crText, rightSide ? c.crInsertedMark : c.crDeletedMark, index, rightSide, c,
+			styled ? &segments : nullptr);
 	};
 
 	if (unified) {
@@ -1062,6 +1091,7 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 			RECT r{ x, y, pane.text, bottom };
 			dc.ExtTextOut(x, y + m_TextOffset, ETO_CLIPPED, &r, rightSide ? L"+" : L"-", 1, nullptr);
 		}
+		PaintGutterExtras(dc, index, y, -1, c);
 		cell(pane, rightSide, rightSide ? row.right : row.left);
 		return;
 	}
@@ -1074,6 +1104,8 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 			FillSolid(dc, { pane.left, y, pane.left + m_MarkerWidth, bottom }, side ? c.crInsertedMark : c.crDeletedMark);
 		if (m_LineNumbers && line >= 0)
 			PaintNumber(dc, pane.left + m_MarkerWidth + m_Pad + numberWidth, y, line, c.crGutterText);
+		if (line >= 0)
+			PaintGutterExtras(dc, index, y, side, c);
 		cell(pane, side == 1, line);
 	}
 }
@@ -1113,7 +1145,7 @@ bool CDiffViewCtrl::SelectionIn(size_t row, bool rightSide, size_t length, size_
 }
 
 void CDiffViewCtrl::PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_view line, const std::vector<DfSpan>* spans, COLORREF text, COLORREF markBack,
-	size_t row, bool rightSide, const DFVCOLORS& c) {
+	size_t row, bool rightSide, const DFVCOLORS& c, const std::vector<DfStyleSegment>* styled) {
 	if (rc.right <= rc.left)
 		return;
 	DfExpandTabs(line, m_TabSize, m_DrawBuffer);
@@ -1121,6 +1153,29 @@ void CDiffViewCtrl::PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_vi
 	auto clipped = [&](int x0, int x1) {
 		return RECT{ std::max((int)rc.left, origin + x0), rc.top, std::min((int)rc.right, origin + x1), rc.bottom };
 	};
+	// where a column of the expanded line starts, from the text's origin
+	auto columnX = [&](size_t column) -> int {
+		if (m_FixedPitch)
+			return (int)std::min<size_t>(column * m_CharWidth, INT_MAX / 2);
+		SIZE size{};
+		dc.GetTextExtent(m_DrawBuffer.c_str(), (int)std::min<size_t>({ column, m_DrawBuffer.size(), 32 * 1024 }), &size);
+		return (int)size.cx;
+	};
+	auto styleOf = [&](uint32_t style) -> const DfStyle* {
+		return style < m_Styles->palette.size() ? &m_Styles->palette[style] : nullptr;
+	};
+
+	// the styles' backgrounds, under the changed words
+	if (styled) {
+		for (auto& seg : *styled) {
+			auto st = styleOf(seg.style);
+			if (!st || st->back == CLR_NONE)
+				continue;
+			auto r = clipped(columnX(seg.first), columnX(seg.last));
+			if (r.right > r.left)
+				FillSolid(dc, r, st->back);
+		}
+	}
 
 	// the changed words under the text
 	if (spans) {
@@ -1163,11 +1218,30 @@ void CDiffViewCtrl::PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_vi
 	}
 	if (first >= last)
 		return;
-	auto draw = [&](COLORREF color, const RECT& clip) {
+	// columns [from, to) of the expanded line
+	auto drawRange = [&](size_t from, size_t to, int x, COLORREF color, const RECT& clip) {
 		dc.SetTextColor(color);
-		dc.ExtTextOut(origin + (int)first * m_CharWidth, rc.top + m_TextOffset, ETO_CLIPPED, &clip, m_DrawBuffer.c_str() + first, (UINT)(last - first), nullptr);
+		dc.ExtTextOut(origin + x, rc.top + m_TextOffset, ETO_CLIPPED, &clip, m_DrawBuffer.c_str() + from, (UINT)(to - from), nullptr);
 	};
-	draw(text, rc);
+	// the text in view, in the plain color or the selection's, each styled segment in its own font and color
+	auto draw = [&](bool selected, const RECT& clip) {
+		COLORREF selColor = focused ? c.crSelText : c.crSelTextInactive;
+		if (!styled) {
+			drawRange(first, last, columnX(first), selected ? selColor : text, clip);
+			return;
+		}
+		for (auto& seg : *styled) {
+			size_t from = std::max(seg.first, first), to = std::min(seg.last, last);
+			if (from >= to)
+				continue;
+			auto st = styleOf(seg.style);
+			int x = columnX(from);   // measured in the regular font: a style's font (bold) only draws
+			auto oldFont = dc.SelectFont(StyleFont(st ? st->flags : 0));
+			drawRange(from, to, x, selected ? selColor : st && st->text != CLR_DEFAULT ? st->text : text, clip);
+			dc.SelectFont(oldFont);
+		}
+	};
+	draw(false, rc);
 	if (sel.right > sel.left)
-		draw(focused ? c.crSelText : c.crSelTextInactive, sel);
+		draw(true, sel);
 }

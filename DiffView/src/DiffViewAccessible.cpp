@@ -382,6 +382,8 @@ private:
 		auto& row = Rows()[index];
 		if (row.kind == DfRowKind::Fold)
 			return std::to_wstring(row.hidden) + L" unchanged lines";
+		if (row.kind == DfRowKind::Annotation)
+			return L"Comment";
 		if (row.kind == DfRowKind::Changed && row.left >= 0 && row.right >= 0)
 			return Text(false, row.left) + L"  \x2192  " + Text(true, row.right);
 		return row.left >= 0 ? Text(false, row.left) : Text(true, row.right);
@@ -391,6 +393,8 @@ private:
 		auto& row = Rows()[index];
 		auto number = [](int line) { return std::to_wstring(line + 1); };
 		switch (row.kind) {
+			case DfRowKind::Annotation:
+				return L"Room for a comment on the line above";
 			case DfRowKind::Fold:
 				return L"Lines " + number(row.left) + L" to " + number(row.left + row.hidden - 1) + L" on the left, " +
 					number(row.right) + L" to " + number(row.right + row.hidden - 1) + L" on the right, folded";

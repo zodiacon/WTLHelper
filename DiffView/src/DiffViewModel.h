@@ -7,11 +7,13 @@
 // other side and the unified diff text. Covered by DiffViewTests.
 
 #include <windows.h>
+#include <commctrl.h>   // CLR_NONE, CLR_DEFAULT
 
 #include <atomic>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // ---- Lines -------------------------------------------------------------------------------
@@ -137,6 +139,45 @@ size_t DfColumns(std::wstring_view line, int tabSize);                        //
 void   DfExpandTabs(std::wstring_view line, int tabSize, std::wstring& out);
 size_t DfColumnOf(std::wstring_view line, size_t index, int tabSize);       // the column where a character starts
 
+// ---- Styled text (syntax highlighting) -------------------------------------------------------
+
+constexpr uint32_t DfNoStyle = UINT32_MAX;   // plain text: no span, or a style the palette doesn't have
+
+struct DfStyleSpan {     // characters of a line (indexes into the line, tabs not expanded) and the app's style for them
+	uint32_t start = 0;
+	uint32_t length = 0;
+	uint32_t style = 0;
+	bool operator==(const DfStyleSpan&) const = default;
+};
+
+// Sorts the spans by start and makes them fit the line: spans past its end are cut or dropped, empty ones dropped,
+// and where spans overlap the one that starts first (the first given, on a tie) keeps the characters.
+void DfNormalizeStyleSpans(size_t lineLength, std::vector<DfStyleSpan>& spans);
+
+struct DfStyleSegment {  // columns of the line with its tabs expanded, [first, last)
+	size_t   first = 0;
+	size_t   last = 0;
+	uint32_t style = DfNoStyle;
+	bool operator==(const DfStyleSegment&) const = default;
+};
+
+// The line's whole width as consecutive segments: the (normalized) spans' columns, and plain ones between and after
+// them. Neighbors of one style are joined.
+std::vector<DfStyleSegment> DfStyleSegments(std::wstring_view line, const std::vector<DfStyleSpan>& spans, int tabSize);
+
+struct DfStyle {         // one entry of the palette
+	COLORREF text = CLR_DEFAULT;   // CLR_DEFAULT: the text color
+	COLORREF back = CLR_NONE;      // CLR_NONE: none
+	UINT     flags = 0;            // 1 bold, 2 italic, 4 underline
+};
+
+// The palette and the spans the app gave for the lines asked about, by side and line. With no palette nothing is asked.
+struct DfStyleStore {
+	std::vector<DfStyle> palette;
+	std::unordered_map<size_t, std::vector<DfStyleSpan>> cache[2];
+	static constexpr size_t MaxCached = 20000;   // lines per side; the cache is emptied when it gets past this
+};
+
 // ---- Rows ----------------------------------------------------------------------------------
 
 enum class DfLayout {
@@ -148,6 +189,17 @@ enum class DfRowKind : uint8_t {
 	Equal,
 	Changed,
 	Fold,         // unchanged lines not shown
+	Annotation,   // room the app fills (a comment); no line of either side
+};
+
+// Room the app asked for under a line: a few rows, as many as its height needs (the control's row height is fixed,
+// which keeps scrolling, paging and the overview in whole rows).
+struct DfAnnotationSlot {
+	uint32_t id = 0;
+	bool     right = false;      // the side whose line it follows
+	size_t   line = 0;
+	uint32_t rows = 1;           // >= 1
+	bool     full = false;       // side by side: across both panes (else in its side's pane, the other one hatched)
 };
 
 struct DfRow {
@@ -157,12 +209,20 @@ struct DfRow {
 	int      right = -1;
 	uint32_t block = 0;
 	uint32_t hidden = 0;         // Fold: how many lines
+	uint32_t annotation = 0;     // Annotation: the app's id
+	uint32_t slot = 0;           // Annotation: which of its rows this is, 0 for the first
+	uint32_t slots = 0;          // Annotation: how many rows it has
+	uint8_t  pane = 0;           // Annotation, side by side: 0 the left pane, 1 the right one, 2 both
 };
 
 // The rows to show. With context >= 0, runs of unchanged lines keep that many lines next to a change and fold the
 // rest (a fold must hide at least two lines); expanded (by block index, may be shorter or empty) shows a block's
-// lines anyway.
-std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context = -1, const std::vector<uint8_t>& expanded = {});
+// lines anyway. An annotated unchanged line stays out of the folds, with up to DfAnnotationContext lines around it,
+// and the annotation's rows come right after the row showing its line (annotations on one row: in the order given,
+// the left side's first). One whose line isn't shown (there is no such line) gets no rows.
+constexpr int DfAnnotationContext = 2;
+std::vector<DfRow> DfBuildRows(const DfDiff& diff, DfLayout layout, int context = -1, const std::vector<uint8_t>& expanded = {},
+	const std::vector<DfAnnotationSlot>& annotations = {});
 
 // The first row of the next (or previous) changed block after (or before) the block of the given row; -1 if none.
 int DfNextChange(const std::vector<DfRow>& rows, int row, bool forward);
@@ -211,6 +271,11 @@ struct DfPos {                          // a place between characters of a line 
 	bool operator==(const DfPos&) const = default;
 };
 
+// The lines a comment started at a line covers (the "+" in the gutter): the selection's lines if the line is among
+// them and the selection is on the line's side (a selection that ends at the start of a line doesn't include it),
+// else just the line. first <= last.
+void DfCommentRange(bool hasSelection, DfPos start, DfPos end, DfPos clicked, size_t& first, size_t& last);
+
 struct DfChangeRows {                   // where a changed block's rows are
 	size_t first = 0;
 	size_t count = 0;
@@ -228,6 +293,8 @@ struct DfDocument {
 	std::vector<DfChangeRows> changeRows;   // by change, as changeBlocks
 	std::vector<int> leftRows, rightRows;   // by line: the row showing it, or the fold hiding it
 	std::vector<uint8_t> expanded;      // by block: folds the user opened
+	std::vector<DfAnnotationSlot> annotations;   // set before BuildRows
+	std::unordered_map<uint32_t, size_t> annotationRows;   // by id: the first row of those that have rows
 	size_t  maxColumns = 0;             // the widest line of either side, tabs expanded
 
 	void Compute(const DfOptions& options, int tabSize);

@@ -185,6 +185,7 @@ void CDiffViewCtrl::UpdateHotMerge(POINT pt) {
 LRESULT CDiffViewCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	m_TrackingMouse = false;
 	UpdateHotMerge({ -1, -1 });
+	UpdateHotGutter({ -1, -1 });
 	return 0;
 }
 

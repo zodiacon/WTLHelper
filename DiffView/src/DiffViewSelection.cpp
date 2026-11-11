@@ -328,6 +328,12 @@ LRESULT CDiffViewCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) 
 		ScrollToOverview(pt.y);
 		return 0;
 	}
+	size_t addRow;
+	bool addRight;
+	if (GutterAddAt(pt, addRow, addRight)) {
+		UserGutterAdd(addRow, addRight);
+		return 0;
+	}
 	int change;
 	bool toRight;
 	if (MergeHitTest(pt, change, toRight)) {
@@ -447,7 +453,9 @@ void CDiffViewCtrl::DragTo(POINT pt) {
 
 LRESULT CDiffViewCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	if (m_Drag == Drag::None || ::GetCapture() != m_hWnd) {
-		UpdateHotMerge({ (short)LOWORD(lParam), (short)HIWORD(lParam) });
+		POINT at{ (short)LOWORD(lParam), (short)HIWORD(lParam) };
+		UpdateHotMerge(at);
+		UpdateHotGutter(at);
 		return 0;
 	}
 	m_DragPoint = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
@@ -515,6 +523,10 @@ LRESULT CDiffViewCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHa
 	if (hit.part == DFVHT_TEXT)
 		cursor = IDC_IBEAM;
 	else if (hit.part == DFVHT_FOLD || hit.part == DFVHT_MERGE)
+		cursor = IDC_HAND;
+	size_t addRow;
+	bool addRight;
+	if (GutterAddAt(pt, addRow, addRight))
 		cursor = IDC_HAND;
 	::SetCursor(::LoadCursor(nullptr, cursor));
 	return TRUE;
