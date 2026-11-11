@@ -15,6 +15,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <string_view>
 #include <vector>
 
@@ -182,6 +183,14 @@ struct DFVANNOTATION {
 #define DFVN_GETLINESTYLE   (DFVN_FIRST - 6)   // NMDFVLINESTYLE; while painting, for a line with no spans yet
 #define DFVN_ANNOTATIONSHOW (DFVN_FIRST - 7)   // NMDFVANNOTATION; make the window, a child of the control: hwnd
 #define DFVN_ANNOTATIONHIDE (DFVN_FIRST - 8)   // NMDFVANNOTATION; the window (hwnd) isn't needed now
+#define DFVN_GUTTERADD      (DFVN_FIRST - 9)   // NMDFVGUTTERADD; the user clicked the "+" of a line
+
+struct NMDFVGUTTERADD {
+	NMHDR  hdr;
+	BOOL   right;                       // the side of the lines; an unchanged line in the unified layout is the right's
+	size_t firstLine;                   // 0-based; the selection's lines if the click was in it, else just the line
+	size_t lastLine;
+};
 
 struct NMDFVANNOTATION {
 	NMHDR  hdr;
@@ -397,6 +406,19 @@ public:
 	BOOL    GetAnnotationRect(UINT id, RECT* prc) const;
 	BOOL    EnsureAnnotationVisible(UINT id);                 // scrolls to its room
 
+	// ---- The gutter ---------------------------------------------------------------------
+	//
+	// EnableGutterAdd shows a "+" over the line number of the line under the mouse; a click on it sends
+	// DFVN_GUTTERADD (the app then makes the annotation, with AddAnnotation, and the comment's window). A click
+	// inside the selection, on a line of the selection's side, is for all the selection's lines. Icons mark lines
+	// (a comment's): the gutter has room for one at its right edge when any is set; the app keeps the icons alive
+	// while they're set, and the control scales them to the row. Unified, a line is the left one's, else the right's.
+
+	void    EnableGutterAdd(bool enable);
+	bool    IsGutterAddEnabled() const;
+	void    SetGutterIcon(bool right, size_t line, HICON icon);   // nullptr: none
+	void    ClearGutterIcons();
+
 	// ---- Syntax highlighting ------------------------------------------------------------
 	//
 	// SetStylePalette turns it on (the palette is copied; count 0 or nullptr turns it off). The styles are for
@@ -498,6 +520,16 @@ private:
 	HFONT   StyleFont(UINT flags);                    // the font with bold, italic or underline added; flags 0: m_hFont
 	void    ForgetStyles();                           // the spans asked for (the lines changed); the palette stays
 
+	// the gutter (DiffViewGutter.cpp)
+	int     GutterExtra() const;                      // width the icons and the "+" ask the gutter for
+	int     GutterAddSize() const;
+	bool    GutterAddRect(size_t row, bool rightSide, RECT* prc) const;   // the "+" of a row's line
+	bool    GutterRowAt(POINT pt, size_t& row, bool& rightSide) const;    // the row whose gutter has the point
+	bool    GutterAddAt(POINT pt, size_t& row, bool& rightSide) const;    // the point is on the "+" shown
+	void    UpdateHotGutter(POINT pt);
+	void    PaintGutterExtras(WTL::CDCHandle dc, size_t index, int y, int pane, const DFVCOLORS& c);   // pane -1: unified
+	void    UserGutterAdd(size_t row, bool rightSide);
+
 	// annotations (DiffViewAnnotations.cpp)
 	struct AnnotationState {
 		DFVANNOTATION info{};
@@ -563,6 +595,10 @@ private:
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;
 	WTL::CFont m_UiFont;                              // the titles'
+	bool    m_GutterAdd = false;
+	size_t  m_HotGutterRow = SIZE_MAX;                // the row whose gutter has the mouse (with the "+" on)
+	bool    m_HotGutterRight = false;
+	std::unordered_map<unsigned long long, HICON> m_GutterIcons;   // by side and line
 	std::vector<AnnotationState> m_Annotations;
 	bool    m_UpdatingAnnotations = false;            // UpdateAnnotations is running (the app's answers may call it again)
 	bool    m_AnnotationsAgain = false;

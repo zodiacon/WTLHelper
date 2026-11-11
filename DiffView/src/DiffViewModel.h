@@ -271,6 +271,11 @@ struct DfPos {                          // a place between characters of a line 
 	bool operator==(const DfPos&) const = default;
 };
 
+// The lines a comment started at a line covers (the "+" in the gutter): the selection's lines if the line is among
+// them and the selection is on the line's side (a selection that ends at the start of a line doesn't include it),
+// else just the line. first <= last.
+void DfCommentRange(bool hasSelection, DfPos start, DfPos end, DfPos clicked, size_t& first, size_t& last);
+
 struct DfChangeRows {                   // where a changed block's rows are
 	size_t first = 0;
 	size_t count = 0;

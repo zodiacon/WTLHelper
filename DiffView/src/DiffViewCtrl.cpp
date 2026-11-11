@@ -641,9 +641,11 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 int CDiffViewCtrl::GutterWidth() const {
 	int digits = std::max(3, Digits(std::max(m_Doc->left.size(), m_Doc->right.size())));
 	int numbers = m_LineNumbers ? digits * m_DigitWidth + m_Pad : 0;
-	if (m_Layout == DFVL_UNIFIED)
-		return m_MarkerWidth + m_Pad + 2 * numbers + m_DigitWidth + 2 * m_Pad;   // two numbers, then the sign
-	return m_MarkerWidth + m_Pad + numbers + m_Pad;
+	int width = m_Layout == DFVL_UNIFIED ? m_MarkerWidth + m_Pad + 2 * numbers + m_DigitWidth + 2 * m_Pad   // two numbers, then the sign
+		: m_MarkerWidth + m_Pad + numbers + m_Pad;
+	if (m_GutterAdd && !m_LineNumbers)
+		width = std::max(width, m_MarkerWidth + m_Pad + GutterAddSize() + m_Pad);   // the "+" has no number to go over
+	return width + GutterExtra();
 }
 
 CDiffViewCtrl::Pane CDiffViewCtrl::GetPane(int index) const {
@@ -1089,6 +1091,7 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 			RECT r{ x, y, pane.text, bottom };
 			dc.ExtTextOut(x, y + m_TextOffset, ETO_CLIPPED, &r, rightSide ? L"+" : L"-", 1, nullptr);
 		}
+		PaintGutterExtras(dc, index, y, -1, c);
 		cell(pane, rightSide, rightSide ? row.right : row.left);
 		return;
 	}
@@ -1101,6 +1104,8 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 			FillSolid(dc, { pane.left, y, pane.left + m_MarkerWidth, bottom }, side ? c.crInsertedMark : c.crDeletedMark);
 		if (m_LineNumbers && line >= 0)
 			PaintNumber(dc, pane.left + m_MarkerWidth + m_Pad + numberWidth, y, line, c.crGutterText);
+		if (line >= 0)
+			PaintGutterExtras(dc, index, y, side, c);
 		cell(pane, side == 1, line);
 	}
 }

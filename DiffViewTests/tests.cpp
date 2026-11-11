@@ -1078,6 +1078,35 @@ TEST(Annotations_Random) {
 	}
 }
 
+TEST(CommentRange) {
+	size_t first, last;
+	// no selection: the line
+	DfCommentRange(false, {}, {}, { true, 7, 0 }, first, last);
+	CHECK(first == 7 && last == 7);
+	// the click inside the selection of its side: all its lines
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 7, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 5, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 9, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	// a selection ending at the start of a line doesn't include that line
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 0 }, { true, 6, 0 }, first, last);
+	CHECK(first == 5 && last == 8);
+	DfCommentRange(true, { true, 5, 3 }, { true, 5, 0 }, { true, 5, 0 }, first, last);   // within a line
+	CHECK(first == 5 && last == 5);
+	// the end before the start
+	DfCommentRange(true, { true, 9, 2 }, { true, 5, 3 }, { true, 6, 0 }, first, last);
+	CHECK(first == 5 && last == 9);
+	// outside the selection, or on the other side: just the line
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { true, 10, 0 }, first, last);
+	CHECK(first == 10 && last == 10);
+	DfCommentRange(true, { true, 5, 3 }, { true, 9, 2 }, { false, 7, 0 }, first, last);
+	CHECK(first == 7 && last == 7);
+	DfCommentRange(true, { false, 5, 3 }, { true, 9, 2 }, { true, 7, 0 }, first, last);   // across sides
+	CHECK(first == 7 && last == 7);
+}
+
 // ---- Entry point -------------------------------------------------------------------------
 
 int wmain() {
@@ -1125,6 +1154,7 @@ int wmain() {
 	Run_Annotations_Folds();
 	Run_Annotations_Document();
 	Run_Annotations_Random();
+	Run_CommentRange();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

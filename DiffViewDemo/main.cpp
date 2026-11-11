@@ -55,6 +55,7 @@ enum {
 	ID_VIEW_HIGHCONTRAST,
 	ID_VIEW_SYNTAX,
 	ID_VIEW_COMMENTS,
+	ID_VIEW_ADDBUTTON,
 
 	ID_COMPARE_IGNORECASE = 401,
 	ID_COMPARE_IGNORESPACECHANGE,
@@ -421,16 +422,36 @@ static const struct {
 };
 
 static HFONT g_commentFont;
+static std::vector<std::pair<UINT, CString>> g_newComments;   // the user's, from the "+": ids from 100
+
+static void AddComment(UINT id, bool right, size_t line, bool full) {
+	DFVANNOTATION a{ id, right ? TRUE : FALSE, line, full ? DFVAF_FULLWIDTH : 0u, 40, 0 };
+	g_diff.AddAnnotation(&a);
+	g_diff.SetGutterIcon(right, line, ::LoadIcon(nullptr, IDI_INFORMATION));   // a shared icon: nothing to destroy
+}
 
 static void ToggleComments() {
 	if (g_diff.GetAnnotationCount()) {
 		g_diff.ClearAnnotations();
+		g_diff.ClearGutterIcons();
+		g_newComments.clear();
 		return;
 	}
-	for (auto& c : g_comments) {
-		DFVANNOTATION a{ c.id, c.right ? TRUE : FALSE, c.line, c.full ? DFVAF_FULLWIDTH : 0u, 40, 0 };
-		g_diff.AddAnnotation(&a);
-	}
+	for (auto& c : g_comments)
+		AddComment(c.id, c.right, c.line, c.full);
+}
+
+// the "+" of a line, or of the lines selected: a comment under the last one
+static void OnGutterAdd(const NMDFVGUTTERADD* nm) {
+	UINT id = 100 + (UINT)g_newComments.size();
+	CString text;
+	if (nm->firstLine == nm->lastLine)
+		text.Format(L"New comment on the %s side's line %zu.", nm->right ? L"right" : L"left", nm->firstLine + 1);
+	else
+		text.Format(L"New comment on the %s side's lines %zu to %zu.", nm->right ? L"right" : L"left", nm->firstLine + 1, nm->lastLine + 1);
+	g_newComments.push_back({ id, text });
+	AddComment(id, nm->right != FALSE, nm->lastLine, false);
+	g_diff.EnsureAnnotationVisible(id);
 }
 
 static void OnAnnotationShow(NMDFVANNOTATION* nm) {
@@ -438,6 +459,10 @@ static void OnAnnotationShow(NMDFVANNOTATION* nm) {
 	for (auto& c : g_comments) {
 		if (c.id == nm->id)
 			text = c.text;
+	}
+	for (auto& c : g_newComments) {
+		if (c.first == nm->id)
+			text = c.second;
 	}
 	if (!g_commentFont) {
 		NONCLIENTMETRICSW ncm{ sizeof(ncm) };
@@ -478,6 +503,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_HIGHCONTRAST, g_highContrast);
 	check(ID_VIEW_SYNTAX, g_syntax);
 	check(ID_VIEW_COMMENTS, g_diff.GetAnnotationCount() != 0);
+	check(ID_VIEW_ADDBUTTON, g_diff.IsGutterAddEnabled());
 	check(ID_MERGE_ENABLE, g_diff.GetMergeFlags() != 0);
 	check(ID_MERGE_ASK, g_askMerge);
 	check(ID_MERGE_BACKGROUND, g_diff.GetBackgroundThreshold() != SIZE_MAX);
@@ -547,6 +573,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 			break;
 		case ID_VIEW_COMMENTS:
 			ToggleComments();
+			break;
+		case ID_VIEW_ADDBUTTON:
+			g_diff.EnableGutterAdd(!g_diff.IsGutterAddEnabled());
 			break;
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
@@ -627,6 +656,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 				}
 				case DFVN_ANNOTATIONSHOW:
 					OnAnnotationShow((NMDFVANNOTATION*)lParam);
+					break;
+				case DFVN_GUTTERADD:
+					OnGutterAdd((NMDFVGUTTERADD*)lParam);
 					break;
 				case DFVN_ANNOTATIONHIDE:
 					::DestroyWindow(((NMDFVANNOTATION*)lParam)->hwnd);
@@ -714,6 +746,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_HIGHCONTRAST, L"&High Contrast Drawing");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SYNTAX, L"Syntax &Highlighting");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_COMMENTS, L"Sample Co&mments");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_ADDBUTTON, L"Comment &Buttons (+)");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
 #endif

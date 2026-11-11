@@ -1099,6 +1099,20 @@ size_t DfIndexAtColumn(std::wstring_view line, double column, int tabSize) {
 
 // ---- The control's document ------------------------------------------------------------------
 
+void DfCommentRange(bool hasSelection, DfPos start, DfPos end, DfPos clicked, size_t& first, size_t& last) {
+	first = last = clicked.line;
+	if (!hasSelection || start.right != clicked.right || end.right != clicked.right)
+		return;
+	if (start.line > end.line || (start.line == end.line && start.column > end.column))
+		std::swap(start, end);
+	if (clicked.line < start.line || clicked.line > end.line)
+		return;
+	first = start.line;
+	last = end.line;
+	if (last > first && end.column == 0)
+		last--;
+}
+
 void DfDocument::Compute(const DfOptions& options, int tabSize) {
 	diff = DfCompute(left, right, options);
 	changeBlocks.clear();

@@ -102,6 +102,7 @@
     <ClCompile Include="src\DiffViewAccessible.cpp" />
     <ClCompile Include="src\DiffViewAnnotations.cpp" />
     <ClCompile Include="src\DiffViewCtrl.cpp" />
+    <ClCompile Include="src\DiffViewGutter.cpp" />
     <ClCompile Include="src\DiffViewMerge.cpp" />
     <ClCompile Include="src\DiffViewModel.cpp" />
     <ClCompile Include="src\DiffViewSelection.cpp" />
