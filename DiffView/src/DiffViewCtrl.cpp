@@ -61,7 +61,7 @@ CDiffViewCtrl::~CDiffViewCtrl() {
 
 LRESULT CDiffViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
-	ModifyStyle(0, WS_VSCROLL | WS_HSCROLL, SWP_FRAMECHANGED);
+	ModifyStyle(0, WS_VSCROLL | WS_HSCROLL | WS_CLIPCHILDREN, SWP_FRAMECHANGED);   // children: the annotations' windows
 	UpdateFonts();
 	UpdateMetrics();
 	UpdateScrollBarTheme();
@@ -71,6 +71,8 @@ LRESULT CDiffViewCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 
 LRESULT CDiffViewCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
 	CancelCompare();   // its result has no window to go to
+	for (auto& a : m_Annotations)
+		a.hwnd = nullptr;   // destroyed with the control, which has no one to tell
 	DisconnectAccessible();
 	bHandled = FALSE;
 	return 0;
@@ -136,6 +138,8 @@ void CDiffViewCtrl::UpdateMetrics() {
 	m_MarkerWidth = Scale(3);
 	if (m_HasCaret)
 		CreateSystemCaret();   // the row's height
+	if (!m_Annotations.empty() && IsWindow())
+		RebuildRows();   // the annotations' rows are of this height
 }
 
 LRESULT CDiffViewCtrl::OnSetFont(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
@@ -321,7 +325,10 @@ CDiffViewCtrl::Anchor CDiffViewCtrl::GetAnchor() const {
 	auto& rows = m_Doc->rows;
 	if (rows.empty())
 		return {};
-	auto& row = rows[std::min(m_TopRow, rows.size() - 1)];
+	size_t index = std::min(m_TopRow, rows.size() - 1);
+	while (index > 0 && rows[index].kind == DfRowKind::Annotation)
+		index--;   // an annotation's rows are under a line: that line
+	auto& row = rows[index];
 	if (row.left >= 0)
 		return { false, (size_t)row.left };
 	return { true, (size_t)row.right };
@@ -339,6 +346,7 @@ void CDiffViewCtrl::SetAnchor(const Anchor& anchor) {
 }
 
 void CDiffViewCtrl::BuildRows() {
+	m_Doc->annotations = AnnotationSlots();
 	m_Doc->BuildRows(m_Layout == DFVL_UNIFIED ? DfLayout::Unified : DfLayout::SideBySide, m_Context);
 	NotifyRowsAccessible();
 }
@@ -586,6 +594,7 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 	pHit->pos = {};
 	pHit->change = -1;
 	pHit->toRight = FALSE;
+	pHit->annotation = 0;
 	POINT pt = pHit->pt;
 	RECT client{};
 	GetClientRect(&client);
@@ -622,6 +631,10 @@ BOOL CDiffViewCtrl::HitTest(DFVHITTEST* pHit) const {
 	UINT part;
 	pHit->pos = PosFromPoint(pt, rightSide, &part);
 	pHit->part = part;
+	if (m_Doc->rows[row].kind == DfRowKind::Annotation) {
+		pHit->part = DFVHT_ANNOTATION;
+		pHit->annotation = m_Doc->rows[row].annotation;
+	}
 	return TRUE;
 }
 
@@ -685,6 +698,7 @@ void CDiffViewCtrl::UpdateScrollBars() {
 	si.nPos = m_Left;
 	SetScrollInfo(SB_HORZ, &si, TRUE);
 	UpdateCaret();
+	UpdateAnnotations();   // the rows or the view moved
 }
 
 void CDiffViewCtrl::ScrollTo(size_t topRow, int left) {
@@ -1012,6 +1026,10 @@ void CDiffViewCtrl::PaintRow(WTL::CDCHandle dc, size_t index, int y, const DFVCO
 		FillSolid(dc, { p1.right, y, right, bottom }, c.crBack);
 	}
 
+	if (row.kind == DfRowKind::Annotation) {
+		PaintAnnotationRow(dc, row, y, c);
+		return;
+	}
 	if (row.kind == DfRowKind::Fold) {
 		wchar_t text[64];
 		swprintf_s(text, L"\x2026  %u unchanged lines", row.hidden);

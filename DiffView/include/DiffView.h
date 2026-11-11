@@ -100,6 +100,7 @@ struct DFVPOS {
 #define DFVHT_OVERVIEW  6   // the strip beside the scroll bar; row: the row there
 #define DFVHT_BELOW     7   // under the last row
 #define DFVHT_MERGE     8   // a merge arrow between the panes; change, toRight
+#define DFVHT_ANNOTATION 9  // the room of an annotation, outside its window (the gutter, the other pane); annotation
 
 struct DFVHITTEST {
 	POINT  pt;                 // in: client coords
@@ -108,6 +109,7 @@ struct DFVHITTEST {
 	DFVPOS pos;
 	int    change;             // DFVHT_MERGE: the change's index
 	BOOL   toRight;            // DFVHT_MERGE: the arrow copies the left lines to the right
+	UINT   annotation;         // DFVHT_ANNOTATION: its id
 };
 
 // ---- Merging -----------------------------------------------------------------------
@@ -141,6 +143,33 @@ struct DFVSTYLESPAN {                   // characters of a line (an index into i
 	UINT   style;                       // index into the palette
 };
 
+// ---- Annotations ------------------------------------------------------------------------
+//
+// An annotation is room under a line of one side for a window of the app's (a review comment). The control keeps the
+// room, in whole rows (the height rounded up to the row height), and puts the window there as the view scrolls; the
+// window's own content is the app's. Windows are made on demand: the control sends DFVN_ANNOTATIONSHOW for an
+// annotation coming near the view, and the app makes its window a child of the control (the notification's
+// hdr.hwndFrom) and returns it in hwnd; DFVN_ANNOTATIONHIDE says the annotation went far from the view (or was
+// removed), and the app destroys or hides the window. So a file with hundreds of comments has a few windows. The
+// control sets the window's position, size and window region (to clip it at the view's edges): the app's window
+// leaves them alone, and reports its real height with SetAnnotationHeight (the first height is an estimate). The
+// messages the window sends its parent (WM_COMMAND, WM_NOTIFY, WM_CTLCOLOR*...) reach the control's parent.
+//
+// The line is a line of the text the view shows; after a merge, an undo or new texts the app gives the annotations
+// again (those whose line isn't there have no room, and wait). An annotated unchanged line isn't folded away, with
+// a line or two around it.
+
+#define DFVAF_FULLWIDTH  0x0001   // side by side: across both panes (else the side's pane, the other one hatched)
+
+struct DFVANNOTATION {
+	UINT   id;                          // the app's, not 0, unique
+	BOOL   right;                       // the side whose line it follows
+	size_t line;                        // 0-based
+	UINT   flags;                       // DFVAF_*
+	int    heightDips;                  // the room, an estimate until the window tells; at least 1
+	LPARAM data;                        // the app's, in the notifications
+};
+
 // ---- Notifications -------------------------------------------------------------
 
 #define DFVN_FIRST          (0U - 3000U)   // outside the common controls ranges
@@ -151,6 +180,16 @@ struct DFVSTYLESPAN {                   // characters of a line (an index into i
 #define DFVN_TEXTCHANGED    (DFVN_FIRST - 4)   // NMHDR; the user's merge or undo changed a text
 #define DFVN_DIFFDONE       (DFVN_FIRST - 5)   // NMHDR; a compare on the worker thread is done and shown
 #define DFVN_GETLINESTYLE   (DFVN_FIRST - 6)   // NMDFVLINESTYLE; while painting, for a line with no spans yet
+#define DFVN_ANNOTATIONSHOW (DFVN_FIRST - 7)   // NMDFVANNOTATION; make the window, a child of the control: hwnd
+#define DFVN_ANNOTATIONHIDE (DFVN_FIRST - 8)   // NMDFVANNOTATION; the window (hwnd) isn't needed now
+
+struct NMDFVANNOTATION {
+	NMHDR  hdr;
+	UINT   id;
+	LPARAM data;
+	RECT   rc;                          // client coords: where the window will be (SHOW: its first size)
+	HWND   hwnd;                        // SHOW: out, the window (null: none yet, asked again later); HIDE: in
+};
 
 struct NMDFVLINESTYLE {
 	NMHDR  hdr;
@@ -180,6 +219,8 @@ struct NMDFVCONTEXTMENU {
 
 struct DfDocument;
 struct DfSpan;
+struct DfRow;
+struct DfAnnotationSlot;
 struct DfStyleSegment;
 struct DfStyleStore;
 struct DfJob;
@@ -234,6 +275,12 @@ public:
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		// what an annotation's window sends its parent, which is the control
+		MESSAGE_HANDLER(WM_COMMAND, OnToParent)
+		MESSAGE_HANDLER(WM_NOTIFY, OnToParent)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnToParent)
+		MESSAGE_HANDLER(WM_MEASUREITEM, OnToParent)
+		MESSAGE_RANGE_HANDLER(WM_CTLCOLORMSGBOX, WM_CTLCOLORSTATIC, OnToParent)
 	END_MSG_MAP()
 
 	// ---- Texts ------------------------------------------------------------------------
@@ -334,6 +381,22 @@ public:
 	size_t  GetBackgroundThreshold() const;
 	bool    IsComparing() const;
 
+	// ---- Annotations --------------------------------------------------------------------
+	//
+	// See above. Adding, removing and changing the room builds the rows again (keeping the line at the top of the
+	// view); AddAnnotations does that once for many. The notifications can be answered by calling these.
+
+	BOOL    AddAnnotation(const DFVANNOTATION* annotation);   // FALSE: no id, or the id is there
+	size_t  AddAnnotations(const DFVANNOTATION* annotations, size_t count);   // how many were added
+	BOOL    RemoveAnnotation(UINT id);                        // HIDE first, if it has a window
+	void    ClearAnnotations();
+	BOOL    SetAnnotationHeight(UINT id, int heightDips);
+	BOOL    GetAnnotation(UINT id, DFVANNOTATION* pAnnotation) const;
+	size_t  GetAnnotationCount() const;
+	// where its window is (client coords), or would be; FALSE if it has no room (its line isn't there)
+	BOOL    GetAnnotationRect(UINT id, RECT* prc) const;
+	BOOL    EnsureAnnotationVisible(UINT id);                 // scrolls to its room
+
 	// ---- Syntax highlighting ------------------------------------------------------------
 	//
 	// SetStylePalette turns it on (the palette is copied; count 0 or nullptr turns it off). The styles are for
@@ -388,6 +451,7 @@ private:
 	LRESULT OnSettingChange(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnDpiChanged(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnToParent(UINT, WPARAM, LPARAM, BOOL&);
 
 	struct Anchor {            // a line kept in view across a new diff or layout
 		bool   right = false;
@@ -433,7 +497,21 @@ private:
 	bool    GetLineSegments(bool rightSide, size_t line, std::wstring_view text, std::vector<DfStyleSegment>& out);
 	HFONT   StyleFont(UINT flags);                    // the font with bold, italic or underline added; flags 0: m_hFont
 	void    ForgetStyles();                           // the spans asked for (the lines changed); the palette stays
-	void    PaintNumber(WTL::CDCHandle dc, int right, int y, int line, COLORREF color);
+
+	// annotations (DiffViewAnnotations.cpp)
+	struct AnnotationState {
+		DFVANNOTATION info{};
+		HWND hwnd = nullptr;                          // the app's window, while the annotation is near the view
+		bool clipped = false;                         // its window region is set
+	};
+	AnnotationState* FindAnnotation(UINT id);
+	const AnnotationState* FindAnnotation(UINT id) const;
+	std::vector<DfAnnotationSlot> AnnotationSlots() const;   // the rows' input
+	int     AnnotationRows(int heightDips) const;
+	void    UpdateAnnotations();                      // asks for and drops windows, then puts them where they belong
+	void    PlaceAnnotationWindows();
+	HWND    FireAnnotation(UINT code, UINT id, LPARAM data, const RECT& rc, HWND hwnd);   // the window the app answered
+	void    PaintAnnotationRow(WTL::CDCHandle dc, const DfRow& row, int y, const DFVCOLORS& c);	void    PaintNumber(WTL::CDCHandle dc, int right, int y, int line, COLORREF color);
 	void    FillHatch(WTL::CDCHandle dc, const RECT& rc, COLORREF back, COLORREF hatch);
 	bool    SelectionIn(size_t row, bool rightSide, size_t length, size_t& from, size_t& to, bool& lineBreak) const;
 	int     ColumnToX(WTL::CDCHandle dc, std::wstring_view line, size_t index) const;   // from the text's origin
@@ -485,6 +563,9 @@ private:
 	HFONT   m_hFont = nullptr;
 	bool    m_OwnFont = true;
 	WTL::CFont m_UiFont;                              // the titles'
+	std::vector<AnnotationState> m_Annotations;
+	bool    m_UpdatingAnnotations = false;            // UpdateAnnotations is running (the app's answers may call it again)
+	bool    m_AnnotationsAgain = false;
 	std::unique_ptr<DfStyleStore> m_Styles;           // the palette and the spans asked for; none until a palette is set
 	WTL::CFont m_StyleFonts[8];                       // m_hFont with the DFVSF_* flags; made when first used
 	UINT    m_Dpi = 96;

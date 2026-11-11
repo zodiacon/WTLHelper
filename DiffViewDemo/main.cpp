@@ -54,6 +54,7 @@ enum {
 	ID_VIEW_EXPANDALL,
 	ID_VIEW_HIGHCONTRAST,
 	ID_VIEW_SYNTAX,
+	ID_VIEW_COMMENTS,
 
 	ID_COMPARE_IGNORECASE = 401,
 	ID_COMPARE_IGNORESPACECHANGE,
@@ -400,6 +401,68 @@ static void ApplySyntax() {
 	g_diff.SetStylePalette(dark ? dim : light, std::size(light));
 }
 
+// ---- Comments (annotations) -----------------------------------------------------------
+//
+// Sample review comments under lines of the sample texts. Their windows are made when the control asks (an edit
+// control, read-only), and destroyed when it says they're far from the view; the height is an estimate until the
+// window is made and has measured its text.
+
+static const struct {
+	UINT id;
+	bool right;
+	size_t line;
+	bool full;
+	const wchar_t* text;
+} g_comments[] = {
+	{ 1, true, 5, false, L"Why size_t here? The callers all add the result to an int, so every one of them now converts." },
+	{ 2, false, 27, true, L"Is removing Unused() intentional? It is still declared in the header of the old branch, so anything built against that header will fail to link.\r\n\r\nIf so, please say it in the description." },
+	{ 3, true, 29, false, L"Nice. A test with an empty list would be good: Longest() returns 0 there, which is right, but only by accident of the initial value." },
+	{ 4, true, 38, false, L"(int) hides a possible overflow." },
+};
+
+static HFONT g_commentFont;
+
+static void ToggleComments() {
+	if (g_diff.GetAnnotationCount()) {
+		g_diff.ClearAnnotations();
+		return;
+	}
+	for (auto& c : g_comments) {
+		DFVANNOTATION a{ c.id, c.right ? TRUE : FALSE, c.line, c.full ? DFVAF_FULLWIDTH : 0u, 40, 0 };
+		g_diff.AddAnnotation(&a);
+	}
+}
+
+static void OnAnnotationShow(NMDFVANNOTATION* nm) {
+	const wchar_t* text = L"";
+	for (auto& c : g_comments) {
+		if (c.id == nm->id)
+			text = c.text;
+	}
+	if (!g_commentFont) {
+		NONCLIENTMETRICSW ncm{ sizeof(ncm) };
+		::SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, ::GetDpiForWindow(g_diff));
+		g_commentFont = ::CreateFontIndirectW(&ncm.lfMessageFont);
+	}
+	int width = nm->rc.right - nm->rc.left, height = nm->rc.bottom - nm->rc.top;
+	HWND edit = ::CreateWindowExW(0, L"EDIT", text, WS_CHILD | WS_BORDER | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+		nm->rc.left, nm->rc.top, width, height, nm->hdr.hwndFrom, (HMENU)(UINT_PTR)(1000 + nm->id), nullptr, nullptr);
+	::SendMessage(edit, WM_SETFONT, (WPARAM)g_commentFont, FALSE);
+	nm->hwnd = edit;
+
+	// the real height: the text wrapped at the width, with the border and a little room
+	HDC dc = ::GetDC(edit);
+	HGDIOBJ old = ::SelectObject(dc, g_commentFont);
+	RECT measure{ 0, 0, std::max(1, width - 2 * ::GetSystemMetricsForDpi(SM_CXBORDER, ::GetDpiForWindow(edit)) - 8), 0 };
+	::DrawTextW(dc, text, -1, &measure, DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL);
+	::SelectObject(dc, old);
+	::ReleaseDC(edit, dc);
+	UINT dpi = ::GetDpiForWindow(edit);
+	int dips = ::MulDiv(measure.bottom + 12, 96, dpi);
+	if (dips != ::MulDiv(height, 96, dpi))
+		g_diff.SetAnnotationHeight(nm->id, dips);   // inside the notification: the control lays out after it
+}
+
 // ---- Commands ----------------------------------------------------------------------
 
 static void UpdateChecks(HMENU menu) {
@@ -414,6 +477,7 @@ static void UpdateChecks(HMENU menu) {
 	check(ID_VIEW_OVERVIEW, g_diff.IsOverviewShown());
 	check(ID_VIEW_HIGHCONTRAST, g_highContrast);
 	check(ID_VIEW_SYNTAX, g_syntax);
+	check(ID_VIEW_COMMENTS, g_diff.GetAnnotationCount() != 0);
 	check(ID_MERGE_ENABLE, g_diff.GetMergeFlags() != 0);
 	check(ID_MERGE_ASK, g_askMerge);
 	check(ID_MERGE_BACKGROUND, g_diff.GetBackgroundThreshold() != SIZE_MAX);
@@ -480,6 +544,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_VIEW_SYNTAX:
 			g_syntax = !g_syntax;
 			ApplySyntax();
+			break;
+		case ID_VIEW_COMMENTS:
+			ToggleComments();
 			break;
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
@@ -558,6 +625,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 					nm->spanCount = g_spans.size();
 					break;
 				}
+				case DFVN_ANNOTATIONSHOW:
+					OnAnnotationShow((NMDFVANNOTATION*)lParam);
+					break;
+				case DFVN_ANNOTATIONHIDE:
+					::DestroyWindow(((NMDFVANNOTATION*)lParam)->hwnd);
+					break;
 				case DFVN_SELCHANGED:
 				case DFVN_FOLDEXPANDED:
 					UpdateTitle();
@@ -640,6 +713,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_COLORS, L"&Custom Colors");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_HIGHCONTRAST, L"&High Contrast Drawing");
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SYNTAX, L"Syntax &Highlighting");
+	::AppendMenuW(hView, MF_STRING, ID_VIEW_COMMENTS, L"Sample Co&mments");
 #ifdef DEMO_WTLHELPER
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_DARKMODE, L"&Dark Mode");
 #endif
