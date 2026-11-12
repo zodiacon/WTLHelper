@@ -755,3 +755,35 @@ void CDiffViewCtrl::FireSelChanged() {
 	NMHDR hdr{};
 	FireNotify(&hdr, DFVN_SELCHANGED);
 }
+
+// ---- Finding -------------------------------------------------------------------------------
+
+BOOL CDiffViewCtrl::Find(LPCWSTR pszText, UINT flags) {
+	if (!pszText || !*pszText)
+		return FALSE;
+	DfFind find{ pszText, (flags & DFVFF_MATCHCASE) != 0, (flags & DFVFF_WHOLEWORD) != 0 };
+	bool forward = (flags & DFVFF_UP) == 0;
+	DFVPOS selStart, selEnd;
+	GetSelection(&selStart, &selEnd);
+	// an unchanged line's match in the caret's pane (side by side); unified shows such a line as the left one
+	bool preferRight = m_Doc->layout == DfLayout::SideBySide && m_Caret.right;
+	DfPos start, end;
+	if (!DfFindNext(m_Doc->left, m_Doc->right, m_Doc->diff, find, ToDf(forward ? selEnd : selStart), forward, preferRight, start, end))
+		return FALSE;
+	// in a fold: opened, so the match shows
+	int row = m_Doc->RowOf(start);
+	if (row >= 0 && (size_t)row < m_Doc->rows.size() && m_Doc->rows[row].kind == DfRowKind::Fold)
+		ExpandFold((size_t)row, false);
+	SetSelection(ToDfv(start), ToDfv(end));
+	return TRUE;
+}
+
+int CDiffViewCtrl::HighlightAll(LPCWSTR pszText, UINT flags) {
+	m_HighlightText = pszText ? pszText : L"";
+	m_HighlightFlags = flags;
+	Invalidate(FALSE);
+	if (m_HighlightText.empty())
+		return 0;
+	DfFind find{ m_HighlightText, (flags & DFVFF_MATCHCASE) != 0, (flags & DFVFF_WHOLEWORD) != 0 };
+	return (int)DfCountMatches(m_Doc->left, m_Doc->right, m_Doc->diff, find, 100000);
+}

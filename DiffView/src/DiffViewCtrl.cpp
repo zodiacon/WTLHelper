@@ -1241,6 +1241,31 @@ void CDiffViewCtrl::PaintText(WTL::CDCHandle dc, const RECT& rc, std::wstring_vi
 		}
 	}
 
+	// HighlightAll's matches, over the changed words and under the selection: a yellow tint of the background
+	// (framed in high contrast, where a fill would need its own text color)
+	if (!m_HighlightText.empty()) {
+		DfFind find{ m_HighlightText, (m_HighlightFlags & DFVFF_MATCHCASE) != 0, (m_HighlightFlags & DFVFF_WHOLEWORD) != 0 };
+		std::vector<DfSpan> matches;
+		DfFindInLine(line, find, matches);
+		if (!matches.empty()) {
+			COLORREF findBack = m_PaintHighContrast ? ::GetSysColor(COLOR_HIGHLIGHT)
+				: Blend(c.crBack, RGB(0xF2, 0xC0, 0x1E), IsDark(c.crBack) ? 45 : 60);
+			for (auto& m : matches) {
+				auto r = clipped(ColumnToX(dc, line, m.start), ColumnToX(dc, line, m.start + m.length));
+				if (r.right <= r.left)
+					continue;
+				if (m_PaintHighContrast) {
+					WTL::CBrush frame;
+					frame.CreateSolidBrush(findBack);
+					dc.FrameRect(&r, frame);
+				}
+				else {
+					FillSolid(dc, r, findBack);
+				}
+			}
+		}
+	}
+
 	// the selection over them; a selected line break shows as a character's width past the end
 	size_t selFrom, selTo;
 	bool selBreak;

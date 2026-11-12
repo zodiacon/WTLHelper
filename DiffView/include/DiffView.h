@@ -121,6 +121,15 @@ struct DFVHITTEST {
 #define DFVMF_TORIGHT   0x0001   // the left lines over the right ones
 #define DFVMF_TOLEFT    0x0002
 
+// ---- Finding ---------------------------------------------------------------------------
+//
+// Find goes through the texts in the order the unified layout shows them (an unchanged line once, a change's left
+// lines then its right ones), on both sides: side by side an unchanged line's match is in the caret's pane.
+
+#define DFVFF_MATCHCASE  0x0001
+#define DFVFF_WHOLEWORD  0x0002   // not part of a longer run of letters, digits and '_'
+#define DFVFF_UP         0x0004   // Find: backwards
+
 // ---- Syntax highlighting ----------------------------------------------------------------
 //
 // The control has no tokenizer: the app has a palette (SetStylePalette) and answers DFVN_GETLINESTYLE for the lines
@@ -391,6 +400,16 @@ public:
 	int     GetCurrentChange() const;                 // the change the caret is in; -1 if none
 	BOOL    GoToChange(size_t index);                 // the caret to the change's first line, scrolled into view
 	BOOL    NextChange(bool forward = true);          // from the caret, as F7 and Shift+F7; FALSE if there's none
+
+	// ---- Finding ------------------------------------------------------------------------
+	//
+	// Find selects the next match (DFVFF_*) after the selection (before it, with DFVFF_UP), going round, opening
+	// the fold it's in and scrolling it into view; FALSE if the texts have none. HighlightAll shades every match
+	// (painted as the lines are, so it follows new texts and merges) and returns how many there are, at most
+	// 100,000; null or empty turns it off. Neither sends a notification.
+
+	BOOL    Find(LPCWSTR pszText, UINT flags = 0);
+	int     HighlightAll(LPCWSTR pszText, UINT flags = 0);
 
 	// ---- Merging ------------------------------------------------------------------------
 	//
@@ -673,6 +692,8 @@ private:
 	WPARAM  m_JobNumber = 0;
 	size_t  m_BackgroundThreshold = 100000;
 	int     m_ForceHighContrast = -1;
+	std::wstring m_HighlightText;                     // HighlightAll's, empty: none
+	UINT    m_HighlightFlags = 0;
 	bool    m_PaintHighContrast = false;              // while painting
 	DfAccessible* m_Accessible = nullptr;             // made on the first WM_GETOBJECT; cut off in OnDestroy
 };

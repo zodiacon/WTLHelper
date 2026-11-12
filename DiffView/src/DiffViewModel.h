@@ -352,3 +352,25 @@ struct DfDocument {
 	// the whole of a side (side by side) or of every row (unified)
 	void All(bool rightSide, DfPos& start, DfPos& end) const;
 };
+
+// ---- Finding ----------------------------------------------------------------------------------
+//
+// A find goes through the texts in the order the unified layout shows them: an unchanged line once, then a change's
+// left lines and then its right ones. An unchanged line whose two sides read the same is searched once, on the side
+// the caller prefers (the caret's, side by side; the left one, unified, which is what that layout shows); one whose
+// sides differ (ignoring whitespace or case made them equal) is searched on both, its left side first.
+
+struct DfFind {
+	std::wstring what;
+	bool matchCase = false;
+	bool wholeWord = false;             // not inside a run of word characters on either end
+};
+
+// The matches in a line, left to right, not overlapping.
+void DfFindInLine(std::wstring_view line, const DfFind& find, std::vector<DfSpan>& matches);
+// The match after from (forward: the first starting at from or later) or before it (backward: the last starting before
+// from), going round past the end (or the start); false if there's none at all.
+bool DfFindNext(const DfLines& left, const DfLines& right, const DfDiff& diff, const DfFind& find, DfPos from, bool forward,
+	bool preferRight, DfPos& start, DfPos& end);
+// How many matches there are, counted up to max (an unchanged line that reads the same on both sides once).
+size_t DfCountMatches(const DfLines& left, const DfLines& right, const DfDiff& diff, const DfFind& find, size_t max = SIZE_MAX);

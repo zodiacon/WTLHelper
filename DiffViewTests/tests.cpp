@@ -611,7 +611,7 @@ TEST(Document_Text) {
 	CHECK_STR(doc.Text({ false, 3, 9 }, { false, 4, 0 }), L"\r\n");
 	DfPos start, end;
 	doc.All(true, start, end);
-	CHECK(start == (DfPos{ true, 0, 0 }) && end == (DfPos{ true, 6, 5 }));
+	CHECK((start == (DfPos{ true, 0, 0 }) && end == (DfPos{ true, 6, 5 })));
 
 	// unified: the rows, the hidden lines of a fold too
 	doc.BuildRows(DfLayout::Unified, 1);
@@ -622,12 +622,12 @@ TEST(Document_Text) {
 	CHECK(doc.Less({ false, 1, 3 }, { true, 1, 0 }));   // by row
 	CHECK(doc.Less({ true, 2, 0 }, { false, 3, 0 }));   // an equal line on the right: its row
 	doc.All(false, start, end);
-	CHECK(start == (DfPos{ false, 0, 0 }) && end == (DfPos{ true, 6, 5 }));
+	CHECK((start == (DfPos{ false, 0, 0 }) && end == (DfPos{ true, 6, 5 })));
 
-	CHECK(doc.Clamp({ false, 99, 99 }) == (DfPos{ false, 5, 3 }));
+	CHECK((doc.Clamp({ false, 99, 99 }) == (DfPos{ false, 5, 3 })));
 	DfDocument empty;
 	empty.BuildRows(DfLayout::SideBySide, -1);
-	CHECK(empty.Clamp({ true, 3, 3 }) == (DfPos{ true, 0, 0 }));
+	CHECK((empty.Clamp({ true, 3, 3 }) == (DfPos{ true, 0, 0 })));
 	CHECK(empty.Text({ false, 0, 0 }, { false, 0, 0 }).empty());
 	CHECK(empty.StepRow(0, 1, false) == -1);
 }
@@ -986,17 +986,17 @@ TEST(Annotations_Document) {
 	CHECK_STR(doc.Text({ true, 3, 0 }, { false, 4, 1 }, L"|"), L"X|e");
 	DfPos start, end;
 	doc.All(false, start, end);
-	CHECK(start == (DfPos{ false, 0, 0 }) && end == (DfPos{ false, 5, 1 }));
+	CHECK((start == (DfPos{ false, 0, 0 }) && end == (DfPos{ false, 5, 1 })));
 
 	// annotations at the ends: the text's ends are lines
 	doc.annotations = { Note(1, false, 0), Note(2, false, 5, 2) };
 	doc.BuildRows(DfLayout::Unified, -1);
 	CHECK(doc.rows.front().kind == DfRowKind::Equal && doc.rows.back().kind == DfRowKind::Annotation);
 	doc.All(false, start, end);
-	CHECK(start == (DfPos{ false, 0, 0 }) && end == (DfPos{ false, 5, 1 }));
+	CHECK((start == (DfPos{ false, 0, 0 }) && end == (DfPos{ false, 5, 1 })));
 	doc.BuildRows(DfLayout::SideBySide, -1);
 	doc.All(true, start, end);
-	CHECK(start == (DfPos{ true, 0, 0 }) && end == (DfPos{ true, 5, 1 }));
+	CHECK((start == (DfPos{ true, 0, 0 }) && end == (DfPos{ true, 5, 1 })));
 
 	// annotations only: nothing to select
 	DfDocument empty;
@@ -1304,6 +1304,80 @@ TEST(Patch_Annotations) {
 
 // ---- Entry point -------------------------------------------------------------------------
 
+// ---- Finding ---------------------------------------------------------------------------------
+
+TEST(Find_InLine) {
+	std::vector<DfSpan> m;
+	// case ignored by default
+	DfFindInLine(L"abc ABC abcabc", { L"abc" }, m);
+	CHECK(m.size() == 4);
+	DfFindInLine(L"abc ABC abcabc", { L"abc", true }, m);
+	CHECK(m.size() == 3 && m[0].start == 0 && m[1].start == 8 && m[2].start == 11 && m[0].length == 3);
+	// whole words: not inside a longer run of word characters
+	DfFindInLine(L"abc abcd _abc xabc abc.", { L"abc", false, true }, m);
+	CHECK(m.size() == 2 && m[0].start == 0 && m[1].start == 19);
+	// punctuation: its ends are boundaries already
+	DfFindInLine(L"a->b", { L"->", false, true }, m);
+	CHECK(m.size() == 1 && m[0].start == 1);
+	// not overlapping
+	DfFindInLine(L"aaaa", { L"aa" }, m);
+	CHECK(m.size() == 2 && m[1].start == 2);
+	DfFindInLine(L"short", { L"longer than it" }, m);
+	CHECK(m.empty());
+	DfFindInLine(L"x", { L"" }, m);
+	CHECK(m.empty());
+}
+
+TEST(Find_Order) {
+	// one | foo 1 -> foo 2, foo new | same foo, two
+	DfLines left(L"one\nfoo 1\nsame foo\ntwo\n"), right(L"one\nfoo 2\nfoo new\nsame foo\ntwo\n");
+	auto diff = DfCompute(left, right);
+	DfFind find{ L"foo" };
+	DfPos s, e;
+	auto next = [&](DfPos from, bool forward, bool preferRight) {
+		return DfFindNext(left, right, diff, find, from, forward, preferRight, s, e);
+	};
+	// a change's left lines, then its right ones
+	CHECK((next({ false, 0, 0 }, true, false) && s == DfPos{ false, 1, 0 } && e == DfPos{ false, 1, 3 }));
+	CHECK((next(e, true, false) && s == DfPos{ true, 1, 0 }));
+	CHECK((next({ true, 1, 3 }, true, false) && s == DfPos{ true, 2, 0 }));
+	// an unchanged line once, on the preferred side
+	CHECK((next({ true, 2, 3 }, true, true) && s == DfPos{ true, 3, 5 }));
+	CHECK((next({ true, 2, 3 }, true, false) && s == DfPos{ false, 2, 5 }));
+	// round from the end
+	CHECK((next({ true, 3, 8 }, true, true) && s == DfPos{ false, 1, 0 }));
+	// a match starting at from is the next one (the caret before it)
+	CHECK((next({ true, 1, 0 }, true, false) && s == DfPos{ true, 1, 0 }));
+	// backwards: the last one starting before from, round to the last of all
+	CHECK((next({ true, 2, 0 }, false, false) && s == DfPos{ true, 1, 0 }));
+	CHECK((next({ false, 1, 0 }, false, true) && s == DfPos{ true, 3, 5 }));
+	// an unchanged line's place is the same from either side
+	CHECK((next({ false, 2, 0 }, true, true) && s == DfPos{ true, 3, 5 }));
+	CHECK(DfCountMatches(left, right, diff, find) == 4);
+	CHECK(DfCountMatches(left, right, diff, find, 2) == 2);
+
+	// nothing to find
+	DfFind upper{ L"FOO", true };
+	CHECK(!DfFindNext(left, right, diff, upper, { false, 0, 0 }, true, false, s, e));
+	CHECK(DfCountMatches(left, right, diff, upper) == 0);
+	auto none = DfCompute(DfLines(), DfLines());
+	CHECK(!DfFindNext(DfLines(), DfLines(), none, find, { false, 0, 0 }, true, false, s, e));
+}
+
+TEST(Find_UnchangedLinesThatDiffer) {
+	// equal ignoring whitespace, but not the same text: both sides are searched, the left first
+	DfLines left(L"a  foo\n"), right(L"a foo\n");
+	DfOptions options;
+	options.whitespace = DfWhitespace::Change;
+	auto diff = DfCompute(left, right, options);
+	CHECK(diff.Identical());
+	DfFind find{ L"foo" };
+	DfPos s, e;
+	CHECK((DfFindNext(left, right, diff, find, { false, 0, 0 }, true, true, s, e) && s == DfPos{ false, 0, 3 }));
+	CHECK((DfFindNext(left, right, diff, find, e, true, true, s, e) && s == DfPos{ true, 0, 2 }));
+	CHECK(DfCountMatches(left, right, diff, find) == 2);
+}
+
 int wmain() {
 	setvbuf(stdout, nullptr, _IONBF, 0);   // a test that hangs shows where
 	wprintf(L"DiffView model tests\n\n");
@@ -1351,6 +1425,9 @@ int wmain() {
 	Run_Annotations_Document();
 	Run_Annotations_Random();
 	Run_CommentRange();
+	Run_Find_InLine();
+	Run_Find_Order();
+	Run_Find_UnchangedLinesThatDiffer();
 
 	Run_Patch_Parse();
 	Run_Patch_Hunks();

@@ -70,6 +70,9 @@ enum {
 	ID_DEMO_COPY = 601,
 	ID_DEMO_SELECTALL,
 	ID_DEMO_COMMENT,
+	ID_DEMO_FIND,
+	ID_DEMO_FINDNEXT,
+	ID_DEMO_FINDPREV,
 
 	ID_MERGE_ENABLE = 701,
 	ID_MERGE_ASK,
@@ -566,6 +569,41 @@ static void ToggleOption(UINT flag) {
 	UpdateTitle();
 }
 
+// Edit > Find: the common Find dialog (modeless); a search also shades every match, until the dialog closes
+static const UINT g_findMessage = ::RegisterWindowMessageW(FINDMSGSTRINGW);
+static WCHAR g_findText[256];
+static FINDREPLACEW g_find{};
+static HWND g_findDialog;
+static DWORD g_findFlags = FR_DOWN;
+
+static void DoFind(bool up) {
+	if (!*g_findText)
+		return;
+	UINT flags = (g_findFlags & FR_MATCHCASE ? DFVFF_MATCHCASE : 0) | (g_findFlags & FR_WHOLEWORD ? DFVFF_WHOLEWORD : 0);
+	g_diff.HighlightAll(g_findText, flags);
+	if (!g_diff.Find(g_findText, flags | (up ? DFVFF_UP : 0)))
+		::MessageBeep(MB_OK);
+}
+
+static void ShowFind(HWND hwnd) {
+	if (g_findDialog) {
+		::SetFocus(g_findDialog);
+		return;
+	}
+	// the selection, if it's on one line, to look for
+	if (g_diff.HasSelection()) {
+		auto text = g_diff.GetSelectedText();
+		if (text.Find(L'\n') < 0 && text.GetLength() < (int)std::size(g_findText))
+			wcscpy_s(g_findText, text);
+	}
+	g_find = { sizeof(g_find) };
+	g_find.hwndOwner = hwnd;
+	g_find.lpstrFindWhat = g_findText;
+	g_find.wFindWhatLen = (WORD)std::size(g_findText);
+	g_find.Flags = g_findFlags;
+	g_findDialog = ::FindTextW(&g_find);
+}
+
 static void OnCommand(HWND hwnd, UINT id) {
 	switch (id) {
 		case ID_FILE_OPENLEFT: OpenFile(0); break;
@@ -625,6 +663,9 @@ static void OnCommand(HWND hwnd, UINT id) {
 		case ID_DEMO_COPY: g_diff.Copy(); break;
 		case ID_DEMO_SELECTALL: g_diff.SelectAll(); UpdateTitle(); break;
 		case ID_DEMO_COMMENT: g_diff.StartComment(); break;
+		case ID_DEMO_FIND: ShowFind(hwnd); break;
+		case ID_DEMO_FINDNEXT: DoFind(false); break;
+		case ID_DEMO_FINDPREV: DoFind(true); break;
 		case ID_MERGE_ENABLE: g_diff.EnableMerge(g_diff.GetMergeFlags() ? 0 : DFVMF_TORIGHT | DFVMF_TOLEFT); break;
 		case ID_MERGE_ASK: g_askMerge = !g_askMerge; break;
 		case ID_MERGE_UNDO: g_diff.Undo(); UpdateTitle(); break;
@@ -650,6 +691,18 @@ static void ShowContextMenu(HWND hwnd, const NMDFVCONTEXTMENU* nm) {
 // ---- Main window ------------------------------------------------------------------
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	if (msg == g_findMessage) {
+		auto fr = (FINDREPLACEW*)lParam;
+		if (fr->Flags & FR_DIALOGTERM) {
+			g_findDialog = nullptr;
+			g_diff.HighlightAll(nullptr);
+			return 0;
+		}
+		g_findFlags = fr->Flags & (FR_MATCHCASE | FR_WHOLEWORD | FR_DOWN);
+		if (fr->Flags & FR_FINDNEXT)
+			DoFind((fr->Flags & FR_DOWN) == 0);
+		return 0;
+	}
 	switch (msg) {
 		case WM_CREATE:
 			g_main = hwnd;
@@ -787,6 +840,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COPY, L"&Copy\tCtrl+C");
 	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_SELECTALL, L"Select &All\tCtrl+A");
 	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_COMMENT, L"Add Co&mment\tCtrl+Shift+M");
+	::AppendMenuW(hEdit, MF_SEPARATOR, 0, nullptr);
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_FIND, L"&Find...\tCtrl+F");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_FINDNEXT, L"Find &Next\tF3");
+	::AppendMenuW(hEdit, MF_STRING, ID_DEMO_FINDPREV, L"Find &Previous\tShift+F3");
 
 	HMENU hView = ::CreatePopupMenu();
 	::AppendMenuW(hView, MF_STRING, ID_VIEW_SIDEBYSIDE, L"&Side by Side");
@@ -839,6 +896,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 		{ FVIRTKEY | FCONTROL, '1', ID_FILE_OPENLEFT },
 		{ FVIRTKEY | FCONTROL, '2', ID_FILE_OPENRIGHT },
 		{ FVIRTKEY | FCONTROL | FSHIFT, 'M', ID_DEMO_COMMENT },
+		{ FVIRTKEY | FCONTROL, 'F', ID_DEMO_FIND },
+		{ FVIRTKEY, VK_F3, ID_DEMO_FINDNEXT },
+		{ FVIRTKEY | FSHIFT, VK_F3, ID_DEMO_FINDPREV },
 		{ FVIRTKEY, VK_F7, ID_GO_NEXT },
 		{ FVIRTKEY | FSHIFT, VK_F7, ID_GO_PREV },
 	};
@@ -861,6 +921,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
 	MSG msg;
 	while (::GetMessage(&msg, nullptr, 0, 0)) {
+		if (g_findDialog && ::IsDialogMessageW(g_findDialog, &msg))
+			continue;
 		if (!::TranslateAccelerator(hwnd, hAccel, &msg)) {
 			::TranslateMessage(&msg);
 			::DispatchMessage(&msg);

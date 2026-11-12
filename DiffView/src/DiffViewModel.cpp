@@ -1574,3 +1574,167 @@ void DfDocument::All(bool rightSide, DfPos& start, DfPos& end) const {
 	start = edge(*first, false);
 	end = edge(*last, true);
 }
+
+// ---- Finding ---------------------------------------------------------------------------------
+
+namespace {
+	std::wstring FoldCase(std::wstring_view s) {
+		std::wstring folded(s);
+		if (!folded.empty())
+			CharLowerBuffW(folded.data(), DWORD(folded.size()));   // one for one: the indexes stay
+		return folded;
+	}
+
+	// Calls visit(seq, rightSide, line) for each line a find goes through, in its order (see DfFindNext). seq is the
+	// line's place in that order: twice the line's place, plus one for the right side of an unchanged line whose sides
+	// differ (searched after its left side); both sides of one that reads the same have the same place. visit returns
+	// false to stop.
+	template<typename Visit>
+	void ForEachFindLine(const DfLines& left, const DfLines& right, const DfDiff& diff, bool preferRight, Visit visit) {
+		size_t seq = 0;
+		for (auto& b : diff.blocks) {
+			if (!b.changed) {
+				for (size_t i = 0; i < b.leftCount; i++, seq++) {
+					auto l = left[b.left + i], r = right[b.right + i];
+					if (l == r) {
+						if (!visit(2 * seq, preferRight, preferRight ? b.right + i : b.left + i))
+							return;
+					}
+					else if (!visit(2 * seq, false, b.left + i) || !visit(2 * seq + 1, true, b.right + i)) {
+						return;
+					}
+				}
+				continue;
+			}
+			for (size_t i = 0; i < b.leftCount; i++, seq++)
+				if (!visit(2 * seq, false, b.left + i))
+					return;
+			for (size_t i = 0; i < b.rightCount; i++, seq++)
+				if (!visit(2 * seq, true, b.right + i))
+					return;
+		}
+	}
+
+	// a position's place in a find's order (past the end if the line isn't there)
+	size_t FindSeqOf(const DfLines& left, const DfLines& right, const DfDiff& diff, DfPos pos) {
+		size_t seq = 0;
+		for (auto& b : diff.blocks) {
+			size_t first = pos.right ? b.right : b.left, count = pos.right ? b.rightCount : b.leftCount;
+			if (pos.line >= first && pos.line < first + count) {
+				if (b.changed)
+					return 2 * (seq + (pos.right ? b.leftCount : 0) + (pos.line - first));
+				// an unchanged line: its right side after its left one if they differ
+				size_t index = pos.line - first;
+				bool differ = left[b.left + index] != right[b.right + index];
+				return 2 * (seq + index) + (pos.right && differ ? 1 : 0);
+			}
+			seq += b.changed ? b.leftCount + b.rightCount : b.leftCount;
+		}
+		return 2 * seq;
+	}
+}
+
+void DfFindInLine(std::wstring_view line, const DfFind& find, std::vector<DfSpan>& matches) {
+	matches.clear();
+	if (find.what.empty() || line.size() < find.what.size())
+		return;
+	std::wstring foldedLine, foldedWhat;
+	std::wstring_view hay = line, needle = find.what;
+	if (!find.matchCase) {
+		foldedLine = FoldCase(line);
+		foldedWhat = FoldCase(find.what);
+		hay = foldedLine;
+		needle = foldedWhat;
+	}
+	// a whole word: no word character on both sides of either end
+	auto boundary = [&](size_t at) {
+		return at == 0 || at >= line.size() || !IsWordChar(line[at - 1]) || !IsWordChar(line[at]);
+	};
+	size_t at = 0;
+	while ((at = hay.find(needle, at)) != std::wstring_view::npos) {
+		size_t end = at + needle.size();
+		if (!find.wholeWord || (boundary(at) && boundary(end))) {
+			matches.push_back({ uint32_t(at), uint32_t(needle.size()) });
+			at = end;
+		}
+		else {
+			at++;
+		}
+	}
+}
+
+bool DfFindNext(const DfLines& left, const DfLines& right, const DfDiff& diff, const DfFind& find, DfPos from, bool forward,
+	bool preferRight, DfPos& start, DfPos& end) {
+	if (find.what.empty())
+		return false;
+	struct Hit {
+		size_t seq, column;
+		DfPos pos;
+		uint32_t length;
+	};
+	auto fromSeq = FindSeqOf(left, right, diff, from);
+	auto before = [&](size_t seq, size_t column) {   // the place is before from
+		return seq < fromSeq || (seq == fromSeq && column < from.column);
+	};
+	bool haveFirst = false, haveFound = false;
+	Hit first{}, found{};
+	std::vector<DfSpan> matches;
+	ForEachFindLine(left, right, diff, preferRight, [&](size_t seq, bool rightSide, size_t line) {
+		DfFindInLine((rightSide ? right : left)[line], find, matches);
+		for (auto& m : matches) {
+			Hit hit{ seq, m.start, { rightSide, line, m.start }, m.length };
+			if (!haveFirst) {
+				first = hit;
+				haveFirst = true;
+			}
+			if (forward) {
+				if (!before(seq, m.start)) {
+					found = hit;
+					haveFound = true;
+					return false;   // the first at or after from
+				}
+			}
+			else if (before(seq, m.start)) {
+				found = hit;        // the last one before from, so far
+				haveFound = true;
+			}
+			else {
+				return false;
+			}
+		}
+		return true;
+		});
+	if (!haveFirst)
+		return false;
+	if (!haveFound) {
+		if (forward) {
+			found = first;          // round from the top
+		}
+		else {
+			// round from the bottom: the last match of all
+			ForEachFindLine(left, right, diff, preferRight, [&](size_t seq, bool rightSide, size_t line) {
+				DfFindInLine((rightSide ? right : left)[line], find, matches);
+				if (!matches.empty())
+					found = { seq, matches.back().start, { rightSide, line, matches.back().start }, matches.back().length };
+				return true;
+				});
+		}
+	}
+	start = found.pos;
+	end = found.pos;
+	end.column += found.length;
+	return true;
+}
+
+size_t DfCountMatches(const DfLines& left, const DfLines& right, const DfDiff& diff, const DfFind& find, size_t max) {
+	size_t count = 0;
+	if (find.what.empty())
+		return 0;
+	std::vector<DfSpan> matches;
+	ForEachFindLine(left, right, diff, true, [&](size_t, bool rightSide, size_t line) {
+		DfFindInLine((rightSide ? right : left)[line], find, matches);
+		count += matches.size();
+		return count < max;
+		});
+	return std::min(count, max);
+}
