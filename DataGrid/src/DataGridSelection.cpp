@@ -190,6 +190,10 @@ void CDataGridCtrl::EndSelectDrag() {
 
 LRESULT CDataGridCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
+	if (wParam == DgData::ErrorTimer) {
+		HideError();
+		return 0;
+	}
 	if (wParam != DgData::ScrollTimer) {
 		bHandled = FALSE;
 		return 0;
@@ -307,6 +311,8 @@ BOOL CDataGridCtrl::Copy(UINT flags) {
 
 void CDataGridCtrl::Sort(std::vector<DgSortKey> keys, bool user) {
 	auto& d = *m_Data;
+	if (!CommitOrCancel())
+		return;
 	std::vector<DGVSORTKEY> pub;
 	for (auto& k : keys)
 		pub.push_back({ k.id, k.descending });

@@ -172,18 +172,18 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			DgCell value;
 			if (!column || !Fetch(dataRow, column->id, value))
 				continue;
+			if (d.edit.active && dataRow == d.edit.row && column->id == d.edit.id)
+				continue;   // its editor is over it
 			dc.SaveDC();
 			dc.IntersectClipRect(&visible);
 			RECT inner{ cell.left + pad, cell.top, cell.right - pad, cell.bottom - 1 };
 			int align = DgEffectiveAlign(*column);
 			switch (column->type) {
 				case DgColType::Bool: {
-					if (value.value.type == DgType::Empty)
+					if (value.value.type == DgType::Empty && !CanEdit(dataRow, column->id))   // editable: an empty box to click
 						break;
-					int box = std::min(Scale(13), L.rowHeight - Scale(6));
-					int bx = align == DgAlign::Left ? inner.left : align == DgAlign::Right ? inner.right - box : (cell.left + cell.right - box) / 2;
-					int by = (cell.top + cell.bottom - box) / 2;
-					RECT rb{ bx, by, bx + box, by + box };
+					RECT rb = CheckRect(cell, align);
+					int bx = rb.left, by = rb.top, box = rb.right - rb.left;
 					Frame(dc, rb, 1, Blend(c.back, text, 60));
 					if (DgChecked(value.value)) {
 						CPen pen;

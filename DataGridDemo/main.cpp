@@ -6,6 +6,9 @@
 // the row numbers select rows, the corner all), or whole rows (Edit > Select Rows); Ctrl+C copies them (Ctrl+Shift+C
 // with the titles) as text and HTML. A click on a title sorts by it (again: descending, again: unsorted; Shift adds
 // a key). In virtual mode the demo sorts only by ID (it reverses its rows) and stops the rest (DGVN_SORTCHANGING).
+// Edit > Editable lets cells be edited (F2, typing, a double-click; Enter, Tab, Esc), pasted (Ctrl+V), cleared
+// (Delete), cut, and undone (Ctrl+Z, Ctrl+Y); check boxes toggle with a click or Space. ID is read-only and Quantity
+// rejects negative numbers (DGVN_VALIDATE). In virtual mode the demo keeps the changed cells itself (DGVN_SETCELL).
 // The log at the bottom shows the notifications.
 
 #include <atlbase.h>
@@ -25,6 +28,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -39,6 +43,7 @@ enum : UINT {
 	CMD_ROWNUMBERS, CMD_FROZEN0, CMD_FROZEN1, CMD_FROZEN2, CMD_HORZLINES, CMD_VERTLINES, CMD_NOHEADER, CMD_LARGEFONT,
 	CMD_CUSTOMCOLORS, CMD_DARKMODE, CMD_FITALL, CMD_SHOWALL, CMD_CLEARLOG, CMD_GOTO_END,
 	CMD_COPY, CMD_COPYTITLES, CMD_SELECTALL, CMD_SELCELLS, CMD_SELROWS, CMD_SELSINGLE, CMD_DELETEROWS, CMD_UNSORT,
+	CMD_EDITABLE, CMD_UNDO, CMD_REDO, CMD_CUT, CMD_PASTE, CMD_CLEAR,
 	CMD_HIDE = 2000, CMD_FIT, CMD_FREEZE,
 };
 
@@ -80,6 +85,16 @@ private:
 		m_IdModified = 0, m_IdLink = 0, m_IdNotes = 0;
 	std::wstring m_Text;   // the text DGVN_GETDISPINFO gives
 	bool m_Reversed = false;   // virtual mode sorted by ID, descending
+	struct Changed {           // a virtual cell the user changed
+		DGVVALUE value;
+		std::wstring text;
+		int image;
+	};
+	std::map<std::pair<LONGLONG, int>, Changed> m_Changed;   // by the demo's own row (before reversing) and column
+
+	LONGLONG SourceRow(LONGLONG row) const {
+		return m_Reversed ? m_Grid.GetRowCount() - 1 - row : row;
+	}
 
 	void Log(const wchar_t* format, ...) {
 		wchar_t text[512];
@@ -116,7 +131,7 @@ private:
 	}
 
 	void AddColumns() {
-		m_IdId = AddColumn(L"ID", DGVCT_INTEGER, 90, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS);
+		m_IdId = AddColumn(L"ID", DGVCT_INTEGER, 90, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS | DGVCF_READONLY);
 		m_IdName = AddColumn(L"Name", DGVCT_IMAGETEXT, 140);
 		m_IdCategory = AddColumn(L"Category", DGVCT_ENUM, 100, DGVCM_ENUMITEMS, 0, 0, 0, L"Hardware\0Fasteners\0Tools\0Plumbing\0");
 		m_IdPrice = AddColumn(L"Price", DGVCT_FLOAT, 80, DGVCM_DECIMALS | DGVCM_FLAGS, 0, 2, DGVCF_GROUPDIGITS);
@@ -189,6 +204,7 @@ private:
 		}
 		m_Grid.SetVirtual(true);
 		m_Reversed = false;
+		m_Changed.clear();
 		LONGLONG rows = cmd == CMD_HUGE ? 5'000'000'000LL : 10'000'000LL;
 		m_Grid.SetRowCount(rows);
 		Log(L"Virtual: %lld rows", rows);
@@ -260,7 +276,14 @@ private:
 		file.AppendMenu(MF_SEPARATOR);
 		file.AppendMenu(MF_STRING, CMD_EXIT, L"E&xit");
 		edit.CreatePopupMenu();
+		edit.AppendMenu(MF_STRING, CMD_EDITABLE, L"&Editable");
+		edit.AppendMenu(MF_STRING, CMD_UNDO, L"&Undo\tCtrl+Z");
+		edit.AppendMenu(MF_STRING, CMD_REDO, L"&Redo\tCtrl+Y");
+		edit.AppendMenu(MF_SEPARATOR);
+		edit.AppendMenu(MF_STRING, CMD_CUT, L"Cu&t\tCtrl+X");
 		edit.AppendMenu(MF_STRING, CMD_COPY, L"&Copy\tCtrl+C");
+		edit.AppendMenu(MF_STRING, CMD_PASTE, L"&Paste\tCtrl+V");
+		edit.AppendMenu(MF_STRING, CMD_CLEAR, L"C&lear\tDel");
 		edit.AppendMenu(MF_STRING, CMD_COPYTITLES, L"Copy with &Titles\tCtrl+Shift+C");
 		edit.AppendMenu(MF_STRING, CMD_SELECTALL, L"Select &All\tCtrl+A");
 		edit.AppendMenu(MF_SEPARATOR);
@@ -301,7 +324,7 @@ private:
 		m_Menu.AppendMenu(MF_POPUP, view, L"&View");
 		SetMenu(m_Menu);
 
-		m_Grid.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | DGVS_ROWHEADER, WS_EX_CLIENTEDGE, IDC_GRID);
+		m_Grid.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | DGVS_ROWHEADER | DGVS_EDITABLE, WS_EX_CLIENTEDGE, IDC_GRID);
 		m_Log.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOSEL,
 			WS_EX_CLIENTEDGE, IDC_LOG);
 		m_Log.SetFont(m_Grid.GetFont());
@@ -320,6 +343,7 @@ private:
 		SetData(CMD_STORE);
 		Check(CMD_ROWNUMBERS, true);
 		Check(CMD_SELCELLS, true);
+		Check(CMD_EDITABLE, true);
 		Check(CMD_HORZLINES, true);
 		Check(CMD_VERTLINES, true);
 		SetFrozen(1);
@@ -414,8 +438,30 @@ private:
 			}
 			case CMD_UNSORT:
 				m_Grid.SetSortKeys(nullptr, 0);
+				if (m_Reversed && m_Grid.IsVirtual())
+					m_Grid.ClearUndo();   // the rows' indexes name other rows now
 				m_Reversed = false;
 				m_Grid.RedrawRows(-1, -1);
+				break;
+			case CMD_EDITABLE:
+				ToggleStyle(id, DGVS_EDITABLE, true);
+				break;
+			case CMD_UNDO:
+				if (!m_Grid.Undo())
+					Log(L"Nothing to undo");
+				break;
+			case CMD_REDO:
+				if (!m_Grid.Redo())
+					Log(L"Nothing to redo");
+				break;
+			case CMD_CUT:
+				m_Grid.Cut();
+				break;
+			case CMD_PASTE:
+				m_Grid.Paste();
+				break;
+			case CMD_CLEAR:
+				m_Grid.ClearSelectedCells();
 				break;
 			case CMD_ROWNUMBERS:
 				ToggleStyle(id, DGVS_ROWHEADER, true);
@@ -486,8 +532,43 @@ private:
 		switch (hdr->code) {
 			case DGVN_GETDISPINFO: {
 				auto info = (NMDGVDISPINFO*)hdr;
-				LONGLONG row = m_Reversed ? m_Grid.GetRowCount() - 1 - info->iRow : info->iRow;
+				LONGLONG row = SourceRow(info->iRow);
+				if (auto it = m_Changed.find({ row, info->idColumn }); it != m_Changed.end()) {
+					info->value = it->second.value;
+					info->value.pszText = it->second.text.c_str();
+					info->iImage = it->second.image;
+					break;
+				}
 				info->value = Value(row, info->idColumn, info->iImage, m_Text);
+				break;
+			}
+			case DGVN_SETCELL: {   // virtual mode: the demo keeps what the user changed
+				auto nm = (NMDGVSETCELL*)hdr;
+				Changed c{ nm->value, nm->value.type == DGVVT_TEXT && nm->value.pszText ? nm->value.pszText : L"", nm->iImage };
+				m_Changed[{ SourceRow(nm->iRow), nm->idColumn }] = std::move(c);
+				break;
+			}
+			case DGVN_VALIDATE: {
+				auto nm = (NMDGVVALIDATE*)hdr;
+				if (nm->idColumn == m_IdQty && nm->value.type == DGVVT_INT && nm->value.llVal < 0) {
+					wcscpy_s(nm->szError, L"The quantity can't be negative.");
+					Log(L"DGVN_VALIDATE: row %lld: \"%s\" rejected", nm->iRow, nm->pszText);
+					return 1;
+				}
+				break;
+			}
+			case DGVN_BEGINEDIT:
+			case DGVN_ENDEDIT: {
+				auto nm = (NMDGVEDIT*)hdr;
+				Log(L"%s: row %lld, column %d%s", hdr->code == DGVN_BEGINEDIT ? L"DGVN_BEGINEDIT" : L"DGVN_ENDEDIT", nm->iRow,
+					nm->idColumn, hdr->code == DGVN_ENDEDIT && nm->fCanceled ? L" (canceled)" : L"");
+				break;
+			}
+			case DGVN_CELLSCHANGED: {
+				static const wchar_t* reasons[] = { L"edit", L"paste", L"clear", L"toggle", L"undo", L"redo" };
+				auto nm = (NMDGVCHANGE*)hdr;
+				Log(L"DGVN_CELLSCHANGED: %s, %d cell(s), the first at row %lld, column %d", nm->reason < _countof(reasons) ? reasons[nm->reason] : L"?",
+					nm->cCells, nm->iFirstRow, nm->idFirstColumn);
 				break;
 			}
 			case DGVN_SELCHANGED: {
@@ -516,7 +597,10 @@ private:
 					}
 				}
 				else {
-					m_Reversed = nm->cKeys == 1 && nm->pKeys[0].fDescending;
+					bool reversed = nm->cKeys == 1 && nm->pKeys[0].fDescending;
+					if (reversed != m_Reversed)
+						m_Grid.ClearUndo();   // the rows' indexes name other rows now
+					m_Reversed = reversed;
 					m_Grid.RedrawRows(-1, -1);
 				}
 				break;

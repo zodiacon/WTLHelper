@@ -15,6 +15,8 @@ namespace {
 LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
+	if (!CommitOrCancel())   // a value that can't be kept: the editor stays, the click does nothing
+		return 0;
 	if (::GetFocus() != m_hWnd)
 		SetFocus();
 	DGVHITTEST hit{ pt };
@@ -45,6 +47,8 @@ LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) 
 			ClientToScreen(&screen);
 			NotifyCell(DGVN_LINKCLICK, hit, screen);
 		}
+		if (op == SelOp::Reset && column && column->type == DgColType::Bool && OnCheckBox(view, col, pt))
+			ToggleChecks(view, col, false);
 	}
 	else if (hit.flags & DGVHT_ROWHEADER) {
 		Select(op, view, std::max(0, d.layout.IndexOf(d.caretId)), true, true);
@@ -76,11 +80,38 @@ LRESULT CDataGridCtrl::OnLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		return OnLButtonDown(WM_LBUTTONDOWN, 0, lParam, handled);
 	}
 	if (hit.flags & DGVHT_CELL) {
+		auto& d = *m_Data;
+		auto column = d.columns.Find(hit.idColumn);
+		int64_t view = d.rows.ToView(hit.iRow);
+		if (column && column->type == DgColType::Bool && OnCheckBox(view, col, pt)) {   // a second click on it
+			if (CommitOrCancel())
+				ToggleChecks(view, col, false);
+			return 0;
+		}
+		if (column && column->type != DgColType::Bool && CanEdit(hit.iRow, hit.idColumn)) {   // editable: an editor
+			StartEdit(hit.iRow, hit.idColumn, nullptr);
+			return 0;
+		}
 		POINT screen = pt;
 		ClientToScreen(&screen);
 		NotifyCell(DGVN_ACTIVATE, hit, screen);
 	}
 	return 0;
+}
+
+bool CDataGridCtrl::OnCheckBox(LONGLONG viewRow, int displayCol, POINT pt) const {
+	auto& d = *m_Data;
+	auto& L = d.layout;
+	if (displayCol < 0 || displayCol >= (int)L.cols.size() || viewRow < d.topRow)
+		return false;
+	auto column = d.columns.Find(L.cols[displayCol].id);
+	if (!column || !CanEdit(d.rows.ToData(viewRow), column->id))
+		return false;
+	int y = L.header + (int)(viewRow - d.topRow) * L.rowHeight;
+	RECT cell{ L.Left(displayCol, d.scrollX), y, L.Right(displayCol, d.scrollX), y + L.rowHeight };
+	RECT box = CheckRect(cell, DgEffectiveAlign(*column));
+	::InflateRect(&box, Scale(3), Scale(3));   // a little slack around it
+	return ::PtInRect(&box, pt) != FALSE;
 }
 
 LRESULT CDataGridCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
@@ -182,6 +213,8 @@ LRESULT CDataGridCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL& bHandled
 	// the caret goes to the cell, as in Excel; DefWindowProc sends WM_CONTEXTMENU on the button's release
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
+	if (!CommitOrCancel())
+		return 0;
 	if (::GetFocus() != m_hWnd)
 		SetFocus();
 	DGVHITTEST hit{ pt };
@@ -232,7 +265,7 @@ LRESULT CDataGridCtrl::OnContextMenu(UINT, WPARAM, LPARAM lParam, BOOL&) {
 LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
 	bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
-	if (SelectionKey(wParam, ctrl, shift))
+	if (EditKey(wParam, ctrl, shift) || SelectionKey(wParam, ctrl, shift))
 		return 0;
 	DgKey key;
 	switch (wParam) {
@@ -279,9 +312,10 @@ LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	return 0;
 }
 
-LRESULT CDataGridCtrl::OnFocus(UINT msg, WPARAM, LPARAM, BOOL&) {
+LRESULT CDataGridCtrl::OnFocus(UINT msg, WPARAM wParam, LPARAM, BOOL&) {
 	auto& d = *m_Data;
-	d.focused = msg == WM_SETFOCUS;
+	// to the editor: still the grid's focus, as far as the colors go
+	d.focused = msg == WM_SETFOCUS || (d.edit.active && (HWND)wParam == m_Editor.m_hWnd);
 	if (d.focused && d.caretRow < 0 && d.RowCount() > 0 && !d.layout.cols.empty()) {   // somewhere for the keys to start
 		d.caretRow = d.rows.ToData(d.topRow);
 		if (d.layout.IndexOf(d.caretId) < 0)

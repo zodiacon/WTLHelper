@@ -38,6 +38,21 @@ struct DgData {
 	enum class Drag { None, Resize, Press, Reorder, Select } drag = Drag::None;
 	bool selectRows = false;        // selecting by the row numbers: whole rows
 	static constexpr UINT_PTR ScrollTimer = 1;
+	static constexpr UINT_PTR ErrorTimer = 2;
+
+	// editing
+	struct Edit {
+		bool active = false;
+		int64_t row = -1;           // a data row
+		int id = 0;
+		enum class Kind { Text, List, Date } kind = Kind::Text;
+		bool typed = false;         // opened by typing: the arrows commit
+		bool dirty = false;         // changed in the editor: nothing is written otherwise
+	} edit;
+	DgUndoStack undo;
+	HWND errorTip = nullptr;
+	HBRUSH editBrush = nullptr;
+	COLORREF editBrushColor = CLR_INVALID;
 	int dragCol = -1;               // an index into layout.cols
 	int dragStartX = 0, dragStartWidth = 0, dragX = 0, dragOffset = 0;
 	int dropIndex = -1;
@@ -80,3 +95,38 @@ struct DgData {
 
 // the text a cell shows (dates in the user's format)
 std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumberFormat& nf);
+
+// a date in the user's format (VarDateFromStr), for pasting what was copied
+bool DgParseUserDate(const std::wstring& text, int64_t& ticks);
+
+// ---- Between the API's values and the model's -------------------------------------------
+
+inline int64_t DgTicksOf(const FILETIME& ft) {
+	return (int64_t)(((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime);
+}
+
+inline FILETIME DgFileTimeOf(int64_t ticks) {
+	return { (DWORD)(uint64_t)ticks, (DWORD)((uint64_t)ticks >> 32) };
+}
+
+inline DgValue DgFromPublic(const DGVVALUE& v) {
+	switch (v.type) {
+		case DGVVT_TEXT:     return DgValue::Text(v.pszText ? v.pszText : L"");
+		case DGVVT_INT:      return DgValue::Int(v.llVal);
+		case DGVVT_FLOAT:    return DgValue::Float(v.dblVal);
+		case DGVVT_BOOL:     return DgValue::Bool(v.bVal != FALSE);
+		case DGVVT_DATETIME: return DgValue::DateTime(DgTicksOf(v.ftVal));
+	}
+	return {};
+}
+
+inline DGVVALUE DgToPublic(const DgValue& v, LPCWSTR text) {   // text: the value's, kept alive by the caller
+	switch (v.type) {
+		case DgType::Text:     return DgvText(text);
+		case DgType::Int:      return DgvInt(v.i);
+		case DgType::Float:    return DgvFloat(v.d);
+		case DgType::Bool:     return DgvBool(v.i != 0);
+		case DgType::DateTime: return DgvDateTime(DgFileTimeOf(v.i));
+	}
+	return DgvEmpty();
+}

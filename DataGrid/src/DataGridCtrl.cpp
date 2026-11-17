@@ -8,43 +8,13 @@
 static_assert(DgType::Text == DGVVT_TEXT && DgType::DateTime == DGVVT_DATETIME && DgType::Bool == DGVVT_BOOL);
 static_assert(DgColType::Integer == DGVCT_INTEGER && DgColType::Progress == DGVCT_PROGRESS && DgColType::Link == DGVCT_LINK);
 static_assert(DgAlign::Right == DGVA_RIGHT && DgAlign::Center == DGVA_CENTER);
-static_assert(DgColFlag::Hidden == DGVCF_HIDDEN && DgColFlag::GroupDigits == DGVCF_GROUPDIGITS && DgColFlag::NoSort == DGVCF_NOSORT);
+static_assert(DgColFlag::Hidden == DGVCF_HIDDEN && DgColFlag::GroupDigits == DGVCF_GROUPDIGITS && DgColFlag::NoSort == DGVCF_NOSORT && DgColFlag::ReadOnly == DGVCF_READONLY);
 static_assert(DgHitFlag::Cell == DGVHT_CELL && DgHitFlag::HeaderDivider == DGVHT_HEADERDIVIDER && DgHitFlag::Empty == DGVHT_EMPTY);
 
 // ---- Helpers -----------------------------------------------------------------------
 
 namespace {
-	int64_t TicksOf(const FILETIME& ft) {
-		return (int64_t)(((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime);
-	}
-
-	FILETIME FileTimeOf(int64_t ticks) {
-		return { (DWORD)(uint64_t)ticks, (DWORD)((uint64_t)ticks >> 32) };
-	}
-
-	DgValue ValueOf(const DGVVALUE& v) {
-		switch (v.type) {
-			case DGVVT_TEXT:     return DgValue::Text(v.pszText ? v.pszText : L"");
-			case DGVVT_INT:      return DgValue::Int(v.llVal);
-			case DGVVT_FLOAT:    return DgValue::Float(v.dblVal);
-			case DGVVT_BOOL:     return DgValue::Bool(v.bVal != FALSE);
-			case DGVVT_DATETIME: return DgValue::DateTime(TicksOf(v.ftVal));
-		}
-		return {};
-	}
-
-	DGVVALUE PublicOf(const DgValue& v, LPCWSTR text) {
-		switch (v.type) {
-			case DgType::Text:     return DgvText(text);
-			case DgType::Int:      return DgvInt(v.i);
-			case DgType::Float:    return DgvFloat(v.d);
-			case DgType::Bool:     return DgvBool(v.i != 0);
-			case DgType::DateTime: return DgvDateTime(FileTimeOf(v.i));
-		}
-		return DgvEmpty();
-	}
-
-	void Apply(DgColumn& c, const DGVCOLUMN& d) {
+	void ApplyColumn(DgColumn& c, const DGVCOLUMN& d) {
 		if (d.mask & DGVCM_TITLE)
 			c.title = d.pszTitle ? d.pszTitle : L"";
 		if (d.mask & DGVCM_TYPE)
@@ -71,7 +41,7 @@ namespace {
 std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumberFormat& nf) {
 	if (cell.value.type != DgType::DateTime)
 		return DgFormat(cell.value, column, nf);
-	FILETIME ft = FileTimeOf(cell.value.i);
+	FILETIME ft = DgFileTimeOf(cell.value.i);
 	SYSTEMTIME st;
 	if (!::FileTimeToSystemTime(&ft, &st))
 		return DgFormatDateTime(cell.value.i);
@@ -83,10 +53,12 @@ std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumb
 
 // ---- Construction ------------------------------------------------------------------
 
-CDataGridCtrl::CDataGridCtrl() : m_Data(std::make_unique<DgData>()) {
+CDataGridCtrl::CDataGridCtrl() : m_Data(std::make_unique<DgData>()), m_Editor(this, 1) {
 }
 
 CDataGridCtrl::~CDataGridCtrl() {
+	if (m_Data->editBrush)
+		::DeleteObject(m_Data->editBrush);
 	if (m_OwnFont && m_hFont)
 		::DeleteObject(m_hFont);
 	if (m_hBold)
@@ -97,6 +69,8 @@ CDataGridCtrl::~CDataGridCtrl() {
 
 LRESULT CDataGridCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	m_Dpi = ::GetDpiForWindow(m_hWnd);
+	INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_DATE_CLASSES | ICC_STANDARD_CLASSES };   // the editors
+	::InitCommonControlsEx(&icc);
 	ModifyStyle(0, WS_VSCROLL | WS_HSCROLL);
 	BOOL handled;
 	OnSettingChange(0, 0, 0, handled);   // the number format
@@ -272,6 +246,7 @@ void CDataGridCtrl::Relayout() {
 	else {
 		d.selection.Clamp(d.RowCount(), d.ColCount());
 	}
+	PositionEditor();
 	Invalidate();
 }
 
@@ -314,6 +289,7 @@ void CDataGridCtrl::ScrollRows(LONGLONG top) {
 	ClampScroll();
 	if (d.topRow != old) {
 		UpdateScrollBars();
+		PositionEditor();   // or closes it, its cell gone from view
 		Invalidate();
 	}
 }
@@ -325,6 +301,7 @@ void CDataGridCtrl::ScrollX(int x) {
 	ClampScroll();
 	if (d.scrollX != old) {
 		UpdateScrollBars();
+		PositionEditor();
 		Invalidate();
 	}
 }
@@ -416,7 +393,7 @@ LRESULT CDataGridCtrl::OnMouseWheel(UINT msg, WPARAM wParam, LPARAM, BOOL&) {
 
 int CDataGridCtrl::InsertColumn(const DGVCOLUMN& column, int displayIndex) {
 	DgColumn c;
-	Apply(c, column);
+	ApplyColumn(c, column);
 	int id = m_Data->columns.Insert(std::move(c), displayIndex);
 	if (m_Data->caretId == 0)
 		m_Data->caretId = id;
@@ -429,6 +406,9 @@ BOOL CDataGridCtrl::DeleteColumn(int id) {
 	auto c = d.columns.Find(id);
 	if (!c)
 		return FALSE;
+	if (d.edit.active)
+		EndEdit(false);
+	d.undo.Clear();   // its cells' changes can't be undone any more
 	d.store.ClearSlot(c->slot);
 	d.columns.Erase(id);
 	std::erase_if(d.sortKeys, [&](auto& k) { return k.id == id; });
@@ -445,7 +425,7 @@ BOOL CDataGridCtrl::SetColumn(int id, const DGVCOLUMN& column) {
 	auto c = m_Data->columns.Find(id);
 	if (!c)
 		return FALSE;
-	Apply(*c, column);
+	ApplyColumn(*c, column);
 	Relayout();
 	return TRUE;
 }
@@ -556,6 +536,9 @@ int CDataGridCtrl::GetFrozenColumns() const {
 
 void CDataGridCtrl::SetVirtual(bool virtualMode) {
 	auto& d = *m_Data;
+	if (d.edit.active)
+		EndEdit(false);
+	d.undo.Clear();
 	d.virtualMode = virtualMode;
 	d.store.Clear();
 	d.cache.Clear();
@@ -576,6 +559,11 @@ BOOL CDataGridCtrl::SetRowCount(LONGLONG count) {
 	auto& d = *m_Data;
 	if (count < 0)
 		return FALSE;
+	if (count < d.DataRowCount()) {   // rows that were changed may be gone (more rows keep the indexes)
+		if (d.edit.active && d.edit.row >= count)
+			EndEdit(false);
+		d.undo.Clear();
+	}
 	if (d.virtualMode) {
 		d.virtualCount = count;
 		d.cache.Drop(count, INT64_MAX);
@@ -603,6 +591,9 @@ LONGLONG CDataGridCtrl::InsertRows(LONGLONG at, LONGLONG count) {
 	auto& d = *m_Data;
 	if (d.virtualMode || count < 0)
 		return -1;
+	if (d.edit.active)
+		EndEdit(false);
+	d.undo.Clear();   // the rows after move
 	int64_t first = d.store.Insert(at, count);
 	if (d.caretRow >= first)
 		d.caretRow += count;
@@ -612,8 +603,12 @@ LONGLONG CDataGridCtrl::InsertRows(LONGLONG at, LONGLONG count) {
 
 BOOL CDataGridCtrl::DeleteRows(LONGLONG at, LONGLONG count) {
 	auto& d = *m_Data;
-	if (d.virtualMode || !d.store.Erase(at, count))
+	if (d.virtualMode || at < 0 || count < 0 || at + count > d.store.Count())
 		return FALSE;
+	if (d.edit.active)
+		EndEdit(false);
+	d.undo.Clear();
+	d.store.Erase(at, count);
 	if (d.caretRow >= at + count)
 		d.caretRow -= count;
 	else if (d.caretRow >= at)
@@ -627,7 +622,7 @@ BOOL CDataGridCtrl::SetCell(LONGLONG row, int id, const DGVVALUE& value, int ima
 	auto c = d.columns.Find(id);
 	if (d.virtualMode || !c)
 		return FALSE;
-	if (!d.store.Set(row, c->slot, DgCell{ ValueOf(value), image }))
+	if (!d.store.Set(row, c->slot, DgCell{ DgFromPublic(value), image }))
 		return FALSE;
 	InvalidateRow(d.rows.ToView(row));
 	return TRUE;
@@ -652,7 +647,7 @@ bool CDataGridCtrl::Fetch(LONGLONG dataRow, int id, DgCell& cell) {
 	info.idColumn = id;
 	info.iImage = -1;
 	FireNotify(&info.hdr, DGVN_GETDISPINFO);
-	cell = DgCell{ ValueOf(info.value), info.iImage };
+	cell = DgCell{ DgFromPublic(info.value), info.iImage };
 	d.cache.Put(dataRow, id, cell);
 	return true;
 }
@@ -664,7 +659,7 @@ BOOL CDataGridCtrl::GetCell(LONGLONG row, int id, DGVVALUE* value, int* image) {
 	auto& d = *m_Data;
 	d.cellText = cell.value.s;
 	if (value)
-		*value = PublicOf(cell.value, d.cellText.c_str());
+		*value = DgToPublic(cell.value, d.cellText.c_str());
 	if (image)
 		*image = cell.image;
 	return TRUE;

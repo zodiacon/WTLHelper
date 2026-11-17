@@ -26,7 +26,7 @@ namespace DgAlign {       // DGVA_*
 	enum : int { Default, Left, Center, Right };
 }
 namespace DgColFlag {     // DGVCF_*
-	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8, NoSort = 16 };
+	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8, NoSort = 16, ReadOnly = 32 };
 }
 namespace DgHitFlag {     // DGVHT_*
 	enum : unsigned { Nowhere = 0, Cell = 1, Header = 2, HeaderDivider = 4, RowHeader = 8, Corner = 0x10, Empty = 0x20 };
@@ -368,6 +368,84 @@ std::string DgCfHtml(const std::string& fragmentUtf8);          // the clipboard
 // The selection as a table: the rows and the columns it touches, cells it doesn't left empty, titles first if wanted.
 template<typename TextOf, typename TitleOf>
 std::vector<std::vector<std::wstring>> DgSelectionTable(const DgSelection& selection, TextOf text, TitleOf title, bool titles);
+
+
+// ---- Editing --------------------------------------------------------------------------------------------
+
+// Text to a column's value: empty text is an empty cell; numbers take the user's separators; dates are ISO
+// ("2026-11-17", "2026-11-17 13:05[:09]", a 'T' allowed), or what parseDate (the user's format) makes of them.
+struct DgParsed {
+	bool ok = false;
+	DgValue value;
+	std::wstring error;   // when not ok: what to enter
+};
+using DgDateParser = bool (*)(const std::wstring& text, int64_t& ticks);
+DgParsed DgParseValue(const std::wstring& text, const DgColumn& column, const DgNumberFormat& nf, DgDateParser parseDate = nullptr);
+bool DgParseIsoDateTime(const std::wstring& text, int64_t& ticks);
+
+// The text an editor starts with (F2): numbers without grouping and with all their digits.
+std::wstring DgEditText(const DgValue& value, const DgColumn& column, const DgNumberFormat& nf);
+
+// Tab-separated text (Excel's: quoted fields may hold tabs, line breaks and doubled quotes) to rows of fields; a
+// last line break doesn't make an empty row.
+std::vector<std::vector<std::wstring>> DgParseTsv(const std::wstring& text);
+
+// Where pasted fields go: one field fills every selected cell; more go from the top-left of the last range, cut at
+// the grid's edges. At most max cells.
+struct DgPasteCell {
+	int64_t row = 0;
+	int col = 0;
+	const std::wstring* text = nullptr;
+};
+std::vector<DgPasteCell> DgPasteTargets(const std::vector<std::vector<std::wstring>>& fields, const DgSelection& selection,
+	int64_t rowCount, int colCount, size_t max);
+
+// What a key does to an open editor. Typed: it was opened by typing, so the arrows commit and move (Excel's "enter"
+// mode); after F2 they move in the text.
+enum class DgEditAction { None, Cancel, CommitStay, CommitDown, CommitUp, CommitRight, CommitLeft };
+DgEditAction DgEditKey(unsigned key, bool shift, bool typed);
+
+// ---- Undo --------------------------------------------------------------------------------------------------
+
+struct DgCellChange {
+	int64_t row = 0;        // a data row
+	int id = 0;
+	DgCell before, after;
+};
+
+struct DgEditStep {
+	std::vector<DgCellChange> changes;
+	int reason = 0;         // DGVCR_*
+};
+
+// Steps done, undone and redone; a new step drops what was undone. Rows inserted or deleted (their indexes move)
+// clear it.
+class DgUndoStack {
+public:
+	explicit DgUndoStack(size_t limit = 100) : m_Limit(limit) {
+	}
+	void Push(DgEditStep step);
+	bool CanUndo() const {
+		return m_Done > 0;
+	}
+	bool CanRedo() const {
+		return m_Done < m_Steps.size();
+	}
+	const DgEditStep* Undo();   // the step to take back (apply its befores); nullptr if none
+	const DgEditStep* Redo();   // the step to do again (apply its afters)
+	void Clear() {
+		m_Steps.clear();
+		m_Done = 0;
+	}
+	size_t Count() const {
+		return m_Steps.size();
+	}
+
+private:
+	std::vector<DgEditStep> m_Steps;
+	size_t m_Done = 0;
+	size_t m_Limit;
+};
 
 // ---- Templates ----------------------------------------------------------------------------------------
 

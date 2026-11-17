@@ -101,6 +101,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\DataGridCtrl.cpp" />
+    <ClCompile Include="src\DataGridEdit.cpp" />
     <ClCompile Include="src\DataGridHeader.cpp" />
     <ClCompile Include="src\DataGridInput.cpp" />
     <ClCompile Include="src\DataGridModel.cpp" />

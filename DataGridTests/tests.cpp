@@ -720,6 +720,233 @@ TEST(SelectionTable) {
 	CHECK_INT(DgSelectionTable(s, text, title, false).size(), 3);
 }
 
+// ---- Editing -----------------------------------------------------------------------------------------
+
+static DgColumn TypedColumn(int type) {
+	DgColumn c;
+	c.type = type;
+	return c;
+}
+
+static bool SlashDate(const std::wstring& text, int64_t& ticks) {   // "17/11/2026", for the user's format
+	int d, m, y;
+	if (swscanf_s(text.c_str(), L"%d/%d/%d", &d, &m, &y) != 3)
+		return false;
+	wchar_t iso[16];
+	swprintf_s(iso, L"%04d-%02d-%02d", y, m, d);
+	return DgParseIsoDateTime(iso, ticks);
+}
+
+TEST(ParseNumbers) {
+	DgNumberFormat nf;
+	auto in = TypedColumn(DgColType::Integer);
+	auto p = DgParseValue(L"1,234", in, nf);
+	CHECK(p.ok && p.value == DgValue::Int(1234));
+	p = DgParseValue(L" -12 ", in, nf);
+	CHECK(p.ok && p.value == DgValue::Int(-12));
+	p = DgParseValue(L"-9223372036854775808", in, nf);
+	CHECK(p.ok && p.value.i == INT64_MIN);
+	CHECK(!DgParseValue(L"9223372036854775808", in, nf).ok);       // too big
+	CHECK(!DgParseValue(L"1.5", in, nf).ok);
+	CHECK_STR(DgParseValue(L"x", in, nf).error, L"Enter a whole number.");
+	CHECK(!DgParseValue(L"-", in, nf).ok);
+	p = DgParseValue(L"   ", in, nf);                                // nothing: an empty cell
+	CHECK(p.ok && p.value.type == DgType::Empty);
+
+	auto fl = TypedColumn(DgColType::Float);
+	p = DgParseValue(L"3.25", fl, nf);
+	CHECK(p.ok && p.value == DgValue::Float(3.25));
+	p = DgParseValue(L"1e3", fl, nf);
+	CHECK(p.ok && p.value.d == 1000);
+	p = DgParseValue(L"1,234.5", fl, nf);
+	CHECK(p.ok && p.value.d == 1234.5);
+	CHECK(!DgParseValue(L"inf", fl, nf).ok);
+	CHECK(!DgParseValue(L"nan", fl, nf).ok);
+	CHECK(!DgParseValue(L"0x10", fl, nf).ok);
+	CHECK(!DgParseValue(L"1.2.3", fl, nf).ok);
+
+	DgNumberFormat german{ L".", L"," };
+	p = DgParseValue(L"1.234,5", fl, german);
+	CHECK(p.ok && p.value.d == 1234.5);
+	p = DgParseValue(L"1.234", in, german);
+	CHECK(p.ok && p.value.i == 1234);
+	DgNumberFormat french{ L"\x202F", L"," };                         // grouped with a narrow no-break space
+	p = DgParseValue(L"1\x202F" L"234,5", fl, french);
+	CHECK(p.ok && p.value.d == 1234.5);
+}
+
+TEST(ParseOthers) {
+	DgNumberFormat nf;
+	auto bo = TypedColumn(DgColType::Bool);
+	CHECK(DgParseValue(L"Yes", bo, nf).value == DgValue::Bool(true));
+	CHECK(DgParseValue(L"0", bo, nf).value == DgValue::Bool(false));
+	CHECK(!DgParseValue(L"maybe", bo, nf).ok);
+
+	auto en = TypedColumn(DgColType::Enum);
+	en.enumItems = { L"Low", L"High" };
+	CHECK(DgParseValue(L"high", en, nf).value == DgValue::Int(1));
+	CHECK(DgParseValue(L"0", en, nf).value == DgValue::Int(0));
+	auto bad = DgParseValue(L"7", en, nf);
+	CHECK(!bad.ok);
+	CHECK_STR(bad.error, L"Enter one of: Low, High.");
+
+	auto pr = TypedColumn(DgColType::Progress);
+	CHECK(DgParseValue(L"42%", pr, nf).value == DgValue::Int(42));
+	CHECK(DgParseValue(L"42", pr, nf).value == DgValue::Int(42));
+	CHECK(DgParseValue(L"0.5", pr, nf).value == DgValue::Float(0.5));
+	CHECK(DgParseValue(L"50.4 %", pr, nf).value == DgValue::Int(50));
+	CHECK(!DgParseValue(L"150", pr, nf).ok);
+	CHECK(!DgParseValue(L"1.5", pr, nf).ok);
+	CHECK(!DgParseValue(L"-1%", pr, nf).ok);
+
+	auto tx = TypedColumn(DgColType::Text);
+	CHECK(DgParseValue(L"  hi ", tx, nf).value == DgValue::Text(L"  hi "));   // text as typed
+	CHECK(DgParseValue(L"x", TypedColumn(DgColType::Link), nf).value == DgValue::Text(L"x"));
+}
+
+TEST(ParseDates) {
+	DgNumberFormat nf;
+	auto dt = TypedColumn(DgColType::DateTime);
+	int64_t t = 0;
+	CHECK(DgParseIsoDateTime(L"2026-11-17", t));
+	CHECK_STR(DgFormatDateTime(t), L"2026-11-17 00:00:00");
+	CHECK(DgParseIsoDateTime(L"2026-11-17 13:05", t));
+	CHECK_STR(DgFormatDateTime(t), L"2026-11-17 13:05:00");
+	CHECK(DgParseIsoDateTime(L" 2026-11-17T13:05:09 ", t));
+	CHECK_STR(DgFormatDateTime(t), L"2026-11-17 13:05:09");
+	CHECK(DgParseIsoDateTime(L"2024-02-29", t));
+	CHECK(DgParseIsoDateTime(L"1601-01-01", t) && t == 0);
+	CHECK(!DgParseIsoDateTime(L"2025-02-29", t));
+	CHECK(!DgParseIsoDateTime(L"2026-11-31", t));
+	CHECK(!DgParseIsoDateTime(L"2026-13-01", t));
+	CHECK(!DgParseIsoDateTime(L"2026-11-17 24:00", t));
+	CHECK(!DgParseIsoDateTime(L"2026-11-17 13", t));
+	CHECK(!DgParseIsoDateTime(L"2026-11-17 13:05:09x", t));
+	CHECK(!DgParseIsoDateTime(L"1600-12-31", t));                   // before FILETIME's epoch
+
+	CHECK(!DgParseValue(L"17/11/2026", dt, nf).ok);
+	auto p = DgParseValue(L"17/11/2026", dt, nf, SlashDate);        // the user's format
+	CHECK(p.ok && DgFormatDateTime(p.value.i) == L"2026-11-17 00:00:00");
+	CHECK(DgParseValue(L"2026-11-17", dt, nf, SlashDate).ok);        // ISO first
+}
+
+TEST(EditText) {
+	DgNumberFormat nf;
+	DgColumn in = TypedColumn(DgColType::Integer);
+	in.flags = DgColFlag::GroupDigits;
+	CHECK_STR(DgEditText(DgValue::Int(1234), in, nf), L"1234");     // no grouping to edit
+	CHECK_STR(DgEditText(DgValue::Float(2.6), in, nf), L"3");
+	auto fl = TypedColumn(DgColType::Float);
+	fl.decimals = 2;
+	CHECK_STR(DgEditText(DgValue::Float(0.1), fl, nf), L"0.1");
+	CHECK_STR(DgEditText(DgValue::Float(3.14159), fl, nf), L"3.14159");   // all the digits
+	DgNumberFormat german{ L".", L"," };
+	CHECK_STR(DgEditText(DgValue::Float(0.25), fl, german), L"0,25");
+	auto en = TypedColumn(DgColType::Enum);
+	en.enumItems = { L"Low", L"High" };
+	CHECK_STR(DgEditText(DgValue::Int(1), en, nf), L"High");
+	CHECK_STR(DgEditText(DgValue::Int(42), TypedColumn(DgColType::Progress), nf), L"42%");
+	auto dt = TypedColumn(DgColType::DateTime);
+	int64_t t;
+	DgParseIsoDateTime(L"2026-11-17 13:05", t);
+	CHECK_STR(DgEditText(DgValue::DateTime(t), dt, nf), L"2026-11-17 13:05");
+	DgParseIsoDateTime(L"2026-11-17 13:05:09", t);
+	CHECK_STR(DgEditText(DgValue::DateTime(t), dt, nf), L"2026-11-17 13:05:09");
+	CHECK_STR(DgEditText(DgValue{}, dt, nf), L"");
+	// what's edited parses back to the same value
+	for (auto v : { DgValue::Float(1e-7), DgValue::Float(-123456.789), DgValue::Float(1.0 / 3) }) {
+		auto back = DgParseValue(DgEditText(v, fl, german), fl, german);
+		CHECK(back.ok && back.value == v);
+	}
+}
+
+TEST(ParseTsv) {
+	using Rows = std::vector<std::vector<std::wstring>>;
+	CHECK(DgParseTsv(L"a\tb\r\nc\td\r\n") == (Rows{ { L"a", L"b" }, { L"c", L"d" } }));
+	CHECK(DgParseTsv(L"a\tb\nc") == (Rows{ { L"a", L"b" }, { L"c" } }));
+	CHECK(DgParseTsv(L"a\t\"x\ty\"\n\"say \"\"hi\"\"\"") == (Rows{ { L"a", L"x\ty" }, { L"say \"hi\"" } }));
+	CHECK(DgParseTsv(L"\"1\r\n2\"\tz") == (Rows{ { L"1\r\n2", L"z" } }));
+	CHECK(DgParseTsv(L"a\"b\tc") == (Rows{ { L"a\"b", L"c" } }));       // a quote inside: as it is
+	CHECK(DgParseTsv(L"a\t") == (Rows{ { L"a", L"" } }));
+	CHECK(DgParseTsv(L"") == Rows{});
+	CHECK(DgParseTsv(L"\r\n") == (Rows{ { L"" } }));
+	Rows table{ { L"x\ty", L"" }, { L"\"q\"", L"two\r\nlines" } };     // round trip with copying
+	CHECK(DgParseTsv(DgBuildTsv(table)) == table);
+}
+
+TEST(PasteTargets) {
+	std::vector<std::vector<std::wstring>> two{ { L"a", L"b" }, { L"c", L"d" } };
+	DgSelection s;
+	s.Reset({ 2, 1 }, 3);
+	auto cells = DgPasteTargets(two, s, 4, 3, 100);
+	CHECK_INT(cells.size(), 4);
+	CHECK(cells[3].row == 3 && cells[3].col == 2 && *cells[3].text == L"d");
+	s.Reset({ 3, 2 }, 3);                                           // cut at the edges
+	cells = DgPasteTargets(two, s, 4, 3, 100);
+	CHECK_INT(cells.size(), 1);
+	CHECK(*cells[0].text == L"a");
+
+	std::vector<std::vector<std::wstring>> one{ { L"z" } };
+	s.Reset({ 0, 0 }, 3);
+	s.Extend({ 1, 1 }, 3);
+	s.Add({ 1, 1 }, 3);                                             // overlapping: once each
+	cells = DgPasteTargets(one, s, 4, 3, 100);
+	CHECK_INT(cells.size(), 4);
+	CHECK(*cells[2].text == L"z");
+	CHECK_INT(DgPasteTargets(one, s, 4, 3, 3).size(), 3);           // at most max
+	s.Reset({ 1, 1 }, 3);                                           // one cell, one field
+	CHECK_INT(DgPasteTargets(one, s, 4, 3, 100).size(), 1);
+	s.Reset({ 0, 0 }, 3);
+	s.Extend({ 1, 1 }, 3);                                          // several fields: from the top-left
+	cells = DgPasteTargets(two, s, 4, 3, 100);
+	CHECK(cells[0].row == 0 && cells[0].col == 0);
+	CHECK_INT(DgPasteTargets({}, s, 4, 3, 100).size(), 0);
+}
+
+TEST(EditKeys) {
+	CHECK(DgEditKey(0x1B, false, false) == DgEditAction::Cancel);
+	CHECK(DgEditKey(0x0D, false, false) == DgEditAction::CommitDown);
+	CHECK(DgEditKey(0x0D, true, false) == DgEditAction::CommitUp);
+	CHECK(DgEditKey(0x09, false, true) == DgEditAction::CommitRight);
+	CHECK(DgEditKey(0x09, true, true) == DgEditAction::CommitLeft);
+	CHECK(DgEditKey(0x27, false, true) == DgEditAction::CommitRight);   // typed: the arrows move on
+	CHECK(DgEditKey(0x27, false, false) == DgEditAction::None);         // F2: they move in the text
+	CHECK(DgEditKey(0x28, false, true) == DgEditAction::CommitDown);
+	CHECK(DgEditKey('A', false, true) == DgEditAction::None);
+}
+
+TEST(Undo) {
+	auto step = [](int64_t row) {
+		DgEditStep s;
+		s.changes.push_back({ row, 1, DgCell{}, DgCell{ DgValue::Int(row) } });
+		return s;
+	};
+	DgUndoStack u(3);
+	CHECK(!u.CanUndo() && !u.CanRedo());
+	CHECK(u.Undo() == nullptr);
+	u.Push(step(1));
+	u.Push(step(2));
+	u.Push(step(3));
+	auto s = u.Undo();
+	CHECK(s && s->changes[0].row == 3);
+	s = u.Undo();
+	CHECK(s && s->changes[0].row == 2);
+	CHECK(u.CanRedo());
+	s = u.Redo();
+	CHECK(s && s->changes[0].row == 2);
+	u.Push(step(4));                                                // drops the undone 3
+	CHECK(!u.CanRedo());
+	CHECK_INT(u.Count(), 3);
+	u.Push(step(5));                                                // past the limit: the oldest goes
+	CHECK_INT(u.Count(), 3);
+	CHECK(u.Undo()->changes[0].row == 5);
+	CHECK(u.Undo()->changes[0].row == 4);
+	CHECK(u.Undo()->changes[0].row == 2);
+	CHECK(!u.CanUndo());
+	u.Clear();
+	CHECK(!u.CanRedo());
+}
+
 int wmain() {
 	wprintf(L"DataGrid model tests\n\n");
 
@@ -752,6 +979,14 @@ int wmain() {
 	Run_Tsv();
 	Run_Html();
 	Run_SelectionTable();
+	Run_ParseNumbers();
+	Run_ParseOthers();
+	Run_ParseDates();
+	Run_EditText();
+	Run_ParseTsv();
+	Run_PasteTargets();
+	Run_EditKeys();
+	Run_Undo();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

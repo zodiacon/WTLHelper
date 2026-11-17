@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
+#include <cwctype>
 
 // ---- Values ------------------------------------------------------------------------------
 
@@ -934,4 +935,357 @@ std::string DgCfHtml(const std::string& fragmentUtf8) {
 	char buffer[256];
 	snprintf(buffer, sizeof(buffer), header, headerLength, endHtml, startFragment, endFragment);
 	return buffer + before + fragmentUtf8 + after;
+}
+
+// ---- Editing --------------------------------------------------------------------------------------------
+
+namespace {
+	std::wstring Trim(const std::wstring& s) {
+		auto space = [](wchar_t c) { return c == L' ' || c == L'\t' || c == 0xA0 || c == 0x202F; };
+		size_t a = 0, b = s.size();
+		while (a < b && space(s[a]))
+			a++;
+		while (b > a && space(s[b - 1]))
+			b--;
+		return s.substr(a, b - a);
+	}
+
+	std::wstring Lower(std::wstring s) {
+		for (auto& c : s)
+			c = (wchar_t)towlower(c);
+		return s;
+	}
+
+	// without the thousands separators and spaces (some locales group with a no-break space)
+	std::wstring Ungrouped(const std::wstring& s, const DgNumberFormat& nf) {
+		std::wstring result;
+		for (size_t i = 0; i < s.size(); i++) {
+			if (!nf.thousands.empty() && nf.thousands != nf.decimal && s.compare(i, nf.thousands.size(), nf.thousands) == 0) {
+				i += nf.thousands.size() - 1;
+				continue;
+			}
+			if (s[i] == L' ' || s[i] == 0xA0 || s[i] == 0x202F)
+				continue;
+			result += s[i];
+		}
+		return result;
+	}
+
+	bool ParseInt(const std::wstring& text, const DgNumberFormat& nf, int64_t& value) {
+		auto s = Ungrouped(text, nf);
+		size_t i = 0;
+		bool negative = false;
+		if (i < s.size() && (s[i] == L'-' || s[i] == L'+'))
+			negative = s[i++] == L'-';
+		if (i == s.size())
+			return false;
+		uint64_t magnitude = 0;
+		const uint64_t limit = negative ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
+		for (; i < s.size(); i++) {
+			if (s[i] < L'0' || s[i] > L'9')
+				return false;
+			unsigned digit = s[i] - L'0';
+			if (magnitude > (limit - digit) / 10)
+				return false;   // too big
+			magnitude = magnitude * 10 + digit;
+		}
+		value = negative ? (int64_t)(0 - magnitude) : (int64_t)magnitude;
+		return true;
+	}
+
+	bool ParseNumber(const std::wstring& text, const DgNumberFormat& nf, double& value) {
+		auto s = Ungrouped(text, nf);
+		if (!nf.decimal.empty() && nf.decimal != L".") {
+			for (size_t at; (at = s.find(nf.decimal)) != std::wstring::npos;)
+				s.replace(at, nf.decimal.size(), L".");
+		}
+		if (s.empty() || s.find_first_not_of(L"0123456789+-.eE") != std::wstring::npos)
+			return false;   // no "inf", "nan" or hex
+		wchar_t* end = nullptr;
+		value = wcstod(s.c_str(), &end);
+		return end == s.c_str() + s.size() && std::isfinite(value);
+	}
+
+	// days since 1970-01-01 (Howard Hinnant's days_from_civil)
+	int64_t DaysFromCivil(int64_t y, unsigned m, unsigned d) {
+		y -= m <= 2;
+		int64_t era = (y >= 0 ? y : y - 399) / 400;
+		unsigned yoe = (unsigned)(y - era * 400);
+		unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+		unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+		return era * 146097 + (int64_t)doe - 719468;
+	}
+
+	std::wstring Shortest(double value, const DgNumberFormat& nf) {
+		// the fewest digits that read back as the same number
+		wchar_t buffer[64];
+		for (int digits = 15; digits <= 17; digits++) {
+			swprintf_s(buffer, L"%.*g", digits, value);
+			if (wcstod(buffer, nullptr) == value)
+				break;
+		}
+		std::wstring s = buffer;
+		if (auto at = s.find(L'.'); at != std::wstring::npos)
+			s.replace(at, 1, nf.decimal);
+		return s;
+	}
+}
+
+bool DgParseIsoDateTime(const std::wstring& text, int64_t& ticks) {
+	auto s = Trim(text);
+	int y = 0, mo = 0, d = 0, h = 0, mi = 0, sec = 0;
+	auto digits = [&](size_t at, size_t count, int& out) {
+		if (at + count > s.size())
+			return false;
+		out = 0;
+		for (size_t i = at; i < at + count; i++) {
+			if (s[i] < L'0' || s[i] > L'9')
+				return false;
+			out = out * 10 + (s[i] - L'0');
+		}
+		return true;
+	};
+	if (!digits(0, 4, y) || s.size() < 10 || s[4] != L'-' || !digits(5, 2, mo) || s[7] != L'-' || !digits(8, 2, d))
+		return false;
+	if (s.size() > 10) {
+		if ((s[10] != L' ' && s[10] != L'T') || !digits(11, 2, h) || s.size() < 16 || s[13] != L':' || !digits(14, 2, mi))
+			return false;
+		if (s.size() > 16 && (s[16] != L':' || !digits(17, 2, sec) || s.size() != 19))
+			return false;
+	}
+	static const int monthDays[] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+	bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+	if (y < 1601 || mo < 1 || mo > 12 || d < 1 || d > monthDays[mo - 1] || (mo == 2 && d == 29 && !leap) || h > 23 || mi > 59 || sec > 59)
+		return false;
+	constexpr int64_t DaysFrom1601To1970 = 134774;
+	int64_t days = DaysFromCivil(y, (unsigned)mo, (unsigned)d) + DaysFrom1601To1970;
+	ticks = ((days * 86400) + h * 3600 + mi * 60 + sec) * 10'000'000LL;
+	return true;
+}
+
+DgParsed DgParseValue(const std::wstring& text, const DgColumn& column, const DgNumberFormat& nf, DgDateParser parseDate) {
+	DgParsed r;
+	auto s = Trim(text);
+	if (s.empty()) {
+		r.ok = true;
+		return r;
+	}
+	int64_t i = 0;
+	double f = 0;
+	switch (column.type) {
+		case DgColType::Integer:
+			if ((r.ok = ParseInt(s, nf, i)))
+				r.value = DgValue::Int(i);
+			else
+				r.error = L"Enter a whole number.";
+			break;
+		case DgColType::Float:
+			if ((r.ok = ParseNumber(s, nf, f)))
+				r.value = DgValue::Float(f);
+			else
+				r.error = L"Enter a number.";
+			break;
+		case DgColType::Bool: {
+			auto l = Lower(s);
+			if (l == L"true" || l == L"yes" || l == L"1" || l == L"x" || l == L"on")
+				r.value = DgValue::Bool(true);
+			else if (l == L"false" || l == L"no" || l == L"0" || l == L"off")
+				r.value = DgValue::Bool(false);
+			else
+				r.error = L"Enter true or false.";
+			r.ok = r.error.empty();
+			break;
+		}
+		case DgColType::DateTime:
+			if (DgParseIsoDateTime(s, i) || (parseDate && parseDate(s, i))) {
+				r.ok = true;
+				r.value = DgValue::DateTime(i);
+			}
+			else {
+				r.error = L"Enter a date, as 2026-11-17 13:05.";
+			}
+			break;
+		case DgColType::Enum: {
+			auto l = Lower(s);
+			for (size_t k = 0; k < column.enumItems.size(); k++)
+				if (Lower(column.enumItems[k]) == l) {
+					r.ok = true;
+					r.value = DgValue::Int((int64_t)k);
+					return r;
+				}
+			if (ParseInt(s, nf, i) && i >= 0 && i < (int64_t)column.enumItems.size()) {
+				r.ok = true;
+				r.value = DgValue::Int(i);
+				return r;
+			}
+			r.error = L"Enter one of: ";
+			for (size_t k = 0; k < column.enumItems.size(); k++)
+				r.error += (k ? L", " : L"") + column.enumItems[k];
+			r.error += L".";
+			break;
+		}
+		case DgColType::Progress: {
+			bool percent = s.back() == L'%';
+			auto number = percent ? Trim(s.substr(0, s.size() - 1)) : s;
+			if (!percent && ParseInt(number, nf, i) && i >= 0 && i <= 100) {
+				r.ok = true;
+				r.value = DgValue::Int(i);
+			}
+			else if (ParseNumber(number, nf, f) && (percent ? f >= 0 && f <= 100 : f >= 0 && f <= 1)) {
+				r.ok = true;
+				r.value = percent ? DgValue::Int(std::llround(f)) : DgValue::Float(f);
+			}
+			else {
+				r.error = L"Enter a percentage from 0 to 100, or a fraction from 0 to 1.";
+			}
+			break;
+		}
+		default:   // text, links, image and text: as typed
+			r.ok = true;
+			r.value = DgValue::Text(text);
+			break;
+	}
+	return r;
+}
+
+std::wstring DgEditText(const DgValue& value, const DgColumn& column, const DgNumberFormat& nf) {
+	switch (value.type) {
+		case DgType::Int:
+			if (column.type == DgColType::Enum)
+				return DgFormat(value, column, nf);
+			if (column.type == DgColType::Progress)
+				return DgFormatInt(value.i, false, nf) + L"%";
+			if (column.type == DgColType::Bool)
+				return value.i ? L"true" : L"false";
+			return DgFormatInt(value.i, false, nf);
+		case DgType::Float:
+			if (column.type == DgColType::Integer && std::isfinite(value.d) && std::fabs(value.d) < 9.2e18)
+				return DgFormatInt(std::llround(value.d), false, nf);
+			return std::isfinite(value.d) ? Shortest(value.d, nf) : DgFormat(value, column, nf);
+		case DgType::DateTime: {
+			auto s = DgFormatDateTime(value.i);
+			return s.size() == 19 && s.compare(16, 3, L":00") == 0 ? s.substr(0, 16) : s;
+		}
+	}
+	return DgFormat(value, column, nf);
+}
+
+std::vector<std::vector<std::wstring>> DgParseTsv(const std::wstring& text) {
+	std::vector<std::vector<std::wstring>> rows;
+	std::vector<std::wstring> row;
+	std::wstring field;
+	bool quoted = false, atStart = true;
+	for (size_t i = 0; i < text.size(); i++) {
+		wchar_t c = text[i];
+		if (quoted) {
+			if (c == L'"') {
+				if (i + 1 < text.size() && text[i + 1] == L'"') {
+					field += L'"';
+					i++;
+				}
+				else {
+					quoted = false;
+				}
+			}
+			else {
+				field += c;
+			}
+			continue;
+		}
+		if (c == L'"' && atStart) {
+			quoted = true;
+			atStart = false;
+			continue;
+		}
+		if (c == L'\t') {
+			row.push_back(std::move(field));
+			field.clear();
+			atStart = true;
+			continue;
+		}
+		if (c == L'\r' || c == L'\n') {
+			if (c == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n')
+				i++;
+			row.push_back(std::move(field));
+			field.clear();
+			rows.push_back(std::move(row));
+			row.clear();
+			atStart = true;
+			continue;
+		}
+		field += c;
+		atStart = false;
+	}
+	if (!field.empty() || !row.empty() || (!atStart && !text.empty())) {
+		row.push_back(std::move(field));
+		rows.push_back(std::move(row));
+	}
+	return rows;
+}
+
+std::vector<DgPasteCell> DgPasteTargets(const std::vector<std::vector<std::wstring>>& fields, const DgSelection& selection,
+	int64_t rowCount, int colCount, size_t max) {
+	std::vector<DgPasteCell> cells;
+	if (fields.empty() || selection.Empty() || rowCount <= 0 || colCount <= 0)
+		return cells;
+	bool one = fields.size() == 1 && fields[0].size() == 1;
+	auto& ranges = selection.Ranges();
+	bool many = ranges.size() > 1 || ranges[0].top != ranges[0].bottom || ranges[0].left != ranges[0].right;
+	if (one && many) {   // fill the selection
+		auto cols = selection.Cols();
+		for (auto [first, last] : selection.Rows())
+			for (int64_t r = first; r <= last && r < rowCount; r++)
+				for (int c : cols) {
+					if (c >= colCount || !selection.Contains(r, c))
+						continue;
+					if (cells.size() >= max)
+						return cells;
+					cells.push_back({ r, c, &fields[0][0] });
+				}
+		return cells;
+	}
+	auto& origin = ranges.back();
+	for (size_t r = 0; r < fields.size(); r++)
+		for (size_t c = 0; c < fields[r].size(); c++) {
+			int64_t row = origin.top + (int64_t)r;
+			int col = origin.left + (int)c;
+			if (row >= rowCount || col >= colCount)
+				continue;
+			if (cells.size() >= max)
+				return cells;
+			cells.push_back({ row, col, &fields[r][c] });
+		}
+	return cells;
+}
+
+DgEditAction DgEditKey(unsigned key, bool shift, bool typed) {
+	enum : unsigned { Tab = 0x09, Return = 0x0D, Escape = 0x1B, Left = 0x25, Up = 0x26, Right = 0x27, Down = 0x28 };
+	switch (key) {
+		case Escape: return DgEditAction::Cancel;
+		case Return: return shift ? DgEditAction::CommitUp : DgEditAction::CommitDown;
+		case Tab:    return shift ? DgEditAction::CommitLeft : DgEditAction::CommitRight;
+		case Up:     return typed ? DgEditAction::CommitUp : DgEditAction::None;
+		case Down:   return typed ? DgEditAction::CommitDown : DgEditAction::None;
+		case Left:   return typed ? DgEditAction::CommitLeft : DgEditAction::None;
+		case Right:  return typed ? DgEditAction::CommitRight : DgEditAction::None;
+	}
+	return DgEditAction::None;
+}
+
+// ---- Undo --------------------------------------------------------------------------------------------------
+
+void DgUndoStack::Push(DgEditStep step) {
+	m_Steps.resize(m_Done);   // what was undone can't be redone after a new step
+	m_Steps.push_back(std::move(step));
+	if (m_Steps.size() > m_Limit)
+		m_Steps.erase(m_Steps.begin());
+	m_Done = m_Steps.size();
+}
+
+const DgEditStep* DgUndoStack::Undo() {
+	return CanUndo() ? &m_Steps[--m_Done] : nullptr;
+}
+
+const DgEditStep* DgUndoStack::Redo() {
+	return CanRedo() ? &m_Steps[m_Done++] : nullptr;
 }

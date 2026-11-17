@@ -18,6 +18,7 @@
 #include <commctrl.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 // ---- Window class name -------------------------------------------------------
@@ -34,6 +35,7 @@ constexpr wchar_t WC_DATAGRID[] = L"WC_DataGrid";
 #define DGVS_NOCOLUMNREORDER   0x0020   // the user can't drag columns to another place
 #define DGVS_NOCARETROW        0x0040   // the caret's row isn't shaded
 #define DGVS_NOSORT            0x0080   // a click on a title doesn't sort (DGVN_COLUMNCLICK is still sent)
+#define DGVS_EDITABLE          0x0100   // the user can edit cells (F2, typing, a double-click), paste, clear and undo
 
 // ---- Values ---------------------------------------------------------------------
 
@@ -111,6 +113,7 @@ inline DGVVALUE DgvDateTime(const FILETIME& value) {
 #define DGVCF_NOREORDER   0x0004   // the user can't drag it
 #define DGVCF_GROUPDIGITS 0x0008   // numbers with the user's thousands separator
 #define DGVCF_NOSORT      0x0010   // a click on its title doesn't sort
+#define DGVCF_READONLY    0x0020   // its cells can't be edited (DGVS_EDITABLE)
 
 #define DGVCM_TITLE       0x0001
 #define DGVCM_TYPE        0x0002
@@ -214,6 +217,54 @@ struct NMDGVSORT {
 	const DGVSORTKEY* pKeys; // the first is the main one
 };
 
+// Editing (DGVS_EDITABLE): the user's changes to cells go through DGVN_VALIDATE (each cell), are written (the store,
+// or DGVN_SETCELL in virtual mode) and announced with DGVN_CELLSCHANGED (each change, with its reason).
+#define DGVN_BEGINEDIT       (DGVN_FIRST - 11)  // NMDGVEDIT; an editor opens: non-zero stops it
+#define DGVN_ENDEDIT         (DGVN_FIRST - 12)  // NMDGVEDIT; it closed (fCanceled: nothing was written)
+#define DGVN_VALIDATE        (DGVN_FIRST - 13)  // NMDGVVALIDATE; non-zero rejects the value (szError says why)
+#define DGVN_SETCELL         (DGVN_FIRST - 14)  // NMDGVSETCELL; virtual mode: the app keeps the cell's new value
+#define DGVN_CELLSCHANGED    (DGVN_FIRST - 15)  // NMDGVCHANGE; the user changed cells
+
+#define DGVCR_EDIT           0   // why cells changed: an editor
+#define DGVCR_PASTE          1
+#define DGVCR_CLEAR          2   // Delete, or Cut
+#define DGVCR_TOGGLE         3   // a check box
+#define DGVCR_UNDO           4
+#define DGVCR_REDO           5
+
+struct NMDGVEDIT {
+	NMHDR hdr;
+	LONGLONG iRow;
+	int idColumn;
+	BOOL fCanceled;          // DGVN_ENDEDIT
+};
+
+struct NMDGVVALIDATE {
+	NMHDR hdr;
+	LONGLONG iRow;
+	int idColumn;
+	UINT reason;             // DGVCR_EDIT, DGVCR_PASTE, DGVCR_CLEAR or DGVCR_TOGGLE
+	DGVVALUE value;          // in, parsed from the text; out: the app may change it (its text is copied)
+	LPCWSTR pszText;         // what was typed or pasted
+	WCHAR szError[256];      // out, when rejected
+};
+
+struct NMDGVSETCELL {
+	NMHDR hdr;
+	LONGLONG iRow;
+	int idColumn;
+	DGVVALUE value;
+	int iImage;
+};
+
+struct NMDGVCHANGE {
+	NMHDR hdr;
+	UINT reason;             // DGVCR_*
+	int cCells;
+	LONGLONG iFirstRow;      // the first cell changed
+	int idFirstColumn;
+};
+
 struct NMDGVDISPINFO {
 	NMHDR hdr;
 	LONGLONG iRow;           // the data row
@@ -251,6 +302,7 @@ struct NMDGVCELL {
 struct DgData;
 struct DgCell;
 struct DgSortKey;
+struct DgCellChange;
 
 class CDataGridCtrl : public ATL::CWindowImpl<CDataGridCtrl> {
 public:
@@ -294,7 +346,20 @@ public:
 		MESSAGE_HANDLER(WM_THEMECHANGED, OnColorsChanged)
 		MESSAGE_HANDLER(ThemeChangedMessage, OnColorsChanged)
 		MESSAGE_HANDLER(WM_DPICHANGED_AFTERPARENT, OnDpiChanged)
+		MESSAGE_HANDLER(WM_CHAR, OnChar)
+		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColor)
+		MESSAGE_HANDLER(WM_CTLCOLORLISTBOX, OnCtlColor)
+		MESSAGE_HANDLER(WM_DGV_ENDEDIT, OnEndEditPosted)
+		MESSAGE_HANDLER(WM_COMMAND, OnEditorCommand)
+		MESSAGE_HANDLER(WM_NOTIFY, OnEditorNotify)
+	ALT_MSG_MAP(1)   // the editor
+		MESSAGE_HANDLER(WM_KEYDOWN, OnEditorKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnEditorChar)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnEditorGetDlgCode)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnEditorKillFocus)
 	END_MSG_MAP()
+
+	enum : UINT { WM_DGV_ENDEDIT = WM_USER + 100 };
 
 	// ---- Columns ------------------------------------------------------------------------------------
 
@@ -362,6 +427,21 @@ public:
 	BOOL    SetSortKeys(const DGVSORTKEY* keys, int count);
 	int     GetSortKeys(DGVSORTKEY* keys, int count) const;   // returns how many there are
 	void    Resort();
+
+	// ---- Editing (DGVS_EDITABLE) -------------------------------------------------------------------------
+
+	BOOL    BeginEdit(LONGLONG row, int id);               // the caret goes there; no editor for check boxes
+	BOOL    EndEdit(bool commit = true);                   // FALSE: the value was rejected and the editor stays
+	bool    IsEditing() const;
+	bool    CanEdit(LONGLONG row, int id) const;
+	BOOL    Paste();                                       // the clipboard's text into the selection
+	BOOL    Cut();
+	BOOL    ClearSelectedCells();
+	BOOL    Undo();
+	BOOL    Redo();
+	bool    CanUndo() const;
+	bool    CanRedo() const;
+	void    ClearUndo();
 
 	// ---- Looks -----------------------------------------------------------------------------------------
 
@@ -431,6 +511,30 @@ private:
 	void    ApplyOrder();                                  // the row map from the sort keys
 	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 
+	// DataGridEdit.cpp
+	LRESULT OnChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnCtlColor(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEndEditPosted(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditorCommand(UINT, WPARAM, LPARAM, BOOL&);   // EN_CHANGE, CBN_SELCHANGE: dirty
+	LRESULT OnEditorNotify(UINT, WPARAM, LPARAM, BOOL&);    // DTN_DATETIMECHANGE: dirty
+	LRESULT OnEditorKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditorChar(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditorGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEditorKillFocus(UINT, WPARAM, LPARAM, BOOL&);
+	bool    StartEdit(LONGLONG dataRow, int id, const wchar_t* typed);   // typed: what replaces the text
+	bool    CommitOrCancel();                              // before the view changes: false if the value was rejected
+	void    PositionEditor();
+	bool    CellRect(LONGLONG viewRow, int displayCol, RECT& rc) const;   // the part in view; false if none
+	RECT    CheckRect(const RECT& cell, int align) const;  // a check box's in its cell
+	bool    OnCheckBox(LONGLONG viewRow, int displayCol, POINT pt) const;   // an editable check box under the point
+	bool    EditKey(WPARAM key, bool ctrl, bool shift);    // F2, Delete, Ctrl+V/X/Z/Y, Space on a check box
+	bool    Validate(LONGLONG dataRow, int id, DgCell& cell, const std::wstring& text, UINT reason, std::wstring& error);
+	void    Apply(std::vector<DgCellChange> changes, UINT reason, bool undoable, bool forward = true);
+	void    WriteCell(LONGLONG dataRow, int id, const DgCell& cell);
+	void    ToggleChecks(LONGLONG viewRow, int displayCol, bool selection);
+	void    ShowError(const std::wstring& text, LONGLONG viewRow, int displayCol);
+	void    HideError();
+
 	// DataGridPaint.cpp
 	void    Paint(HDC hdc, const RECT& clip);
 	void    UpdateColors();
@@ -449,4 +553,5 @@ private:
 	bool m_OwnFont = true;
 	UINT m_Dpi = 96;
 	int m_WheelRemainder = 0, m_HWheelRemainder = 0;
+	ATL::CContainedWindow m_Editor;   // the open editor (an edit box, a drop-down list or a date picker)
 };
