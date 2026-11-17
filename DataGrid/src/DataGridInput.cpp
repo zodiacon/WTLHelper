@@ -15,6 +15,7 @@ namespace {
 LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
+	HideTip();
 	if (!CommitOrCancel())   // a value that can't be kept: the editor stays, the click does nothing
 		return 0;
 	if (::GetFocus() != m_hWnd)
@@ -121,7 +122,7 @@ bool CDataGridCtrl::OnCheckBox(LONGLONG viewRow, int displayCol, POINT pt) const
 	if (displayCol < 0 || displayCol >= (int)L.cols.size() || viewRow < d.topRow)
 		return false;
 	auto column = d.columns.Find(L.cols[displayCol].id);
-	if (!column || !CanEdit(d.rows.ToData(viewRow), column->id))
+	if (!column || !CanEditCell(d.rows.ToData(viewRow), column->id))   // the new row's box too
 		return false;
 	int y = L.header + (int)(viewRow - d.topRow) * L.rowHeight;
 	RECT cell{ L.Left(displayCol, d.scrollX), y, L.Right(displayCol, d.scrollX), y + L.rowHeight };
@@ -179,12 +180,22 @@ LRESULT CDataGridCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		RECT rc{ 0, 0, d.clientWidth, d.layout.header };
 		InvalidateRect(&rc, FALSE);
 	}
+	UpdateTip(pt);
 	return 0;
 }
 
 LRESULT CDataGridCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
-	d.tracking = false;
+	d.tracking = false;   // the next move asks again
+	// the tooltip shown over the cell, under the mouse, makes the grid "left": it's still there
+	POINT cursor;
+	RECT client;
+	::GetCursorPos(&cursor);
+	ScreenToClient(&cursor);
+	GetClientRect(&client);
+	if (d.tip && ::IsWindowVisible(d.tip) && ::PtInRect(&client, cursor))
+		return 0;
+	HideTip();
 	if (d.hotCol >= 0 || d.hotFilterCol >= 0) {
 		d.hotCol = d.hotFilterCol = -1;
 		RECT rc{ 0, 0, d.clientWidth, d.layout.header };

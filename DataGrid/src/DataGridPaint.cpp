@@ -293,6 +293,12 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			if (!has || editing || (cellFlags & CDRF_SKIPDEFAULT)) {   // nothing to draw, its editor over it, or the app drew it
 				if (cellFlags & CDRF_NEWFONT)
 					dc.RestoreDC(-1);
+				if (newRow && column && column->type == DgColType::Bool && CanEditCell(dataRow, column->id)) {   // a box to tick
+					dc.SaveDC();
+					dc.IntersectClipRect(&visible);
+					Frame(dc, CheckRect(cell, DgEffectiveAlign(*column)), 1, Blend(c.back, c.text, 60));
+					dc.RestoreDC(-1);
+				}
 				if (!(style & DGVS_NOVERTLINES))
 					VLine(dc, right - 1, y, y + L.rowHeight, c.grid);
 				continue;

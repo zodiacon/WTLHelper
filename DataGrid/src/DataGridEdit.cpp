@@ -248,12 +248,10 @@ BOOL CDataGridCtrl::EndEdit(bool commit) {
 		}
 		if (adding && cell.value.type != DgType::Empty) {
 			d.edit.closing = true;   // the rows change under the editor: it isn't to be ended again
-			int64_t row = AddNewRow(d.edit.id);
+			int64_t row = AddRows(1, d.edit.id, {}, { DgCellChange{ 0, d.edit.id, old, cell } }, DGVCR_EDIT);
 			d.edit.closing = false;
-			if (row >= 0) {
-				Apply({ DgCellChange{ row, d.edit.id, old, cell } }, DGVCR_EDIT, true);
+			if (row >= 0)
 				d.edit.row = row;
-			}
 		}
 		else if (!adding && !(cell.value == old.value)) {
 			Apply({ DgCellChange{ d.edit.row, d.edit.id, old, cell } }, DGVCR_EDIT, true);
@@ -386,6 +384,8 @@ LRESULT CDataGridCtrl::OnEditorCommand(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 LRESULT CDataGridCtrl::OnEditorNotify(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	auto nm = (NMHDR*)lParam;
+	if (d.tip && nm->hwndFrom == d.tip)
+		return TipNotify(nm);
 	if (d.edit.active && nm->hwndFrom == m_Editor.m_hWnd && nm->code == DTN_DATETIMECHANGE)
 		d.edit.dirty = true;
 	return 0;
@@ -451,13 +451,27 @@ bool CDataGridCtrl::EditKey(WPARAM key, bool ctrl, bool shift) {
 			if (!StartEdit(d.caretRow, d.caretId, nullptr))
 				::MessageBeep(MB_OK);
 			return true;
-		case VK_DELETE:
+		case VK_DELETE: {
 			if (ctrl)
 				return false;
-			if (shift)
+			// whole rows selected (DGVS_USERROWS): they go
+			auto& ranges = d.selection.Ranges();
+			bool rows = !shift && (GetStyle() & DGVS_USERROWS) && !d.virtualMode && !ranges.empty()
+				&& std::all_of(ranges.begin(), ranges.end(), [&](auto& r) { return r.left == 0 && r.right == d.ColCount() - 1; });
+			if (rows)
+				DeleteSelectedRows();
+			else if (shift)
 				Cut();
 			else
 				ClearSelectedCells();
+			return true;
+		}
+		case VK_OEM_PLUS:
+		case VK_ADD:   // Ctrl+Shift++ (DGVS_USERROWS): a row above the caret's (Ctrl++ alone opens the groups)
+			if (!ctrl || !shift || !(GetStyle() & DGVS_USERROWS) || d.virtualMode)
+				return false;
+			if (InsertRowAtCaret() < 0)
+				::MessageBeep(MB_OK);
 			return true;
 		case VK_INSERT:
 			if (!shift || ctrl)
@@ -488,7 +502,7 @@ bool CDataGridCtrl::EditKey(WPARAM key, bool ctrl, bool shift) {
 			Redo();
 			return true;
 		case VK_SPACE: {
-			if (ctrl || shift || d.caretRow < 0)
+			if (ctrl || shift || !d.HasCaret())   // the new row's box too
 				return false;
 			auto column = d.columns.Find(d.caretId);
 			if (!column || column->type != DgColType::Bool)
@@ -540,31 +554,173 @@ void CDataGridCtrl::WriteCell(LONGLONG dataRow, int id, const DgCell& cell) {
 }
 
 void CDataGridCtrl::Apply(std::vector<DgCellChange> changes, UINT reason, bool undoable, bool forward) {
-	auto& d = *m_Data;
 	if (changes.empty())
 		return;
+	DgEditStep step;
+	step.changes = std::move(changes);
+	step.reason = (int)reason;
+	ApplyStep(step, reason, undoable, forward);
+}
+
+void CDataGridCtrl::ApplyStep(const DgEditStep& step, UINT reason, bool undoable, bool forward) {
+	auto& d = *m_Data;
+	bool rows = step.HasRows() && !d.virtualMode;
+	if (rows && forward)
+		DgApplyRowChanges(d.store, step, true);
 	if (forward) {
-		for (auto& c : changes)
+		for (auto& c : step.changes)
 			WriteCell(c.row, c.id, c.after);
 	}
 	else {
-		for (auto it = changes.rbegin(); it != changes.rend(); ++it)
+		for (auto it = step.changes.rbegin(); it != step.changes.rend(); ++it)
 			WriteCell(it->row, it->id, it->before);
 	}
-	NMDGVCHANGE nm{};
-	nm.reason = reason;
-	nm.cCells = (int)std::min<size_t>(changes.size(), INT_MAX);
-	nm.iFirstRow = changes.front().row;
-	nm.idFirstColumn = changes.front().id;
+	if (rows && !forward)
+		DgApplyRowChanges(d.store, step, false);
+	if (rows)
+		d.caretRow = std::min(DgRowAfter(d.caretRow, step, forward), d.store.Count() - 1);   // the caller may put it elsewhere
 	if (undoable)
-		d.undo.Push(DgEditStep{ std::move(changes), (int)reason });
-	FireNotify(&nm.hdr, DGVN_CELLSCHANGED);
+		d.undo.Push(step);
+	if (!step.changes.empty()) {
+		NMDGVCHANGE nm{};
+		nm.reason = reason;
+		nm.cCells = (int)std::min<size_t>(step.changes.size(), INT_MAX);
+		nm.iFirstRow = step.changes.front().row;
+		nm.idFirstColumn = step.changes.front().id;
+		FireNotify(&nm.hdr, DGVN_CELLSCHANGED);
+	}
+	if (rows) {
+		std::vector<LONGLONG> inserted, deleted;
+		for (auto& r : (forward ? step.inserted : step.deleted))
+			inserted.push_back(r.row);
+		for (auto& r : (forward ? step.deleted : step.inserted))
+			deleted.push_back(r.row);
+		NMDGVROWS nm{};
+		nm.reason = reason;
+		nm.cInserted = (int)inserted.size();
+		nm.piInserted = inserted.data();
+		nm.cDeleted = (int)deleted.size();
+		nm.piDeleted = deleted.data();
+		FireNotify(&nm.hdr, DGVN_ROWSCHANGED);
+	}
+}
+
+LONGLONG CDataGridCtrl::AddRows(int count, int id, std::vector<DgCellChange> existing, std::vector<DgCellChange> added, UINT reason,
+	bool caretToNew) {
+	auto& d = *m_Data;
+	if (count <= 0)
+		return -1;
+	int64_t first = d.DataRowCount();
+	NMDGVROWADD nm{};
+	nm.iRow = first;
+	nm.idColumn = id;
+	nm.cRows = count;
+	if (FireNotify(&nm.hdr, DGVN_ROWADDING))
+		return -1;
+	// at the end: no row's index moves
+	DgEditStep step;
+	step.reason = (int)reason;
+	if (d.virtualMode) {
+		d.virtualCount += count;   // the app keeps them: DGVN_ROWADDED, then DGVN_SETCELL
+	}
+	else {
+		for (int i = 0; i < count; i++)
+			step.inserted.push_back({ first + i, {} });
+		DgApplyRowChanges(d.store, step, true);
+	}
+	FireNotify(&nm.hdr, DGVN_ROWADDED);
+	for (auto& c : added)
+		c.row += first;
+	step.changes = std::move(existing);
+	step.changes.insert(step.changes.end(), added.begin(), added.end());
+	for (auto& c : step.changes)
+		WriteCell(c.row, c.id, c.after);
+	if (!step.changes.empty() || step.HasRows())
+		d.undo.Push(step);
+	if (!step.changes.empty()) {
+		NMDGVCHANGE change{};
+		change.reason = reason;
+		change.cCells = (int)std::min<size_t>(step.changes.size(), INT_MAX);
+		change.iFirstRow = step.changes.front().row;
+		change.idFirstColumn = step.changes.front().id;
+		FireNotify(&change.hdr, DGVN_CELLSCHANGED);
+	}
+	if (caretToNew || !d.HasCaret() || d.caretRow == DgRowMap::NewRow) {
+		d.caretRow = added.empty() ? first : added.front().row;
+		if (id && d.layout.IndexOf(id) >= 0)
+			d.caretId = id;
+	}
+	d.ensureCaret = true;   // wherever it's sorted, once the rows are shown
+	ApplyOrder();
+	return first;
+}
+
+LONGLONG CDataGridCtrl::InsertRowAtCaret() {
+	auto& d = *m_Data;
+	if (d.virtualMode || !m_hWnd || !CommitOrCancel())
+		return -1;
+	int64_t at = d.caretRow >= 0 ? d.caretRow : d.store.Count();
+	NMDGVROWADD nm{};
+	nm.iRow = at;
+	nm.cRows = 1;
+	if (FireNotify(&nm.hdr, DGVN_ROWADDING))
+		return -1;
+	DgEditStep step;
+	step.reason = DGVCR_INSERTROWS;
+	step.inserted.push_back({ at, {} });
+	ApplyStep(step, DGVCR_INSERTROWS, true, true);
+	d.caretRow = at;
+	d.ensureCaret = true;
+	ApplyOrder();
+	return at;
+}
+
+BOOL CDataGridCtrl::DeleteSelectedRows() {
+	auto& d = *m_Data;
+	if (d.virtualMode || !m_hWnd || !CommitOrCancel())
+		return FALSE;
+	std::vector<LONGLONG> rows;
+	for (auto [top, bottom] : d.selection.Rows())
+		for (int64_t r = top; r <= bottom; r++)
+			if (int64_t data = d.rows.ToData(r); data >= 0)
+				rows.push_back(data);
+	std::sort(rows.begin(), rows.end());
+	rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+	if (rows.empty())
+		return FALSE;
+	NMDGVROWS nm{};
+	nm.reason = DGVCR_DELETEROWS;
+	nm.cDeleted = (int)std::min<size_t>(rows.size(), INT_MAX);
+	nm.piDeleted = rows.data();
+	if (FireNotify(&nm.hdr, DGVN_ROWSDELETING))
+		return FALSE;
+	DgEditStep step;
+	step.reason = DGVCR_DELETEROWS;
+	for (auto r : rows)
+		step.deleted.push_back({ r, d.store.Row(r) });
+	int64_t first = rows.front();
+	ApplyStep(step, DGVCR_DELETEROWS, true, true);
+	d.caretRow = std::min<int64_t>(first, d.store.Count() - 1);   // the row after the first deleted
+	d.ensureCaret = d.caretRow >= 0;
+	ApplyOrder();
+	return TRUE;
 }
 
 void CDataGridCtrl::ToggleChecks(LONGLONG viewRow, int displayCol, bool selection) {
 	auto& d = *m_Data;
 	int64_t dataRow = d.rows.ToData(viewRow);
 	int id = displayCol >= 0 && displayCol < d.ColCount() ? d.layout.cols[displayCol].id : 0;
+	auto clicked = d.columns.Find(id);
+	if (dataRow == DgRowMap::NewRow && clicked && clicked->type == DgColType::Bool && CanEditCell(dataRow, id)) {
+		// the new row's: a row with the box ticked
+		DgCell cell{ DgValue::Bool(true), -1 };
+		std::wstring error;
+		if (Validate(d.DataRowCount(), id, cell, L"true", DGVCR_TOGGLE, error))
+			AddRows(1, id, {}, { DgCellChange{ 0, id, DgCell{}, cell } }, DGVCR_TOGGLE);
+		else
+			ShowError(error, viewRow, displayCol);
+		return;
+	}
 	if (!CanEdit(dataRow, id)) {
 		::MessageBeep(MB_OK);
 		return;
@@ -606,32 +762,58 @@ BOOL CDataGridCtrl::Paste() {
 	if (!(GetStyle() & DGVS_EDITABLE) || !CommitOrCancel())
 		return FALSE;
 	auto fields = DgParseTsv(ClipboardText(m_hWnd));
-	auto targets = DgPasteTargets(fields, d.selection, d.RowCount(), d.ColCount(), MaxPasteCells);
+	// with the new row's placeholder, rows pasted from it on are added (one value filling the selection adds none)
+	bool one = fields.size() == 1 && fields[0].size() == 1;
+	int64_t newRowView = d.rows.HasNewRow() ? d.RowCount() - 1 : -1;
+	int64_t limit = newRowView >= 0 && !one ? newRowView + (int64_t)fields.size() : d.RowCount();
+	auto targets = DgPasteTargets(fields, d.selection, limit, d.ColCount(), MaxPasteCells);
 	if (targets.empty())
 		return FALSE;
-	std::vector<DgCellChange> changes;
+	std::vector<DgCellChange> changes, added;   // added: the rows' offsets past the last
+	int64_t newRows = 0;
+	int firstId = 0;
 	int rejected = 0;
 	for (auto& t : targets) {
-		int64_t row = d.rows.ToData(t.row);
+		bool isNew = newRowView >= 0 && t.row >= newRowView;
+		if (isNew && one)
+			continue;   // filling the selection: not the placeholder
+		int64_t offset = isNew ? t.row - newRowView : -1;
+		int64_t row = isNew ? DgRowMap::NewRow : d.rows.ToData(t.row);
 		int id = d.layout.cols[t.col].id;
 		auto column = d.columns.Find(id);
-		if (!column || !CanEdit(row, id)) {
+		if (!column || !CanEditCell(row, id)) {
 			rejected++;
 			continue;
 		}
 		auto parsed = DgParseValue(*t.text, *column, d.numberFormat, DgParseUserDate);
 		DgCell old;
-		Fetch(row, id, old);
+		if (!isNew)
+			Fetch(row, id, old);
 		DgCell cell{ parsed.value, old.image };
 		std::wstring error;
-		if (!parsed.ok || !Validate(row, id, cell, *t.text, DGVCR_PASTE, error)) {
+		if (!parsed.ok || !Validate(isNew ? d.DataRowCount() + offset : row, id, cell, *t.text, DGVCR_PASTE, error)) {
 			rejected++;
 			continue;
 		}
-		if (!(cell.value == old.value))
+		if (isNew) {
+			newRows = std::max(newRows, offset + 1);
+			if (!firstId)
+				firstId = id;
+			if (cell.value.type != DgType::Empty)
+				added.push_back({ offset, id, old, cell });
+		}
+		else if (!(cell.value == old.value)) {
 			changes.push_back({ row, id, old, cell });
+		}
 	}
-	Apply(std::move(changes), DGVCR_PASTE, true);
+	if (newRows > 0) {
+		// the caret stays where the paste started, as for any paste
+		if (AddRows((int)std::min<int64_t>(newRows, INT_MAX), firstId, changes, std::move(added), DGVCR_PASTE, false) < 0)
+			return FALSE;
+	}
+	else {
+		Apply(std::move(changes), DGVCR_PASTE, true);
+	}
 	if (rejected)
 		::MessageBeep(MB_ICONWARNING);
 	// what was pasted becomes the selection
@@ -692,31 +874,49 @@ BOOL CDataGridCtrl::Undo() {
 	auto& d = *m_Data;
 	if (!CommitOrCancel())
 		return FALSE;
-	auto step = d.undo.Undo();
-	if (!step)
+	auto done = d.undo.Undo();
+	if (!done)
 		return FALSE;
-	Apply(step->changes, DGVCR_UNDO, false, false);
-	auto& first = step->changes.front();
+	DgEditStep step = *done;
+	ApplyStep(step, DGVCR_UNDO, false, false);
+	ShowStep(step, false);
+	return TRUE;
+}
+
+void CDataGridCtrl::ShowStep(const DgEditStep& step, bool forward) {
+	auto& d = *m_Data;
+	if (step.HasRows() && !d.virtualMode) {   // the rows again, the caret on the first that came back (or after those gone)
+		auto& in = forward ? step.inserted : step.deleted;
+		auto& out = forward ? step.deleted : step.inserted;
+		if (!in.empty())
+			d.caretRow = in.front().row;
+		else if (!out.empty())
+			d.caretRow = std::min<int64_t>(out.front().row, d.store.Count() - 1);
+		if (!step.changes.empty() && d.layout.IndexOf(step.changes.front().id) >= 0)
+			d.caretId = step.changes.front().id;
+		d.ensureCaret = d.caretRow >= 0;
+		ApplyOrder();
+		return;
+	}
+	if (step.changes.empty())
+		return;
+	auto& first = step.changes.front();
 	int64_t view = d.rows.ToView(first.row);
 	int col = d.layout.IndexOf(first.id);
 	if (view >= 0 && col >= 0)
 		Select(SelOp::Reset, view, col, true);
-	return TRUE;
 }
 
 BOOL CDataGridCtrl::Redo() {
 	auto& d = *m_Data;
 	if (!CommitOrCancel())
 		return FALSE;
-	auto step = d.undo.Redo();
-	if (!step)
+	auto done = d.undo.Redo();
+	if (!done)
 		return FALSE;
-	Apply(step->changes, DGVCR_REDO, false, true);
-	auto& first = step->changes.front();
-	int64_t view = d.rows.ToView(first.row);
-	int col = d.layout.IndexOf(first.id);
-	if (view >= 0 && col >= 0)
-		Select(SelOp::Reset, view, col, true);
+	DgEditStep step = *done;
+	ApplyStep(step, DGVCR_REDO, false, true);
+	ShowStep(step, true);
 	return TRUE;
 }
 

@@ -1407,10 +1407,14 @@ bool DgFilterMatch(const DgFilter& filter, const DgValue& value, const DgColumn&
 				return false;
 			return true;
 		}
-		case DgFilterKind::Values:
+		case DgFilterKind::Values: {
 			if (empty)
 				return filter.blanks;
-			return std::binary_search(filter.values.begin(), filter.values.end(), Shown(value, column, nf, text));
+			auto shown = Shown(value, column, nf, text);
+			if (!filter.text.empty())   // typed ("=x"): case ignored, the values lowercase
+				shown = DgLower(std::move(shown));
+			return std::binary_search(filter.values.begin(), filter.values.end(), shown);
+		}
 	}
 	return true;
 }
@@ -1815,10 +1819,13 @@ namespace {
 		switch (f.kind) {
 			case DgFilterKind::Contains:
 				return s + L":c:" + Escape(f.text);
-			case DgFilterKind::Range:
-				return s + L":r:" + SaveValue(f.min) + L":" + SaveValue(f.max);
-			case DgFilterKind::Values:
-				s += f.blanks ? L":v:1" : L":v:0";
+			case DgFilterKind::Range:   // with what was typed, if it was
+				return s + L":r:" + SaveValue(f.min) + L":" + SaveValue(f.max) + (f.text.empty() ? L"" : L":" + Escape(f.text));
+			case DgFilterKind::Values:   // "V": the typed text before the values
+				s += f.text.empty() ? L":v:" : L":V:";
+				s += f.blanks ? L"1" : L"0";
+				if (!f.text.empty())
+					s += L":" + Escape(f.text);
 				for (auto& v : f.values)
 					s += L":" + Escape(v);
 				return s;
@@ -1836,13 +1843,20 @@ namespace {
 				return parts.size() == 3 && Unescape(parts[2], f.text);
 			case L'r':
 				f.kind = DgFilterKind::Range;
-				return parts.size() == 4 && LoadValue(parts[2], f.min) && LoadValue(parts[3], f.max);
+				return (parts.size() == 4 || (parts.size() == 5 && Unescape(parts[4], f.text) && !f.text.empty()))
+					&& LoadValue(parts[2], f.min) && LoadValue(parts[3], f.max);
 			case L'v':
+			case L'V': {
 				f.kind = DgFilterKind::Values;
 				if (parts[2] != L"0" && parts[2] != L"1")
 					return false;
 				f.blanks = parts[2] == L"1";
-				for (size_t i = 3; i < parts.size(); i++) {
+				size_t first = 3;
+				if (parts[1][0] == L'V' && (parts.size() < 4 || !Unescape(parts[3], f.text) || f.text.empty()))
+					return false;
+				if (parts[1][0] == L'V')
+					first = 4;
+				for (size_t i = first; i < parts.size(); i++) {
 					std::wstring v;
 					if (!Unescape(parts[i], v))
 						return false;
@@ -1850,6 +1864,7 @@ namespace {
 				}
 				std::sort(f.values.begin(), f.values.end());
 				return true;
+			}
 		}
 		return false;
 	}
@@ -1940,4 +1955,140 @@ bool DgLoadState(const std::wstring& text, DgState& state) {
 	}
 	state = std::move(loaded);
 	return true;
+}
+
+// ---- Rows in undo steps --------------------------------------------------------------------------------------
+
+std::vector<DgCell> DgStore::Row(int64_t row) const {
+	if (row < 0 || row >= Count())
+		return {};
+	return m_Rows[(size_t)row];
+}
+
+bool DgStore::InsertRow(int64_t at, std::vector<DgCell> cells) {
+	if (at < 0 || at > Count())
+		return false;
+	m_Rows.insert(m_Rows.begin() + (ptrdiff_t)at, std::move(cells));
+	return true;
+}
+
+void DgApplyRowChanges(DgStore& store, const DgEditStep& step, bool forward) {
+	if (forward) {
+		for (auto it = step.deleted.rbegin(); it != step.deleted.rend(); ++it)   // the last first: the others keep their indexes
+			store.Erase(it->row, 1);
+		for (auto& r : step.inserted)                                         // ascending: each at its final place
+			store.InsertRow(r.row, {});
+	}
+	else {
+		for (auto it = step.inserted.rbegin(); it != step.inserted.rend(); ++it)
+			store.Erase(it->row, 1);
+		for (auto& r : step.deleted)
+			store.InsertRow(r.row, r.cells);
+	}
+}
+
+int64_t DgRowAfter(int64_t row, const DgEditStep& step, bool forward) {
+	if (row < 0)
+		return row;
+	auto& out = forward ? step.deleted : step.inserted;   // taken out (indexes before)
+	auto& in = forward ? step.inserted : step.deleted;    // put in (indexes after)
+	int64_t before = 0;
+	for (auto& r : out)
+		if (r.row < row)
+			before++;
+	row -= before;   // a row taken out lands on its own index: the next one's now
+	for (auto& r : in)   // ascending, at their final places
+		if (r.row <= row)
+			row++;
+	return row;
+}
+
+// ---- What's typed in the filter row ----------------------------------------------------------------------------
+
+DgFilter DgParseFilterText(const std::wstring& text, const DgColumn& column, const DgNumberFormat& nf, DgDateParser parseDate) {
+	DgFilter f;
+	f.id = column.id;
+	f.text = text;
+	f.kind = DgFilterKind::Contains;   // unless it's an expression that parses
+	auto t = Trim(text);
+	bool ordered = column.type == DgColType::Integer || column.type == DgColType::Float || column.type == DgColType::DateTime;
+	constexpr int64_t Day = 864'000'000'000;   // FILETIME ticks
+
+	// a value, and whether it's a whole day (a date typed without a time)
+	auto parse = [&](const std::wstring& s, DgValue& v, bool& day) {
+		auto p = DgParseValue(Trim(s), column, nf, parseDate);
+		if (!p.ok || p.value.type == DgType::Empty)
+			return false;
+		v = p.value;
+		day = v.type == DgType::DateTime && v.i % Day == 0;
+		return true;
+	};
+	// the value just past (before) v, for ">" and "<"
+	auto step = [](const DgValue& v, int direction) {
+		switch (v.type) {
+			case DgType::Int:
+			case DgType::DateTime: {
+				DgValue next = v;
+				next.i += direction;
+				return next;
+			}
+			case DgType::Float:
+				return DgValue::Float(std::nextafter(v.d, direction > 0 ? HUGE_VAL : -HUGE_VAL));
+		}
+		return v;
+	};
+	auto lastOfDay = [&](DgValue v) {   // a day's last tick
+		v.i += Day - 1;
+		return v;
+	};
+
+	if (ordered) {
+		if (size_t dots = t.find(L".."); dots != std::wstring::npos) {   // a range, either end open
+			auto a = t.substr(0, dots), b = t.substr(dots + 2);
+			DgValue lo, hi;
+			bool loDay = false, hiDay = false;
+			if ((!Trim(a).empty() && !parse(a, lo, loDay)) || (!Trim(b).empty() && !parse(b, hi, hiDay))
+				|| (Trim(a).empty() && Trim(b).empty()))
+				return f;
+			f.kind = DgFilterKind::Range;
+			f.min = lo;
+			f.max = hiDay ? lastOfDay(hi) : hi;
+			return f;
+		}
+		static const wchar_t* const ops[] = { L">=", L"<=", L">", L"<", L"=" };
+		for (auto op : ops) {
+			size_t n = wcslen(op);
+			if (t.compare(0, n, op) != 0)
+				continue;
+			DgValue v;
+			bool day = false;
+			if (!parse(t.substr(n), v, day))
+				return f;
+			f.kind = DgFilterKind::Range;
+			std::wstring o = op;
+			if (o == L">=")
+				f.min = v;
+			else if (o == L">")
+				f.min = day ? DgValue::DateTime(v.i + Day) : step(v, 1);
+			else if (o == L"<=")
+				f.max = day ? lastOfDay(v) : v;
+			else if (o == L"<")
+				f.max = step(v, -1);
+			else {   // "="
+				f.min = v;
+				f.max = day ? lastOfDay(v) : v;
+			}
+			return f;
+		}
+		return f;
+	}
+	if (t.size() > 1 && t[0] == L'=') {   // the cells showing just this
+		DgValue v;
+		bool day = false;
+		if (!parse(t.substr(1), v, day))
+			return f;
+		f.kind = DgFilterKind::Values;
+		f.values = { DgLower(DgFormat(v, column, nf)) };   // matched with case ignored (it has its text)
+	}
+	return f;
 }

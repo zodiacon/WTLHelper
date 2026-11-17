@@ -305,7 +305,7 @@ public:
 		else if (m_Kind == Kind::Cell) {
 			auto column = d.columns.Find(ColumnId());
 			int64_t data = d.rows.ToData(m_Row);
-			if (column && column->type == DgColType::Bool && G()->CanEdit(data, column->id))
+			if (column && column->type == DgColType::Bool && G()->CanEditCell(data, column->id))
 				text = L"Toggle";
 			else if (column && G()->CanEditCell(data, column->id))
 				text = L"Edit";
@@ -459,7 +459,7 @@ public:
 		int64_t data = d.rows.ToData(m_Row);
 		if (!column)
 			return E_FAIL;
-		if (column->type == DgColType::Bool && g->CanEdit(data, column->id)) {
+		if (column->type == DgColType::Bool && g->CanEditCell(data, column->id)) {
 			g->ToggleChecks(m_Row, m_Col, false);
 			return S_OK;
 		}
@@ -505,13 +505,10 @@ public:
 		if (adding) {
 			if (cell.value.type == DgType::Empty)
 				return S_OK;
-			data = g->AddNewRow(column->id);
-			if (data < 0)
-				return E_ACCESSDENIED;
+			return g->AddRows(1, column->id, {}, { DgCellChange{ 0, column->id, old, cell } }, DGVCR_EDIT) >= 0 ? S_OK : E_ACCESSDENIED;
 		}
-		else if (cell.value == old.value) {
+		if (cell.value == old.value)
 			return S_OK;
-		}
 		g->Apply({ DgCellChange{ data, column->id, old, cell } }, DGVCR_EDIT, true);
 		return S_OK;
 	}

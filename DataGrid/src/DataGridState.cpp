@@ -5,6 +5,7 @@
 // Saving and restoring the state (DgState), conditional formats (DgFormatRule) and the new row's placeholder.
 
 static_assert(DgCondOp::Between == DGVCO_BETWEEN && DgCondOp::NotEmpty == DGVCO_NOTEMPTY && DgNoColor == CLR_DEFAULT);
+static_assert(DgColFlag::NoHide == DGVCF_NOHIDE);
 static_assert(DgFindFlag::WholeCell == DGVFF_WHOLECELL && DgFindFlag::NoWrap == DGVFF_NOWRAP && DgRowMap::NewRow == DGV_NEWROW);
 
 // ---- The state ----------------------------------------------------------------------------------------------
@@ -130,23 +131,5 @@ bool CDataGridCtrl::CanEditCell(LONGLONG row, int id) const {
 	if (row != DgRowMap::NewRow)
 		return CanEdit(row, id);
 	auto column = d.columns.Find(id);
-	// check boxes need a row to toggle: a value typed elsewhere makes it
-	return m_hWnd && d.rows.HasNewRow() && column && !(column->flags & DgColFlag::ReadOnly) && column->type != DgColType::Bool;
-}
-
-LONGLONG CDataGridCtrl::AddNewRow(int id) {
-	auto& d = *m_Data;
-	NMDGVROWADD nm{};
-	nm.iRow = d.DataRowCount();
-	nm.idColumn = id;
-	if (FireNotify(&nm.hdr, DGVN_ROWADDING))
-		return -1;
-	// at the end: no row's index moves, so the undo stack stays
-	int64_t row = d.virtualMode ? d.virtualCount++ : d.store.Insert(-1, 1);
-	d.caretRow = row;
-	d.ensureCaret = true;   // wherever it's sorted, once the rows are shown
-	ApplyOrder();
-	nm.iRow = row;
-	FireNotify(&nm.hdr, DGVN_ROWADDED);
-	return row;
+	return m_hWnd && d.rows.HasNewRow() && column && !(column->flags & DgColFlag::ReadOnly);
 }

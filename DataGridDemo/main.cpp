@@ -17,6 +17,9 @@
 // the next and the one before). View > Conditional Formats colors low quantities' rows, high prices and the tools;
 // View > Zebra Rows draws every other row darker and marks what's out of stock, through NM_CUSTOMDRAW. View > Save
 // Layout keeps the columns, the sort, the groups and the filters (GetState), Restore Layout puts them back.
+// Edit > User Rows: Ctrl+Shift++ inserts a row above the caret, Delete on whole rows (the row numbers) deletes them,
+// both undoable. The filter row takes ">100", "<=2022-07-01", "10..20", "=Tools". Hovering over a cut-off cell or
+// title shows it whole; View > Columns (or the titles' menu) shows and hides columns (ID can't be hidden).
 // The log at the bottom shows the notifications.
 
 #include <atlbase.h>
@@ -54,6 +57,7 @@ enum : UINT {
 	CMD_EDITABLE, CMD_UNDO, CMD_REDO, CMD_CUT, CMD_PASTE, CMD_CLEAR,
 	CMD_FILTERROW, CMD_HEADERMENU, CMD_GROUPCAT, CMD_GROUPCATSTOCK, CMD_UNGROUP, CMD_EXPANDALL, CMD_COLLAPSEALL, CMD_STOREBIG,
 	CMD_CLEARFILTERS, CMD_NEWROW, CMD_FIND, CMD_FINDNEXT, CMD_FINDPREV, CMD_RULES, CMD_ZEBRA, CMD_SAVESTATE, CMD_RESTORESTATE,
+	CMD_USERROWS, CMD_INSERTROW, CMD_COLUMNS,
 	CMD_HIDE = 2000, CMD_FIT, CMD_FREEZE,
 };
 
@@ -228,7 +232,7 @@ private:
 	}
 
 	void AddColumns() {
-		m_IdId = AddColumn(L"ID", DGVCT_INTEGER, 90, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS | DGVCF_READONLY);
+		m_IdId = AddColumn(L"ID", DGVCT_INTEGER, 90, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS | DGVCF_READONLY | DGVCF_NOHIDE);
 		m_IdName = AddColumn(L"Name", DGVCT_IMAGETEXT, 140);
 		m_IdCategory = AddColumn(L"Category", DGVCT_ENUM, 100, DGVCM_ENUMITEMS, 0, 0, 0, L"Hardware\0Fasteners\0Tools\0Plumbing\0");
 		m_IdPrice = AddColumn(L"Price", DGVCT_FLOAT, 90, DGVCM_DECIMALS | DGVCM_FLAGS, 0, 2, DGVCF_GROUPDIGITS, nullptr, DGVAGG_AVG);
@@ -377,6 +381,8 @@ private:
 		edit.CreatePopupMenu();
 		edit.AppendMenu(MF_STRING, CMD_EDITABLE, L"&Editable");
 		edit.AppendMenu(MF_STRING, CMD_NEWROW, L"&New Row");
+		edit.AppendMenu(MF_STRING, CMD_USERROWS, L"User Ro&ws (Insert, Delete)");
+		edit.AppendMenu(MF_STRING, CMD_INSERTROW, L"&Insert Row\tCtrl+Shift++");
 		edit.AppendMenu(MF_STRING, CMD_UNDO, L"&Undo\tCtrl+Z");
 		edit.AppendMenu(MF_STRING, CMD_REDO, L"&Redo\tCtrl+Y");
 		edit.AppendMenu(MF_SEPARATOR);
@@ -416,6 +422,7 @@ private:
 		view.AppendMenu(MF_SEPARATOR);
 		view.AppendMenu(MF_STRING, CMD_FITALL, L"&Fit All Columns");
 		view.AppendMenu(MF_STRING, CMD_SHOWALL, L"&Show All Columns");
+		view.AppendMenu(MF_STRING, CMD_COLUMNS, L"C&olumns...");
 		view.AppendMenu(MF_SEPARATOR);
 		view.AppendMenu(MF_STRING, CMD_RULES, L"C&onditional Formats");
 		view.AppendMenu(MF_STRING, CMD_ZEBRA, L"&Zebra Rows (Custom Draw)");
@@ -553,12 +560,8 @@ private:
 			case CMD_DELETEROWS: {
 				if (m_Grid.IsVirtual())
 					break;
-				std::vector<LONGLONG> rows((size_t)m_Grid.GetSelectedRowCount());
-				m_Grid.GetSelectedRows(rows.data(), (LONGLONG)rows.size());
-				std::sort(rows.begin(), rows.end(), std::greater<>());   // the last first, so the others keep their indexes
-				for (auto r : rows)
-					m_Grid.DeleteRows(r, 1);
-				Log(L"Deleted %zu row(s); %lld left", rows.size(), m_Grid.GetRowCount());
+				m_Grid.DeleteSelectedRows();   // undoable
+				Log(L"%lld rows left", m_Grid.GetRowCount());
 				break;
 			}
 			case CMD_UNSORT:
@@ -574,6 +577,19 @@ private:
 			case CMD_NEWROW:
 				ToggleStyle(id, DGVS_NEWROW, true);
 				break;
+			case CMD_USERROWS:
+				ToggleStyle(id, DGVS_USERROWS, true);
+				break;
+			case CMD_INSERTROW:
+				if (m_Grid.InsertRowAtCaret() < 0)
+					Log(L"Insert Row: the store's rows only");
+				break;
+			case CMD_COLUMNS: {
+				RECT rc;
+				m_Grid.GetWindowRect(&rc);
+				m_Grid.ShowColumnMenu(POINT{ rc.left + 40, rc.top + 40 });
+				break;
+			}
 			case CMD_FIND:
 				m_Grid.ShowFindBox(true);
 				break;
@@ -738,7 +754,22 @@ private:
 			case DGVN_ROWADDING:
 			case DGVN_ROWADDED: {
 				auto nm = (NMDGVROWADD*)hdr;
-				Log(L"%s: row %lld, typed in column %d", hdr->code == DGVN_ROWADDING ? L"DGVN_ROWADDING" : L"DGVN_ROWADDED", nm->iRow, nm->idColumn);
+				Log(L"%s: %d row(s) at %lld, column %d", hdr->code == DGVN_ROWADDING ? L"DGVN_ROWADDING" : L"DGVN_ROWADDED", nm->cRows,
+					nm->iRow, nm->idColumn);
+				break;
+			}
+			case DGVN_ROWSDELETING:
+			case DGVN_ROWSCHANGED: {
+				auto nm = (NMDGVROWS*)hdr;
+				Log(L"%s: reason %u, %d inserted (first %lld), %d deleted (first %lld)",
+					hdr->code == DGVN_ROWSDELETING ? L"DGVN_ROWSDELETING" : L"DGVN_ROWSCHANGED", nm->reason, nm->cInserted,
+					nm->cInserted ? nm->piInserted[0] : -1, nm->cDeleted, nm->cDeleted ? nm->piDeleted[0] : -1);
+				break;
+			}
+			case DGVN_COLUMNSHOWN:
+			case DGVN_COLUMNHIDDEN: {
+				auto nm = (NMDGVCOLUMN*)hdr;
+				Log(L"%s: column %d", hdr->code == DGVN_COLUMNSHOWN ? L"DGVN_COLUMNSHOWN" : L"DGVN_COLUMNHIDDEN", nm->idColumn);
 				break;
 			}
 			case DGVN_SETCELL: {   // virtual mode: the demo keeps what the user changed

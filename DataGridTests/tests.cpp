@@ -1435,3 +1435,196 @@ TEST_CASE("StateRoundTrip", "[state]") {
 	CHECK(!DgLoadState(L"dgv1;sort=99999999999", kept));
 	CHECK(kept.columns == s.columns);
 }
+
+// ---- Phase 6: rows in undo steps, the filter row's syntax --------------------------------------------------------
+
+namespace {
+	// a store of rows whose slot 0 holds their names
+	DgStore Named(std::initializer_list<const wchar_t*> names) {
+		DgStore s;
+		s.Resize((int64_t)names.size());
+		int64_t r = 0;
+		for (auto n : names)
+			s.Set(r++, 0, DgCell{ DgValue::Text(n) });
+		return s;
+	}
+
+	std::wstring Names(const DgStore& s) {
+		std::wstring all;
+		for (int64_t r = 0; r < s.Count(); r++) {
+			auto c = s.Get(r, 0);
+			all += c && c->value.type == DgType::Text ? c->value.s : L"_";
+		}
+		return all;
+	}
+}
+
+TEST_CASE("RowSteps", "[edit]") {
+	auto s = Named({ L"a", L"b", L"c", L"d", L"e" });
+	DgEditStep del;
+	del.deleted = { { 1, s.Row(1) }, { 3, s.Row(3) } };   // b and d
+	DgApplyRowChanges(s, del, true);
+	CHECK_STR(Names(s), L"ace");
+	DgApplyRowChanges(s, del, false);
+	CHECK_STR(Names(s), L"abcde");                          // back, with their cells
+
+	DgEditStep ins;
+	ins.inserted = { { 0, {} }, { 2, {} }, { 7, {} } };      // at their final places
+	DgApplyRowChanges(s, ins, true);
+	CHECK_STR(Names(s), L"_a_bcde_");
+	DgApplyRowChanges(s, ins, false);
+	CHECK_STR(Names(s), L"abcde");
+
+	DgEditStep both;                                         // deleted first, then inserted
+	both.deleted = { { 0, s.Row(0) } };
+	both.inserted = { { 4, {} } };
+	DgApplyRowChanges(s, both, true);
+	CHECK_STR(Names(s), L"bcde_");
+	DgApplyRowChanges(s, both, false);
+	CHECK_STR(Names(s), L"abcde");
+
+	CHECK(s.Row(9).empty());
+	CHECK(!s.InsertRow(9, {}));
+	CHECK(s.InsertRow(5, {}));
+	CHECK_INT(s.Count(), 6);
+}
+
+TEST_CASE("RowAfter", "[edit]") {
+	DgEditStep del;
+	del.deleted = { { 1, {} }, { 3, {} } };
+	CHECK_INT(DgRowAfter(0, del, true), 0);
+	CHECK_INT(DgRowAfter(2, del, true), 1);
+	CHECK_INT(DgRowAfter(4, del, true), 2);
+	CHECK_INT(DgRowAfter(3, del, true), 2);                 // deleted: where the next row is now
+	CHECK_INT(DgRowAfter(2, del, false), 4);                // undone: the rows come back before it
+	CHECK_INT(DgRowAfter(0, del, false), 0);
+	CHECK_INT(DgRowAfter(1, del, false), 2);                // "c": b comes back before it
+
+	DgEditStep ins;
+	ins.inserted = { { 0, {} }, { 2, {} } };
+	CHECK_INT(DgRowAfter(0, ins, true), 1);
+	CHECK_INT(DgRowAfter(1, ins, true), 3);
+	CHECK_INT(DgRowAfter(3, ins, false), 1);
+	CHECK_INT(DgRowAfter(-1, ins, true), -1);               // no caret stays none
+}
+
+TEST_CASE("FilterText", "[view]") {
+	DgNumberFormat nf;
+	DgColumn qty;
+	qty.id = 4;
+	qty.type = DgColType::Integer;
+	auto f = DgParseFilterText(L">100", qty, nf);
+	CHECK(f.kind == DgFilterKind::Range);
+	CHECK(f.id == 4);
+	CHECK_STR(f.text, L">100");                               // kept for the filter row
+	CHECK(f.min == DgValue::Int(101));
+	CHECK(f.max.type == DgType::Empty);
+	f = DgParseFilterText(L" <= 1,000 ", qty, nf);
+	CHECK(f.max == DgValue::Int(1000));
+	CHECK(f.min.type == DgType::Empty);
+	f = DgParseFilterText(L"<5", qty, nf);
+	CHECK(f.max == DgValue::Int(4));
+	f = DgParseFilterText(L"=7", qty, nf);
+	CHECK(f.min == DgValue::Int(7));
+	CHECK(f.max == DgValue::Int(7));
+	f = DgParseFilterText(L"10..20", qty, nf);
+	CHECK(f.min == DgValue::Int(10));
+	CHECK(f.max == DgValue::Int(20));
+	f = DgParseFilterText(L"..20", qty, nf);
+	CHECK(f.min.type == DgType::Empty);
+	CHECK(f.max == DgValue::Int(20));
+	f = DgParseFilterText(L"10..", qty, nf);
+	CHECK(f.min == DgValue::Int(10));
+	CHECK(f.max.type == DgType::Empty);
+	CHECK(DgParseFilterText(L"12", qty, nf).kind == DgFilterKind::Contains);   // no operator: the digits anywhere
+	CHECK(DgParseFilterText(L">abc", qty, nf).kind == DgFilterKind::Contains); // doesn't parse
+	CHECK(DgParseFilterText(L"..", qty, nf).kind == DgFilterKind::Contains);
+	CHECK(DgParseFilterText(L">", qty, nf).kind == DgFilterKind::Contains);
+
+	DgColumn price;
+	price.type = DgColType::Float;
+	f = DgParseFilterText(L">4000", price, nf);
+	REQUIRE(f.kind == DgFilterKind::Range);
+	CHECK(f.min.d > 4000.0);                                 // the next double: 4000 itself is out
+	CHECK(DgFilterMatch(f, DgValue::Float(4000.01), price, nf));
+	CHECK(!DgFilterMatch(f, DgValue::Float(4000), price, nf));
+	CHECK(!DgFilterMatch(f, DgValue::Int(4000), price, nf));
+
+	DgColumn date;
+	date.type = DgColType::DateTime;
+	int64_t day = 0;
+	REQUIRE(DgParseIsoDateTime(L"2026-11-17", day));
+	constexpr int64_t Day = 864'000'000'000;
+	f = DgParseFilterText(L"=2026-11-17", date, nf);         // the whole day
+	CHECK(f.min == DgValue::DateTime(day));
+	CHECK(f.max == DgValue::DateTime(day + Day - 1));
+	f = DgParseFilterText(L">2026-11-17", date, nf);         // after it
+	CHECK(f.min == DgValue::DateTime(day + Day));
+	f = DgParseFilterText(L"<=2026-11-17", date, nf);
+	CHECK(f.max == DgValue::DateTime(day + Day - 1));
+	f = DgParseFilterText(L"<2026-11-17", date, nf);
+	CHECK(f.max == DgValue::DateTime(day - 1));
+	f = DgParseFilterText(L"2026-11-01..2026-11-17", date, nf);
+	CHECK(f.min == DgValue::DateTime(day - 16 * Day));
+	CHECK(f.max == DgValue::DateTime(day + Day - 1));
+	f = DgParseFilterText(L">2026-11-17 13:00", date, nf);   // a time: just after it
+	CHECK(f.min == DgValue::DateTime(day + 13 * Day / 24 + 1));
+
+	DgColumn category;
+	category.type = DgColType::Enum;
+	category.enumItems = { L"Hardware", L"Tools" };
+	f = DgParseFilterText(L"=tOOls", category, nf);           // by its name, case ignored
+	CHECK(f.kind == DgFilterKind::Values);
+	CHECK(f.values == std::vector<std::wstring>{ L"tools" });
+	CHECK(DgFilterMatch(f, DgValue::Int(1), category, nf));
+	CHECK(!DgFilterMatch(f, DgValue::Int(0), category, nf));
+	CHECK(DgParseFilterText(L">tools", category, nf).kind == DgFilterKind::Contains);   // not ordered
+
+	DgColumn text;
+	f = DgParseFilterText(L"=Cog 3", text, nf);
+	CHECK(f.kind == DgFilterKind::Values);
+	CHECK(f.values == std::vector<std::wstring>{ L"cog 3" });
+	CHECK(DgFilterMatch(f, DgValue::Text(L"COG 3"), text, nf));
+	CHECK(!DgFilterMatch(f, DgValue::Text(L"Cog 33"), text, nf));
+	DgFilter exact;   // the menu's (no text): exact
+	exact.kind = DgFilterKind::Values;
+	exact.values = { L"Cog 3" };
+	CHECK(!DgFilterMatch(exact, DgValue::Text(L"cog 3"), text, nf));
+	CHECK(DgParseFilterText(L"=", text, nf).kind == DgFilterKind::Contains);
+	f = DgParseFilterText(L"a..b", text, nf);
+	CHECK(f.kind == DgFilterKind::Contains);
+	CHECK_STR(f.text, L"a..b");
+}
+
+TEST_CASE("StateTypedFilters", "[state]") {
+	DgNumberFormat nf;
+	DgColumn qty;
+	qty.id = 4;
+	qty.type = DgColType::Integer;
+	DgColumn category;
+	category.id = 3;
+	category.type = DgColType::Enum;
+	category.enumItems = { L"Hardware", L"Tools" };
+	DgState s;
+	s.filters = { DgParseFilterText(L">100", qty, nf), DgParseFilterText(L"=Tools", category, nf) };
+	DgFilter menu;   // from the menu: no text
+	menu.id = 5;
+	menu.kind = DgFilterKind::Values;
+	menu.values = { L"x" };
+	s.filters.push_back(menu);
+	auto text = DgSaveState(s);
+	CHECK(text.find(L"filter=4:r:i101:e:>100") != std::wstring::npos);
+	CHECK(text.find(L"filter=3:V:0:%003DTools:tools") != std::wstring::npos);
+	CHECK(text.find(L"filter=5:v:0:x") != std::wstring::npos);
+	DgState back;
+	REQUIRE(DgLoadState(text, back));
+	REQUIRE(back.filters.size() == 3);
+	CHECK_STR(back.filters[0].text, L">100");
+	CHECK(back.filters[0].min == DgValue::Int(101));
+	CHECK_STR(back.filters[1].text, L"=Tools");
+	CHECK(back.filters[1].values == std::vector<std::wstring>{ L"tools" });
+	CHECK(back.filters[2].text.empty());
+	CHECK(DgSaveState(back) == text);
+	CHECK(!DgLoadState(L"dgv1;filter=1:V:0", back));          // "V" needs its text
+	CHECK(!DgLoadState(L"dgv1;filter=1:r:i1:e:", back));      // an empty text isn't written
+}

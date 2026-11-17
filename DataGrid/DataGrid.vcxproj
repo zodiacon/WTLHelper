@@ -111,6 +111,7 @@
     <ClCompile Include="src\DataGridAccessible.cpp" />
     <ClCompile Include="src\DataGridFind.cpp" />
     <ClCompile Include="src\DataGridState.cpp" />
+    <ClCompile Include="src\DataGridTips.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

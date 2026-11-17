@@ -81,6 +81,17 @@ struct DgData {
 	unsigned highlightFlags = 0;
 	bool findMiss = false;          // the find box's text matches nothing: shown in red
 
+	// the tooltip with a cut-off text in full, over the text (in place, as a list view's)
+	HWND tip = nullptr;
+	struct TipKey {
+		int64_t row = -3;            // a row in view; -1: a title
+		int col = -1;
+		bool operator==(const TipKey&) const = default;
+	} tipKey;
+	std::wstring tipText;
+	RECT tipRect{};                 // the text's place (client)
+	bool tipBold = false;
+
 	HWND errorTip = nullptr;
 	HBRUSH editBrush = nullptr;
 	COLORREF editBrushColor = CLR_INVALID;

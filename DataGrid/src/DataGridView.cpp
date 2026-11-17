@@ -23,7 +23,7 @@ namespace {
 
 	enum : UINT {
 		MenuSortAscending = 1, MenuSortDescending, MenuClearSort, MenuGroup, MenuUngroup, MenuUngroupAll, MenuClearFilter,
-		MenuClearAllFilters, MenuFilterRow, MenuAllValues = 20, MenuBlanks, MenuValue = 100,
+		MenuClearAllFilters, MenuFilterRow, MenuAllValues = 20, MenuBlanks, MenuValue = 100, MenuColumn = 1000,
 	};
 }
 
@@ -114,7 +114,7 @@ void CDataGridCtrl::ShowView(DgViewResult view) {
 	Reflatten(0);
 	if (d.ensureCaret) {
 		d.ensureCaret = false;
-		if (d.caretRow >= 0)
+		if (d.HasCaret())
 			EnsureVisible(d.caretRow, d.caretId);
 	}
 }
@@ -283,7 +283,7 @@ BOOL CDataGridCtrl::SetFilter(const DGVFILTER& filter) {
 	f.max = DgFromPublic(filter.maxValue);
 	for (int i = 0; filter.ppszValues && i < filter.cValues; i++)
 		if (filter.ppszValues[i])
-			f.values.push_back(filter.ppszValues[i]);
+			f.values.push_back(f.text.empty() ? filter.ppszValues[i] : DgLower(filter.ppszValues[i]));   // with a text: case ignored
 	std::sort(f.values.begin(), f.values.end());
 	f.values.erase(std::unique(f.values.begin(), f.values.end()), f.values.end());
 	f.blanks = filter.fBlanks != FALSE;
@@ -307,6 +307,8 @@ std::wstring CDataGridCtrl::FilterSummary(int id) const {
 	auto column = d.columns.Find(id);
 	if (f == d.filters.end() || !column)
 		return {};
+	if (!f->text.empty())
+		return f->text;   // as typed
 	switch (f->kind) {
 		case DgFilterKind::Contains:
 			return f->text;
@@ -350,7 +352,7 @@ void CDataGridCtrl::OpenFilterEdit(int displayCol) {
 	if (!FilterRect(displayCol, rc))
 		return;
 	auto f = std::find_if(d.filters.begin(), d.filters.end(), [&](auto& x) { return x.id == id; });
-	std::wstring text = f != d.filters.end() && f->kind == DgFilterKind::Contains ? f->text : L"";
+	std::wstring text = f != d.filters.end() ? f->text : L"";   // what was typed (a menu's filter: none)
 	HWND edit = ::CreateWindowExW(0, WC_EDITW, text.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, rc.left + 1, rc.top + 1,
 		rc.right - rc.left - 2, rc.bottom - rc.top - 2, m_hWnd, nullptr, nullptr, nullptr);
 	::SendMessage(edit, WM_SETFONT, (WPARAM)m_hFont, 0);
@@ -383,17 +385,18 @@ void CDataGridCtrl::ApplyFilterText(int id, const std::wstring& text) {
 	auto& d = *m_Data;
 	auto f = std::find_if(d.filters.begin(), d.filters.end(), [&](auto& x) { return x.id == id; });
 	bool has = f != d.filters.end();
-	if (has && f->kind == DgFilterKind::Contains && f->text == text)
-		return;   // as it is
+	if (has && f->text == text)
+		return;   // as it is (what was typed, or the menu's filter left alone)
 	if (text.empty()) {
-		if (has && f->kind == DgFilterKind::Contains)
+		if (has)
 			ChangeFilter(id, nullptr, true);
 		return;
 	}
-	DgFilter filter;
-	filter.id = id;
-	filter.kind = DgFilterKind::Contains;
-	filter.text = text;
+	auto column = d.columns.Find(id);
+	if (!column)
+		return;
+	// ">100", "<=2026-01-01", "5..10", "=Tools", else "contains"
+	auto filter = DgParseFilterText(text, *column, d.numberFormat, DgParseUserDate);
 	ChangeFilter(id, &filter, true);
 }
 
@@ -446,6 +449,58 @@ LRESULT CDataGridCtrl::OnEndFilterPosted(UINT, WPARAM force, LPARAM, BOOL&) {
 	return 0;
 }
 
+// ---- The columns' menu ---------------------------------------------------------------------------------------
+
+namespace {
+	// every column in display order, ticked if shown; the last one shown and DGVCF_NOHIDE ones can't be hidden
+	HMENU ColumnsMenu(const DgColumnSet& columns) {
+		CMenuHandle menu;
+		menu.CreatePopupMenu();
+		auto& order = columns.Order();
+		int shown = (int)columns.Visible().size();
+		for (size_t i = 0; i < order.size(); i++) {
+			auto c = columns.Find(order[i]);
+			if (!c)
+				continue;
+			bool on = !c->Hidden();
+			bool locked = on && (shown <= 1 || (c->flags & DgColFlag::NoHide));
+			std::wstring title = c->title.empty() ? L"(Untitled)" : c->title;
+			std::replace(title.begin(), title.end(), L'&', L'+');   // no mnemonics
+			menu.AppendMenu(MF_STRING | (on ? MF_CHECKED : 0) | (locked ? MF_GRAYED : 0), MenuColumn + (UINT)i, title.c_str());
+		}
+		return menu;
+	}
+}
+
+void CDataGridCtrl::ToggleColumn(int id) {
+	auto& d = *m_Data;
+	auto c = d.columns.Find(id);
+	if (!c || !CommitOrCancel())
+		return;
+	bool show = c->Hidden();
+	if (!show && ((c->flags & DgColFlag::NoHide) || d.columns.Visible().size() <= 1))
+		return;
+	ShowColumn(id, show);
+	NMDGVCOLUMN nm{};
+	nm.idColumn = id;
+	nm.iDisplayIndex = d.columns.DisplayIndexOf(id);
+	nm.iOldIndex = nm.iDisplayIndex;
+	nm.cxWidth = GetColumnWidth(id);
+	FireNotify(&nm.hdr, show ? DGVN_COLUMNSHOWN : DGVN_COLUMNHIDDEN);
+}
+
+BOOL CDataGridCtrl::ShowColumnMenu(POINT ptScreen) {
+	auto& d = *m_Data;
+	if (!m_hWnd || d.columns.Count() == 0 || !CommitOrCancel())
+		return FALSE;
+	CMenu menu(ColumnsMenu(d.columns));
+	UINT cmd = menu.TrackPopupMenu(TPM_RETURNCMD | TPM_RIGHTBUTTON, ptScreen.x, ptScreen.y, m_hWnd);
+	auto& order = d.columns.Order();
+	if (cmd >= MenuColumn && cmd < MenuColumn + order.size())
+		ToggleColumn(order[cmd - MenuColumn]);
+	return TRUE;
+}
+
 // ---- The titles' menu ---------------------------------------------------------------------------------------
 
 void CDataGridCtrl::ShowHeaderMenu(int displayCol) {
@@ -483,7 +538,10 @@ void CDataGridCtrl::ShowHeaderMenu(int displayCol) {
 	// the column's values, to pick which show (the store's: virtual mode has none to go through)
 	std::vector<std::wstring> texts;
 	bool blanks = false, more = false;
-	auto current = std::find_if(d.filters.begin(), d.filters.end(), [&](auto& f) { return f.id == id && f.kind == DgFilterKind::Values; });
+	// a typed value filter ("=x", case ignored) isn't the menu's: the menu starts from all of them
+	auto current = std::find_if(d.filters.begin(), d.filters.end(), [&](auto& f) {
+		return f.id == id && f.kind == DgFilterKind::Values && f.text.empty();
+	});
 	bool filtered = current != d.filters.end();
 	if (!d.virtualMode) {
 		texts = DgDistinctTexts(d.store.Count(), [&](int64_t row) -> const DgValue* {
@@ -508,6 +566,8 @@ void CDataGridCtrl::ShowHeaderMenu(int displayCol) {
 		}
 		menu.AppendMenu(MF_POPUP, values.Detach(), L"Show &Values");
 	}
+	menu.AppendMenu(MF_SEPARATOR);
+	menu.AppendMenu(MF_POPUP, ColumnsMenu(d.columns), L"&Columns");
 
 	POINT pt{ d.layout.Right(displayCol, d.scrollX) - Scale(18), d.layout.titles };
 	ClientToScreen(&pt);
@@ -547,6 +607,10 @@ void CDataGridCtrl::ShowHeaderMenu(int displayCol) {
 			OpenFilterEdit(displayCol);
 			break;
 		default: {
+			if (auto& order = d.columns.Order(); cmd >= MenuColumn && cmd < MenuColumn + order.size()) {
+				ToggleColumn(order[cmd - MenuColumn]);
+				break;
+			}
 			if (cmd != MenuBlanks && (cmd < MenuValue || cmd >= MenuValue + texts.size()))
 				break;
 			DgFilter f;

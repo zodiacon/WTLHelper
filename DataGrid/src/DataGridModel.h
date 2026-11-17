@@ -28,7 +28,7 @@ namespace DgAlign {       // DGVA_*
 	enum : int { Default, Left, Center, Right };
 }
 namespace DgColFlag {     // DGVCF_*
-	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8, NoSort = 16, ReadOnly = 32 };
+	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8, NoSort = 16, ReadOnly = 32, NoHide = 64 };
 }
 namespace DgHitFlag {     // DGVHT_*
 	enum : unsigned { Nowhere = 0, Cell = 1, Header = 2, HeaderDivider = 4, RowHeader = 8, Corner = 0x10, Empty = 0x20, FilterRow = 0x40 };
@@ -244,6 +244,8 @@ public:
 	void Clear() {
 		m_Rows.clear();
 	}
+	std::vector<DgCell> Row(int64_t row) const;                 // its cells by slot (empty if none)
+	bool InsertRow(int64_t at, std::vector<DgCell> cells);      // at: 0 to Count()
 
 private:
 	std::vector<std::vector<DgCell>> m_Rows;
@@ -441,13 +443,33 @@ struct DgCellChange {
 	DgCell before, after;
 };
 
+struct DgRowChange {
+	int64_t row = 0;        // a data row
+	std::vector<DgCell> cells;   // by slot: what a deleted row held
+};
+
+// A user's change: rows deleted, then rows inserted, then cells changed (done in that order, undone the other way).
+// deleted: their indexes before the step, ascending; inserted: their indexes after it, ascending; the cells' rows are
+// those after the rows changed.
 struct DgEditStep {
 	std::vector<DgCellChange> changes;
 	int reason = 0;         // DGVCR_*
+	std::vector<DgRowChange> inserted, deleted;
+	bool HasRows() const {
+		return !inserted.empty() || !deleted.empty();
+	}
 };
 
-// Steps done, undone and redone; a new step drops what was undone. Rows inserted or deleted (their indexes move)
-// clear it.
+// A step's rows in the store: forward deletes then inserts (empty rows), backward takes the inserted ones out and
+// puts the deleted ones back with their cells. The cells' changes are the caller's (after, before).
+void DgApplyRowChanges(DgStore& store, const DgEditStep& step, bool forward);
+
+// Where a data row is once a step's rows are done (forward) or undone: moved by the rows before it; a row taken out
+// goes to the index it had (the next row's now).
+int64_t DgRowAfter(int64_t row, const DgEditStep& step, bool forward);
+
+// Steps done, undone and redone; a new step drops what was undone. Rows inserted or deleted by the app (their indexes
+// move under the steps) clear it; the user's go through steps.
 class DgUndoStack {
 public:
 	explicit DgUndoStack(size_t limit = 100) : m_Limit(limit) {
@@ -484,13 +506,20 @@ using DgValueTextFn = std::wstring (*)(const DgValue& value, const DgColumn& col
 struct DgFilter {
 	int id = 0;                       // the column
 	int kind = DgFilterKind::Contains;
-	std::wstring text;                // Contains: anywhere in the shown text, case ignored
+	std::wstring text;                // Contains: anywhere in the shown text, case ignored; else what was typed, if it was
 	DgValue min, max;                 // Range: both ends included, an empty end open; numbers or dates
-	std::vector<std::wstring> values; // Values: the shown texts let through (sorted)
+	std::vector<std::wstring> values; // Values: the shown texts let through (sorted); typed (text set): lowercase, case ignored
 	bool blanks = false;              // Values: empty cells too
 };
 
 std::wstring DgLower(std::wstring text);
+
+// What's typed in the filter row: ">100", ">=", "<", "<=" and "a..b" (either end open) on numbers and dates give a
+// range (a date without a time stands for its whole day; ">" and "<" leave the value out), "=x" the cells equal to x
+// (a range for numbers and dates, else a value filter of x's shown text); anything else, or what doesn't parse, finds
+// the text anywhere ("contains"). The filter keeps the typed text.
+DgFilter DgParseFilterText(const std::wstring& text, const DgColumn& column, const DgNumberFormat& nf, DgDateParser parseDate = nullptr);
+
 bool DgFilterMatch(const DgFilter& filter, const DgValue& value, const DgColumn& column, const DgNumberFormat& nf,
 	DgValueTextFn text = nullptr);
 

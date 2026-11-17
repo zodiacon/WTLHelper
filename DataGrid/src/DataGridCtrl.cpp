@@ -333,6 +333,7 @@ void CDataGridCtrl::ScrollRows(LONGLONG top) {
 	d.topRow = top;
 	ClampScroll();
 	if (d.topRow != old) {
+		HideTip();   // its cell moved
 		UpdateScrollBars();
 		PositionEditor();   // or closes it, its cell gone from view
 		Invalidate();
@@ -345,6 +346,7 @@ void CDataGridCtrl::ScrollX(int x) {
 	d.scrollX = x;
 	ClampScroll();
 	if (d.scrollX != old) {
+		HideTip();
 		UpdateScrollBars();
 		PositionEditor();
 		PositionFilterEdit();

@@ -43,6 +43,8 @@ constexpr wchar_t WC_DATAGRID[] = L"WC_DataGrid";
 #define DGVS_HEADERMENU        0x0400   // a button on each title for a menu: sort, group, filter by its values
 #define DGVS_NEWROW            0x0800   // with DGVS_EDITABLE: an empty row after the last, where typing adds a row
 #define DGVS_NOFINDBOX         0x1000   // Ctrl+F doesn't open the find box (Find and F3 still work)
+#define DGVS_USERROWS          0x2000   // with DGVS_EDITABLE, the store: Ctrl+Shift++ inserts a row, Delete on whole rows deletes them
+#define DGVS_NOTOOLTIPS        0x4000   // no tooltip with the whole text of a cell or a title that's cut off
 
 // The new row's placeholder (DGVS_NEWROW) where a data row is given: the caret, hit testing, GetDataRow, editing.
 #define DGV_NEWROW             (-2)
@@ -124,6 +126,7 @@ inline DGVVALUE DgvDateTime(const FILETIME& value) {
 #define DGVCF_GROUPDIGITS 0x0008   // numbers with the user's thousands separator
 #define DGVCF_NOSORT      0x0010   // a click on its title doesn't sort
 #define DGVCF_READONLY    0x0020   // its cells can't be edited (DGVS_EDITABLE)
+#define DGVCF_NOHIDE      0x0040   // the user can't hide it (the columns' menu)
 
 #define DGVCM_TITLE       0x0001
 #define DGVCM_TYPE        0x0002
@@ -162,6 +165,8 @@ struct DGVCOLUMN {
 
 // ---- Filters ------------------------------------------------------------------------
 
+// The filter row parses what's typed: ">100", ">=", "<", "<=" and "a..b" on numbers and dates are ranges (a date with
+// no time is its whole day), "=x" the cells equal to x (case ignored), anything else "contains".
 #define DGVFK_CONTAINS    0   // pszText anywhere in the cell's shown text, case ignored
 #define DGVFK_RANGE       1   // from minValue to maxValue, both included (DGVVT_EMPTY: open); numbers or dates
 #define DGVFK_VALUES      2   // one of ppszValues (shown texts), or empty when fBlanks
@@ -169,7 +174,9 @@ struct DGVCOLUMN {
 struct DGVFILTER {
 	int idColumn;
 	int kind;                // DGVFK_*
-	LPCWSTR pszText;
+	LPCWSTR pszText;         // contains: the text; else what the user typed (the filter row shows it), if anything:
+	                         // a value filter with a text ignores case
+
 	DGVVALUE minValue;
 	DGVVALUE maxValue;
 	const LPCWSTR* ppszValues;
@@ -293,6 +300,8 @@ struct NMDGVGROUP {
 #define DGVCR_TOGGLE         3   // a check box
 #define DGVCR_UNDO           4
 #define DGVCR_REDO           5
+#define DGVCR_INSERTROWS     6   // the user inserted a row (DGVS_USERROWS)
+#define DGVCR_DELETEROWS     7   // the user deleted rows
 
 struct NMDGVEDIT {
 	NMHDR hdr;
@@ -359,16 +368,37 @@ struct NMDGVCELL {
 	POINT ptScreen;
 };
 
-// The new row (DGVS_NEWROW): a value typed in its placeholder adds a row at the end (the store's; virtual mode: the
-// count goes up by one, then DGVN_SETCELL), then writes the value as an edit (DGVN_VALIDATE first, with the row's index).
-#define DGVN_ROWADDING       (DGVN_FIRST - 21)  // NMDGVROWADD; non-zero stops it (the editor closes, nothing written)
-#define DGVN_ROWADDED        (DGVN_FIRST - 22)  // NMDGVROWADD; the row is there (iRow), its first value not yet written
+// The new row (DGVS_NEWROW): a value typed in its placeholder (or a check box clicked there, or text pasted past the
+// last row) adds rows at the end (the store's; virtual mode: the count goes up, then DGVN_SETCELL), then writes the
+// values (DGVN_VALIDATE first, with the rows' indexes to be), as one step to undo. Ctrl+Shift++ (DGVS_USERROWS,
+// InsertRowAtCaret) inserting an empty row above the caret's sends DGVN_ROWADDING (idColumn 0), then DGVN_ROWSCHANGED.
+#define DGVN_ROWADDING       (DGVN_FIRST - 21)  // NMDGVROWADD; non-zero stops it (nothing is written)
+#define DGVN_ROWADDED        (DGVN_FIRST - 22)  // NMDGVROWADD; the rows are there, their values not yet written
 
 struct NMDGVROWADD {
 	NMHDR hdr;
-	LONGLONG iRow;           // the new row's index in the data
-	int idColumn;            // the cell typed in
+	LONGLONG iRow;           // the (first) new row's index in the data
+	int idColumn;            // the cell typed in (0: none)
+	int cRows;               // how many
 };
+
+// The user's rows (DGVS_USERROWS): deleting the selected whole rows (Delete, DeleteSelectedRows), and every change of
+// rows the user made or undid. The store only.
+#define DGVN_ROWSDELETING    (DGVN_FIRST - 24)  // NMDGVROWS; non-zero stops it
+#define DGVN_ROWSCHANGED     (DGVN_FIRST - 25)  // NMDGVROWS; rows inserted or deleted (reason: the step's, or undo, redo)
+
+struct NMDGVROWS {
+	NMHDR hdr;
+	UINT reason;             // DGVCR_*
+	int cInserted;           // their indexes after the change, ascending
+	const LONGLONG* piInserted;
+	int cDeleted;            // their indexes before it, ascending
+	const LONGLONG* piDeleted;
+};
+
+// The columns' menu (DGVS_HEADERMENU's Columns, ShowColumnMenu): the user showed or hid a column.
+#define DGVN_COLUMNSHOWN     (DGVN_FIRST - 26)  // NMDGVCOLUMN
+#define DGVN_COLUMNHIDDEN    (DGVN_FIRST - 27)  // NMDGVCOLUMN
 
 // ---- Finding ------------------------------------------------------------------------------------
 
@@ -445,6 +475,7 @@ struct DgData;
 struct DgCell;
 struct DgSortKey;
 struct DgCellChange;
+struct DgEditStep;
 struct DgViewResult;
 struct DgFilter;
 struct DgGroup;
@@ -533,6 +564,7 @@ public:
 	BOOL    SetColumnWidth(int id, int width);             // DIPs; a fill column becomes a fixed one
 	BOOL    ShowColumn(int id, bool show);
 	BOOL    AutoFitColumn(int id);                         // to its title and the rows in view
+	BOOL    ShowColumnMenu(POINT ptScreen);                // every column, ticked if shown, to show or hide (not the last)
 	void    SetFrozenColumns(int count);                   // the first count shown columns don't scroll
 	int     GetFrozenColumns() const;
 
@@ -596,6 +628,8 @@ public:
 	BOOL    Paste();                                       // the clipboard's text into the selection
 	BOOL    Cut();
 	BOOL    ClearSelectedCells();
+	LONGLONG InsertRowAtCaret();                           // the store: an empty row above the caret's (none: at the end), undoable; -1 if none
+	BOOL    DeleteSelectedRows();                          // the store: the rows the selection touches, undoable
 	BOOL    Undo();
 	BOOL    Redo();
 	bool    CanUndo() const;
@@ -728,6 +762,12 @@ private:
 	bool    EditKey(WPARAM key, bool ctrl, bool shift);    // F2, Delete, Ctrl+V/X/Z/Y, Space on a check box
 	bool    Validate(LONGLONG dataRow, int id, DgCell& cell, const std::wstring& text, UINT reason, std::wstring& error);
 	void    Apply(std::vector<DgCellChange> changes, UINT reason, bool undoable, bool forward = true);
+	void    ApplyStep(const DgEditStep& step, UINT reason, bool undoable, bool forward);   // rows, then cells (back: the other way)
+	void    ShowStep(const DgEditStep& step, bool forward);   // after undo or redo: the caret on what changed
+	// count rows at the end, then the cells' changes: existing ones' rows as they are, added ones' rows 0 to count - 1
+	// (their offsets); one undo step. The first new row, -1 if the app stopped it.
+	LONGLONG AddRows(int count, int id, std::vector<DgCellChange> existing, std::vector<DgCellChange> added, UINT reason,
+		bool caretToNew = true);
 	void    WriteCell(LONGLONG dataRow, int id, const DgCell& cell);
 	void    ToggleChecks(LONGLONG viewRow, int displayCol, bool selection);
 	void    ShowError(const std::wstring& text, LONGLONG viewRow, int displayCol);
@@ -768,8 +808,15 @@ private:
 	void    NotifyCaretAccessible();                       // the caret's cell is the focused element
 
 	// DataGridState.cpp (the state, the rules, the new row)
-	LONGLONG AddNewRow(int id);                            // the placeholder's: the new data row, -1 if stopped
 	bool    CanEditCell(LONGLONG row, int id) const;       // CanEdit, or a cell of the new row's placeholder
+
+	// DataGridTips.cpp
+	void    UpdateTip(POINT pt);                           // the tooltip for what's under the mouse
+	void    HideTip();
+	LRESULT TipNotify(NMHDR* nm);                          // TTN_GETDISPINFO, TTN_SHOW
+
+	// DataGridView.cpp
+	void    ToggleColumn(int id);                          // the columns' menu: show or hide it (DGVN_COLUMNSHOWN/HIDDEN)
 
 	// DataGridPaint.cpp
 	void    Paint(HDC hdc, const RECT& clip);
