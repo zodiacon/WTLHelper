@@ -511,6 +511,215 @@ TEST(RowMap) {
 	CHECK_INT(m.ToData(huge - 1), huge - 1);
 }
 
+// ---- Selection ---------------------------------------------------------------------------------
+
+TEST(PosFromPoint) {
+	auto set = ThreeColumns();
+	auto L = DgLayoutColumns(set, Params(300, 20, 1));   // A frozen at 20-120; B 120-170, C 170-250
+	DgView view{ 0, 5, 100, 300, 125 };
+	CHECK(DgPosFromPoint(L, view, 200, 45) == (DgPos{ 7, 2 }));
+	CHECK(DgPosFromPoint(L, view, 200, -50) == (DgPos{ 5, 2 }));    // above: the top row in view
+	CHECK(DgPosFromPoint(L, view, 200, 500) == (DgPos{ 15, 2 }));   // below: the last row in view
+	CHECK(DgPosFromPoint(L, view, 290, 45) == (DgPos{ 7, 2 }));     // past the columns: the last
+	CHECK(DgPosFromPoint(L, view, 5, 45) == (DgPos{ 7, 0 }));       // the row numbers: the first
+	view.topRow = 98;
+	CHECK(DgPosFromPoint(L, view, 200, 120) == (DgPos{ 99, 2 }));   // past the last row
+	view.rowCount = 0;
+	CHECK_INT(DgPosFromPoint(L, view, 200, 45).row, 0);
+
+	auto scrolled = DgLayoutColumns(set, Params(300, 20, 0));
+	DgView v2{ 110, 0, 10, 300, 125 };                              // A at -90..10, B 10..60
+	CHECK_INT(DgPosFromPoint(scrolled, v2, 5, 45).col, 1);          // the first one in view
+}
+
+TEST(SelectionCells) {
+	DgSelection s;
+	s.Reset({ 2, 1 }, 4);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 2, 2, 1, 1 } }));
+	s.Extend({ 5, 3 }, 4);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 2, 5, 1, 3 } }));
+	CHECK(s.Contains(4, 2));
+	CHECK(!s.Contains(6, 2));
+	CHECK(!s.Contains(3, 0));
+	s.Extend({ 0, 0 }, 4);                                          // from the anchor, the other way
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 0, 2, 0, 1 } }));
+	s.Extend({ 5, 3 }, 4);
+	s.Add({ 8, 0 }, 4);
+	CHECK_INT(s.Ranges().size(), 2);
+	CHECK(s.Anchor() == (DgPos{ 8, 0 }));
+	s.Extend({ 9, 1 }, 4);
+	CHECK(s.Ranges()[0] == (DgRange{ 2, 5, 1, 3 }));                // the first stays
+	CHECK(s.Ranges()[1] == (DgRange{ 8, 9, 0, 1 }));
+	CHECK(s.Rows() == (std::vector<std::pair<int64_t, int64_t>>{ { 2, 5 }, { 8, 9 } }));
+	CHECK_INT(s.RowCount(), 6);
+	CHECK(s.Cols() == (std::vector<int>{ 0, 1, 2, 3 }));
+	CHECK(s.RowTouched(9));
+	CHECK(!s.RowTouched(7));
+	CHECK(s.ColTouched(0));
+	s.Add({ 6, 0 }, 4);                                             // next to the first: merged
+	CHECK(s.Rows() == (std::vector<std::pair<int64_t, int64_t>>{ { 2, 6 }, { 8, 9 } }));
+
+	s.Reset({ 4, 2 }, 4, true);                                     // the row numbers': whole rows
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 4, 4, 0, 3 } }));
+	s.Extend({ 6, 2 }, 4, true);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 4, 6, 0, 3 } }));
+
+	s.SelectAll(10, 3);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 0, 9, 0, 2 } }));
+	s.SelectAll(0, 3);
+	CHECK(s.Empty());
+}
+
+TEST(SelectionModes) {
+	DgSelection s;
+	s.SetMode(DgSelMode::Rows, { 3, 2 }, 4);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 3, 3, 0, 3 } }));
+	s.Extend({ 1, 0 }, 4);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 1, 3, 0, 3 } }));
+	s.Toggle({ 2, 1 }, 4);                                          // out of the middle
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 1, 1, 0, 3 }, { 3, 3, 0, 3 } }));
+	CHECK(!s.RowTouched(2));
+	s.Toggle({ 2, 1 }, 4);                                          // back in
+	CHECK(s.RowTouched(2));
+	CHECK_INT(s.RowCount(), 3);
+	s.Toggle({ 1, 0 }, 4);
+	s.Toggle({ 2, 0 }, 4);
+	s.Toggle({ 3, 0 }, 4);
+	CHECK(s.Empty());                                               // rows may have none
+
+	s.SetMode(DgSelMode::Single, { 1, 1 }, 4);
+	s.Extend({ 5, 3 }, 4);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 5, 5, 3, 3 } }));
+	s.Add({ 7, 0 }, 4, true);                                       // whole rows don't apply
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 7, 7, 0, 0 } }));
+	s.Toggle({ 2, 2 }, 4);
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 2, 2, 2, 2 } }));
+}
+
+TEST(SelectionClamp) {
+	DgSelection s;
+	s.Reset({ 2, 1 }, 4);
+	s.Extend({ 5, 3 }, 4);
+	s.Add({ 8, 0 }, 4);
+	s.Extend({ 9, 1 }, 4);
+	s.Clamp(7, 2);                                                  // fewer rows and columns
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 2, 5, 1, 1 } }));
+	CHECK(s.Anchor() == (DgPos{ 6, 0 }));
+	s.Reset({ 8, 3 }, 4);
+	s.Clamp(5, 2);                                                  // nothing left: the anchor's cell
+	CHECK(s.Ranges() == (std::vector<DgRange>{ { 4, 4, 1, 1 } }));
+	s.Clamp(0, 2);
+	CHECK(s.Empty());
+
+	DgSelection rows;
+	rows.SetMode(DgSelMode::Rows, { 1, 0 }, 4);
+	rows.Clamp(5, 6);                                               // more columns: still whole rows
+	CHECK(rows.Ranges() == (std::vector<DgRange>{ { 1, 1, 0, 5 } }));
+}
+
+// ---- Sorting -------------------------------------------------------------------------------------
+
+TEST(ClickSort) {
+	std::vector<DgSortKey> k;
+	k = DgClickSort(k, 3, false);
+	CHECK(k == (std::vector<DgSortKey>{ { 3, false } }));
+	k = DgClickSort(k, 3, false);
+	CHECK(k == (std::vector<DgSortKey>{ { 3, true } }));
+	k = DgClickSort(k, 3, false);
+	CHECK(k.empty());                                               // and back to unsorted
+	k = DgClickSort({ { 3, false } }, 5, false);
+	CHECK(k == (std::vector<DgSortKey>{ { 5, false } }));
+	k = DgClickSort({ { 3, false } }, 5, true);
+	CHECK(k == (std::vector<DgSortKey>{ { 3, false }, { 5, false } }));
+	k = DgClickSort(k, 5, true);
+	CHECK(k == (std::vector<DgSortKey>{ { 3, false }, { 5, true } }));
+	k = DgClickSort(k, 3, true);
+	CHECK(k == (std::vector<DgSortKey>{ { 3, true }, { 5, true } }));
+	k = DgClickSort(k, 3, false);                                   // a plain click: that column alone
+	CHECK(k == (std::vector<DgSortKey>{ { 3, false } }));
+}
+
+TEST(CompareValues) {
+	CHECK_INT(DgCompareValues(DgValue::Int(2), DgValue::Float(2.5), nullptr), -1);
+	CHECK_INT(DgCompareValues(DgValue::Float(2.0), DgValue::Int(2), nullptr), 0);
+	CHECK_INT(DgCompareValues(DgValue::Bool(true), DgValue::Int(0), nullptr), 1);
+	CHECK_INT(DgCompareValues(DgValue::Int(INT64_MAX), DgValue::Int(INT64_MAX - 1), nullptr), 1);   // not through doubles
+	CHECK_INT(DgCompareValues(DgValue::Int(99), DgValue::Text(L"1"), nullptr), -1);   // numbers, dates, text
+	CHECK_INT(DgCompareValues(DgValue::DateTime(5), DgValue::Text(L""), nullptr), -1);
+	CHECK_INT(DgCompareValues(DgValue::Int(5), DgValue::DateTime(1), nullptr), -1);
+	CHECK_INT(DgCompareValues(DgValue::Float(std::nan("")), DgValue::Int(5), nullptr), 1);
+	CHECK_INT(DgCompareValues(DgValue::Text(L"B"), DgValue::Text(L"a"), nullptr), -1);   // ordinal
+	auto noCase = [](const std::wstring& a, const std::wstring& b) {
+		return _wcsicmp(a.c_str(), b.c_str()) < 0 ? -1 : _wcsicmp(a.c_str(), b.c_str()) > 0 ? 1 : 0;
+	};
+	CHECK_INT(DgCompareValues(DgValue::Text(L"B"), DgValue::Text(L"a"), noCase), 1);
+}
+
+TEST(SortOrder) {
+	std::vector<DgValue> col{ DgValue::Int(3), DgValue{}, DgValue::Int(1), DgValue::Int(3), DgValue::Text(L"a"), DgValue::Float(2) };
+	auto value = [&](int64_t row, size_t) -> const DgValue* { return &col[(size_t)row]; };
+	CHECK(DgSortOrder(6, { false }, value, nullptr) == (std::vector<int64_t>{ 2, 5, 0, 3, 4, 1 }));
+	CHECK(DgSortOrder(6, { true }, value, nullptr) == (std::vector<int64_t>{ 4, 0, 3, 5, 2, 1 }));   // stable; empty still last
+	CHECK(DgSortOrder(6, {}, value, nullptr) == (std::vector<int64_t>{ 0, 1, 2, 3, 4, 5 }));
+	auto none = [](int64_t, size_t) -> const DgValue* { return nullptr; };
+	CHECK(DgSortOrder(3, { false }, none, nullptr) == (std::vector<int64_t>{ 0, 1, 2 }));
+
+	// two keys: the first ascending, the second descending
+	std::vector<DgValue> k0{ DgValue::Int(1), DgValue::Int(1), DgValue::Int(2), DgValue::Int(2) };
+	std::vector<DgValue> k1{ DgValue::Text(L"b"), DgValue::Text(L"a"), DgValue::Text(L"a"), DgValue::Text(L"b") };
+	auto two = [&](int64_t row, size_t key) -> const DgValue* { return key == 0 ? &k0[(size_t)row] : &k1[(size_t)row]; };
+	CHECK(DgSortOrder(4, { false, true }, two, nullptr) == (std::vector<int64_t>{ 0, 1, 3, 2 }));
+	CHECK(DgSortOrder(4, { true, false }, two, nullptr) == (std::vector<int64_t>{ 2, 3, 1, 0 }));
+}
+
+// ---- Copying -----------------------------------------------------------------------------------------
+
+TEST(Tsv) {
+	CHECK_STR(DgTsvField(L"plain"), L"plain");
+	CHECK_STR(DgTsvField(L"a\tb"), L"\"a\tb\"");
+	CHECK_STR(DgTsvField(L"say \"hi\""), L"\"say \"\"hi\"\"\"");
+	CHECK_STR(DgTsvField(L"two\r\nlines"), L"\"two\r\nlines\"");
+	CHECK_STR(DgBuildTsv({ { L"a", L"b" }, { L"", L"d" } }), L"a\tb\r\n\td\r\n");
+	CHECK_STR(DgBuildTsv({}), L"");
+}
+
+TEST(Html) {
+	CHECK_STR(DgHtmlEscape(L"<a & \"b\">\r\nx\ny"), L"&lt;a &amp; &quot;b&quot;&gt;<br>x<br>y");
+	CHECK_STR(DgBuildHtmlTable({ { L"A" }, { L"1" } }, true), L"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>");
+	CHECK_STR(DgBuildHtmlTable({ { L"1", L"<" } }, false), L"<table><tr><td>1</td><td>&lt;</td></tr></table>");
+	CHECK(DgUtf8(L"a\x00e9\x20ac") == "a\xC3\xA9\xE2\x82\xAC");
+	CHECK(DgUtf8(L"\xD83D\xDE00") == "\xF0\x9F\x98\x80");          // a surrogate pair
+	CHECK(DgUtf8(L"\xD83Dx") == "\xEF\xBF\xBDx");                   // a lone one
+
+	std::string fragment = "<table><tr><td>\xC3\xA9</td></tr></table>";
+	auto cf = DgCfHtml(fragment);
+	auto number = [&](const char* name) {
+		auto at = cf.find(name);
+		return at == std::string::npos ? -1 : atoi(cf.c_str() + at + strlen(name));
+	};
+	int startHtml = number("StartHTML:"), endHtml = number("EndHTML:");
+	int startFragment = number("StartFragment:"), endFragment = number("EndFragment:");
+	CHECK(cf.compare(0, 12, "Version:0.9\r") == 0);
+	CHECK(cf.compare((size_t)startHtml, 6, "<html>") == 0);
+	CHECK_INT(endHtml, cf.size());
+	CHECK(cf.substr((size_t)startFragment, (size_t)(endFragment - startFragment)) == fragment);
+}
+
+TEST(SelectionTable) {
+	DgSelection s;
+	s.Reset({ 1, 0 }, 3);
+	s.Extend({ 2, 1 }, 3);
+	s.Add({ 4, 2 }, 3);
+	auto text = [](int64_t r, int c) { return std::to_wstring(r) + L":" + std::to_wstring(c); };
+	auto title = [](int c) { return L"T" + std::to_wstring(c); };
+	auto table = DgSelectionTable(s, text, title, true);
+	CHECK_INT(table.size(), 4);                                     // titles, rows 1, 2 and 4
+	CHECK(table[0] == (std::vector<std::wstring>{ L"T0", L"T1", L"T2" }));
+	CHECK(table[1] == (std::vector<std::wstring>{ L"1:0", L"1:1", L"" }));
+	CHECK(table[3] == (std::vector<std::wstring>{ L"", L"", L"4:2" }));
+	CHECK_INT(DgSelectionTable(s, text, title, false).size(), 3);
+}
+
 int wmain() {
 	wprintf(L"DataGrid model tests\n\n");
 
@@ -533,6 +742,16 @@ int wmain() {
 	Run_Store();
 	Run_Cache();
 	Run_RowMap();
+	Run_PosFromPoint();
+	Run_SelectionCells();
+	Run_SelectionModes();
+	Run_SelectionClamp();
+	Run_ClickSort();
+	Run_CompareValues();
+	Run_SortOrder();
+	Run_Tsv();
+	Run_Html();
+	Run_SelectionTable();
 
 	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
 	return g_failures;

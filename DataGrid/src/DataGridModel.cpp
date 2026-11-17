@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cwchar>
 
 // ---- Values ------------------------------------------------------------------------------
@@ -329,6 +330,35 @@ int DgDropIndex(const DgLayout& layout, int scrollX, int x) {
 	return n;
 }
 
+
+DgPos DgPosFromPoint(const DgLayout& layout, const DgView& view, int x, int y) {
+	DgPos pos;
+	if (view.rowCount > 0) {
+		int yy = std::clamp(y, layout.header, std::max(layout.header, view.clientHeight - 1));
+		pos.row = std::clamp<int64_t>(view.topRow + (yy - layout.header) / layout.rowHeight, 0, view.rowCount - 1);
+	}
+	int n = (int)layout.cols.size();
+	if (n == 0)
+		return pos;
+	if (int col = ColumnAt(layout, view.scrollX, x); col >= 0) {
+		pos.col = col;
+		return pos;
+	}
+	if (x >= layout.Right(n - 1, view.scrollX) && x >= layout.rowHeader) {
+		pos.col = n - 1;
+		return pos;
+	}
+	// left of the columns: the first one in view
+	pos.col = 0;
+	if (layout.frozenCount == 0)
+		for (int i = 0; i < n; i++)
+			if (layout.Right(i, view.scrollX) > layout.ScrollLeft()) {
+				pos.col = i;
+				break;
+			}
+	return pos;
+}
+
 // ---- The caret -----------------------------------------------------------------------------------
 
 DgPos DgNavigate(DgPos pos, DgKey key, bool ctrl, int64_t rowCount, int colCount, int64_t page) {
@@ -601,4 +631,307 @@ int64_t DgRowMap::ToView(int64_t data) const {
 	if (m_Identity)
 		return data < m_Count ? data : -1;
 	return data < (int64_t)m_Inverse.size() ? m_Inverse[(size_t)data] : -1;
+}
+
+// ---- Selection ----------------------------------------------------------------------------------
+
+DgRange DgRange::Span(DgPos a, DgPos b) {
+	return { std::min(a.row, b.row), std::max(a.row, b.row), std::min(a.col, b.col), std::max(a.col, b.col) };
+}
+
+DgRange DgSelection::Single(DgPos pos, int colCount, bool wholeRows) const {
+	if ((m_Mode == DgSelMode::Rows || wholeRows) && m_Mode != DgSelMode::Single)
+		return { pos.row, pos.row, 0, std::max(0, colCount - 1) };
+	return { pos.row, pos.row, pos.col, pos.col };
+}
+
+void DgSelection::SetMode(DgSelMode mode, DgPos at, int colCount) {
+	m_Mode = mode;
+	Reset(at, colCount);
+}
+
+void DgSelection::Reset(DgPos pos, int colCount, bool wholeRows) {
+	m_Ranges = { Single(pos, colCount, wholeRows) };
+	m_Anchor = pos;
+}
+
+void DgSelection::Extend(DgPos pos, int colCount, bool wholeRows) {
+	if (m_Mode == DgSelMode::Single || m_Ranges.empty()) {
+		Reset(pos, colCount, wholeRows);
+		return;
+	}
+	auto range = DgRange::Span(m_Anchor, pos);
+	if (m_Mode == DgSelMode::Rows || wholeRows) {
+		range.left = 0;
+		range.right = std::max(0, colCount - 1);
+	}
+	m_Ranges.back() = range;
+}
+
+void DgSelection::Add(DgPos pos, int colCount, bool wholeRows) {
+	if (m_Mode == DgSelMode::Single) {
+		Reset(pos, colCount);
+		return;
+	}
+	m_Ranges.push_back(Single(pos, colCount, wholeRows));
+	m_Anchor = pos;
+}
+
+void DgSelection::Toggle(DgPos pos, int colCount) {
+	if (m_Mode != DgSelMode::Rows || !RowTouched(pos.row)) {
+		Add(pos, colCount);
+		return;
+	}
+	std::vector<DgRange> kept;
+	for (auto& r : m_Ranges) {
+		if (pos.row < r.top || pos.row > r.bottom) {
+			kept.push_back(r);
+			continue;
+		}
+		if (r.top < pos.row)
+			kept.push_back({ r.top, pos.row - 1, r.left, r.right });
+		if (pos.row < r.bottom)
+			kept.push_back({ pos.row + 1, r.bottom, r.left, r.right });
+	}
+	m_Ranges = std::move(kept);
+	m_Anchor = pos;
+}
+
+void DgSelection::SelectAll(int64_t rowCount, int colCount) {
+	m_Ranges.clear();
+	if (rowCount > 0 && colCount > 0)
+		m_Ranges.push_back({ 0, rowCount - 1, 0, colCount - 1 });
+}
+
+void DgSelection::Clamp(int64_t rowCount, int colCount) {
+	bool had = !m_Ranges.empty();
+	m_Anchor.row = std::clamp<int64_t>(m_Anchor.row, 0, std::max<int64_t>(0, rowCount - 1));
+	m_Anchor.col = std::clamp(m_Anchor.col, 0, std::max(0, colCount - 1));
+	if (rowCount <= 0 || colCount <= 0) {
+		m_Ranges.clear();
+		return;
+	}
+	std::vector<DgRange> kept;
+	for (auto r : m_Ranges) {
+		if (r.top >= rowCount || r.left >= colCount)
+			continue;
+		r.bottom = std::min(r.bottom, rowCount - 1);
+		r.right = m_Mode == DgSelMode::Rows ? colCount - 1 : std::min(r.right, colCount - 1);
+		if (m_Mode == DgSelMode::Rows)
+			r.left = 0;
+		kept.push_back(r);
+	}
+	m_Ranges = std::move(kept);
+	if (had && m_Ranges.empty())
+		Reset(m_Anchor, colCount);
+}
+
+bool DgSelection::Contains(int64_t row, int col) const {
+	for (auto& r : m_Ranges)
+		if (r.Contains(row, col))
+			return true;
+	return false;
+}
+
+bool DgSelection::RowTouched(int64_t row) const {
+	for (auto& r : m_Ranges)
+		if (row >= r.top && row <= r.bottom)
+			return true;
+	return false;
+}
+
+bool DgSelection::ColTouched(int col) const {
+	for (auto& r : m_Ranges)
+		if (col >= r.left && col <= r.right)
+			return true;
+	return false;
+}
+
+std::vector<std::pair<int64_t, int64_t>> DgSelection::Rows() const {
+	std::vector<std::pair<int64_t, int64_t>> spans;
+	for (auto& r : m_Ranges)
+		spans.emplace_back(r.top, r.bottom);
+	std::sort(spans.begin(), spans.end());
+	std::vector<std::pair<int64_t, int64_t>> merged;
+	for (auto& s : spans) {
+		if (!merged.empty() && s.first <= merged.back().second + 1)
+			merged.back().second = std::max(merged.back().second, s.second);
+		else
+			merged.push_back(s);
+	}
+	return merged;
+}
+
+std::vector<int> DgSelection::Cols() const {
+	std::vector<int> cols;
+	for (auto& r : m_Ranges)
+		for (int c = r.left; c <= r.right; c++)
+			cols.push_back(c);
+	std::sort(cols.begin(), cols.end());
+	cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+	return cols;
+}
+
+int64_t DgSelection::RowCount() const {
+	int64_t n = 0;
+	for (auto [first, last] : Rows())
+		n += last - first + 1;
+	return n;
+}
+
+// ---- Sorting ----------------------------------------------------------------------------------------
+
+std::vector<DgSortKey> DgClickSort(const std::vector<DgSortKey>& keys, int id, bool add) {
+	if (add) {
+		auto result = keys;
+		for (auto& k : result)
+			if (k.id == id) {
+				k.descending = !k.descending;
+				return result;
+			}
+		result.push_back({ id, false });
+		return result;
+	}
+	if (keys.size() == 1 && keys[0].id == id)
+		return keys[0].descending ? std::vector<DgSortKey>() : std::vector<DgSortKey>{ { id, true } };
+	return { { id, false } };
+}
+
+int DgOrdinalCompare(const std::wstring& a, const std::wstring& b) {
+	int c = a.compare(b);
+	return c < 0 ? -1 : c > 0 ? 1 : 0;
+}
+
+int DgCompareValues(const DgValue& a, const DgValue& b, DgTextCompare compare) {
+	auto rank = [](int type) {
+		switch (type) {
+			case DgType::Int:
+			case DgType::Float:
+			case DgType::Bool:     return 0;
+			case DgType::DateTime: return 1;
+			case DgType::Text:     return 2;
+		}
+		return 3;
+	};
+	int ra = rank(a.type), rb = rank(b.type);
+	if (ra != rb)
+		return ra < rb ? -1 : 1;
+	switch (ra) {
+		case 0: {
+			if (a.type != DgType::Float && b.type != DgType::Float)
+				return a.i < b.i ? -1 : a.i > b.i ? 1 : 0;
+			double x = a.type == DgType::Float ? a.d : (double)a.i, y = b.type == DgType::Float ? b.d : (double)b.i;
+			if (std::isnan(x) || std::isnan(y))   // NaN after the numbers
+				return std::isnan(x) == std::isnan(y) ? 0 : std::isnan(x) ? 1 : -1;
+			return x < y ? -1 : x > y ? 1 : 0;
+		}
+		case 1:
+			return a.i < b.i ? -1 : a.i > b.i ? 1 : 0;
+		case 2:
+			return (compare ? compare : DgOrdinalCompare)(a.s, b.s);
+	}
+	return 0;
+}
+
+// ---- Copying ----------------------------------------------------------------------------------------
+
+std::wstring DgTsvField(const std::wstring& text) {
+	if (text.find_first_of(L"\t\r\n\"") == std::wstring::npos)
+		return text;
+	std::wstring quoted = L"\"";
+	for (wchar_t ch : text) {
+		if (ch == L'"')
+			quoted += L'"';
+		quoted += ch;
+	}
+	return quoted + L"\"";
+}
+
+std::wstring DgBuildTsv(const std::vector<std::vector<std::wstring>>& rows) {
+	std::wstring text;
+	for (auto& row : rows) {
+		for (size_t i = 0; i < row.size(); i++) {
+			if (i)
+				text += L'\t';
+			text += DgTsvField(row[i]);
+		}
+		text += L"\r\n";
+	}
+	return text;
+}
+
+std::wstring DgHtmlEscape(const std::wstring& text) {
+	std::wstring result;
+	for (size_t i = 0; i < text.size(); i++) {
+		switch (text[i]) {
+			case L'&': result += L"&amp;"; break;
+			case L'<': result += L"&lt;"; break;
+			case L'>': result += L"&gt;"; break;
+			case L'"': result += L"&quot;"; break;
+			case L'\r':
+				if (i + 1 < text.size() && text[i + 1] == L'\n')
+					i++;
+				result += L"<br>";
+				break;
+			case L'\n': result += L"<br>"; break;
+			default: result += text[i]; break;
+		}
+	}
+	return result;
+}
+
+std::wstring DgBuildHtmlTable(const std::vector<std::vector<std::wstring>>& rows, bool headerRow) {
+	std::wstring html = L"<table>";
+	for (size_t r = 0; r < rows.size(); r++) {
+		const wchar_t* tag = headerRow && r == 0 ? L"th" : L"td";
+		html += L"<tr>";
+		for (auto& cell : rows[r])
+			html += std::wstring(L"<") + tag + L">" + DgHtmlEscape(cell) + L"</" + tag + L">";
+		html += L"</tr>";
+	}
+	return html + L"</table>";
+}
+
+std::string DgUtf8(const std::wstring& text) {
+	std::string out;
+	for (size_t i = 0; i < text.size(); i++) {
+		uint32_t cp = text[i];
+		if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < text.size() && text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF)
+			cp = 0x10000 + ((cp - 0xD800) << 10) + (uint32_t)(text[++i] - 0xDC00);
+		else if (cp >= 0xD800 && cp <= 0xDFFF)
+			cp = 0xFFFD;   // a lone surrogate
+		if (cp < 0x80) {
+			out += (char)cp;
+		}
+		else if (cp < 0x800) {
+			out += (char)(0xC0 | (cp >> 6));
+			out += (char)(0x80 | (cp & 0x3F));
+		}
+		else if (cp < 0x10000) {
+			out += (char)(0xE0 | (cp >> 12));
+			out += (char)(0x80 | ((cp >> 6) & 0x3F));
+			out += (char)(0x80 | (cp & 0x3F));
+		}
+		else {
+			out += (char)(0xF0 | (cp >> 18));
+			out += (char)(0x80 | ((cp >> 12) & 0x3F));
+			out += (char)(0x80 | ((cp >> 6) & 0x3F));
+			out += (char)(0x80 | (cp & 0x3F));
+		}
+	}
+	return out;
+}
+
+std::string DgCfHtml(const std::string& fragmentUtf8) {
+	const char* header = "Version:0.9\r\nStartHTML:%010d\r\nEndHTML:%010d\r\nStartFragment:%010d\r\nEndFragment:%010d\r\n";
+	const std::string before = "<html><body>\r\n<!--StartFragment-->";
+	const std::string after = "<!--EndFragment-->\r\n</body></html>";
+	char probe[256];
+	int headerLength = snprintf(probe, sizeof(probe), header, 0, 0, 0, 0);
+	int startFragment = headerLength + (int)before.size();
+	int endFragment = startFragment + (int)fragmentUtf8.size();
+	int endHtml = endFragment + (int)after.size();
+	char buffer[256];
+	snprintf(buffer, sizeof(buffer), header, headerLength, endHtml, startFragment, endFragment);
+	return buffer + before + fragmentUtf8 + after;
 }

@@ -2,7 +2,11 @@
 // computed by the demo as the grid asks (virtual mode: ten million rows, or five billion to try the scroll bar's
 // scaling). Drag the titles' dividers to resize (a double-click fits), drag a title to move its column, right-click a
 // title or a cell for a menu (hide, fit, freeze up to here). View has the row numbers, the frozen columns, the grid
-// lines, the font, custom colors and (x64) WTLHelper's dark mode. The log at the bottom shows the notifications.
+// lines, the font, custom colors and (x64) WTLHelper's dark mode. Select cells by dragging (Shift extends, Ctrl adds,
+// the row numbers select rows, the corner all), or whole rows (Edit > Select Rows); Ctrl+C copies them (Ctrl+Shift+C
+// with the titles) as text and HTML. A click on a title sorts by it (again: descending, again: unsorted; Shift adds
+// a key). In virtual mode the demo sorts only by ID (it reverses its rows) and stops the rest (DGVN_SORTCHANGING).
+// The log at the bottom shows the notifications.
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -20,6 +24,7 @@
 #endif
 
 #include <algorithm>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -33,6 +38,7 @@ enum : UINT {
 	CMD_EXIT = 1000, CMD_STORE, CMD_VIRTUAL, CMD_HUGE,
 	CMD_ROWNUMBERS, CMD_FROZEN0, CMD_FROZEN1, CMD_FROZEN2, CMD_HORZLINES, CMD_VERTLINES, CMD_NOHEADER, CMD_LARGEFONT,
 	CMD_CUSTOMCOLORS, CMD_DARKMODE, CMD_FITALL, CMD_SHOWALL, CMD_CLEARLOG, CMD_GOTO_END,
+	CMD_COPY, CMD_COPYTITLES, CMD_SELECTALL, CMD_SELCELLS, CMD_SELROWS, CMD_SELSINGLE, CMD_DELETEROWS, CMD_UNSORT,
 	CMD_HIDE = 2000, CMD_FIT, CMD_FREEZE,
 };
 
@@ -73,6 +79,7 @@ private:
 	int m_IdId = 0, m_IdName = 0, m_IdCategory = 0, m_IdPrice = 0, m_IdQty = 0, m_IdStock = 0, m_IdProgress = 0,
 		m_IdModified = 0, m_IdLink = 0, m_IdNotes = 0;
 	std::wstring m_Text;   // the text DGVN_GETDISPINFO gives
+	bool m_Reversed = false;   // virtual mode sorted by ID, descending
 
 	void Log(const wchar_t* format, ...) {
 		wchar_t text[512];
@@ -181,6 +188,7 @@ private:
 			return;
 		}
 		m_Grid.SetVirtual(true);
+		m_Reversed = false;
 		LONGLONG rows = cmd == CMD_HUGE ? 5'000'000'000LL : 10'000'000LL;
 		m_Grid.SetRowCount(rows);
 		Log(L"Virtual: %lld rows", rows);
@@ -246,11 +254,22 @@ private:
 	}
 
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
-		CMenuHandle file, data, view;
+		CMenuHandle file, edit, data, view;
 		file.CreatePopupMenu();
 		file.AppendMenu(MF_STRING, CMD_CLEARLOG, L"&Clear Log");
 		file.AppendMenu(MF_SEPARATOR);
 		file.AppendMenu(MF_STRING, CMD_EXIT, L"E&xit");
+		edit.CreatePopupMenu();
+		edit.AppendMenu(MF_STRING, CMD_COPY, L"&Copy\tCtrl+C");
+		edit.AppendMenu(MF_STRING, CMD_COPYTITLES, L"Copy with &Titles\tCtrl+Shift+C");
+		edit.AppendMenu(MF_STRING, CMD_SELECTALL, L"Select &All\tCtrl+A");
+		edit.AppendMenu(MF_SEPARATOR);
+		edit.AppendMenu(MF_STRING, CMD_SELCELLS, L"Select C&ells");
+		edit.AppendMenu(MF_STRING, CMD_SELROWS, L"Select &Rows");
+		edit.AppendMenu(MF_STRING, CMD_SELSINGLE, L"Select a &Single Cell");
+		edit.AppendMenu(MF_SEPARATOR);
+		edit.AppendMenu(MF_STRING, CMD_DELETEROWS, L"&Delete Selected Rows (Store)");
+		edit.AppendMenu(MF_STRING, CMD_UNSORT, L"&Unsort");
 		data.CreatePopupMenu();
 		data.AppendMenu(MF_STRING, CMD_STORE, L"&Store (5,000 rows)");
 		data.AppendMenu(MF_STRING, CMD_VIRTUAL, L"&Virtual (10 million rows)");
@@ -277,6 +296,7 @@ private:
 #endif
 		m_Menu.CreateMenu();
 		m_Menu.AppendMenu(MF_POPUP, file, L"&File");
+		m_Menu.AppendMenu(MF_POPUP, edit, L"&Edit");
 		m_Menu.AppendMenu(MF_POPUP, data, L"&Data");
 		m_Menu.AppendMenu(MF_POPUP, view, L"&View");
 		SetMenu(m_Menu);
@@ -299,6 +319,7 @@ private:
 		AddColumns();
 		SetData(CMD_STORE);
 		Check(CMD_ROWNUMBERS, true);
+		Check(CMD_SELCELLS, true);
 		Check(CMD_HORZLINES, true);
 		Check(CMD_VERTLINES, true);
 		SetFrozen(1);
@@ -357,10 +378,45 @@ private:
 			case CMD_GOTO_END: {
 				int caretId = m_IdId;
 				m_Grid.GetCaret(nullptr, &caretId);
-				m_Grid.SetCaret(m_Grid.GetRowCount() - 1, caretId);
+				m_Grid.SetCaret(m_Grid.GetDataRow(m_Grid.GetRowCount() - 1), caretId);   // the last as sorted
 				m_Grid.SetFocus();
 				break;
 			}
+			case CMD_COPY:
+			case CMD_COPYTITLES:
+				if (!m_Grid.Copy(id == CMD_COPYTITLES ? DGVCOPY_TITLES : 0))
+					Log(L"Copy: nothing selected, or over a million cells");
+				else
+					Log(L"Copied %lld row(s)", m_Grid.GetSelectedRowCount());
+				break;
+			case CMD_SELECTALL:
+				m_Grid.SelectAll();
+				m_Grid.SetFocus();
+				break;
+			case CMD_SELCELLS:
+			case CMD_SELROWS:
+			case CMD_SELSINGLE:
+				m_Grid.SetSelectionMode(id == CMD_SELROWS ? DGVSM_ROWS : id == CMD_SELSINGLE ? DGVSM_SINGLE : DGVSM_CELLS);
+				Check(CMD_SELCELLS, id == CMD_SELCELLS);
+				Check(CMD_SELROWS, id == CMD_SELROWS);
+				Check(CMD_SELSINGLE, id == CMD_SELSINGLE);
+				break;
+			case CMD_DELETEROWS: {
+				if (m_Grid.IsVirtual())
+					break;
+				std::vector<LONGLONG> rows((size_t)m_Grid.GetSelectedRowCount());
+				m_Grid.GetSelectedRows(rows.data(), (LONGLONG)rows.size());
+				std::sort(rows.begin(), rows.end(), std::greater<>());   // the last first, so the others keep their indexes
+				for (auto r : rows)
+					m_Grid.DeleteRows(r, 1);
+				Log(L"Deleted %zu row(s); %lld left", rows.size(), m_Grid.GetRowCount());
+				break;
+			}
+			case CMD_UNSORT:
+				m_Grid.SetSortKeys(nullptr, 0);
+				m_Reversed = false;
+				m_Grid.RedrawRows(-1, -1);
+				break;
 			case CMD_ROWNUMBERS:
 				ToggleStyle(id, DGVS_ROWHEADER, true);
 				break;
@@ -430,7 +486,39 @@ private:
 		switch (hdr->code) {
 			case DGVN_GETDISPINFO: {
 				auto info = (NMDGVDISPINFO*)hdr;
-				info->value = Value(info->iRow, info->idColumn, info->iImage, m_Text);
+				LONGLONG row = m_Reversed ? m_Grid.GetRowCount() - 1 - info->iRow : info->iRow;
+				info->value = Value(row, info->idColumn, info->iImage, m_Text);
+				break;
+			}
+			case DGVN_SELCHANGED: {
+				DGVRANGE r{};
+				int ranges = m_Grid.GetSelectedRanges(&r, 1);
+				Log(L"DGVN_SELCHANGED: %d range(s), %lld row(s); the first: rows %lld-%lld, columns %d-%d", ranges,
+					m_Grid.GetSelectedRowCount(), r.iTopRow, r.iBottomRow, r.iLeftColumn, r.iRightColumn);
+				break;
+			}
+			case DGVN_SORTCHANGING:
+			case DGVN_SORTCHANGED: {
+				auto nm = (NMDGVSORT*)hdr;
+				std::wstring keys;
+				for (int i = 0; i < nm->cKeys; i++)
+					keys += std::to_wstring(nm->pKeys[i].idColumn) + (nm->pKeys[i].fDescending ? L" desc " : L" asc ");
+				Log(L"%s: %s", hdr->code == DGVN_SORTCHANGING ? L"DGVN_SORTCHANGING" : L"DGVN_SORTCHANGED", keys.empty() ? L"(unsorted)" : keys.c_str());
+				if (!m_Grid.IsVirtual())
+					break;
+				// virtual: the demo's rows come from their index, so only the ID can be sorted (by reversing them)
+				if (hdr->code == DGVN_SORTCHANGING) {
+					bool byId = nm->cKeys == 0 || (nm->cKeys == 1 && nm->pKeys[0].idColumn == m_IdId);
+					if (!byId) {
+						Log(L"  stopped: the demo sorts its virtual rows by ID only");
+						::MessageBeep(MB_ICONINFORMATION);
+						return 1;
+					}
+				}
+				else {
+					m_Reversed = nm->cKeys == 1 && nm->pKeys[0].fDescending;
+					m_Grid.RedrawRows(-1, -1);
+				}
 				break;
 			}
 			case DGVN_CARETCHANGED: {

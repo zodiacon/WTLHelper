@@ -68,6 +68,8 @@ void CDataGridCtrl::UpdateColors() {
 		c.caret = highlight;
 		c.caretInactive = text;
 		c.link = ::GetSysColor(COLOR_HOTLIGHT);
+		c.selection = c.selectionInactive = highlight;
+		c.selectionText = ::GetSysColor(COLOR_HIGHLIGHTTEXT);
 		return;
 	}
 	c.back = Pick(u.crBack, window);
@@ -81,6 +83,9 @@ void CDataGridCtrl::UpdateColors() {
 	c.caret = Pick(u.crCaret, highlight);
 	c.caretInactive = Blend(c.back, c.text, 40);
 	c.link = Pick(u.crLink, ::GetSysColor(COLOR_HOTLIGHT));
+	c.selection = Pick(u.crSelection, Blend(c.back, highlight, 30));
+	c.selectionInactive = Blend(c.back, c.selection, 55);
+	c.selectionText = c.text;
 }
 
 // ---- Painting --------------------------------------------------------------------------------
@@ -137,6 +142,10 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 	int64_t last = std::min<int64_t>(rowCount, first + (h - L.header) / L.rowHeight + 2);
 	int caretCol = d.caretRow >= 0 ? L.IndexOf(d.caretId) : -1;
 	int64_t caretView = d.rows.ToView(d.caretRow);
+	// a selection of the caret's cell alone isn't shaded: the caret's frame shows it, as in Excel
+	auto& ranges = d.selection.Ranges();
+	bool onlyCaret = ranges.size() == 1 && ranges[0].top == ranges[0].bottom && ranges[0].left == ranges[0].right
+		&& d.selection.Mode() != DgSelMode::Rows;
 	for (int64_t r = first; r < last; r++) {
 		int y = L.header + (int)(r - first) * L.rowHeight;
 		if (y >= clip.bottom || y + L.rowHeight <= clip.top)
@@ -153,8 +162,12 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			RECT visible;
 			if (!::IntersectRect(&visible, &cell, &cellClip) || visible.left >= clip.right || visible.right <= clip.left)
 				continue;
-			if (i < L.frozenCount)   // over the scrolled columns' parts under it
+			bool selected = !onlyCaret && d.selection.Contains(r, i);
+			if (selected)
+				Fill(dc, visible, d.focused ? c.selection : c.selectionInactive);
+			else if (i < L.frozenCount)   // over the scrolled columns' parts under it
 				Fill(dc, visible, caretRow ? c.caretRow : c.back);
+			COLORREF text = selected ? c.selectionText : c.text;
 			auto column = d.columns.Find(L.cols[i].id);
 			DgCell value;
 			if (!column || !Fetch(dataRow, column->id, value))
@@ -171,10 +184,10 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 					int bx = align == DgAlign::Left ? inner.left : align == DgAlign::Right ? inner.right - box : (cell.left + cell.right - box) / 2;
 					int by = (cell.top + cell.bottom - box) / 2;
 					RECT rb{ bx, by, bx + box, by + box };
-					Frame(dc, rb, 1, Blend(c.back, c.text, 60));
+					Frame(dc, rb, 1, Blend(c.back, text, 60));
 					if (DgChecked(value.value)) {
 						CPen pen;
-						pen.CreatePen(PS_SOLID, std::max(1, Scale(2)), c.text);
+						pen.CreatePen(PS_SOLID, std::max(1, Scale(2)), text);
 						HPEN oldPen = dc.SelectPen(pen);
 						POINT pts[3] = { { bx + box / 5, by + box / 2 }, { bx + box * 2 / 5, by + box * 3 / 4 }, { bx + box * 4 / 5, by + box / 4 } };
 						dc.Polyline(pts, 3);
@@ -191,9 +204,9 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 					RECT done = bar;
 					done.right = bar.left + (int)((bar.right - bar.left) * p + 0.5);
 					Fill(dc, done, c.highContrast ? ::GetSysColor(COLOR_HIGHLIGHT) : Blend(c.back, ::GetSysColor(COLOR_HIGHLIGHT), 55));
-					dc.SetTextColor(c.text);
-					auto text = DgCellText(value, *column, d.numberFormat);
-					dc.DrawText(text.c_str(), (int)text.size(), &bar, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+					dc.SetTextColor(text);
+					auto percent = DgCellText(value, *column, d.numberFormat);
+					dc.DrawText(percent.c_str(), (int)percent.size(), &bar, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
 					break;
 				}
 				default: {
@@ -203,11 +216,11 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 						::ImageList_Draw(d.images, value.image, dc, inner.left, (cell.top + cell.bottom - cy) / 2, ILD_TRANSPARENT);
 						inner.left += cx + Scale(4);
 					}
-					auto text = DgCellText(value, *column, d.numberFormat);
+					auto s = DgCellText(value, *column, d.numberFormat);
 					bool link = column->type == DgColType::Link;
-					dc.SetTextColor(link ? c.link : c.text);
+					dc.SetTextColor(link && !(selected && c.highContrast) ? c.link : text);
 					HFONT f = link ? dc.SelectFont(m_hUnderline) : nullptr;
-					dc.DrawText(text.c_str(), (int)text.size(), &inner,
+					dc.DrawText(s.c_str(), (int)s.size(), &inner,
 						DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | AlignFlags(align));
 					if (f)
 						dc.SelectFont(f);
@@ -224,7 +237,7 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 		// the row's number
 		if (L.rowHeader > 0) {
 			RECT rh{ 0, y, L.rowHeader, y + L.rowHeight };
-			Fill(dc, rh, r == caretView ? c.headerPressed : c.headerBack);
+			Fill(dc, rh, r == caretView ? c.headerPressed : d.selection.RowTouched(r) ? c.headerHot : c.headerBack);
 			auto number = std::to_wstring(r + 1);
 			RECT text{ 0, y, L.rowHeader - pad, y + L.rowHeight };
 			dc.SetTextColor(c.headerText);
@@ -271,11 +284,40 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			if (!column)
 				continue;
 			bool pressed = d.drag == DgData::Drag::Press && d.dragCol == i;
-			bool hot = d.hotCol == i && d.drag == DgData::Drag::None;
+			bool hot = (d.hotCol == i && d.drag == DgData::Drag::None)
+				|| (d.selection.Mode() == DgSelMode::Cells && d.selection.ColTouched(i));
 			Fill(dc, visible, pressed ? c.headerPressed : hot ? c.headerHot : c.headerBack);
 			dc.SaveDC();
 			dc.IntersectClipRect(&visible);
 			RECT text{ x + pad, 0, right - pad, L.header };
+			// sorted by it: an arrow at the right, with its place among the keys when there are several
+			auto key = std::find_if(d.sortKeys.begin(), d.sortKeys.end(), [&](auto& k) { return k.id == column->id; });
+			if (key != d.sortKeys.end()) {
+				int aw = Scale(8), hgt = Scale(4);
+				int ax = text.right - aw, ay = (L.header - hgt) / 2;
+				COLORREF arrow = Blend(c.headerBack, c.headerText, 70);
+				CBrush brush;
+				brush.CreateSolidBrush(arrow);
+				CPen pen;
+				pen.CreatePen(PS_SOLID, 1, arrow);
+				HBRUSH oldBrush = dc.SelectBrush(brush);
+				HPEN oldPen = dc.SelectPen(pen);
+				POINT up[3] = { { ax, ay + hgt }, { ax + aw, ay + hgt }, { ax + aw / 2, ay } };
+				POINT down[3] = { { ax, ay }, { ax + aw, ay }, { ax + aw / 2, ay + hgt } };
+				dc.Polygon(key->descending ? down : up, 3);
+				dc.SelectBrush(oldBrush);
+				dc.SelectPen(oldPen);
+				text.right = ax - Scale(3);
+				if (d.sortKeys.size() > 1) {
+					auto number = std::to_wstring(key - d.sortKeys.begin() + 1);
+					HFONT f = dc.SelectFont(m_hFont);
+					dc.SetTextColor(arrow);
+					RECT nr{ text.right - d.digitWidth * 2, 0, text.right, L.header };
+					dc.DrawText(number.c_str(), (int)number.size(), &nr, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+					dc.SelectFont(f);
+					text.right = nr.right - d.digitWidth * (int)number.size() - Scale(3);
+				}
+			}
 			dc.SetTextColor(c.headerText);
 			int align = DgEffectiveAlign(*column);
 			dc.DrawText(column->title.c_str(), (int)column->title.size(), &text,

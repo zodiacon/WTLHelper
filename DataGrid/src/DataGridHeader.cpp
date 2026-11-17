@@ -98,7 +98,11 @@ void CDataGridCtrl::HeaderMouseUp(POINT pt) {
 			if ((hit.flags & DGVHT_HEADER) && at == col) {
 				nm.iDisplayIndex = d.columns.DisplayIndexOf(id);
 				nm.cxWidth = GetColumnWidth(id);
-				FireNotify(&nm.hdr, DGVN_COLUMNCLICK);
+				// non-zero: the app handled it, no sorting
+				bool handled = FireNotify(&nm.hdr, DGVN_COLUMNCLICK) != 0;
+				auto column = d.columns.Find(id);
+				if (!handled && column && !(GetStyle() & DGVS_NOSORT) && !(column->flags & DgColFlag::NoSort))
+					Sort(DgClickSort(d.sortKeys, id, ::GetKeyState(VK_SHIFT) < 0), true);
 			}
 			break;
 		}

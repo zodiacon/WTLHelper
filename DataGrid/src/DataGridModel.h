@@ -6,7 +6,9 @@
 // in the data. The values here mirror DataGrid.h's (DGVVT_*, DGVCT_*, DGVA_*, DGVCF_*, DGVHT_*); DataGridCtrl.cpp
 // checks that they agree.
 
+#include <algorithm>
 #include <cstdint>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -24,7 +26,7 @@ namespace DgAlign {       // DGVA_*
 	enum : int { Default, Left, Center, Right };
 }
 namespace DgColFlag {     // DGVCF_*
-	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8 };
+	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8, NoSort = 16 };
 }
 namespace DgHitFlag {     // DGVHT_*
 	enum : unsigned { Nowhere = 0, Cell = 1, Header = 2, HeaderDivider = 4, RowHeader = 8, Corner = 0x10, Empty = 0x20 };
@@ -182,6 +184,10 @@ DgHit DgHitTest(const DgLayout& layout, const DgView& view, int x, int y, int di
 // where a column dragged to x would go: an index into layout.cols (cols.size(): after the last)
 int DgDropIndex(const DgLayout& layout, int scrollX, int x);
 
+// the cell under a point, or the nearest one in view when it's outside (dragging a selection past the edges)
+struct DgPos;
+DgPos DgPosFromPoint(const DgLayout& layout, const DgView& view, int x, int y);
+
 // ---- The caret -----------------------------------------------------------------------------------
 
 enum class DgKey { Left, Right, Up, Down, PageUp, PageDown, Home, End };
@@ -273,3 +279,138 @@ private:
 	std::vector<int64_t> m_Order;
 	std::vector<int64_t> m_Inverse;               // per data row; -1 if not in view
 };
+
+// ---- Selection ----------------------------------------------------------------------------------
+
+// Rectangles of rows in view and visible columns' indexes, both ends included. The last one is what Shift extends,
+// from the anchor. In Rows mode every range spans all the columns; in Single mode there's one cell, the caret's.
+struct DgRange {
+	int64_t top = 0, bottom = 0;
+	int left = 0, right = 0;
+	bool operator==(const DgRange&) const = default;
+	bool Contains(int64_t row, int col) const {
+		return row >= top && row <= bottom && col >= left && col <= right;
+	}
+	static DgRange Span(DgPos a, DgPos b);
+};
+
+enum class DgSelMode { Single, Cells, Rows };
+
+class DgSelection {
+public:
+	void SetMode(DgSelMode mode, DgPos at, int colCount);
+	DgSelMode Mode() const {
+		return m_Mode;
+	}
+	// wholeRows: the rows across all the columns (the row numbers'), whatever the mode but Single
+	void Reset(DgPos pos, int colCount, bool wholeRows = false);   // only this cell (Rows: its row)
+	void Extend(DgPos pos, int colCount, bool wholeRows = false);  // the last range from the anchor to pos
+	void Add(DgPos pos, int colCount, bool wholeRows = false);     // a new range (Ctrl+click); Single: as Reset
+	void Toggle(DgPos pos, int colCount);                    // Rows: a selected row leaves the selection, else Add
+	void SelectAll(int64_t rowCount, int colCount);
+	void Clear() {
+		m_Ranges.clear();
+	}
+	void Clamp(int64_t rowCount, int colCount);              // after rows or columns went away
+	bool Contains(int64_t row, int col) const;
+	bool RowTouched(int64_t row) const;                      // any of its cells
+	bool ColTouched(int col) const;
+	bool Empty() const {
+		return m_Ranges.empty();
+	}
+	const std::vector<DgRange>& Ranges() const {
+		return m_Ranges;
+	}
+	DgPos Anchor() const {
+		return m_Anchor;
+	}
+	std::vector<std::pair<int64_t, int64_t>> Rows() const;   // the rows touched, as sorted, merged intervals
+	std::vector<int> Cols() const;                           // the columns touched, sorted
+	int64_t RowCount() const;                                // how many rows are touched
+
+private:
+	DgRange Single(DgPos pos, int colCount, bool wholeRows = false) const;
+	DgSelMode m_Mode = DgSelMode::Cells;
+	std::vector<DgRange> m_Ranges;
+	DgPos m_Anchor;
+};
+
+// ---- Sorting ----------------------------------------------------------------------------------------
+
+struct DgSortKey {
+	int id = 0;
+	bool descending = false;
+	bool operator==(const DgSortKey&) const = default;
+};
+
+// A click on a title: unsorted, ascending, descending, unsorted again; add (Shift): the column joins the keys, or turns.
+std::vector<DgSortKey> DgClickSort(const std::vector<DgSortKey>& keys, int id, bool add);
+
+using DgTextCompare = int (*)(const std::wstring& a, const std::wstring& b);   // < 0, 0, > 0
+int DgOrdinalCompare(const std::wstring& a, const std::wstring& b);
+
+// Numbers (and check boxes) before dates before text, each in their order; empty cells go last however it's sorted.
+int DgCompareValues(const DgValue& a, const DgValue& b, DgTextCompare compare);
+
+// The data rows in sorted order, stable. value(row, key) gives the value to compare (nullptr: empty).
+template<typename ValueOf>
+std::vector<int64_t> DgSortOrder(int64_t count, const std::vector<bool>& descending, ValueOf value, DgTextCompare compare);
+
+// ---- Copying ----------------------------------------------------------------------------------------
+
+std::wstring DgTsvField(const std::wstring& text);              // quoted if it has a tab, a line break or a quote
+std::wstring DgBuildTsv(const std::vector<std::vector<std::wstring>>& rows);   // CRLF after each row
+std::wstring DgHtmlEscape(const std::wstring& text);
+std::wstring DgBuildHtmlTable(const std::vector<std::vector<std::wstring>>& rows, bool headerRow);
+std::string DgUtf8(const std::wstring& text);
+std::string DgCfHtml(const std::string& fragmentUtf8);          // the clipboard's "HTML Format", with its offsets
+
+// The selection as a table: the rows and the columns it touches, cells it doesn't left empty, titles first if wanted.
+template<typename TextOf, typename TitleOf>
+std::vector<std::vector<std::wstring>> DgSelectionTable(const DgSelection& selection, TextOf text, TitleOf title, bool titles);
+
+// ---- Templates ----------------------------------------------------------------------------------------
+
+
+template<typename ValueOf>
+std::vector<int64_t> DgSortOrder(int64_t count, const std::vector<bool>& descending, ValueOf value, DgTextCompare compare) {
+	std::vector<int64_t> order((size_t)std::max<int64_t>(0, count));
+	std::iota(order.begin(), order.end(), (int64_t)0);
+	std::stable_sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
+		for (size_t k = 0; k < descending.size(); k++) {
+			const DgValue* va = value(a, k);
+			const DgValue* vb = value(b, k);
+			bool ea = !va || va->type == DgType::Empty, eb = !vb || vb->type == DgType::Empty;
+			if (ea || eb) {
+				if (ea != eb)
+					return eb;   // empty last, either way
+				continue;
+			}
+			int c = DgCompareValues(*va, *vb, compare);
+			if (c != 0)
+				return descending[k] ? c > 0 : c < 0;
+		}
+		return false;
+	});
+	return order;
+}
+
+template<typename TextOf, typename TitleOf>
+std::vector<std::vector<std::wstring>> DgSelectionTable(const DgSelection& selection, TextOf text, TitleOf title, bool titles) {
+	std::vector<std::vector<std::wstring>> table;
+	auto cols = selection.Cols();
+	if (titles) {
+		std::vector<std::wstring> row;
+		for (int c : cols)
+			row.push_back(title(c));
+		table.push_back(std::move(row));
+	}
+	for (auto [first, last] : selection.Rows())
+		for (int64_t r = first; r <= last; r++) {
+			std::vector<std::wstring> row;
+			for (int c : cols)
+				row.push_back(selection.Contains(r, c) ? text(r, c) : std::wstring());
+			table.push_back(std::move(row));
+		}
+	return table;
+}

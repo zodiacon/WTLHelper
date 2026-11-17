@@ -18,6 +18,7 @@
 #include <commctrl.h>
 
 #include <memory>
+#include <vector>
 
 // ---- Window class name -------------------------------------------------------
 
@@ -32,6 +33,7 @@ constexpr wchar_t WC_DATAGRID[] = L"WC_DataGrid";
 #define DGVS_NOCOLUMNRESIZE    0x0010   // the user can't resize columns
 #define DGVS_NOCOLUMNREORDER   0x0020   // the user can't drag columns to another place
 #define DGVS_NOCARETROW        0x0040   // the caret's row isn't shaded
+#define DGVS_NOSORT            0x0080   // a click on a title doesn't sort (DGVN_COLUMNCLICK is still sent)
 
 // ---- Values ---------------------------------------------------------------------
 
@@ -108,6 +110,7 @@ inline DGVVALUE DgvDateTime(const FILETIME& value) {
 #define DGVCF_NORESIZE    0x0002   // the user can't resize it
 #define DGVCF_NOREORDER   0x0004   // the user can't drag it
 #define DGVCF_GROUPDIGITS 0x0008   // numbers with the user's thousands separator
+#define DGVCF_NOSORT      0x0010   // a click on its title doesn't sort
 
 #define DGVCM_TITLE       0x0001
 #define DGVCM_TYPE        0x0002
@@ -163,6 +166,31 @@ struct DGVCOLORS {          // CLR_DEFAULT: the system's (which WTLHelper's dark
 	COLORREF crCaretRow;     // the caret's row's shading
 	COLORREF crCaret;        // the frame around the caret's cell
 	COLORREF crLink;
+	COLORREF crSelection;    // the selected cells' background (lighter when the control hasn't the focus)
+};
+
+// ---- Selection ---------------------------------------------------------------------
+
+#define DGVSM_CELLS          0   // rectangles of cells (Shift extends, Ctrl adds another)
+#define DGVSM_ROWS           1   // whole rows (Ctrl+click toggles one)
+#define DGVSM_SINGLE         2   // the caret's cell only
+
+// Rows in view (as sorted; GetDataRow maps them) and visible columns (GetVisibleColumn), both ends included. A
+// selection is kept in these terms, so sorting, moving or hiding columns puts it back on the caret's cell.
+struct DGVRANGE {
+	LONGLONG iTopRow;
+	LONGLONG iBottomRow;
+	int iLeftColumn;
+	int iRightColumn;
+};
+
+#define DGVCOPY_TITLES       0x0001   // the columns' titles in a first row
+
+// ---- Sorting ------------------------------------------------------------------------
+
+struct DGVSORTKEY {
+	int idColumn;
+	BOOL fDescending;
 };
 
 // ---- Notifications ----------------------------------------------------------------
@@ -170,12 +198,21 @@ struct DGVCOLORS {          // CLR_DEFAULT: the system's (which WTLHelper's dark
 #define DGVN_FIRST           (0U - 3500U)   // outside the common controls ranges
 #define DGVN_GETDISPINFO     (DGVN_FIRST - 0)   // NMDGVDISPINFO; virtual mode: the app fills in the cell's value
 #define DGVN_CARETCHANGED    (DGVN_FIRST - 1)   // NMDGVCARET
-#define DGVN_COLUMNCLICK     (DGVN_FIRST - 2)   // NMDGVCOLUMN; a title was clicked
+#define DGVN_COLUMNCLICK     (DGVN_FIRST - 2)   // NMDGVCOLUMN; a title was clicked: non-zero stops it sorting
 #define DGVN_COLUMNRESIZED   (DGVN_FIRST - 3)   // NMDGVCOLUMN; the user resized a column (cxWidth: its new width)
 #define DGVN_COLUMNMOVED     (DGVN_FIRST - 4)   // NMDGVCOLUMN; the user dragged a column (iOldIndex to iDisplayIndex)
 #define DGVN_ACTIVATE        (DGVN_FIRST - 5)   // NMDGVCELL; a double-click or Enter on a cell
 #define DGVN_CONTEXTMENU     (DGVN_FIRST - 6)   // NMDGVCELL; a right-click or the menu key (ptScreen: where to show it)
 #define DGVN_LINKCLICK       (DGVN_FIRST - 7)   // NMDGVCELL; a DGVCT_LINK cell's text was clicked
+#define DGVN_SELCHANGED      (DGVN_FIRST - 8)   // NMHDR; the user changed the selection
+#define DGVN_SORTCHANGING    (DGVN_FIRST - 9)   // NMDGVSORT; the user is sorting: non-zero stops it
+#define DGVN_SORTCHANGED     (DGVN_FIRST - 10)  // NMDGVSORT; virtual mode: the app sorts its rows and calls RedrawRows
+
+struct NMDGVSORT {
+	NMHDR hdr;
+	int cKeys;               // 0: unsorted
+	const DGVSORTKEY* pKeys; // the first is the main one
+};
 
 struct NMDGVDISPINFO {
 	NMHDR hdr;
@@ -213,6 +250,7 @@ struct NMDGVCELL {
 
 struct DgData;
 struct DgCell;
+struct DgSortKey;
 
 class CDataGridCtrl : public ATL::CWindowImpl<CDataGridCtrl> {
 public:
@@ -247,6 +285,7 @@ public:
 		MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
 		MESSAGE_HANDLER(WM_SETCURSOR, OnSetCursor)
 		MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_SETFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFocus)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnGetDlgCode)
@@ -297,6 +336,32 @@ public:
 	void    SetTopRow(LONGLONG row);
 	int     GetVisibleRowCount() const;                    // the rows that fit whole
 	void    HitTest(DGVHITTEST* hit) const;
+	LONGLONG GetDataRow(LONGLONG viewRow) const;           // -1 if none
+	LONGLONG GetViewRow(LONGLONG dataRow) const;           // -1 if not in view
+	int     GetVisibleColumn(int index) const;             // the ID of the index-th column shown; 0 if none
+	int     GetVisibleColumnIndex(int id) const;           // -1 if hidden or none
+
+	// ---- Selection (the caret is the end a click or Shift moves) ----------------------------------------
+
+	void    SetSelectionMode(int mode);                    // DGVSM_*; the selection goes back to the caret
+	int     GetSelectionMode() const;
+	void    SelectAll();
+	void    ClearSelection();                              // only the caret's cell (DGVSM_ROWS: nothing)
+	BOOL    SelectRange(const DGVRANGE& range, bool add = false);
+	int     GetSelectedRanges(DGVRANGE* ranges, int count) const;   // returns how many there are
+	bool    IsCellSelected(LONGLONG row, int id) const;    // a data row
+	LONGLONG GetSelectedRowCount() const;                  // rows with any cell selected
+	LONGLONG GetSelectedRows(LONGLONG* rows, LONGLONG count) const;   // their data rows, in view order; returns how many
+	// The selected cells as tab-separated text and an HTML table (DGVCOPY_*); FALSE past a million cells.
+	BOOL    Copy(UINT flags = 0);
+
+	// ---- Sorting -----------------------------------------------------------------------------------------
+
+	// The store's rows are sorted by the keys (stable; empty cells last); virtual mode only shows them, the app sorts.
+	// Inserting or deleting rows sorts again; changing a cell doesn't (Resort does).
+	BOOL    SetSortKeys(const DGVSORTKEY* keys, int count);
+	int     GetSortKeys(DGVSORTKEY* keys, int count) const;   // returns how many there are
+	void    Resort();
 
 	// ---- Looks -----------------------------------------------------------------------------------------
 
@@ -352,6 +417,19 @@ private:
 	void    InvalidateRow(LONGLONG viewRow);
 	void    Hit(POINT pt, DGVHITTEST& hit, int& displayCol) const;
 	void    NotifyCell(UINT code, const DGVHITTEST& hit, POINT screen);
+
+	// DataGridSelection.cpp
+	enum class SelOp { Reset, Extend, Add, Toggle };
+	void    Select(SelOp op, LONGLONG viewRow, int displayCol, bool user, bool wholeRows = false);   // the caret goes there too
+	void    ResetSelection();                              // to the caret
+	void    FireSelChanged();
+	void    StartSelectDrag(bool rowHeader);
+	void    SelectDragTo(POINT pt);
+	void    EndSelectDrag();
+	bool    SelectionKey(WPARAM key, bool ctrl, bool shift);   // Ctrl+A, Ctrl+C, Shift/Ctrl+Space
+	void    Sort(std::vector<DgSortKey> keys, bool user);
+	void    ApplyOrder();                                  // the row map from the sort keys
+	LRESULT OnTimer(UINT, WPARAM, LPARAM, BOOL&);
 
 	// DataGridPaint.cpp
 	void    Paint(HDC hdc, const RECT& clip);

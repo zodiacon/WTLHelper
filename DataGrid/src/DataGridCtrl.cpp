@@ -8,7 +8,7 @@
 static_assert(DgType::Text == DGVVT_TEXT && DgType::DateTime == DGVVT_DATETIME && DgType::Bool == DGVVT_BOOL);
 static_assert(DgColType::Integer == DGVCT_INTEGER && DgColType::Progress == DGVCT_PROGRESS && DgColType::Link == DGVCT_LINK);
 static_assert(DgAlign::Right == DGVA_RIGHT && DgAlign::Center == DGVA_CENTER);
-static_assert(DgColFlag::Hidden == DGVCF_HIDDEN && DgColFlag::GroupDigits == DGVCF_GROUPDIGITS);
+static_assert(DgColFlag::Hidden == DGVCF_HIDDEN && DgColFlag::GroupDigits == DGVCF_GROUPDIGITS && DgColFlag::NoSort == DGVCF_NOSORT);
 static_assert(DgHitFlag::Cell == DGVHT_CELL && DgHitFlag::HeaderDivider == DGVHT_HEADERDIVIDER && DgHitFlag::Empty == DGVHT_EMPTY);
 
 // ---- Helpers -----------------------------------------------------------------------
@@ -261,6 +261,17 @@ void CDataGridCtrl::Relayout() {
 			break;
 	}
 	d.relayingOut = false;
+	// the selection is in visible columns' indexes: another set of them puts it back on the caret
+	std::vector<int> ids;
+	for (auto& c : d.layout.cols)
+		ids.push_back(c.id);
+	if (ids != d.shownIds) {
+		d.shownIds = std::move(ids);
+		ResetSelection();
+	}
+	else {
+		d.selection.Clamp(d.RowCount(), d.ColCount());
+	}
 	Invalidate();
 }
 
@@ -420,6 +431,7 @@ BOOL CDataGridCtrl::DeleteColumn(int id) {
 		return FALSE;
 	d.store.ClearSlot(c->slot);
 	d.columns.Erase(id);
+	std::erase_if(d.sortKeys, [&](auto& k) { return k.id == id; });
 	d.cache.Clear();
 	if (d.caretId == id) {
 		auto visible = d.columns.Visible();
@@ -549,8 +561,10 @@ void CDataGridCtrl::SetVirtual(bool virtualMode) {
 	d.cache.Clear();
 	d.virtualCount = 0;
 	d.rows.Reset(0);
+	d.sortKeys.clear();
 	d.caretRow = -1;
 	d.topRow = 0;
+	ResetSelection();
 	Relayout();
 }
 
@@ -569,10 +583,15 @@ BOOL CDataGridCtrl::SetRowCount(LONGLONG count) {
 	else {
 		d.store.Resize(count);
 	}
-	d.rows.Reset(count);
 	if (d.caretRow >= count)
 		d.caretRow = count - 1;
-	Relayout();
+	if (d.virtualMode || d.sortKeys.empty()) {   // the selection stays where it can
+		d.rows.Reset(count);
+		Relayout();
+	}
+	else {
+		ApplyOrder();
+	}
 	return TRUE;
 }
 
@@ -585,10 +604,9 @@ LONGLONG CDataGridCtrl::InsertRows(LONGLONG at, LONGLONG count) {
 	if (d.virtualMode || count < 0)
 		return -1;
 	int64_t first = d.store.Insert(at, count);
-	d.rows.Reset(d.store.Count());
 	if (d.caretRow >= first)
 		d.caretRow += count;
-	Relayout();
+	ApplyOrder();   // sorted again, the selection back on the caret
 	return first;
 }
 
@@ -596,12 +614,11 @@ BOOL CDataGridCtrl::DeleteRows(LONGLONG at, LONGLONG count) {
 	auto& d = *m_Data;
 	if (d.virtualMode || !d.store.Erase(at, count))
 		return FALSE;
-	d.rows.Reset(d.store.Count());
 	if (d.caretRow >= at + count)
 		d.caretRow -= count;
 	else if (d.caretRow >= at)
 		d.caretRow = std::min<int64_t>(at, d.store.Count() - 1);
-	Relayout();
+	ApplyOrder();
 	return TRUE;
 }
 
@@ -701,6 +718,7 @@ BOOL CDataGridCtrl::SetCaret(LONGLONG row, int id, bool ensureVisible) {
 	if (view < 0 || col < 0)
 		return FALSE;
 	MoveCaret(view, col, false);
+	ResetSelection();
 	if (!ensureVisible)
 		return TRUE;
 	EnsureVisible(row, id);
@@ -797,7 +815,7 @@ void CDataGridCtrl::NotifyCell(UINT code, const DGVHITTEST& hit, POINT screen) {
 void CDataGridCtrl::SetColors(const DGVCOLORS* colors) {
 	auto& d = *m_Data;
 	d.userColors = colors ? *colors
-		: DGVCOLORS{ CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT };
+		: DGVCOLORS{ CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT };
 	if (m_hWnd)
 		Invalidate();
 }

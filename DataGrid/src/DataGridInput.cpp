@@ -12,7 +12,7 @@ namespace {
 
 // ---- The mouse ------------------------------------------------------------------------------------
 
-LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
+LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
 	if (::GetFocus() != m_hWnd)
@@ -24,21 +24,32 @@ LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		HeaderMouseDown(pt, hit, col);
 		return 0;
 	}
+	if (hit.flags & DGVHT_CORNER) {
+		if (d.selection.Mode() != DgSelMode::Single) {
+			SelectAll();
+			FireSelChanged();
+		}
+		return 0;
+	}
+	// Shift extends from the anchor, Ctrl adds a range (whole rows: toggles a row), else only this cell
+	bool shift = (wParam & MK_SHIFT) != 0, ctrl = (wParam & MK_CONTROL) != 0;
+	SelOp op = shift ? SelOp::Extend : ctrl ? (d.selection.Mode() == DgSelMode::Rows ? SelOp::Toggle : SelOp::Add) : SelOp::Reset;
 	int64_t view = hit.iRow >= 0 ? d.rows.ToView(hit.iRow) : -1;
 	if (hit.flags & DGVHT_CELL) {
-		MoveCaret(view, col, true);
-		EnsureVisible(hit.iRow, hit.idColumn);
+		Select(op, view, col, true);
+		if (op != SelOp::Toggle)
+			StartSelectDrag(false);
 		auto column = d.columns.Find(hit.idColumn);
-		if (column && column->type == DgColType::Link) {
+		if (op == SelOp::Reset && column && column->type == DgColType::Link) {
 			POINT screen = pt;
 			ClientToScreen(&screen);
 			NotifyCell(DGVN_LINKCLICK, hit, screen);
 		}
 	}
 	else if (hit.flags & DGVHT_ROWHEADER) {
-		int keep = std::max(0, d.layout.IndexOf(d.caretId));
-		MoveCaret(view, keep, true);
-		EnsureVisible(hit.iRow, d.caretId);
+		Select(op, view, std::max(0, d.layout.IndexOf(d.caretId)), true, true);
+		if (op != SelOp::Toggle)
+			StartSelectDrag(true);
 	}
 	return 0;
 }
@@ -73,14 +84,20 @@ LRESULT CDataGridCtrl::OnLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
 }
 
 LRESULT CDataGridCtrl::OnLButtonUp(UINT, WPARAM, LPARAM lParam, BOOL&) {
-	if (m_Data->drag != DgData::Drag::None)
+	if (m_Data->drag == DgData::Drag::Select)
+		EndSelectDrag();
+	else if (m_Data->drag != DgData::Drag::None)
 		HeaderMouseUp(PointOf(lParam));
 	return 0;
 }
 
 LRESULT CDataGridCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
-	if (d.drag != DgData::Drag::None) {   // lost: no click, no move
+	if (d.drag == DgData::Drag::Select) {
+		KillTimer(DgData::ScrollTimer);
+		d.drag = DgData::Drag::None;
+	}
+	else if (d.drag != DgData::Drag::None) {   // lost: no click, no move
 		d.drag = DgData::Drag::None;
 		d.dragCol = -1;
 		d.dropIndex = -1;
@@ -92,6 +109,10 @@ LRESULT CDataGridCtrl::OnCaptureChanged(UINT, WPARAM, LPARAM, BOOL&) {
 LRESULT CDataGridCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	POINT pt = PointOf(lParam);
+	if (d.drag == DgData::Drag::Select) {
+		SelectDragTo(pt);
+		return 0;
+	}
 	if (d.drag != DgData::Drag::None) {
 		HeaderMouseMove(pt);
 		return 0;
@@ -166,8 +187,13 @@ LRESULT CDataGridCtrl::OnRButtonDown(UINT, WPARAM, LPARAM lParam, BOOL& bHandled
 	DGVHITTEST hit{ pt };
 	int col;
 	Hit(pt, hit, col);
-	if (hit.flags & DGVHT_CELL)
-		MoveCaret(d.rows.ToView(hit.iRow), col, true);
+	if (hit.flags & DGVHT_CELL) {   // inside the selection it stays, as in Excel
+		int64_t view = d.rows.ToView(hit.iRow);
+		if (d.selection.Contains(view, col))
+			MoveCaret(view, col, true);
+		else
+			Select(SelOp::Reset, view, col, true);
+	}
 	bHandled = FALSE;
 	return 0;
 }
@@ -205,7 +231,9 @@ LRESULT CDataGridCtrl::OnContextMenu(UINT, WPARAM, LPARAM lParam, BOOL&) {
 
 LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
-	bool ctrl = ::GetKeyState(VK_CONTROL) < 0;
+	bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
+	if (SelectionKey(wParam, ctrl, shift))
+		return 0;
 	DgKey key;
 	switch (wParam) {
 		case VK_LEFT:  key = DgKey::Left; break;
@@ -247,8 +275,7 @@ LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 			ScrollRows(d.topRow + delta);
 		}
 	}
-	MoveCaret(pos.row, pos.col, true);
-	EnsureVisible(d.rows.ToData(pos.row), d.layout.cols[pos.col].id);
+	Select(shift ? SelOp::Extend : SelOp::Reset, pos.row, pos.col, true);
 	return 0;
 }
 
@@ -259,8 +286,9 @@ LRESULT CDataGridCtrl::OnFocus(UINT msg, WPARAM, LPARAM, BOOL&) {
 		d.caretRow = d.rows.ToData(d.topRow);
 		if (d.layout.IndexOf(d.caretId) < 0)
 			d.caretId = d.layout.cols.front().id;
+		ResetSelection();
 	}
-	InvalidateRow(d.rows.ToView(d.caretRow));
+	Invalidate();   // the selection's color and the caret's frame change with the focus
 	return 0;
 }
 

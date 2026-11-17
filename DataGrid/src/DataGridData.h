@@ -29,8 +29,15 @@ struct DgData {
 	int caretId = 0;
 	bool focused = false;
 
-	// the header's mouse
-	enum class Drag { None, Resize, Press, Reorder } drag = Drag::None;
+	// the selection (rows in view, visible columns) and the sort
+	DgSelection selection;
+	std::vector<DgSortKey> sortKeys;
+	std::vector<int> shownIds;      // the visible columns the selection was made over: another set resets it
+
+	// the mouse: the header's (resizing, pressing a title, moving a column) or selecting cells
+	enum class Drag { None, Resize, Press, Reorder, Select } drag = Drag::None;
+	bool selectRows = false;        // selecting by the row numbers: whole rows
+	static constexpr UINT_PTR ScrollTimer = 1;
 	int dragCol = -1;               // an index into layout.cols
 	int dragStartX = 0, dragStartWidth = 0, dragX = 0, dragOffset = 0;
 	int dropIndex = -1;
@@ -41,9 +48,10 @@ struct DgData {
 	int rowHeightDips = 0;          // 0: from the font
 	int textHeight = 16;
 	int digitWidth = 8;
-	DGVCOLORS userColors{ CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT };
+	DGVCOLORS userColors{ CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT };
 	struct Colors {
-		COLORREF back, text, grid, headerBack, headerText, headerHot, headerPressed, caretRow, caret, caretInactive, link;
+		COLORREF back, text, grid, headerBack, headerText, headerHot, headerPressed, caretRow, caret, caretInactive, link,
+			selection, selectionInactive, selectionText;
 		bool highContrast;
 	} colors{};
 	HIMAGELIST images = nullptr;
@@ -59,6 +67,14 @@ struct DgData {
 	}
 	DgView View() const {
 		return { scrollX, topRow, RowCount(), clientWidth, clientHeight };
+	}
+	int ColCount() const {
+		return (int)layout.cols.size();
+	}
+	DgPos CaretPos() const {   // in view; (0, 0) if there's none
+		int64_t row = rows.ToView(caretRow);
+		int col = layout.IndexOf(caretId);
+		return { std::max<int64_t>(0, row), std::max(0, col) };
 	}
 };
 
