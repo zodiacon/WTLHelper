@@ -48,13 +48,13 @@ LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) 
 	// Shift extends from the anchor, Ctrl adds a range (whole rows: toggles a row), else only this cell
 	bool shift = (wParam & MK_SHIFT) != 0, ctrl = (wParam & MK_CONTROL) != 0;
 	SelOp op = shift ? SelOp::Extend : ctrl ? (d.selection.Mode() == DgSelMode::Rows ? SelOp::Toggle : SelOp::Add) : SelOp::Reset;
-	int64_t view = hit.iRow >= 0 ? d.rows.ToView(hit.iRow) : -1;
+	int64_t view = hit.iViewRow;   // the new row's placeholder too
 	if (hit.flags & DGVHT_CELL) {
 		Select(op, view, col, true);
 		if (op != SelOp::Toggle)
 			StartSelectDrag(false);
 		auto column = d.columns.Find(hit.idColumn);
-		if (op == SelOp::Reset && column && column->type == DgColType::Link) {
+		if (op == SelOp::Reset && column && column->type == DgColType::Link && hit.iRow >= 0) {
 			POINT screen = pt;
 			ClientToScreen(&screen);
 			NotifyCell(DGVN_LINKCLICK, hit, screen);
@@ -102,10 +102,12 @@ LRESULT CDataGridCtrl::OnLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
 				ToggleChecks(view, col, false);
 			return 0;
 		}
-		if (column && column->type != DgColType::Bool && CanEdit(hit.iRow, hit.idColumn)) {   // editable: an editor
+		if (column && column->type != DgColType::Bool && CanEditCell(hit.iRow, hit.idColumn)) {   // editable: an editor
 			StartEdit(hit.iRow, hit.idColumn, nullptr);
 			return 0;
 		}
+		if (hit.iRow < 0)
+			return 0;
 		POINT screen = pt;
 		ClientToScreen(&screen);
 		NotifyCell(DGVN_ACTIVATE, hit, screen);
@@ -285,7 +287,7 @@ LRESULT CDataGridCtrl::OnContextMenu(UINT, WPARAM, LPARAM lParam, BOOL&) {
 LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 	auto& d = *m_Data;
 	bool ctrl = ::GetKeyState(VK_CONTROL) < 0, shift = ::GetKeyState(VK_SHIFT) < 0;
-	if (EditKey(wParam, ctrl, shift) || SelectionKey(wParam, ctrl, shift))
+	if (FindKey(wParam, ctrl, shift) || EditKey(wParam, ctrl, shift) || SelectionKey(wParam, ctrl, shift))
 		return 0;
 	DgKey key;
 	switch (wParam) {
@@ -361,13 +363,16 @@ LRESULT CDataGridCtrl::OnFocus(UINT msg, WPARAM wParam, LPARAM, BOOL&) {
 	auto& d = *m_Data;
 	// to the editor: still the grid's focus, as far as the colors go
 	d.focused = msg == WM_SETFOCUS || (d.edit.active && (HWND)wParam == m_Editor.m_hWnd);
-	if (d.focused && d.caretRow < 0 && d.RowCount() > 0 && !d.layout.cols.empty()) {   // somewhere for the keys to start
-		d.caretRow = d.rows.ToData(d.topRow);
+	if (d.focused && !d.HasCaret() && d.RowCount() > 0 && !d.layout.cols.empty()) {   // somewhere for the keys to start
+		int64_t row = DgSkipGroupRows(d.topRow, 1, d.RowCount(), [&](int64_t r) { return d.rows.GroupOf(r) >= 0; });
+		d.caretRow = row >= 0 ? d.rows.ToData(row) : -1;
 		if (d.layout.IndexOf(d.caretId) < 0)
 			d.caretId = d.layout.cols.front().id;
 		ResetSelection();
 	}
 	Invalidate();   // the selection's color and the caret's frame change with the focus
+	if (msg == WM_SETFOCUS)
+		NotifyCaretAccessible();
 	return 0;
 }
 

@@ -1,8 +1,11 @@
 #include "DataGridData.h"
 
+#include <uxtheme.h>
+
 #include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 // the model mirrors the public values
 static_assert(DgType::Text == DGVVT_TEXT && DgType::DateTime == DGVVT_DATETIME && DgType::Bool == DGVVT_BOOL);
@@ -60,7 +63,7 @@ std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumb
 
 // ---- Construction ------------------------------------------------------------------
 
-CDataGridCtrl::CDataGridCtrl() : m_Data(std::make_unique<DgData>()), m_Editor(this, 1), m_FilterEdit(this, 2) {
+CDataGridCtrl::CDataGridCtrl() : m_Data(std::make_unique<DgData>()), m_Editor(this, 1), m_FilterEdit(this, 2), m_FindEdit(this, 3) {
 }
 
 CDataGridCtrl::~CDataGridCtrl() {
@@ -86,6 +89,13 @@ LRESULT CDataGridCtrl::OnCreate(UINT, WPARAM, LPARAM, BOOL&) {
 	UpdateFonts();
 	UpdateMetrics();
 	Relayout();
+	UpdateScrollBarTheme();
+	return 0;
+}
+
+LRESULT CDataGridCtrl::OnDestroy(UINT, WPARAM, LPARAM, BOOL& bHandled) {
+	DisconnectAccessible();   // clients still holding its objects get errors from now on
+	bHandled = FALSE;
 	return 0;
 }
 
@@ -199,8 +209,24 @@ LRESULT CDataGridCtrl::OnSettingChange(UINT, WPARAM, LPARAM, BOOL&) {
 }
 
 LRESULT CDataGridCtrl::OnColorsChanged(UINT, WPARAM, LPARAM, BOOL&) {
+	UpdateScrollBarTheme();
 	Invalidate();   // the colors are read as it paints
 	return 0;
+}
+
+void CDataGridCtrl::UpdateScrollBarTheme() {
+	// the dark Explorer theme makes the scroll bars dark. Set only when it changes: SetWindowTheme sends
+	// WM_THEMECHANGED, which comes back here.
+	if (!IsWindow())
+		return;
+	UpdateColors();
+	COLORREF back = m_Data->colors.back;
+	int dark = GetRValue(back) + GetGValue(back) + GetBValue(back) < 384 ? 1 : 0;
+	if (dark == m_DarkScrollBars)
+		return;
+	m_DarkScrollBars = dark;
+	::SetWindowTheme(m_hWnd, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+	SetWindowPos(nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 LRESULT CDataGridCtrl::OnDpiChanged(UINT, WPARAM, LPARAM, BOOL& bHandled) {
@@ -218,6 +244,13 @@ void CDataGridCtrl::Relayout() {
 	auto& d = *m_Data;
 	if (!m_hWnd)
 		return;
+	// the new row's placeholder comes and goes with the styles
+	DWORD styles = GetStyle();
+	d.rows.SetNewRow((styles & DGVS_NEWROW) && (styles & DGVS_EDITABLE));
+	if (d.caretRow == DgRowMap::NewRow && !d.rows.HasNewRow()) {
+		int64_t count = d.RowCount();
+		d.caretRow = count > 0 ? d.rows.ToData(count - 1) : -1;
+	}
 	d.relayingOut = true;
 	for (int pass = 0; pass < 3; pass++) {   // a scroll bar showing or hiding changes the client area
 		d.sizedAgain = false;
@@ -258,6 +291,7 @@ void CDataGridCtrl::Relayout() {
 	}
 	PositionEditor();
 	PositionFilterEdit();
+	PositionFindBox();
 	Invalidate();
 }
 
@@ -427,6 +461,7 @@ BOOL CDataGridCtrl::DeleteColumn(int id) {
 		+ std::erase_if(d.filters, [&](auto& f) { return f.id == id; }) + std::erase(d.groupIds, id) > 0;
 	if (d.filterEditId == id)
 		CloseFilterEdit(false);
+	std::erase_if(d.rules, [&](auto& r) { return r.column == id; });
 	d.cache.Clear();
 	if (d.caretId == id) {
 		auto visible = d.columns.Visible();
@@ -661,7 +696,7 @@ BOOL CDataGridCtrl::SetCell(LONGLONG row, int id, const DGVVALUE& value, int ima
 	return TRUE;
 }
 
-bool CDataGridCtrl::Fetch(LONGLONG dataRow, int id, DgCell& cell) {
+bool CDataGridCtrl::Fetch(LONGLONG dataRow, int id, DgCell& cell, bool keep) {
 	auto& d = *m_Data;
 	auto c = d.columns.Find(id);
 	if (!c || dataRow < 0 || dataRow >= d.DataRowCount())
@@ -681,7 +716,8 @@ bool CDataGridCtrl::Fetch(LONGLONG dataRow, int id, DgCell& cell) {
 	info.iImage = -1;
 	FireNotify(&info.hdr, DGVN_GETDISPINFO);
 	cell = DgCell{ DgFromPublic(info.value), info.iImage };
-	d.cache.Put(dataRow, id, cell);
+	if (keep)
+		d.cache.Put(dataRow, id, cell);
 	return true;
 }
 
@@ -755,7 +791,7 @@ BOOL CDataGridCtrl::SetCaret(LONGLONG row, int id, bool ensureVisible) {
 
 BOOL CDataGridCtrl::GetCaret(LONGLONG* row, int* id) const {
 	auto& d = *m_Data;
-	if (d.caretRow < 0 || d.caretId == 0)
+	if (!d.HasCaret() || d.caretId == 0)
 		return FALSE;
 	if (row)
 		*row = d.caretRow;
@@ -794,7 +830,7 @@ void CDataGridCtrl::MoveCaret(LONGLONG viewRow, int displayCol, bool notify) {
 		return;
 	int64_t dataRow = d.rows.ToData(viewRow);
 	int id = d.layout.cols[displayCol].id;
-	if (dataRow < 0 || (dataRow == d.caretRow && id == d.caretId))
+	if ((dataRow < 0 && dataRow != DgRowMap::NewRow) || (dataRow == d.caretRow && id == d.caretId))
 		return;
 	NMDGVCARET nm{};
 	nm.iOldRow = d.caretRow;
@@ -803,6 +839,7 @@ void CDataGridCtrl::MoveCaret(LONGLONG viewRow, int displayCol, bool notify) {
 	d.caretRow = dataRow;
 	d.caretId = id;
 	InvalidateRow(viewRow);
+	NotifyCaretAccessible();
 	if (notify) {
 		nm.iRow = dataRow;
 		nm.idColumn = id;
@@ -849,8 +886,10 @@ void CDataGridCtrl::SetColors(const DGVCOLORS* colors) {
 	auto& d = *m_Data;
 	d.userColors = colors ? *colors
 		: DGVCOLORS{ CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT, CLR_DEFAULT };
-	if (m_hWnd)
+	if (m_hWnd) {
+		UpdateScrollBarTheme();   // a dark background of the app's too
 		Invalidate();
+	}
 }
 
 void CDataGridCtrl::GetColors(DGVCOLORS* colors) const {

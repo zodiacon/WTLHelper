@@ -46,7 +46,7 @@ void CDataGridCtrl::Select(SelOp op, LONGLONG viewRow, int displayCol, bool user
 
 void CDataGridCtrl::ResetSelection() {
 	auto& d = *m_Data;
-	if (d.caretRow < 0 || d.RowCount() == 0 || d.ColCount() == 0)
+	if (!d.HasCaret() || d.RowCount() == 0 || d.ColCount() == 0)
 		d.selection.Clear();
 	else
 		d.selection.Reset(d.CaretPos(), d.ColCount());
@@ -244,7 +244,7 @@ bool CDataGridCtrl::SelectionKey(WPARAM key, bool ctrl, bool shift) {
 			Copy(shift ? DGVCOPY_TITLES : 0);
 			return true;
 		case VK_SPACE:
-			if (d.caretRow < 0 || d.RowCount() == 0 || d.ColCount() == 0)
+			if (!d.HasCaret() || d.RowCount() == 0 || d.ColCount() == 0)
 				return true;
 			if (ctrl && shift) {
 				SelectAll();
@@ -284,7 +284,7 @@ BOOL CDataGridCtrl::Copy(UINT flags) {
 		return FALSE;
 	}
 	bool titles = (flags & DGVCOPY_TITLES) != 0;
-	auto table = DgSelectionTable(d.selection, [&](int64_t r) { return d.rows.GroupOf(r) < 0; },   // not the groups' rows
+	auto table = DgSelectionTable(d.selection, [&](int64_t r) { return d.rows.ToData(r) >= 0; },   // not the groups' or the new row
 		[&](int64_t r, int c) {
 			int id = d.layout.cols[c].id;
 			auto column = d.columns.Find(id);

@@ -13,6 +13,10 @@
 // group, and pick the values shown. Group > groups by Category (and In stock), with the quantity's sum and the price's
 // average on each group's row; a click on a group's row opens or closes it (Ctrl+- closes the caret's, Ctrl++ opens
 // all). Data > Store (1 million rows) filters, sorts and groups on the worker thread ("Working..." meanwhile).
+// Edit > New Row puts an empty row at the end: typing in it adds a row. Ctrl+F opens the find box (F3 and Shift+F3 find
+// the next and the one before). View > Conditional Formats colors low quantities' rows, high prices and the tools;
+// View > Zebra Rows draws every other row darker and marks what's out of stock, through NM_CUSTOMDRAW. View > Save
+// Layout keeps the columns, the sort, the groups and the filters (GetState), Restore Layout puts them back.
 // The log at the bottom shows the notifications.
 
 #include <atlbase.h>
@@ -49,7 +53,7 @@ enum : UINT {
 	CMD_COPY, CMD_COPYTITLES, CMD_SELECTALL, CMD_SELCELLS, CMD_SELROWS, CMD_SELSINGLE, CMD_DELETEROWS, CMD_UNSORT,
 	CMD_EDITABLE, CMD_UNDO, CMD_REDO, CMD_CUT, CMD_PASTE, CMD_CLEAR,
 	CMD_FILTERROW, CMD_HEADERMENU, CMD_GROUPCAT, CMD_GROUPCATSTOCK, CMD_UNGROUP, CMD_EXPANDALL, CMD_COLLAPSEALL, CMD_STOREBIG,
-	CMD_CLEARFILTERS,
+	CMD_CLEARFILTERS, CMD_NEWROW, CMD_FIND, CMD_FINDNEXT, CMD_FINDPREV, CMD_RULES, CMD_ZEBRA, CMD_SAVESTATE, CMD_RESTORESTATE,
 	CMD_HIDE = 2000, CMD_FIT, CMD_FREEZE,
 };
 
@@ -97,6 +101,90 @@ private:
 		int image;
 	};
 	std::map<std::pair<LONGLONG, int>, Changed> m_Changed;   // by the demo's own row (before reversing) and column
+	LONGLONG m_VirtualRows = 0;   // the rows the demo computes; the ones added after are empty but for what was typed
+	std::wstring m_State;         // View > Save Layout's
+	bool m_Zebra = false;
+
+	bool Dark() const {
+		COLORREF c = ::GetSysColor(COLOR_WINDOW);
+		return GetRValue(c) + GetGValue(c) + GetBValue(c) < 384;
+	}
+
+	// View > Conditional Formats: colors that suit the mode
+	void ApplyRules(bool on) {
+		m_Grid.DeleteFormatRule(0);
+		if (!on)
+			return;
+		bool dark = Dark();
+		DGVFORMATRULE r{};
+		r.idColumn = m_IdQty;           // few left: the whole row
+		r.op = DGVCO_LESS;
+		r.value1 = DgvInt(500);
+		r.flags = DGVFR_WHOLEROW;
+		r.crText = CLR_DEFAULT;
+		r.crBack = dark ? RGB(90, 35, 35) : RGB(255, 226, 222);
+		m_Grid.AddFormatRule(r);
+		r = {};
+		r.idColumn = m_IdPrice;         // expensive: bold and green
+		r.op = DGVCO_GREATER;
+		r.value1 = DgvFloat(4000);
+		r.flags = DGVFR_BOLD;
+		r.crText = dark ? RGB(120, 220, 120) : RGB(0, 120, 0);
+		r.crBack = CLR_DEFAULT;
+		m_Grid.AddFormatRule(r);
+		r = {};
+		r.idColumn = m_IdCategory;      // an enum by its name
+		r.op = DGVCO_EQUAL;
+		r.value1 = DgvText(L"Tools");
+		r.crText = dark ? RGB(130, 170, 255) : RGB(0, 70, 200);
+		r.crBack = CLR_DEFAULT;
+		m_Grid.AddFormatRule(r);
+		r = {};
+		r.idColumn = m_IdNotes;
+		r.op = DGVCO_CONTAINS;
+		r.value1 = DgvText(L"discontinued");
+		r.crText = dark ? RGB(150, 150, 150) : RGB(140, 140, 140);
+		r.crBack = CLR_DEFAULT;
+		m_Grid.AddFormatRule(r);
+	}
+
+	// View > Zebra Rows: NM_CUSTOMDRAW darkens every other row and marks the quantity of what's out of stock
+	LRESULT CustomDraw(NMDGVCUSTOMDRAW* cd) {
+		if (!m_Zebra)
+			return CDRF_DODEFAULT;
+		switch (cd->nmcd.dwDrawStage) {
+			case CDDS_PREPAINT:
+				return CDRF_NOTIFYITEMDRAW;
+			case CDDS_ITEMPREPAINT: {
+				if (cd->nmcd.dwItemSpec & 1) {
+					COLORREF b = cd->clrTextBk;
+					int k = Dark() ? 12 : -10;
+					auto mix = [&](int x) { return (BYTE)std::clamp(x + k, 0, 255); };
+					cd->clrTextBk = RGB(mix(GetRValue(b)), mix(GetGValue(b)), mix(GetBValue(b)));
+				}
+				return CDRF_NOTIFYSUBITEMDRAW;
+			}
+			case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+				return cd->idColumn == m_IdQty ? CDRF_NOTIFYPOSTPAINT : CDRF_DODEFAULT;
+			case CDDS_ITEMPOSTPAINT | CDDS_SUBITEM: {
+				DGVVALUE v{};
+				if (m_Grid.GetCell(cd->iRow, m_IdStock, &v) && v.type == DGVVT_BOOL && !v.bVal) {   // a red corner
+					int s = ::MulDiv(7, ::GetDpiForWindow(m_hWnd), 96);
+					POINT p[3] = { { cd->nmcd.rc.left, cd->nmcd.rc.top }, { cd->nmcd.rc.left + s, cd->nmcd.rc.top },
+						{ cd->nmcd.rc.left, cd->nmcd.rc.top + s } };
+					HBRUSH brush = ::CreateSolidBrush(RGB(220, 40, 40));
+					HGDIOBJ old = ::SelectObject(cd->nmcd.hdc, brush);
+					HGDIOBJ oldPen = ::SelectObject(cd->nmcd.hdc, ::GetStockObject(NULL_PEN));
+					::Polygon(cd->nmcd.hdc, p, 3);
+					::SelectObject(cd->nmcd.hdc, oldPen);
+					::SelectObject(cd->nmcd.hdc, old);
+					::DeleteObject(brush);
+				}
+				return CDRF_DODEFAULT;
+			}
+		}
+		return CDRF_DODEFAULT;
+	}
 
 	LONGLONG SourceRow(LONGLONG row) const {
 		return m_Reversed ? m_Grid.GetRowCount() - 1 - row : row;
@@ -216,6 +304,7 @@ private:
 		m_Reversed = false;
 		m_Changed.clear();
 		LONGLONG rows = cmd == CMD_HUGE ? 5'000'000'000LL : 10'000'000LL;
+		m_VirtualRows = rows;
 		m_Grid.SetRowCount(rows);
 		Log(L"Virtual: %lld rows", rows);
 	}
@@ -287,6 +376,7 @@ private:
 		file.AppendMenu(MF_STRING, CMD_EXIT, L"E&xit");
 		edit.CreatePopupMenu();
 		edit.AppendMenu(MF_STRING, CMD_EDITABLE, L"&Editable");
+		edit.AppendMenu(MF_STRING, CMD_NEWROW, L"&New Row");
 		edit.AppendMenu(MF_STRING, CMD_UNDO, L"&Undo\tCtrl+Z");
 		edit.AppendMenu(MF_STRING, CMD_REDO, L"&Redo\tCtrl+Y");
 		edit.AppendMenu(MF_SEPARATOR);
@@ -296,6 +386,10 @@ private:
 		edit.AppendMenu(MF_STRING, CMD_CLEAR, L"C&lear\tDel");
 		edit.AppendMenu(MF_STRING, CMD_COPYTITLES, L"Copy with &Titles\tCtrl+Shift+C");
 		edit.AppendMenu(MF_STRING, CMD_SELECTALL, L"Select &All\tCtrl+A");
+		edit.AppendMenu(MF_SEPARATOR);
+		edit.AppendMenu(MF_STRING, CMD_FIND, L"&Find...\tCtrl+F");
+		edit.AppendMenu(MF_STRING, CMD_FINDNEXT, L"Find Ne&xt\tF3");
+		edit.AppendMenu(MF_STRING, CMD_FINDPREV, L"Find Pre&vious\tShift+F3");
 		edit.AppendMenu(MF_SEPARATOR);
 		edit.AppendMenu(MF_STRING, CMD_SELCELLS, L"Select C&ells");
 		edit.AppendMenu(MF_STRING, CMD_SELROWS, L"Select &Rows");
@@ -322,6 +416,11 @@ private:
 		view.AppendMenu(MF_SEPARATOR);
 		view.AppendMenu(MF_STRING, CMD_FITALL, L"&Fit All Columns");
 		view.AppendMenu(MF_STRING, CMD_SHOWALL, L"&Show All Columns");
+		view.AppendMenu(MF_SEPARATOR);
+		view.AppendMenu(MF_STRING, CMD_RULES, L"C&onditional Formats");
+		view.AppendMenu(MF_STRING, CMD_ZEBRA, L"&Zebra Rows (Custom Draw)");
+		view.AppendMenu(MF_STRING, CMD_SAVESTATE, L"Sa&ve Layout");
+		view.AppendMenu(MF_STRING, CMD_RESTORESTATE, L"R&estore Layout");
 		view.AppendMenu(MF_SEPARATOR);
 		view.AppendMenu(MF_STRING, CMD_LARGEFONT, L"&Large Font");
 		view.AppendMenu(MF_STRING, CMD_CUSTOMCOLORS, L"&Custom Colors");
@@ -472,6 +571,44 @@ private:
 			case CMD_EDITABLE:
 				ToggleStyle(id, DGVS_EDITABLE, true);
 				break;
+			case CMD_NEWROW:
+				ToggleStyle(id, DGVS_NEWROW, true);
+				break;
+			case CMD_FIND:
+				m_Grid.ShowFindBox(true);
+				break;
+			case CMD_FINDNEXT:
+			case CMD_FINDPREV:
+				if (!m_Grid.Find(nullptr, id == CMD_FINDPREV ? DGVFF_BACKWARD : 0))   // the last text again
+					Log(L"Find: nothing (more) found");
+				break;
+			case CMD_RULES: {
+				bool on = !Checked(id);
+				Check(id, on);
+				ApplyRules(on);
+				break;
+			}
+			case CMD_ZEBRA:
+				m_Zebra = !m_Zebra;
+				Check(id, m_Zebra);
+				m_Grid.Invalidate();
+				break;
+			case CMD_SAVESTATE: {
+				int n = m_Grid.GetState(nullptr, 0);
+				m_State.resize((size_t)n);
+				m_Grid.GetState(m_State.data(), n);
+				m_State.resize((size_t)n - 1);
+				Log(L"Saved: %s", m_State.c_str());
+				break;
+			}
+			case CMD_RESTORESTATE:
+				if (m_State.empty())
+					Log(L"Nothing saved yet (View > Save Layout)");
+				else if (!m_Grid.SetState(m_State.c_str()))
+					Log(L"SetState failed");
+				else
+					Log(L"Restored the layout");
+				break;
 			case CMD_UNDO:
 				if (!m_Grid.Undo())
 					Log(L"Nothing to undo");
@@ -571,6 +708,8 @@ private:
 			case CMD_DARKMODE:
 				WTLHelper::SwitchToMode(WTLHelper::IsDarkMode() ? DarkModeKind::Classic : DarkModeKind::Dark, m_hWnd);
 				Check(id, WTLHelper::IsDarkMode());
+				if (Checked(CMD_RULES))
+					ApplyRules(true);   // the mode's colors
 				Invalidate();
 				break;
 #endif
@@ -580,6 +719,8 @@ private:
 
 	LRESULT OnGridNotify(int, LPNMHDR hdr, BOOL&) {
 		switch (hdr->code) {
+			case NM_CUSTOMDRAW:
+				return CustomDraw((NMDGVCUSTOMDRAW*)hdr);
 			case DGVN_GETDISPINFO: {
 				auto info = (NMDGVDISPINFO*)hdr;
 				LONGLONG row = SourceRow(info->iRow);
@@ -589,7 +730,15 @@ private:
 					info->iImage = it->second.image;
 					break;
 				}
+				if (info->iRow >= m_VirtualRows)   // added with the new row: empty but for what was typed
+					break;
 				info->value = Value(row, info->idColumn, info->iImage, m_Text);
+				break;
+			}
+			case DGVN_ROWADDING:
+			case DGVN_ROWADDED: {
+				auto nm = (NMDGVROWADD*)hdr;
+				Log(L"%s: row %lld, typed in column %d", hdr->code == DGVN_ROWADDING ? L"DGVN_ROWADDING" : L"DGVN_ROWADDED", nm->iRow, nm->idColumn);
 				break;
 			}
 			case DGVN_SETCELL: {   // virtual mode: the demo keeps what the user changed

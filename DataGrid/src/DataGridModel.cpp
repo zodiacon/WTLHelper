@@ -1,6 +1,8 @@
 #include "DataGridModel.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
@@ -627,18 +629,22 @@ void DgRowMap::SetOrder(std::vector<int64_t> order, int64_t dataCount) {
 }
 
 int64_t DgRowMap::ToData(int64_t view) const {
-	if (view < 0 || view >= Count())
+	if (IsNewRow(view))
+		return NewRow;
+	if (view < 0 || view >= Entries())
 		return -1;
 	return m_Identity ? view : std::max<int64_t>(-1, m_Order[(size_t)view]);
 }
 
 int64_t DgRowMap::GroupOf(int64_t view) const {
-	if (m_Identity || view < 0 || view >= Count() || m_Order[(size_t)view] >= 0)
+	if (m_Identity || view < 0 || view >= Entries() || m_Order[(size_t)view] >= 0)
 		return -1;
 	return -1 - m_Order[(size_t)view];
 }
 
 int64_t DgRowMap::ToView(int64_t data) const {
+	if (data == NewRow)
+		return m_NewRow ? Entries() : -1;
 	if (data < 0)
 		return -1;
 	if (m_Identity)
@@ -1604,4 +1610,334 @@ std::wstring DgAggregateText(const DgAggregate& aggregate, const DgColumn& colum
 			return L"n " + DgFormatInt(aggregate.value.i, true, nf);
 	}
 	return {};
+}
+
+// ---- Finding ----------------------------------------------------------------------------------------------
+
+bool DgTextMatches(const std::wstring& text, const std::wstring& what, unsigned flags) {
+	if (what.empty())
+		return false;
+	if (flags & DgFindFlag::MatchCase)
+		return flags & DgFindFlag::WholeCell ? text == what : text.find(what) != std::wstring::npos;
+	// case ignored without copies: it's asked of every cell
+	auto same = [](wchar_t a, wchar_t b) { return a == b || towlower(a) == towlower(b); };
+	if (flags & DgFindFlag::WholeCell)
+		return text.size() == what.size() && std::equal(text.begin(), text.end(), what.begin(), same);
+	return std::search(text.begin(), text.end(), what.begin(), what.end(), same) != text.end();
+}
+
+// ---- Conditional formats -----------------------------------------------------------------------------------
+
+namespace {
+	// < 0, 0, > 0; false if they can't be compared
+	bool CompareForRule(const DgValue& value, const DgValue& to, const DgColumn& column, const DgNumberFormat& nf,
+		DgValueTextFn text, int& result) {
+		if (value.type == DgType::Empty || to.type == DgType::Empty)
+			return false;
+		int rank = RangeRank(value.type), toRank = RangeRank(to.type);
+		if (rank == toRank) {
+			result = rank == 2 ? DgLower(value.s).compare(DgLower(to.s)) : DgCompareValues(value, to, nullptr);
+			return true;
+		}
+		if (toRank == 2) {   // text against what another kind shows (an enum's name, a date's text)
+			result = DgLower(Shown(value, column, nf, text)).compare(DgLower(to.s));
+			return true;
+		}
+		return false;
+	}
+}
+
+bool DgRuleMatches(const DgFormatRule& rule, const DgValue& value, const DgColumn& column, const DgNumberFormat& nf, DgValueTextFn text) {
+	bool empty = value.type == DgType::Empty;
+	int c = 0;
+	switch (rule.op) {
+		case DgCondOp::Empty:
+			return empty;
+		case DgCondOp::NotEmpty:
+			return !empty;
+		case DgCondOp::Equal:
+			return empty ? rule.a.type == DgType::Empty : CompareForRule(value, rule.a, column, nf, text, c) && c == 0;
+		case DgCondOp::NotEqual:
+			return empty ? rule.a.type != DgType::Empty : !(CompareForRule(value, rule.a, column, nf, text, c) && c == 0);
+		case DgCondOp::Less:
+			return CompareForRule(value, rule.a, column, nf, text, c) && c < 0;
+		case DgCondOp::LessEqual:
+			return CompareForRule(value, rule.a, column, nf, text, c) && c <= 0;
+		case DgCondOp::Greater:
+			return CompareForRule(value, rule.a, column, nf, text, c) && c > 0;
+		case DgCondOp::GreaterEqual:
+			return CompareForRule(value, rule.a, column, nf, text, c) && c >= 0;
+		case DgCondOp::Between: {
+			int d = 0;
+			return CompareForRule(value, rule.a, column, nf, text, c) && c >= 0 && CompareForRule(value, rule.b, column, nf, text, d) && d <= 0;
+		}
+		case DgCondOp::Contains: {
+			if (empty)
+				return false;
+			auto what = rule.a.type == DgType::Text ? rule.a.s : rule.a.type == DgType::Empty ? std::wstring() : DgFormat(rule.a, column, nf);
+			return !what.empty() && DgLower(Shown(value, column, nf, text)).find(DgLower(what)) != std::wstring::npos;
+		}
+	}
+	return false;
+}
+
+// ---- Saving the state --------------------------------------------------------------------------------------
+
+namespace {
+	// the separators and the escape itself, and control characters, as %XXXX
+	std::wstring Escape(const std::wstring& text) {
+		std::wstring out;
+		for (wchar_t c : text) {
+			if (c < 0x20 || c == L'%' || c == L';' || c == L',' || c == L':' || c == L'=') {
+				wchar_t buffer[8];
+				swprintf_s(buffer, L"%%%04X", (unsigned)c);
+				out += buffer;
+			}
+			else {
+				out += c;
+			}
+		}
+		return out;
+	}
+
+	bool Unescape(const std::wstring& text, std::wstring& out) {
+		out.clear();
+		for (size_t i = 0; i < text.size(); i++) {
+			if (text[i] != L'%') {
+				out += text[i];
+				continue;
+			}
+			if (i + 4 >= text.size())
+				return false;
+			unsigned code = 0;
+			for (size_t k = 1; k <= 4; k++) {
+				wchar_t h = text[i + k];
+				int digit = h >= L'0' && h <= L'9' ? h - L'0' : h >= L'A' && h <= L'F' ? h - L'A' + 10 : h >= L'a' && h <= L'f' ? h - L'a' + 10 : -1;
+				if (digit < 0)
+					return false;
+				code = code * 16 + (unsigned)digit;
+			}
+			out += (wchar_t)code;
+			i += 4;
+		}
+		return true;
+	}
+
+	std::vector<std::wstring> Split(const std::wstring& text, wchar_t separator) {
+		std::vector<std::wstring> parts;
+		size_t start = 0;
+		for (;;) {
+			size_t end = text.find(separator, start);
+			parts.push_back(text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
+			if (end == std::wstring::npos)
+				return parts;
+			start = end + 1;
+		}
+	}
+
+	bool ParseInt64(const std::wstring& text, int64_t& value) {
+		if (text.empty())
+			return false;
+		wchar_t* end = nullptr;
+		errno = 0;
+		value = wcstoll(text.c_str(), &end, 10);
+		return end && *end == 0 && errno == 0;
+	}
+
+	bool ParseInt(const std::wstring& text, int& value) {
+		int64_t v;
+		if (!ParseInt64(text, v) || v < INT_MIN || v > INT_MAX)
+			return false;
+		value = (int)v;
+		return true;
+	}
+
+	std::wstring SaveValue(const DgValue& v) {
+		switch (v.type) {
+			case DgType::Text:     return L"t" + Escape(v.s);
+			case DgType::Int:      return L"i" + std::to_wstring(v.i);
+			case DgType::Bool:     return v.i ? L"b1" : L"b0";
+			case DgType::DateTime: return L"d" + std::to_wstring(v.i);
+			case DgType::Float: {
+				wchar_t buffer[40];
+				swprintf_s(buffer, L"f%.17g", v.d);
+				return buffer;
+			}
+		}
+		return L"e";
+	}
+
+	bool LoadValue(const std::wstring& text, DgValue& v) {
+		if (text.empty())
+			return false;
+		auto rest = text.substr(1);
+		int64_t n;
+		switch (text[0]) {
+			case L'e':
+				v = {};
+				return rest.empty();
+			case L't': {
+				std::wstring s;
+				if (!Unescape(rest, s))
+					return false;
+				v = DgValue::Text(std::move(s));
+				return true;
+			}
+			case L'i':
+				if (!ParseInt64(rest, n))
+					return false;
+				v = DgValue::Int(n);
+				return true;
+			case L'b':
+				if (rest != L"0" && rest != L"1")
+					return false;
+				v = DgValue::Bool(rest == L"1");
+				return true;
+			case L'd':
+				if (!ParseInt64(rest, n))
+					return false;
+				v = DgValue::DateTime(n);
+				return true;
+			case L'f': {
+				wchar_t* end = nullptr;
+				double d = wcstod(rest.c_str(), &end);
+				if (rest.empty() || !end || *end)
+					return false;
+				v = DgValue::Float(d);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	std::wstring SaveFilter(const DgFilter& f) {
+		std::wstring s = std::to_wstring(f.id);
+		switch (f.kind) {
+			case DgFilterKind::Contains:
+				return s + L":c:" + Escape(f.text);
+			case DgFilterKind::Range:
+				return s + L":r:" + SaveValue(f.min) + L":" + SaveValue(f.max);
+			case DgFilterKind::Values:
+				s += f.blanks ? L":v:1" : L":v:0";
+				for (auto& v : f.values)
+					s += L":" + Escape(v);
+				return s;
+		}
+		return s;
+	}
+
+	bool LoadFilter(const std::wstring& text, DgFilter& f) {
+		auto parts = Split(text, L':');
+		if (parts.size() < 3 || !ParseInt(parts[0], f.id) || parts[1].size() != 1)
+			return false;
+		switch (parts[1][0]) {
+			case L'c':
+				f.kind = DgFilterKind::Contains;
+				return parts.size() == 3 && Unescape(parts[2], f.text);
+			case L'r':
+				f.kind = DgFilterKind::Range;
+				return parts.size() == 4 && LoadValue(parts[2], f.min) && LoadValue(parts[3], f.max);
+			case L'v':
+				f.kind = DgFilterKind::Values;
+				if (parts[2] != L"0" && parts[2] != L"1")
+					return false;
+				f.blanks = parts[2] == L"1";
+				for (size_t i = 3; i < parts.size(); i++) {
+					std::wstring v;
+					if (!Unescape(parts[i], v))
+						return false;
+					f.values.push_back(std::move(v));
+				}
+				std::sort(f.values.begin(), f.values.end());
+				return true;
+		}
+		return false;
+	}
+}
+
+std::wstring DgSaveState(const DgState& state) {
+	std::wstring s = L"dgv1;cols=";
+	for (size_t i = 0; i < state.columns.size(); i++) {
+		auto& c = state.columns[i];
+		if (i)
+			s += L',';
+		s += std::to_wstring(c.id) + L":" + std::to_wstring(c.width);
+		if (c.fill > 0)
+			s += L":f" + std::to_wstring(c.fill);
+		if (c.hidden)
+			s += L":h";
+	}
+	s += L";frozen=" + std::to_wstring(state.frozen);
+	s += L";sort=";
+	for (size_t i = 0; i < state.sortKeys.size(); i++)
+		s += (i ? L"," : L"") + std::to_wstring(state.sortKeys[i].id) + (state.sortKeys[i].descending ? L"d" : L"");
+	s += L";group=";
+	for (size_t i = 0; i < state.groupIds.size(); i++)
+		s += (i ? L"," : L"") + std::to_wstring(state.groupIds[i]);
+	for (auto& f : state.filters)
+		s += L";filter=" + SaveFilter(f);
+	return s;
+}
+
+bool DgLoadState(const std::wstring& text, DgState& state) {
+	auto parts = Split(text, L';');
+	if (parts.empty() || parts[0] != L"dgv1")
+		return false;
+	DgState loaded;
+	for (size_t i = 1; i < parts.size(); i++) {
+		auto& part = parts[i];
+		size_t eq = part.find(L'=');
+		if (eq == std::wstring::npos)
+			return false;
+		auto key = part.substr(0, eq), value = part.substr(eq + 1);
+		auto list = value.empty() ? std::vector<std::wstring>() : Split(value, L',');
+		if (key == L"cols") {
+			for (auto& item : list) {
+				auto fields = Split(item, L':');
+				DgState::Column c;
+				if (fields.size() < 2 || !ParseInt(fields[0], c.id) || !ParseInt(fields[1], c.width) || c.width < 0)
+					return false;
+				for (size_t k = 2; k < fields.size(); k++) {
+					if (fields[k] == L"h")
+						c.hidden = true;
+					else if (!(fields[k].size() > 1 && fields[k][0] == L'f' && ParseInt(fields[k].substr(1), c.fill) && c.fill >= 0))
+						return false;
+				}
+				loaded.columns.push_back(c);
+			}
+		}
+		else if (key == L"frozen") {
+			if (!ParseInt(value, loaded.frozen) || loaded.frozen < 0)
+				return false;
+		}
+		else if (key == L"sort") {
+			for (auto item : list) {
+				DgSortKey k;
+				if (!item.empty() && item.back() == L'd') {
+					k.descending = true;
+					item.pop_back();
+				}
+				if (!ParseInt(item, k.id))
+					return false;
+				loaded.sortKeys.push_back(k);
+			}
+		}
+		else if (key == L"group") {
+			for (auto& item : list) {
+				int id;
+				if (!ParseInt(item, id))
+					return false;
+				loaded.groupIds.push_back(id);
+			}
+		}
+		else if (key == L"filter") {
+			DgFilter f;
+			if (!LoadFilter(value, f))
+				return false;
+			loaded.filters.push_back(std::move(f));
+		}
+		// another key: from a later version, skipped
+	}
+	state = std::move(loaded);
+	return true;
 }

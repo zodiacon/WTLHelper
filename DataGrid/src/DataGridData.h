@@ -49,6 +49,7 @@ struct DgData {
 		enum class Kind { Text, List, Date } kind = Kind::Text;
 		bool typed = false;         // opened by typing: the arrows commit
 		bool dirty = false;         // changed in the editor: nothing is written otherwise
+		bool closing = false;       // being committed: the view changing under it doesn't end it again
 	} edit;
 	DgUndoStack undo;
 
@@ -70,6 +71,15 @@ struct DgData {
 	int hotFilterCol = -1;
 	static constexpr UINT_PTR FilterTimer = 3;
 	static constexpr int64_t BackgroundRows = 100'000;
+
+	// conditional formats, finding
+	std::vector<DgFormatRule> rules;
+	int nextRuleId = 1;
+	std::wstring findText;          // the last find, for F3
+	unsigned findFlags = 0;
+	std::wstring highlight;         // cells matching it are shaded
+	unsigned highlightFlags = 0;
+	bool findMiss = false;          // the find box's text matches nothing: shown in red
 
 	HWND errorTip = nullptr;
 	HBRUSH editBrush = nullptr;
@@ -106,6 +116,9 @@ struct DgData {
 	}
 	int ColCount() const {
 		return (int)layout.cols.size();
+	}
+	bool HasCaret() const {         // a data row, or the new row's placeholder
+		return caretRow >= 0 || (caretRow == DgRowMap::NewRow && rows.HasNewRow());
 	}
 	DgPos CaretPos() const {   // in view; (0, 0) if there's none
 		int64_t row = rows.ToView(caretRow);

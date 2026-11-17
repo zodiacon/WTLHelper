@@ -173,12 +173,26 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 	// ---- the rows
 	int64_t first = d.topRow;
 	int64_t last = std::min<int64_t>(rowCount, first + (h - L.header) / L.rowHeight + 2);
-	int caretCol = d.caretRow >= 0 ? L.IndexOf(d.caretId) : -1;
+	int caretCol = d.HasCaret() ? L.IndexOf(d.caretId) : -1;
 	int64_t caretView = d.rows.ToView(d.caretRow);
 	// a selection of the caret's cell alone isn't shaded: the caret's frame shows it, as in Excel
 	auto& ranges = d.selection.Ranges();
 	bool onlyCaret = ranges.size() == 1 && ranges[0].top == ranges[0].bottom && ranges[0].left == ranges[0].right
 		&& d.selection.Mode() != DgSelMode::Rows;
+	// custom draw: the app asks for the rows' and the cells' notifications
+	NMDGVCUSTOMDRAW cd{};
+	cd.nmcd.hdc = dc;
+	cd.nmcd.rc = RECT{ 0, 0, w, h };
+	cd.nmcd.dwDrawStage = CDDS_PREPAINT;
+	cd.iRow = -1;
+	cd.clrText = c.text;
+	cd.clrTextBk = c.back;
+	LRESULT drawFlags = FireNotify(&cd.nmcd.hdr, NM_CUSTOMDRAW);
+	bool notifyRows = (drawFlags & CDRF_NOTIFYITEMDRAW) != 0;
+	bool looks = !d.rules.empty() && !c.highContrast;   // high contrast keeps the system's colors
+	COLORREF highlight = c.highContrast ? ::GetSysColor(COLOR_HIGHLIGHT) : Blend(c.back, RGB(255, 190, 0), 45);
+	COLORREF selectionBack = d.focused ? c.selection : c.selectionInactive;
+
 	for (int64_t r = first; r < last; r++) {
 		int y = L.header + (int)(r - first) * L.rowHeight;
 		if (y >= clip.bottom || y + L.rowHeight <= clip.top)
@@ -188,9 +202,36 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			PaintGroupRow(dc, d.view.groups[(size_t)g], y);
 			continue;
 		}
+		bool newRow = dataRow == DgRowMap::NewRow;
 		bool caretRow = r == caretView && !(style & DGVS_NOCARETROW);
-		if (caretRow)
-			Fill(dc, RECT{ L.rowHeader, y, contentRight, y + L.rowHeight }, c.caretRow);
+		COLORREF rowBack = caretRow ? c.caretRow : c.back;
+		COLORREF rowText = c.text;
+		bool notifyCells = false;
+		if (notifyRows && !newRow) {
+			cd.nmcd.dwDrawStage = CDDS_ITEMPREPAINT;
+			cd.nmcd.dwItemSpec = (DWORD_PTR)r;
+			cd.nmcd.rc = RECT{ L.rowHeader, y, contentRight, y + L.rowHeight };
+			cd.nmcd.uItemState = d.selection.RowTouched(r) ? CDIS_SELECTED : 0;
+			cd.iRow = dataRow;
+			cd.idColumn = 0;
+			cd.clrText = rowText;
+			cd.clrTextBk = rowBack;
+			notifyCells = (FireNotify(&cd.nmcd.hdr, NM_CUSTOMDRAW) & CDRF_NOTIFYSUBITEMDRAW) != 0;
+			rowText = cd.clrText;
+			rowBack = cd.clrTextBk;
+		}
+		if (rowBack != c.back)
+			Fill(dc, RECT{ L.rowHeader, y, contentRight, y + L.rowHeight }, rowBack);
+
+		// the values the rules test, fetched once for the row
+		std::vector<std::pair<int, DgCell>> ruleValues;
+		if (looks && !newRow)
+			for (auto& rule : d.rules)
+				if (std::none_of(ruleValues.begin(), ruleValues.end(), [&](auto& v) { return v.first == rule.column; })) {
+					DgCell v;
+					Fetch(dataRow, rule.column, v);
+					ruleValues.emplace_back(rule.column, std::move(v));
+				}
 
 		for (int i : order) {
 			int x = L.Left(i, d.scrollX), right = x + L.cols[i].width;
@@ -200,19 +241,68 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			if (!::IntersectRect(&visible, &cell, &cellClip) || visible.left >= clip.right || visible.right <= clip.left)
 				continue;
 			bool selected = !onlyCaret && d.selection.Contains(r, i);
-			if (selected)
-				Fill(dc, visible, d.focused ? c.selection : c.selectionInactive);
-			else if (i < L.frozenCount)   // over the scrolled columns' parts under it
-				Fill(dc, visible, caretRow ? c.caretRow : c.back);
-			COLORREF text = selected ? c.selectionText : c.text;
 			auto column = d.columns.Find(L.cols[i].id);
 			DgCell value;
-			if (!column || !Fetch(dataRow, column->id, value))
+			bool has = column && Fetch(dataRow, column->id, value);
+			bool editing = d.edit.active && dataRow == d.edit.row && column && column->id == d.edit.id;
+
+			// its colors: the row's, a rule's, the find's shading, the app's; the selection blends over them
+			COLORREF back = rowBack, text = rowText;
+			bool bold = false;
+			if (looks && has) {
+				auto look = DgResolveLook(d.rules, column->id,
+					[&](int id) -> const DgValue* {
+						auto v = std::find_if(ruleValues.begin(), ruleValues.end(), [&](auto& p) { return p.first == id; });
+						return v != ruleValues.end() ? &v->second.value : nullptr;
+					},
+					[&](int id) { return (const DgColumn*)d.columns.Find(id); }, d.numberFormat, DgValueText);
+				if (look.back != DgNoColor)
+					back = look.back;
+				if (look.text != DgNoColor)
+					text = look.text;
+				bold = look.bold;
+			}
+			if (has && !d.highlight.empty() && value.value.type != DgType::Empty
+				&& DgTextMatches(DgCellText(value, *column, d.numberFormat), d.highlight, d.highlightFlags))
+				back = highlight;
+			if (selected) {
+				back = back == rowBack && rowBack == (caretRow ? c.caretRow : c.back) ? selectionBack : Blend(back, selectionBack, 55);
+				if (text == c.text)
+					text = c.selectionText;
+			}
+			LRESULT cellFlags = CDRF_DODEFAULT;
+			if (notifyCells && has) {
+				cd.nmcd.dwDrawStage = CDDS_ITEMPREPAINT | CDDS_SUBITEM;
+				cd.nmcd.rc = cell;
+				cd.nmcd.uItemState = (selected ? CDIS_SELECTED : 0) | (r == caretView && i == caretCol ? CDIS_FOCUS : 0);
+				cd.idColumn = column->id;
+				cd.clrText = text;
+				cd.clrTextBk = back;
+				dc.SaveDC();
+				dc.IntersectClipRect(&visible);
+				dc.SelectFont(bold ? m_hBold : m_hFont);
+				cellFlags = FireNotify(&cd.nmcd.hdr, NM_CUSTOMDRAW);
+				if (!(cellFlags & CDRF_NEWFONT))
+					dc.RestoreDC(-1);
+				text = cd.clrText;
+				back = cd.clrTextBk;
+			}
+			// frozen cells cover the scrolled ones under them
+			if (back != rowBack || i < L.frozenCount)
+				Fill(dc, visible, back);
+			if (!has || editing || (cellFlags & CDRF_SKIPDEFAULT)) {   // nothing to draw, its editor over it, or the app drew it
+				if (cellFlags & CDRF_NEWFONT)
+					dc.RestoreDC(-1);
+				if (!(style & DGVS_NOVERTLINES))
+					VLine(dc, right - 1, y, y + L.rowHeight, c.grid);
 				continue;
-			if (d.edit.active && dataRow == d.edit.row && column->id == d.edit.id)
-				continue;   // its editor is over it
-			dc.SaveDC();
-			dc.IntersectClipRect(&visible);
+			}
+			if (!(cellFlags & CDRF_NEWFONT)) {
+				dc.SaveDC();
+				dc.IntersectClipRect(&visible);
+				if (bold)
+					dc.SelectFont(m_hBold);
+			}
 			RECT inner{ cell.left + pad, cell.top, cell.right - pad, cell.bottom - 1 };
 			int align = DgEffectiveAlign(*column);
 			switch (column->type) {
@@ -254,7 +344,7 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 						inner.left += cx + Scale(4);
 					}
 					auto s = DgCellText(value, *column, d.numberFormat);
-					bool link = column->type == DgColType::Link;
+					bool link = column->type == DgColType::Link && text == (selected ? c.selectionText : c.text);   // not a rule's color
 					dc.SetTextColor(link && !(selected && c.highContrast) ? c.link : text);
 					HFONT f = link ? dc.SelectFont(m_hUnderline) : nullptr;
 					dc.DrawText(s.c_str(), (int)s.size(), &inner,
@@ -265,17 +355,29 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 				}
 			}
 			dc.RestoreDC(-1);
+			if (cellFlags & CDRF_NOTIFYPOSTPAINT) {
+				cd.nmcd.dwDrawStage = CDDS_ITEMPOSTPAINT | CDDS_SUBITEM;
+				FireNotify(&cd.nmcd.hdr, NM_CUSTOMDRAW);
+			}
 			if (!(style & DGVS_NOVERTLINES))
 				VLine(dc, right - 1, y, y + L.rowHeight, c.grid);
 		}
 		if (!(style & DGVS_NOHORZLINES))
 			HLine(dc, L.rowHeader, contentRight, y + L.rowHeight - 1, c.grid);
+		// the new row's placeholder: a hint across it, unless it's being typed in
+		if (newRow && !(d.edit.active && d.edit.row == DgRowMap::NewRow)) {
+			static const wchar_t hint[] = L"Type here to add a row";
+			int left = n > 0 ? std::max(L.Left(0, d.scrollX), L.rowHeader) : L.rowHeader;
+			RECT rc{ left + pad, y, std::max(left + pad, contentRight - pad), y + L.rowHeight - 1 };
+			dc.SetTextColor(Blend(c.back, c.text, 45));
+			dc.DrawText(hint, (int)wcslen(hint), &rc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+		}
 
-		// the row's number
+		// the row's number (the new row's a star)
 		if (L.rowHeader > 0) {
 			RECT rh{ 0, y, L.rowHeader, y + L.rowHeight };
 			Fill(dc, rh, r == caretView ? c.headerPressed : d.selection.RowTouched(r) ? c.headerHot : c.headerBack);
-			auto number = std::to_wstring(r + 1);
+			auto number = newRow ? std::wstring(L"*") : std::to_wstring(r + 1);
 			RECT text{ 0, y, L.rowHeader - pad, y + L.rowHeight };
 			dc.SetTextColor(c.headerText);
 			dc.DrawText(number.c_str(), (int)number.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
@@ -448,6 +550,15 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 		dc.DrawText(note.c_str(), (int)note.size(), &box, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
 	}
 	dc.SelectFont(oldFont);
+	if (drawFlags & CDRF_NOTIFYPOSTPAINT) {
+		cd.nmcd.dwDrawStage = CDDS_POSTPAINT;
+		cd.nmcd.rc = RECT{ 0, 0, w, h };
+		cd.nmcd.dwItemSpec = 0;
+		cd.nmcd.uItemState = 0;
+		cd.iRow = -1;
+		cd.idColumn = 0;
+		FireNotify(&cd.nmcd.hdr, NM_CUSTOMDRAW);
+	}
 
 	// a virtual grid keeps the cells around the rows in view
 	if (d.virtualMode) {

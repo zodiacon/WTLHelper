@@ -1155,3 +1155,283 @@ TEST_CASE("SkipGroupRows", "[caret]") {
 	CHECK_INT(DgSkipGroupRows(0, 1, 0, isGroup), -1);
 }
 
+
+// ---- Phase 5: the new row, finding, conditional formats, the state -----------------------------------------
+
+TEST_CASE("RowMapNewRow", "[data]") {
+	DgRowMap m;
+	m.Reset(3);
+	m.SetNewRow(true);
+	CHECK_INT(m.Count(), 4);
+	CHECK(m.IsNewRow(3));
+	CHECK(!m.IsNewRow(2));
+	CHECK_INT(m.ToData(3), DgRowMap::NewRow);
+	CHECK_INT(m.ToView(DgRowMap::NewRow), 3);
+	CHECK_INT(m.GroupOf(3), -1);
+	CHECK_INT(m.ToData(4), -1);
+
+	// after the groups' rows and the data rows in view, whatever the order
+	m.SetOrder({ -1, 2, 0 }, 3);
+	CHECK_INT(m.Count(), 4);
+	CHECK_INT(m.ToData(3), DgRowMap::NewRow);
+	CHECK_INT(m.ToView(DgRowMap::NewRow), 3);
+	CHECK_INT(m.ToView(1), -1);
+
+	m.SetNewRow(false);
+	CHECK_INT(m.Count(), 3);
+	CHECK_INT(m.ToView(DgRowMap::NewRow), -1);
+	CHECK_INT(m.ToData(3), -1);
+
+	DgRowMap empty;
+	empty.SetNewRow(true);
+	CHECK_INT(empty.Count(), 1);
+	CHECK_INT(empty.ToData(0), DgRowMap::NewRow);
+}
+
+TEST_CASE("TextMatches", "[find]") {
+	CHECK(DgTextMatches(L"Hello World", L"world", 0));
+	CHECK(!DgTextMatches(L"Hello World", L"world", DgFindFlag::MatchCase));
+	CHECK(DgTextMatches(L"Hello World", L"World", DgFindFlag::MatchCase));
+	CHECK(!DgTextMatches(L"Hello World", L"hello", DgFindFlag::WholeCell));
+	CHECK(DgTextMatches(L"Hello", L"hELLO", DgFindFlag::WholeCell));
+	CHECK(!DgTextMatches(L"Hello", L"hELLO", DgFindFlag::WholeCell | DgFindFlag::MatchCase));
+	CHECK(!DgTextMatches(L"Hello", L"", 0));                                // nothing to look for
+}
+
+namespace {
+	// a grid of 4 rows and 3 columns where the cells listed match
+	struct FindGrid {
+		std::vector<DgPos> hits;
+		bool operator()(int64_t r, int c) const {
+			return std::find(hits.begin(), hits.end(), DgPos{ r, c }) != hits.end();
+		}
+	};
+
+	DgPos FindIn(const FindGrid& g, DgPos start, bool inclusive, unsigned flags, int first = 0, int last = 2, int64_t maxRows = 100) {
+		DgPos found{ -1, -1 };
+		if (!DgFindCell(start, inclusive, flags, 4, first, last, maxRows, g, found))
+			return { -1, -1 };
+		return found;
+	}
+}
+
+TEST_CASE("FindCell", "[find]") {
+	FindGrid g{ { { 0, 1 }, { 2, 0 }, { 3, 2 } } };
+	CHECK(FindIn(g, { 0, 1 }, false, 0) == DgPos{ 2, 0 });               // across, then down
+	CHECK(FindIn(g, { 0, 1 }, true, 0) == DgPos{ 0, 1 });                // the start counts
+	CHECK(FindIn(g, { 2, 0 }, false, 0) == DgPos{ 3, 2 });
+	CHECK(FindIn(g, { 3, 2 }, false, 0) == DgPos{ 0, 1 });               // wraps past the end
+	CHECK(FindIn(g, { 3, 2 }, false, DgFindFlag::NoWrap) == DgPos{ -1, -1 });
+	CHECK(FindIn(g, { 2, 0 }, false, DgFindFlag::Backward) == DgPos{ 0, 1 });   // left, then up
+	CHECK(FindIn(g, { 0, 1 }, false, DgFindFlag::Backward) == DgPos{ 3, 2 });   // wraps past the start
+	CHECK(FindIn(g, { 0, 1 }, false, DgFindFlag::Backward | DgFindFlag::NoWrap) == DgPos{ -1, -1 });
+	CHECK(FindIn(g, { 1, 1 }, false, 0, 2, 2) == DgPos{ 3, 2 });         // in one column
+
+	// the only match is the start: found last, after every other cell
+	FindGrid one{ { { 1, 1 } } };
+	CHECK(FindIn(one, { 1, 1 }, false, 0) == DgPos{ 1, 1 });
+	CHECK(FindIn(one, { 1, 1 }, false, DgFindFlag::Backward) == DgPos{ 1, 1 });
+	CHECK(FindIn(one, { 1, 2 }, false, 0) == DgPos{ 1, 1 });             // the start's row again, up to it
+	CHECK(FindIn(one, { 1, 0 }, false, DgFindFlag::Backward) == DgPos{ 1, 1 });
+
+	// every cell is looked at once
+	int calls = 0;
+	DgPos found;
+	DgFindCell({ 1, 1 }, false, 0, 4, 0, 2, 100, [&](int64_t, int) { calls++; return false; }, found);
+	CHECK(calls == 12);
+	calls = 0;
+	DgFindCell({ 1, 1 }, true, DgFindFlag::Backward, 4, 0, 2, 100, [&](int64_t, int) { calls++; return false; }, found);
+	CHECK(calls == 12);
+
+	// at most so many rows
+	int64_t looked = 0;
+	CHECK(!DgFindCell({ 0, 0 }, true, 0, 4, 0, 2, 2, FindGrid{ { { 3, 0 } } }, found, &looked));
+	CHECK_INT(looked, 2);
+	CHECK(!DgFindCell({ 0, 0 }, true, 0, 0, 0, 2, 100, g, found));         // no rows
+
+	// stopped (out of time): asked before each row
+	int asked = 0;
+	CHECK(!DgFindCell({ 0, 0 }, true, 0, 4, 0, 2, 100, FindGrid{ { { 3, 0 } } }, found, &looked, [&] { return ++asked > 2; }));
+	CHECK_INT(looked, 2);
+	CHECK(DgFindCell({ 0, 0 }, true, 0, 4, 0, 2, 100, FindGrid{ { { 1, 0 } } }, found, &looked, [] { return false; }));
+}
+
+TEST_CASE("RuleMatches", "[format]") {
+	DgNumberFormat nf;
+	DgColumn number;
+	number.type = DgColType::Integer;
+	DgFormatRule r;
+	r.op = DgCondOp::Greater;
+	r.a = DgValue::Int(10);
+	CHECK(DgRuleMatches(r, DgValue::Int(11), number, nf));
+	CHECK(DgRuleMatches(r, DgValue::Float(10.5), number, nf));             // numbers with numbers
+	CHECK(!DgRuleMatches(r, DgValue::Int(10), number, nf));
+	CHECK(!DgRuleMatches(r, DgValue{}, number, nf));                         // empty: not compared
+	r.op = DgCondOp::LessEqual;
+	CHECK(DgRuleMatches(r, DgValue::Int(10), number, nf));
+	CHECK(!DgRuleMatches(r, DgValue::DateTime(5), number, nf));              // a date isn't a number
+
+	r.op = DgCondOp::Between;
+	r.b = DgValue::Int(20);
+	CHECK(DgRuleMatches(r, DgValue::Int(10), number, nf));
+	CHECK(DgRuleMatches(r, DgValue::Int(20), number, nf));
+	CHECK(!DgRuleMatches(r, DgValue::Int(21), number, nf));
+
+	DgColumn text;
+	r.op = DgCondOp::Equal;
+	r.a = DgValue::Text(L"apple");
+	CHECK(DgRuleMatches(r, DgValue::Text(L"APPLE"), text, nf));              // case ignored
+	CHECK(!DgRuleMatches(r, DgValue::Text(L"apples"), text, nf));
+	r.op = DgCondOp::NotEqual;
+	CHECK(DgRuleMatches(r, DgValue::Text(L"pear"), text, nf));
+	CHECK(DgRuleMatches(r, DgValue{}, text, nf));                            // an empty cell isn't "apple"
+	CHECK(!DgRuleMatches(r, DgValue::Text(L"Apple"), text, nf));
+
+	DgColumn priority;
+	priority.type = DgColType::Enum;
+	priority.enumItems = { L"Low", L"High" };
+	r.op = DgCondOp::Equal;
+	r.a = DgValue::Text(L"high");
+	CHECK(DgRuleMatches(r, DgValue::Int(1), priority, nf));                  // text against an enum's name
+	CHECK(!DgRuleMatches(r, DgValue::Int(0), priority, nf));
+
+	r.op = DgCondOp::Contains;
+	r.a = DgValue::Text(L"IG");
+	CHECK(DgRuleMatches(r, DgValue::Int(1), priority, nf));
+	CHECK(!DgRuleMatches(r, DgValue{}, priority, nf));
+	DgColumn grouped = number;
+	grouped.flags = DgColFlag::GroupDigits;
+	r.a = DgValue::Text(L"1,2");
+	CHECK(DgRuleMatches(r, DgValue::Int(1234), grouped, nf));                // in the shown text
+
+	r.op = DgCondOp::Empty;
+	CHECK(DgRuleMatches(r, DgValue{}, text, nf));
+	CHECK(!DgRuleMatches(r, DgValue::Text(L"x"), text, nf));
+	r.op = DgCondOp::NotEmpty;
+	CHECK(DgRuleMatches(r, DgValue::Bool(false), text, nf));
+
+	DgColumn date;
+	date.type = DgColType::DateTime;
+	r.op = DgCondOp::Less;
+	r.a = DgValue::DateTime(1000);
+	CHECK(DgRuleMatches(r, DgValue::DateTime(999), date, nf));
+	CHECK(!DgRuleMatches(r, DgValue::DateTime(1000), date, nf));
+}
+
+TEST_CASE("ResolveLook", "[format]") {
+	DgNumberFormat nf;
+	DgColumn qty;
+	qty.id = 1;
+	qty.type = DgColType::Integer;
+	DgColumn name;
+	name.id = 2;
+	std::vector<DgFormatRule> rules(3);
+	rules[0].column = 1;                    // negative: red text, bold
+	rules[0].op = DgCondOp::Less;
+	rules[0].a = DgValue::Int(0);
+	rules[0].text = 0x0000FF;
+	rules[0].bold = true;
+	rules[1].column = 1;                    // under 10: the whole row yellow, gray text
+	rules[1].op = DgCondOp::Less;
+	rules[1].a = DgValue::Int(10);
+	rules[1].wholeRow = true;
+	rules[1].back = 0x00FFFF;
+	rules[1].text = 0x808080;
+	rules[2].column = 2;                    // a name with "x": green
+	rules[2].op = DgCondOp::Contains;
+	rules[2].a = DgValue::Text(L"x");
+	rules[2].back = 0x00FF00;
+
+	DgValue q, n = DgValue::Text(L"box");
+	auto valueOf = [&](int id) -> const DgValue* { return id == 1 ? &q : id == 2 ? &n : nullptr; };
+	auto columnOf = [&](int id) -> const DgColumn* { return id == 1 ? &qty : id == 2 ? &name : nullptr; };
+
+	q = DgValue::Int(-5);
+	auto look = DgResolveLook(rules, 1, valueOf, columnOf, nf);
+	CHECK(look.text == 0x0000FF);           // the first rule's, which comes first
+	CHECK(look.back == 0x00FFFF);           // the second's: the first leaves it
+	CHECK(look.bold);
+	look = DgResolveLook(rules, 2, valueOf, columnOf, nf);
+	CHECK(look.text == 0x808080);           // the row's rule; the first rule is only the quantity's
+	CHECK(look.back == 0x00FFFF);           // before the name's own rule
+	CHECK(!look.bold);
+
+	q = DgValue::Int(50);
+	look = DgResolveLook(rules, 2, valueOf, columnOf, nf);
+	CHECK(look == DgCellLook{ DgNoColor, 0x00FF00, false });
+	look = DgResolveLook(rules, 1, valueOf, columnOf, nf);
+	CHECK(look == DgCellLook{});
+
+	q = DgValue{};                          // empty: no number rule matches
+	CHECK(DgResolveLook(rules, 1, valueOf, columnOf, nf) == DgCellLook{});
+	auto gone = [](int) -> const DgColumn* { return nullptr; };
+	q = DgValue::Int(-5);
+	CHECK(DgResolveLook(rules, 1, valueOf, gone, nf) == DgCellLook{});   // the rules' columns are gone
+}
+
+TEST_CASE("StateRoundTrip", "[state]") {
+	DgState s;
+	s.columns = { { 3, 120, 0, false }, { 1, 80, 2, false }, { 2, 60, 0, true } };
+	s.frozen = 1;
+	s.sortKeys = { { 2, false }, { 3, true } };
+	s.groupIds = { 1 };
+	DgFilter contains;
+	contains.id = 3;
+	contains.text = L"a;b,c:d=e%f\tg";      // every separator, escaped
+	DgFilter range;
+	range.id = 1;
+	range.kind = DgFilterKind::Range;
+	range.min = DgValue::Float(0.1);
+	range.max = DgValue{};
+	DgFilter values;
+	values.id = 2;
+	values.kind = DgFilterKind::Values;
+	values.values = { L"", L"x:y", L"\x00E9t\x00E9" };
+	values.blanks = true;
+	DgFilter dates;
+	dates.id = 4;
+	dates.kind = DgFilterKind::Range;
+	dates.min = DgValue::DateTime(133000000000000000);
+	dates.max = DgValue::Int(-7);
+	s.filters = { contains, range, values, dates };
+
+	auto text = DgSaveState(s);
+	CHECK(text.find(L'\t') == std::wstring::npos);
+	CHECK(text.rfind(L"dgv1;cols=3:120,1:80:f2,2:60:h;frozen=1;sort=2,3d;group=1;filter=", 0) == 0);
+
+	DgState back;
+	REQUIRE(DgLoadState(text, back));
+	CHECK(back.columns == s.columns);
+	CHECK(back.frozen == 1);
+	CHECK(back.sortKeys == s.sortKeys);
+	CHECK(back.groupIds == s.groupIds);
+	REQUIRE(back.filters.size() == 4);
+	CHECK(back.filters[0].kind == DgFilterKind::Contains);
+	CHECK_STR(back.filters[0].text, contains.text);
+	CHECK(back.filters[1].min == range.min);   // all the digits
+	CHECK(back.filters[1].max.type == DgType::Empty);
+	CHECK(back.filters[2].values == values.values);
+	CHECK(back.filters[2].blanks);
+	CHECK(back.filters[3].min == dates.min);
+	CHECK(back.filters[3].max == dates.max);
+	CHECK(DgSaveState(back) == text);
+
+	// empty lists, and keys a later version might add
+	DgState none;
+	REQUIRE(DgLoadState(L"dgv1;cols=;frozen=0;sort=;group=;future=1", none));
+	CHECK(none.columns.empty());
+	CHECK(none.sortKeys.empty());
+
+	// not a state: nothing changes
+	DgState kept = s;
+	CHECK(!DgLoadState(L"", kept));
+	CHECK(!DgLoadState(L"dgv2;cols=1:2", kept));
+	CHECK(!DgLoadState(L"dgv1;cols=x:2", kept));
+	CHECK(!DgLoadState(L"dgv1;cols=1:2:q", kept));
+	CHECK(!DgLoadState(L"dgv1;frozen=-1", kept));
+	CHECK(!DgLoadState(L"dgv1;filter=1:c:%00", kept));       // a cut escape
+	CHECK(!DgLoadState(L"dgv1;filter=1:r:i1", kept));
+	CHECK(!DgLoadState(L"dgv1;filter=1:z:x", kept));
+	CHECK(!DgLoadState(L"dgv1;sort=99999999999", kept));
+	CHECK(kept.columns == s.columns);
+}

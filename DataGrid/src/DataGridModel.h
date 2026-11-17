@@ -271,23 +271,38 @@ private:
 // ---- Rows in view and in the data ------------------------------------------------------------------
 
 // The identity until an order is set (sorted, filtered, grouped); then the rows in view are its entries: a data row
-// (>= 0), or a group's row (-1 - the group's index in DgViewResult::groups).
+// (>= 0), or a group's row (-1 - the group's index in DgViewResult::groups). With the new row's placeholder on, it's
+// one more row in view, after all the others, whose data row is NewRow.
 class DgRowMap {
 public:
+	static constexpr int64_t NewRow = -2;         // DGV_NEWROW
 	void Reset(int64_t count);
 	void SetOrder(std::vector<int64_t> order, int64_t dataCount);
+	void SetNewRow(bool on) {
+		m_NewRow = on;
+	}
+	bool HasNewRow() const {
+		return m_NewRow;
+	}
 	int64_t Count() const {
-		return m_Identity ? m_Count : (int64_t)m_Order.size();
+		return Entries() + (m_NewRow ? 1 : 0);
 	}
 	bool Identity() const {
 		return m_Identity;
 	}
-	int64_t ToData(int64_t view) const;           // -1 if out of range or a group's row
+	bool IsNewRow(int64_t view) const {
+		return m_NewRow && view == Entries();
+	}
+	int64_t ToData(int64_t view) const;           // -1 if out of range or a group's row; NewRow for the placeholder
 	int64_t ToView(int64_t data) const;           // -1 if not in view
 	int64_t GroupOf(int64_t view) const;          // the group a group row shows; -1 for a data row
 
 private:
+	int64_t Entries() const {
+		return m_Identity ? m_Count : (int64_t)m_Order.size();
+	}
 	bool m_Identity = true;
+	bool m_NewRow = false;
 	int64_t m_Count = 0;
 	std::vector<int64_t> m_Order;
 	std::vector<int64_t> m_Inverse;               // per data row; -1 if not in view
@@ -536,7 +551,151 @@ int64_t DgSkipGroupRows(int64_t row, int direction, int64_t count, IsGroup isGro
 // The aggregate's text on a group's row ("Σ 1,234", "avg 3.50").
 std::wstring DgAggregateText(const DgAggregate& aggregate, const DgColumn& column, const DgNumberFormat& nf, DgValueTextFn text = nullptr);
 
+// ---- Finding ----------------------------------------------------------------------------------------------
+
+namespace DgFindFlag {    // DGVFF_*
+	enum : unsigned { MatchCase = 1, WholeCell = 2, Backward = 4, Column = 8, NoWrap = 0x10 };
+}
+
+// Whether a cell's shown text matches what's looked for (case ignored unless MatchCase; the whole text with WholeCell).
+bool DgTextMatches(const std::wstring& text, const std::wstring& what, unsigned flags);
+
+// From a cell, the next one (across, then down; Backward: the other way) that matches, among the columns first to last,
+// wrapping past the end unless NoWrap; inclusive: the start cell counts too. At most maxRows rows are looked at, and
+// none once stop() says so (asked before each row). Returns false if none; looked: the rows looked at.
+template<typename Matches, typename Stop>
+bool DgFindCell(DgPos start, bool inclusive, unsigned flags, int64_t rowCount, int firstCol, int lastCol, int64_t maxRows,
+	Matches matches, DgPos& found, int64_t* looked, Stop stop);
+template<typename Matches>
+bool DgFindCell(DgPos start, bool inclusive, unsigned flags, int64_t rowCount, int firstCol, int lastCol, int64_t maxRows,
+	Matches matches, DgPos& found, int64_t* looked = nullptr) {
+	return DgFindCell(start, inclusive, flags, rowCount, firstCol, lastCol, maxRows, matches, found, looked, [] { return false; });
+}
+
+// ---- Conditional formats -----------------------------------------------------------------------------------
+
+namespace DgCondOp {      // DGVCO_*
+	enum : int { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual, Between, Contains, Empty, NotEmpty };
+}
+
+constexpr uint32_t DgNoColor = 0xFF000000;   // CLR_DEFAULT: the property is left as it is
+
+struct DgFormatRule {
+	int id = 0;
+	int column = 0;                   // whose value is tested
+	int op = DgCondOp::Equal;
+	DgValue a, b;                     // compared to (Between: both ends, included)
+	bool wholeRow = false;            // the row's cells, not only the column's
+	bool bold = false;
+	uint32_t text = DgNoColor, back = DgNoColor;
+};
+
+// Numbers with numbers, dates with dates, text with text (case ignored); a text rule's value is compared to the shown
+// text of a value of another kind (an enum's name). Contains: in the shown text, case ignored.
+bool DgRuleMatches(const DgFormatRule& rule, const DgValue& value, const DgColumn& column, const DgNumberFormat& nf,
+	DgValueTextFn text = nullptr);
+
+struct DgCellLook {
+	uint32_t text = DgNoColor, back = DgNoColor;
+	bool bold = false;
+	bool operator==(const DgCellLook&) const = default;
+};
+
+// A cell's looks from the rules that match, in their order: the first one to set a color wins. valueOf(id): the row's
+// value in a column (nullptr: empty); columnOf(id): the column (nullptr: gone).
+template<typename ValueOf, typename ColumnOf>
+DgCellLook DgResolveLook(const std::vector<DgFormatRule>& rules, int columnId, ValueOf valueOf, ColumnOf columnOf,
+	const DgNumberFormat& nf, DgValueTextFn text = nullptr);
+
+// ---- Saving the state --------------------------------------------------------------------------------------
+
+// What the user changes in how the grid shows its rows: the columns' order, widths and hiding, the frozen columns,
+// the sort, the groups and the filters. Columns by ID.
+struct DgState {
+	struct Column {
+		int id = 0;
+		int width = 0;                // DIPs
+		int fill = 0;
+		bool hidden = false;
+		bool operator==(const Column&) const = default;
+	};
+	std::vector<Column> columns;      // in display order
+	int frozen = 0;
+	std::vector<DgSortKey> sortKeys;
+	std::vector<int> groupIds;
+	std::vector<DgFilter> filters;
+};
+
+// One line of text ("dgv1;cols=1:120,2:80:f1,3:100:h;frozen=1;sort=2,3d;group=4;filter=..."), text escaped with %XXXX.
+std::wstring DgSaveState(const DgState& state);
+bool DgLoadState(const std::wstring& text, DgState& state);   // false if it isn't one (state untouched)
+
 // ---- Templates ----------------------------------------------------------------------------------------
+
+template<typename Matches, typename Stop>
+bool DgFindCell(DgPos start, bool inclusive, unsigned flags, int64_t rowCount, int firstCol, int lastCol, int64_t maxRows,
+	Matches matches, DgPos& found, int64_t* looked, Stop stop) {
+	if (looked)
+		*looked = 0;
+	if (rowCount <= 0 || firstCol > lastCol)
+		return false;
+	bool back = (flags & DgFindFlag::Backward) != 0, wrap = !(flags & DgFindFlag::NoWrap);
+	int64_t row = std::clamp<int64_t>(start.row, 0, rowCount - 1);
+	int col = std::clamp(start.col, firstCol, lastCol);
+	int step = back ? -1 : 1;
+	int64_t rowsSeen = 0;
+	// every cell once: the start's row is looked at again at the end for the cells before (after) the start
+	for (int64_t n = 0; n <= rowCount && rowsSeen < maxRows && !stop(); n++) {
+		int64_t r = row + step * n;
+		if (r < 0 || r >= rowCount) {
+			if (!wrap)
+				break;
+			r = (r % rowCount + rowCount) % rowCount;
+		}
+		rowsSeen++;
+		int from = n == 0 ? col + (inclusive ? 0 : step) : back ? lastCol : firstCol;
+		// the start's row again (wrapped): up to the start, which comes last when it didn't count first
+		int to = n == rowCount ? col - (inclusive ? step : 0) : back ? firstCol : lastCol;
+		for (int c = from; back ? c >= to : c <= to; c += step) {
+			if (c < firstCol || c > lastCol)
+				continue;
+			if (matches(r, c)) {
+				found = { r, c };
+				if (looked)
+					*looked = rowsSeen;
+				return true;
+			}
+		}
+	}
+	if (looked)
+		*looked = rowsSeen;
+	return false;
+}
+
+template<typename ValueOf, typename ColumnOf>
+DgCellLook DgResolveLook(const std::vector<DgFormatRule>& rules, int columnId, ValueOf valueOf, ColumnOf columnOf,
+	const DgNumberFormat& nf, DgValueTextFn text) {
+	DgCellLook look;
+	static const DgValue empty;
+	for (auto& rule : rules) {
+		if (!rule.wholeRow && rule.column != columnId)
+			continue;
+		if (look.text != DgNoColor && look.back != DgNoColor && look.bold)
+			break;   // nothing left to set
+		const DgColumn* column = columnOf(rule.column);
+		if (!column)
+			continue;
+		const DgValue* v = valueOf(rule.column);
+		if (!DgRuleMatches(rule, v ? *v : empty, *column, nf, text))
+			continue;
+		if (look.text == DgNoColor)
+			look.text = rule.text;
+		if (look.back == DgNoColor)
+			look.back = rule.back;
+		look.bold = look.bold || rule.bold;
+	}
+	return look;
+}
 
 
 template<typename ValueOf>

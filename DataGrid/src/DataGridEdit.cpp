@@ -103,7 +103,7 @@ bool CDataGridCtrl::StartEdit(LONGLONG dataRow, int id, const wchar_t* typed) {
 	auto column = d.columns.Find(id);
 	int64_t view = d.rows.ToView(dataRow);
 	int col = d.layout.IndexOf(id);
-	if (!CanEdit(dataRow, id) || !column || column->type == DgColType::Bool || view < 0 || col < 0)
+	if (!CanEditCell(dataRow, id) || !column || column->type == DgColType::Bool || view < 0 || col < 0)
 		return false;
 	if (d.caretRow != dataRow || d.caretId != id)
 		Select(SelOp::Reset, view, col, true);
@@ -236,16 +236,28 @@ BOOL CDataGridCtrl::EndEdit(bool commit) {
 			ShowError(parsed.error, view, col);
 			return FALSE;
 		}
+		bool adding = d.edit.row == DgRowMap::NewRow;   // the new row's placeholder: a value adds the row
 		DgCell old;
-		Fetch(d.edit.row, d.edit.id, old);
+		if (!adding)
+			Fetch(d.edit.row, d.edit.id, old);
 		DgCell cell{ parsed.value, old.image };
 		std::wstring error;
-		if (!Validate(d.edit.row, d.edit.id, cell, text, DGVCR_EDIT, error)) {
+		if (!Validate(adding ? d.DataRowCount() : d.edit.row, d.edit.id, cell, text, DGVCR_EDIT, error)) {
 			ShowError(error, view, col);
 			return FALSE;
 		}
-		if (!(cell.value == old.value))
+		if (adding && cell.value.type != DgType::Empty) {
+			d.edit.closing = true;   // the rows change under the editor: it isn't to be ended again
+			int64_t row = AddNewRow(d.edit.id);
+			d.edit.closing = false;
+			if (row >= 0) {
+				Apply({ DgCellChange{ row, d.edit.id, old, cell } }, DGVCR_EDIT, true);
+				d.edit.row = row;
+			}
+		}
+		else if (!adding && !(cell.value == old.value)) {
 			Apply({ DgCellChange{ d.edit.row, d.edit.id, old, cell } }, DGVCR_EDIT, true);
+		}
 	}
 	// closed first, so the focus moving off it doesn't end it again
 	d.edit.active = false;
@@ -271,7 +283,7 @@ bool CDataGridCtrl::CommitOrCancel() {
 
 void CDataGridCtrl::PositionEditor() {
 	auto& d = *m_Data;
-	if (!d.edit.active || !m_Editor.m_hWnd)
+	if (!d.edit.active || !m_Editor.m_hWnd || d.edit.closing)
 		return;
 	RECT rc;
 	int64_t view = d.rows.ToView(d.edit.row);
@@ -366,6 +378,8 @@ LRESULT CDataGridCtrl::OnEditorCommand(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 		d.edit.dirty = true;
 	if (m_FilterEdit.m_hWnd && (HWND)lParam == m_FilterEdit.m_hWnd && HIWORD(wParam) == EN_CHANGE)
 		SetTimer(DgData::FilterTimer, 300);   // filters once the typing pauses
+	if (m_FindEdit.m_hWnd && (HWND)lParam == m_FindEdit.m_hWnd && HIWORD(wParam) == EN_CHANGE)
+		OnFindChanged();
 	return 0;
 }
 
@@ -389,7 +403,7 @@ LRESULT CDataGridCtrl::OnEndEditPosted(UINT, WPARAM, LPARAM, BOOL&) {
 	return 0;
 }
 
-LRESULT CDataGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM, BOOL&) {
+LRESULT CDataGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM lParam, BOOL&) {
 	auto& d = *m_Data;
 	UpdateColors();
 	if (d.editBrushColor != d.colors.back) {
@@ -398,7 +412,10 @@ LRESULT CDataGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM, BOOL&) {
 		d.editBrush = ::CreateSolidBrush(d.colors.back);
 		d.editBrushColor = d.colors.back;
 	}
-	::SetTextColor((HDC)wParam, d.colors.text);
+	// the find box's text, when it matches nothing: red (a lighter one on a dark background)
+	bool miss = d.findMiss && (HWND)lParam == m_FindEdit.m_hWnd && !d.colors.highContrast;
+	bool dark = GetRValue(d.colors.back) + GetGValue(d.colors.back) + GetBValue(d.colors.back) < 384;
+	::SetTextColor((HDC)wParam, miss ? (dark ? RGB(255, 110, 100) : RGB(200, 0, 0)) : d.colors.text);
 	::SetBkColor((HDC)wParam, d.colors.back);
 	return (LRESULT)d.editBrush;
 }
@@ -407,7 +424,7 @@ LRESULT CDataGridCtrl::OnCtlColor(UINT, WPARAM wParam, LPARAM, BOOL&) {
 
 LRESULT CDataGridCtrl::OnChar(UINT, WPARAM wParam, LPARAM, BOOL&) {
 	auto& d = *m_Data;
-	if (d.edit.active || wParam < L' ' || wParam == 127 || !(GetStyle() & DGVS_EDITABLE) || d.caretRow < 0)
+	if (d.edit.active || wParam < L' ' || wParam == 127 || !(GetStyle() & DGVS_EDITABLE) || !d.HasCaret())
 		return 0;
 	bool ctrl = ::GetKeyState(VK_CONTROL) < 0, alt = ::GetKeyState(VK_MENU) < 0;
 	if (ctrl && !alt)   // a shortcut (Ctrl+Alt is AltGr: a character)
@@ -429,7 +446,7 @@ bool CDataGridCtrl::EditKey(WPARAM key, bool ctrl, bool shift) {
 		return false;
 	switch (key) {
 		case VK_F2:
-			if (ctrl || shift || d.caretRow < 0)
+			if (ctrl || shift || !d.HasCaret())
 				return false;
 			if (!StartEdit(d.caretRow, d.caretId, nullptr))
 				::MessageBeep(MB_OK);

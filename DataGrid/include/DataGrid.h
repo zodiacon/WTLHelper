@@ -8,7 +8,10 @@
 // boxes, progress bars, an image and text, links). The caret is a cell, moved with the keys as in Excel. Rows scroll
 // whole, so any number of them fit the scroll bar. The API follows the common controls: C-style structures and
 // WM_NOTIFY codes (DGVN_*) sent to the parent. Columns are known by IDs the control gives them, which don't change
-// when they move; rows by their index in the data, which stays the same however they're shown.
+// when they move; rows by their index in the data, which stays the same however they're shown. Cells can be edited,
+// pasted and undone; the store's rows filtered, sorted and grouped (a worker thread rebuilds big ones); cells found
+// (Ctrl+F), colored by conditional formats or the app's custom draw, and rows added in a new row at the end. The
+// layout, sort, groups and filters save as a line of text; screen readers see a table of rows of cells (MSAA).
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -38,6 +41,11 @@ constexpr wchar_t WC_DATAGRID[] = L"WC_DataGrid";
 #define DGVS_EDITABLE          0x0100   // the user can edit cells (F2, typing, a double-click), paste, clear and undo
 #define DGVS_FILTERROW         0x0200   // a row under the titles to type each column's filter in
 #define DGVS_HEADERMENU        0x0400   // a button on each title for a menu: sort, group, filter by its values
+#define DGVS_NEWROW            0x0800   // with DGVS_EDITABLE: an empty row after the last, where typing adds a row
+#define DGVS_NOFINDBOX         0x1000   // Ctrl+F doesn't open the find box (Find and F3 still work)
+
+// The new row's placeholder (DGVS_NEWROW) where a data row is given: the caret, hit testing, GetDataRow, editing.
+#define DGV_NEWROW             (-2)
 
 // ---- Values ---------------------------------------------------------------------
 
@@ -351,6 +359,86 @@ struct NMDGVCELL {
 	POINT ptScreen;
 };
 
+// The new row (DGVS_NEWROW): a value typed in its placeholder adds a row at the end (the store's; virtual mode: the
+// count goes up by one, then DGVN_SETCELL), then writes the value as an edit (DGVN_VALIDATE first, with the row's index).
+#define DGVN_ROWADDING       (DGVN_FIRST - 21)  // NMDGVROWADD; non-zero stops it (the editor closes, nothing written)
+#define DGVN_ROWADDED        (DGVN_FIRST - 22)  // NMDGVROWADD; the row is there (iRow), its first value not yet written
+
+struct NMDGVROWADD {
+	NMHDR hdr;
+	LONGLONG iRow;           // the new row's index in the data
+	int idColumn;            // the cell typed in
+};
+
+// ---- Finding ------------------------------------------------------------------------------------
+
+#define DGVFF_MATCHCASE      0x0001
+#define DGVFF_WHOLECELL      0x0002   // the cell's whole shown text, not a part of it
+#define DGVFF_BACKWARD       0x0004   // left, then up
+#define DGVFF_COLUMN         0x0008   // in the caret's column only
+#define DGVFF_NOWRAP         0x0010   // not past the last (first) cell
+
+// Virtual mode: the control finds by asking for the cells (DGVN_GETDISPINFO, about a second for 10,000 rows of ten
+// columns), at most DGV_VIRTUALFINDROWS rows from the caret; the app may find the cell itself, faster or further:
+// non-zero with iRow and idColumn set (iRow -1: not found). Typing in the find box looks for 150 ms at most each time.
+#define DGVN_FINDCELL        (DGVN_FIRST - 23)  // NMDGVFIND
+#define DGV_VIRTUALFINDROWS  10000
+
+struct NMDGVFIND {
+	NMHDR hdr;
+	LPCWSTR pszText;
+	UINT flags;              // DGVFF_*
+	LONGLONG iStartRow;      // the data row of the cell after (before) which to look (the caret's; -1: none)
+	int idStartColumn;
+	BOOL fInclusive;         // the start cell counts too (typing in the find box)
+	LONGLONG iRow;           // out
+	int idColumn;            // out
+};
+
+// ---- Conditional formats -------------------------------------------------------------------------
+
+#define DGVCO_EQUAL          0
+#define DGVCO_NOTEQUAL       1
+#define DGVCO_LESS           2
+#define DGVCO_LESSEQUAL      3
+#define DGVCO_GREATER        4
+#define DGVCO_GREATEREQUAL   5
+#define DGVCO_BETWEEN        6   // value1 to value2, both included
+#define DGVCO_CONTAINS       7   // value1's text in the cell's shown text, case ignored
+#define DGVCO_EMPTY          8
+#define DGVCO_NOTEMPTY       9
+
+#define DGVFR_WHOLEROW       0x0001   // the row's cells take the looks, not only the tested column's
+#define DGVFR_BOLD           0x0002
+
+// Numbers compare with numbers, dates with dates, text with text (case ignored); text against another kind compares
+// with what the cell shows (an enum's name). Earlier rules come first: the first that matches sets a color.
+struct DGVFORMATRULE {
+	int idColumn;            // the column whose value is tested
+	int op;                  // DGVCO_*
+	DGVVALUE value1;         // the text is copied
+	DGVVALUE value2;         // DGVCO_BETWEEN's upper end
+	UINT flags;              // DGVFR_*
+	COLORREF crText;         // CLR_DEFAULT: as it is
+	COLORREF crBack;
+};
+
+// ---- Custom draw -----------------------------------------------------------------------------------
+
+// NM_CUSTOMDRAW, as a list view's: CDDS_PREPAINT (return CDRF_NOTIFYITEMDRAW for rows, CDRF_NOTIFYPOSTPAINT for
+// CDDS_POSTPAINT at the end), then each data row in view CDDS_ITEMPREPAINT (dwItemSpec: the row in view; colors for its
+// cells; CDRF_NOTIFYSUBITEMDRAW for its cells), each cell CDDS_ITEMPREPAINT | CDDS_SUBITEM (colors; CDRF_NEWFONT: the
+// font selected in hdc; CDRF_SKIPDEFAULT: the app drew it, background and all; CDRF_NOTIFYPOSTPAINT: CDDS_ITEMPOSTPAINT
+// | CDDS_SUBITEM after it's drawn). The groups' rows and the new row aren't sent. The colors come in as the control
+// would draw them, conditional formats applied.
+struct NMDGVCUSTOMDRAW {
+	NMCUSTOMDRAW nmcd;       // rc: the row's or the cell's; uItemState: CDIS_SELECTED, CDIS_FOCUS (the caret's cell)
+	LONGLONG iRow;           // the data row
+	int idColumn;            // a cell's (0: the row)
+	COLORREF clrText;        // in, out
+	COLORREF clrTextBk;      // in, out: the background
+};
+
 // ---- Control class --------------------------------------------------------------------------
 
 struct DgData;
@@ -360,6 +448,7 @@ struct DgCellChange;
 struct DgViewResult;
 struct DgFilter;
 struct DgGroup;
+class DgAccessible;
 
 class CDataGridCtrl : public ATL::CWindowImpl<CDataGridCtrl> {
 public:
@@ -373,6 +462,8 @@ public:
 
 	BEGIN_MSG_MAP(CDataGridCtrl)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+		MESSAGE_HANDLER(WM_GETOBJECT, OnGetObject)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_STYLECHANGED, OnStyleChanged)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
@@ -421,6 +512,10 @@ public:
 		MESSAGE_HANDLER(WM_CHAR, OnEditorChar)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnFilterGetDlgCode)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnFilterKillFocus)
+	ALT_MSG_MAP(3)   // the find box
+		MESSAGE_HANDLER(WM_KEYDOWN, OnFindKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnEditorChar)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnFilterGetDlgCode)
 	END_MSG_MAP()
 
 	enum : UINT { WM_DGV_ENDEDIT = WM_USER + 100, WM_DGV_VIEWDONE, WM_DGV_ENDFILTER };
@@ -521,6 +616,30 @@ public:
 	LONGLONG GetViewRowCount() const;                      // the rows in view: the data rows that pass, and the groups'
 	bool    IsBusy() const;                                // rows being rebuilt on the worker thread
 
+	// ---- Finding -------------------------------------------------------------------------------------------
+
+	// The next cell whose shown text matches (DGVFF_*), from the caret's: the caret goes there and it's selected.
+	// FALSE if there's none (a virtual grid: in the rows looked at). text nullptr or empty: the last text looked for.
+	BOOL    Find(LPCWSTR text, UINT flags = 0);
+	// Ctrl+F: a box at the top right; typing finds from the caret and shades the cells that match, Enter and F3 find the
+	// next, with Shift the one before, Esc closes it. F3 and Shift+F3 on the grid repeat the last find.
+	void    ShowFindBox(bool show = true);
+	bool    IsFindBoxShown() const;
+	void    SetHighlight(LPCWSTR text, UINT flags = 0);   // the cells that match are shaded (nullptr or empty: none)
+
+	// ---- Conditional formats -------------------------------------------------------------------------------
+
+	int     AddFormatRule(const DGVFORMATRULE& rule, int index = -1);   // its ID (> 0); -1: last (the lowest priority)
+	BOOL    DeleteFormatRule(int id);                      // 0: all
+	int     GetFormatRules(int* ids, int count) const;     // in their order; returns how many there are
+
+	// ---- The state --------------------------------------------------------------------------------------------
+
+	// The columns' order, widths and hiding, the frozen columns, the sort, the groups and the filters as one line of
+	// text, for the app to keep (columns by ID: insert them in the same order). Returns its length with the terminator.
+	int     GetState(LPWSTR text, int cch) const;
+	BOOL    SetState(LPCWSTR text);                        // columns it doesn't name keep their order, after the others
+
 	// ---- Looks -----------------------------------------------------------------------------------------
 
 	void    SetColors(const DGVCOLORS* colors);            // nullptr: the system's
@@ -532,6 +651,7 @@ public:
 
 private:
 	LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnDestroy(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnSize(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnStyleChanged(UINT, WPARAM, LPARAM, BOOL&);
 	LRESULT OnEraseBkgnd(UINT, WPARAM, LPARAM, BOOL&);
@@ -569,7 +689,7 @@ private:
 	void    ClampScroll();
 	void    ScrollRows(LONGLONG top);
 	void    ScrollX(int x);
-	bool    Fetch(LONGLONG dataRow, int id, DgCell& cell);   // from the store, the cache or the app
+	bool    Fetch(LONGLONG dataRow, int id, DgCell& cell, bool keep = true);   // from the store, the cache or the app (keep: in the cache)
 	void    DropCache();
 	void    MoveCaret(LONGLONG viewRow, int displayCol, bool notify);
 	void    InvalidateRow(LONGLONG viewRow);
@@ -632,9 +752,29 @@ private:
 	std::wstring FilterSummary(int id) const;              // what the filter row shows for a column's filter
 	void    ApplyFilterText(int id, const std::wstring& text);   // the filter row's: a "contains" filter, or none
 
+	// DataGridFind.cpp
+	LRESULT OnFindKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	bool    FindKey(WPARAM key, bool ctrl, bool shift);    // Ctrl+F, F3
+	// inclusive: the caret's cell counts; budget: milliseconds to look for (0: no end). 1: found, 0: none, -1: out of time
+	int     FindFrom(const std::wstring& text, UINT flags, bool inclusive, bool beep, DWORD budget = 0);
+	void    PositionFindBox();
+	void    CloseFindBox();
+	void    OnFindChanged();                               // the find box's text
+
+	// DataGridAccessible.cpp
+	friend class DgAccessible;
+	LRESULT OnGetObject(UINT, WPARAM, LPARAM, BOOL&);
+	void    DisconnectAccessible();
+	void    NotifyCaretAccessible();                       // the caret's cell is the focused element
+
+	// DataGridState.cpp (the state, the rules, the new row)
+	LONGLONG AddNewRow(int id);                            // the placeholder's: the new data row, -1 if stopped
+	bool    CanEditCell(LONGLONG row, int id) const;       // CanEdit, or a cell of the new row's placeholder
+
 	// DataGridPaint.cpp
 	void    Paint(HDC hdc, const RECT& clip);
 	void    UpdateColors();
+	void    UpdateScrollBarTheme();                        // dark scroll bars on a dark background (DataGridCtrl.cpp)
 	void    PaintGroupRow(HDC hdc, const DgGroup& group, int y);   // its open or closed mark, label and aggregates
 
 	// DataGridHeader.cpp
@@ -651,6 +791,9 @@ private:
 	bool m_OwnFont = true;
 	UINT m_Dpi = 96;
 	int m_WheelRemainder = 0, m_HWheelRemainder = 0;
+	int m_DarkScrollBars = -1;    // the theme last set: -1 none yet
 	ATL::CContainedWindow m_Editor;   // the open editor (an edit box, a drop-down list or a date picker)
 	ATL::CContainedWindow m_FilterEdit;   // the filter row's, while one of its cells is typed in
+	ATL::CContainedWindow m_FindEdit;     // the find box's
+	DgAccessible* m_Accessible = nullptr; // made on the first WM_GETOBJECT; cut off in OnDestroy
 };
