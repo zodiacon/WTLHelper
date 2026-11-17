@@ -107,6 +107,7 @@
     <ClCompile Include="src\DataGridModel.cpp" />
     <ClCompile Include="src\DataGridPaint.cpp" />
     <ClCompile Include="src\DataGridSelection.cpp" />
+    <ClCompile Include="src\DataGridView.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

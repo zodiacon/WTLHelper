@@ -364,6 +364,8 @@ LRESULT CDataGridCtrl::OnEditorCommand(UINT, WPARAM wParam, LPARAM lParam, BOOL&
 	auto& d = *m_Data;
 	if (d.edit.active && (HWND)lParam == m_Editor.m_hWnd && (HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == CBN_SELCHANGE))
 		d.edit.dirty = true;
+	if (m_FilterEdit.m_hWnd && (HWND)lParam == m_FilterEdit.m_hWnd && HIWORD(wParam) == EN_CHANGE)
+		SetTimer(DgData::FilterTimer, 300);   // filters once the typing pauses
 	return 0;
 }
 

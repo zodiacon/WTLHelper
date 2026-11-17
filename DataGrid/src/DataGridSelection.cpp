@@ -5,13 +5,6 @@
 // The selection (rectangles of rows in view and visible columns, in DgSelection), copying it, and sorting the store.
 
 namespace {
-	// the user's order: case ignored, digits as numbers ("file2" before "file10")
-	int UserCompare(const std::wstring& a, const std::wstring& b) {
-		int r = ::CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE | SORT_DIGITSASNUMBERS, a.c_str(), (int)a.size(),
-			b.c_str(), (int)b.size(), nullptr, nullptr, 0);
-		return r ? r - CSTR_EQUAL : DgOrdinalCompare(a, b);
-	}
-
 	bool SetClipboard(UINT format, const void* data, size_t bytes) {
 		HGLOBAL h = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
 		if (!h)
@@ -194,6 +187,15 @@ LRESULT CDataGridCtrl::OnTimer(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 		HideError();
 		return 0;
 	}
+	if (wParam == DgData::FilterTimer) {   // typing in the filter row paused: filter by what's there
+		KillTimer(DgData::FilterTimer);
+		if (m_FilterEdit.m_hWnd) {
+			std::wstring text(m_FilterEdit.GetWindowTextLength(), L'\0');
+			m_FilterEdit.GetWindowText(text.data(), (int)text.size() + 1);
+			ApplyFilterText(d.filterEditId, text);
+		}
+		return 0;
+	}
 	if (wParam != DgData::ScrollTimer) {
 		bHandled = FALSE;
 		return 0;
@@ -282,7 +284,7 @@ BOOL CDataGridCtrl::Copy(UINT flags) {
 		return FALSE;
 	}
 	bool titles = (flags & DGVCOPY_TITLES) != 0;
-	auto table = DgSelectionTable(d.selection,
+	auto table = DgSelectionTable(d.selection, [&](int64_t r) { return d.rows.GroupOf(r) < 0; },   // not the groups' rows
 		[&](int64_t r, int c) {
 			int id = d.layout.cols[c].id;
 			auto column = d.columns.Find(id);
@@ -322,37 +324,10 @@ void CDataGridCtrl::Sort(std::vector<DgSortKey> keys, bool user) {
 	if (user && FireNotify(&nm.hdr, DGVN_SORTCHANGING))
 		return;
 	d.sortKeys = std::move(keys);
+	d.ensureCaret = d.caretRow >= 0;   // once the rows are shown (now, or when the worker is done)
 	ApplyOrder();
-	if (d.caretRow >= 0)
-		EnsureVisible(d.caretRow, d.caretId);
 	if (user)
 		FireNotify(&nm.hdr, DGVN_SORTCHANGED);
-}
-
-void CDataGridCtrl::ApplyOrder() {
-	auto& d = *m_Data;
-	int64_t count = d.DataRowCount();
-	if (d.virtualMode || d.sortKeys.empty()) {
-		d.rows.Reset(count);
-		d.cache.Clear();
-	}
-	else {
-		std::vector<int> slots;
-		std::vector<bool> descending;
-		for (auto& k : d.sortKeys) {
-			auto column = d.columns.Find(k.id);
-			slots.push_back(column ? column->slot : -1);
-			descending.push_back(k.descending);
-		}
-		auto order = DgSortOrder(count, descending,
-			[&](int64_t row, size_t k) -> const DgValue* {
-				auto cell = d.store.Get(row, slots[k]);
-				return cell ? &cell->value : nullptr;
-			}, UserCompare);
-		d.rows.SetOrder(std::move(order), count);
-	}
-	ResetSelection();
-	Relayout();
 }
 
 BOOL CDataGridCtrl::SetSortKeys(const DGVSORTKEY* keys, int count) {

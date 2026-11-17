@@ -5,6 +5,7 @@
 #include "DataGrid.h"
 #include "DataGridModel.h"
 
+#include <memory>
 #include <string>
 
 struct DgData {
@@ -50,6 +51,26 @@ struct DgData {
 		bool dirty = false;         // changed in the editor: nothing is written otherwise
 	} edit;
 	DgUndoStack undo;
+
+	// filtering and grouping: the view's groups (for their rows) and the job rebuilding it
+	std::vector<DgFilter> filters;
+	std::vector<int> groupIds;
+	DgViewResult view;
+	std::unordered_set<std::wstring> collapsed;   // groups' keys
+	struct Job {
+		std::atomic<bool> cancel{ false };
+		uint64_t id = 0;
+		DgViewInput input;
+		DgViewResult result;
+	};
+	std::shared_ptr<Job> job;       // running on the worker thread
+	uint64_t generation = 0;
+	bool ensureCaret = false;       // a user's sort: the caret's row into view once the rows are shown
+	int filterEditId = 0;           // the column typed in the filter row (0: none)
+	int hotFilterCol = -1;
+	static constexpr UINT_PTR FilterTimer = 3;
+	static constexpr int64_t BackgroundRows = 100'000;
+
 	HWND errorTip = nullptr;
 	HBRUSH editBrush = nullptr;
 	COLORREF editBrushColor = CLR_INVALID;
@@ -95,6 +116,9 @@ struct DgData {
 
 // the text a cell shows (dates in the user's format)
 std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumberFormat& nf);
+
+// the text a value shows in a column (a cell's, without its image); safe on the worker thread
+std::wstring DgValueText(const DgValue& value, const DgColumn& column, const DgNumberFormat& nf);
 
 // a date in the user's format (VarDateFromStr), for pasting what was copied
 bool DgParseUserDate(const std::wstring& text, int64_t& ticks);

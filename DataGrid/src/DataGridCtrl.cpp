@@ -9,7 +9,8 @@ static_assert(DgType::Text == DGVVT_TEXT && DgType::DateTime == DGVVT_DATETIME &
 static_assert(DgColType::Integer == DGVCT_INTEGER && DgColType::Progress == DGVCT_PROGRESS && DgColType::Link == DGVCT_LINK);
 static_assert(DgAlign::Right == DGVA_RIGHT && DgAlign::Center == DGVA_CENTER);
 static_assert(DgColFlag::Hidden == DGVCF_HIDDEN && DgColFlag::GroupDigits == DGVCF_GROUPDIGITS && DgColFlag::NoSort == DGVCF_NOSORT && DgColFlag::ReadOnly == DGVCF_READONLY);
-static_assert(DgHitFlag::Cell == DGVHT_CELL && DgHitFlag::HeaderDivider == DGVHT_HEADERDIVIDER && DgHitFlag::Empty == DGVHT_EMPTY);
+static_assert(DgHitFlag::Cell == DGVHT_CELL && DgHitFlag::HeaderDivider == DGVHT_HEADERDIVIDER && DgHitFlag::Empty == DGVHT_EMPTY && DgHitFlag::FilterRow == DGVHT_FILTERROW);
+static_assert(DgAggKind::Sum == DGVAGG_SUM && DgAggKind::Count == DGVAGG_COUNT && DgFilterKind::Range == DGVFK_RANGE && DgFilterKind::Values == DGVFK_VALUES);
 
 // ---- Helpers -----------------------------------------------------------------------
 
@@ -35,28 +36,36 @@ namespace {
 			c.enumItems = DgSplitEnumItems(d.pszEnumItems);
 		if (d.mask & DGVCM_PARAM)
 			c.param = d.lParam;
+		if (d.mask & DGVCM_AGGREGATE)
+			c.aggregate = std::clamp(d.aggregate, (int)DGVAGG_NONE, (int)DGVAGG_COUNT);
 	}
 }
 
-std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumberFormat& nf) {
-	if (cell.value.type != DgType::DateTime)
-		return DgFormat(cell.value, column, nf);
-	FILETIME ft = DgFileTimeOf(cell.value.i);
+std::wstring DgValueText(const DgValue& value, const DgColumn& column, const DgNumberFormat& nf) {
+	if (value.type != DgType::DateTime)
+		return DgFormat(value, column, nf);
+	FILETIME ft = DgFileTimeOf(value.i);
 	SYSTEMTIME st;
 	if (!::FileTimeToSystemTime(&ft, &st))
-		return DgFormatDateTime(cell.value.i);
+		return DgFormatDateTime(value.i);
 	wchar_t date[80]{}, time[80]{};
 	::GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &st, nullptr, date, _countof(date), nullptr);
 	::GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, time, _countof(time));
 	return std::wstring(date) + L" " + time;
 }
 
+std::wstring DgCellText(const DgCell& cell, const DgColumn& column, const DgNumberFormat& nf) {
+	return DgValueText(cell.value, column, nf);
+}
+
 // ---- Construction ------------------------------------------------------------------
 
-CDataGridCtrl::CDataGridCtrl() : m_Data(std::make_unique<DgData>()), m_Editor(this, 1) {
+CDataGridCtrl::CDataGridCtrl() : m_Data(std::make_unique<DgData>()), m_Editor(this, 1), m_FilterEdit(this, 2) {
 }
 
 CDataGridCtrl::~CDataGridCtrl() {
+	if (m_Data->job)   // the worker drops its result
+		m_Data->job->cancel = true;
 	if (m_Data->editBrush)
 		::DeleteObject(m_Data->editBrush);
 	if (m_OwnFont && m_hFont)
@@ -223,6 +232,7 @@ void CDataGridCtrl::Relayout() {
 		p.dpi = (int)m_Dpi;
 		p.rowHeight = d.rowHeightDips ? Scale(d.rowHeightDips) : d.textHeight + Scale(8);
 		p.header = (style & DGVS_NOHEADER) ? 0 : d.textHeight + Scale(10);
+		p.filterRow = (style & DGVS_FILTERROW) && !(style & DGVS_NOHEADER) ? p.rowHeight : 0;
 		if (style & DGVS_ROWHEADER) {
 			int digits = (int)std::to_wstring(std::max<int64_t>(1, d.RowCount())).size();
 			p.rowHeader = std::max(2, digits) * d.digitWidth + Scale(16);
@@ -247,6 +257,7 @@ void CDataGridCtrl::Relayout() {
 		d.selection.Clamp(d.RowCount(), d.ColCount());
 	}
 	PositionEditor();
+	PositionFilterEdit();
 	Invalidate();
 }
 
@@ -302,6 +313,7 @@ void CDataGridCtrl::ScrollX(int x) {
 	if (d.scrollX != old) {
 		UpdateScrollBars();
 		PositionEditor();
+		PositionFilterEdit();
 		Invalidate();
 	}
 }
@@ -411,13 +423,19 @@ BOOL CDataGridCtrl::DeleteColumn(int id) {
 	d.undo.Clear();   // its cells' changes can't be undone any more
 	d.store.ClearSlot(c->slot);
 	d.columns.Erase(id);
-	std::erase_if(d.sortKeys, [&](auto& k) { return k.id == id; });
+	bool reorder = std::erase_if(d.sortKeys, [&](auto& k) { return k.id == id; })
+		+ std::erase_if(d.filters, [&](auto& f) { return f.id == id; }) + std::erase(d.groupIds, id) > 0;
+	if (d.filterEditId == id)
+		CloseFilterEdit(false);
 	d.cache.Clear();
 	if (d.caretId == id) {
 		auto visible = d.columns.Visible();
 		d.caretId = visible.empty() ? 0 : visible.front()->id;
 	}
-	Relayout();
+	if (reorder)
+		ApplyOrder();
+	else
+		Relayout();
 	return TRUE;
 }
 
@@ -426,7 +444,10 @@ BOOL CDataGridCtrl::SetColumn(int id, const DGVCOLUMN& column) {
 	if (!c)
 		return FALSE;
 	ApplyColumn(*c, column);
-	Relayout();
+	if ((column.mask & DGVCM_AGGREGATE) && !m_Data->groupIds.empty())
+		ApplyOrder();   // the groups' aggregates again
+	else
+		Relayout();
 	return TRUE;
 }
 
@@ -455,6 +476,8 @@ BOOL CDataGridCtrl::GetColumn(int id, DGVCOLUMN* column) const {
 		column->pszEnumItems = nullptr;   // not given back
 	if (mask & DGVCM_PARAM)
 		column->lParam = c->param;
+	if (mask & DGVCM_AGGREGATE)
+		column->aggregate = c->aggregate;
 	return TRUE;
 }
 
@@ -545,6 +568,16 @@ void CDataGridCtrl::SetVirtual(bool virtualMode) {
 	d.virtualCount = 0;
 	d.rows.Reset(0);
 	d.sortKeys.clear();
+	d.filters.clear();
+	d.groupIds.clear();
+	d.collapsed.clear();
+	if (d.job) {
+		d.job->cancel = true;
+		d.job.reset();
+	}
+	d.view = DgViewResult();
+	d.view.identity = true;
+	CloseFilterEdit(false);
 	d.caretRow = -1;
 	d.topRow = 0;
 	ResetSelection();
@@ -785,8 +818,13 @@ void CDataGridCtrl::Hit(POINT pt, DGVHITTEST& hit, int& displayCol) const {
 	hit.pt = pt;
 	hit.flags = h.flags;
 	hit.iRow = h.row >= 0 ? d.rows.ToData(h.row) : -1;
+	hit.iViewRow = h.row;
 	hit.idColumn = h.col >= 0 ? d.layout.cols[h.col].id : 0;
 	displayCol = h.col;
+	if (h.row >= 0 && d.rows.GroupOf(h.row) >= 0)   // a group's row, wherever on it
+		hit.flags = DGVHT_GROUP;
+	else if ((h.flags & DgHitFlag::Header) && (GetStyle() & DGVS_HEADERMENU) && pt.x >= d.layout.Right(h.col, d.scrollX) - Scale(18))
+		hit.flags = DGVHT_HEADERBUTTON;
 }
 
 void CDataGridCtrl::HitTest(DGVHITTEST* hit) const {

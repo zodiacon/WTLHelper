@@ -22,8 +22,20 @@ LRESULT CDataGridCtrl::OnLButtonDown(UINT, WPARAM wParam, LPARAM lParam, BOOL&) 
 	DGVHITTEST hit{ pt };
 	int col;
 	Hit(pt, hit, col);
+	if (hit.flags & DGVHT_HEADERBUTTON) {
+		ShowHeaderMenu(col);
+		return 0;
+	}
 	if (hit.flags & (DGVHT_HEADER | DGVHT_HEADERDIVIDER)) {
 		HeaderMouseDown(pt, hit, col);
+		return 0;
+	}
+	if (hit.flags & DGVHT_FILTERROW) {
+		OpenFilterEdit(col);
+		return 0;
+	}
+	if (hit.flags & DGVHT_GROUP) {   // opens or closes it
+		ToggleGroup(hit.iViewRow, true);
 		return 0;
 	}
 	if (hit.flags & DGVHT_CORNER) {
@@ -75,10 +87,12 @@ LRESULT CDataGridCtrl::OnLButtonDblClk(UINT, WPARAM, LPARAM lParam, BOOL&) {
 		FireNotify(&nm.hdr, DGVN_COLUMNRESIZED);
 		return 0;
 	}
-	if (hit.flags & DGVHT_HEADER) {   // as a second click
+	if (hit.flags & (DGVHT_HEADER | DGVHT_GROUP)) {   // as a second click
 		BOOL handled;
 		return OnLButtonDown(WM_LBUTTONDOWN, 0, lParam, handled);
 	}
+	if (hit.flags & (DGVHT_HEADERBUTTON | DGVHT_FILTERROW))
+		return 0;
 	if (hit.flags & DGVHT_CELL) {
 		auto& d = *m_Data;
 		auto column = d.columns.Find(hit.idColumn);
@@ -155,9 +169,11 @@ LRESULT CDataGridCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 	DGVHITTEST hit{ pt };
 	int col;
 	Hit(pt, hit, col);
-	int hot = (hit.flags & DGVHT_HEADER) ? col : -1;
-	if (hot != d.hotCol) {
+	int hot = (hit.flags & (DGVHT_HEADER | DGVHT_HEADERBUTTON)) ? col : -1;
+	int hotFilter = (hit.flags & DGVHT_FILTERROW) ? col : -1;
+	if (hot != d.hotCol || hotFilter != d.hotFilterCol) {
 		d.hotCol = hot;
+		d.hotFilterCol = hotFilter;
 		RECT rc{ 0, 0, d.clientWidth, d.layout.header };
 		InvalidateRect(&rc, FALSE);
 	}
@@ -167,8 +183,8 @@ LRESULT CDataGridCtrl::OnMouseMove(UINT, WPARAM, LPARAM lParam, BOOL&) {
 LRESULT CDataGridCtrl::OnMouseLeave(UINT, WPARAM, LPARAM, BOOL&) {
 	auto& d = *m_Data;
 	d.tracking = false;
-	if (d.hotCol >= 0) {
-		d.hotCol = -1;
+	if (d.hotCol >= 0 || d.hotFilterCol >= 0) {
+		d.hotCol = d.hotFilterCol = -1;
 		RECT rc{ 0, 0, d.clientWidth, d.layout.header };
 		InvalidateRect(&rc, FALSE);
 	}
@@ -204,6 +220,10 @@ LRESULT CDataGridCtrl::OnSetCursor(UINT, WPARAM wParam, LPARAM lParam, BOOL& bHa
 			::SetCursor(::LoadCursor(nullptr, IDC_HAND));
 			return TRUE;
 		}
+	}
+	if (hit.flags & DGVHT_FILTERROW) {
+		::SetCursor(::LoadCursor(nullptr, IDC_IBEAM));
+		return TRUE;
 	}
 	::SetCursor(::LoadCursor(nullptr, IDC_ARROW));
 	return TRUE;
@@ -277,6 +297,26 @@ LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 		case VK_NEXT:  key = DgKey::PageDown; break;
 		case VK_HOME:  key = DgKey::Home; break;
 		case VK_END:   key = DgKey::End; break;
+		case VK_SUBTRACT:
+		case VK_OEM_MINUS:
+		case VK_ADD:
+		case VK_OEM_PLUS: {   // Ctrl+-: close the caret's group; Ctrl++: open them all
+			if (!ctrl || d.view.groups.empty()) {
+				bHandled = FALSE;
+				return 0;
+			}
+			if (wParam == VK_ADD || wParam == VK_OEM_PLUS) {
+				ExpandAllGroups(true);
+				return 0;
+			}
+			// the innermost group's row above the caret: the nearest one
+			for (int64_t r = d.rows.ToView(d.caretRow); r >= 0; r--)
+				if (d.rows.GroupOf(r) >= 0) {
+					ToggleGroup(r, true);
+					break;
+				}
+			return 0;
+		}
 		case VK_RETURN:
 			if (d.caretRow >= 0) {
 				DGVHITTEST hit{};
@@ -308,6 +348,11 @@ LRESULT CDataGridCtrl::OnKeyDown(UINT, WPARAM wParam, LPARAM, BOOL& bHandled) {
 			ScrollRows(d.topRow + delta);
 		}
 	}
+	// past the groups' rows: the caret is on data rows only
+	int direction = key == DgKey::Up || key == DgKey::PageUp || (key == DgKey::Home && ctrl) ? -1 : 1;
+	pos.row = DgSkipGroupRows(pos.row, direction, rowCount, [&](int64_t r) { return d.rows.GroupOf(r) >= 0; });
+	if (pos.row < 0)
+		return 0;
 	Select(shift ? SelOp::Extend : SelOp::Reset, pos.row, pos.col, true);
 	return 0;
 }

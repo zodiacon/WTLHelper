@@ -147,7 +147,8 @@ int DgLayout::IndexOf(int id) const {
 DgLayout DgLayoutColumns(const DgColumnSet& columns, const DgLayoutParams& params) {
 	DgLayout layout;
 	layout.rowHeader = params.rowHeader;
-	layout.header = params.header;
+	layout.header = params.header + params.filterRow;
+	layout.titles = params.header;
 	layout.rowHeight = std::max(1, params.rowHeight);
 
 	auto visible = columns.Visible();
@@ -292,6 +293,11 @@ DgHit DgHitTest(const DgLayout& layout, const DgView& view, int x, int y, int di
 	if (y < layout.header) {
 		if (x < layout.rowHeader) {
 			hit.flags = DgHitFlag::Corner;
+			return hit;
+		}
+		if (y >= layout.titles) {   // the filter row
+			hit.col = ColumnAt(layout, view.scrollX, x);
+			hit.flags = hit.col >= 0 ? DgHitFlag::FilterRow : DgHitFlag::Empty;
 			return hit;
 		}
 		if (int divider = DividerAt(layout, view.scrollX, x, dividerZone); divider >= 0) {
@@ -623,7 +629,13 @@ void DgRowMap::SetOrder(std::vector<int64_t> order, int64_t dataCount) {
 int64_t DgRowMap::ToData(int64_t view) const {
 	if (view < 0 || view >= Count())
 		return -1;
-	return m_Identity ? view : m_Order[(size_t)view];
+	return m_Identity ? view : std::max<int64_t>(-1, m_Order[(size_t)view]);
+}
+
+int64_t DgRowMap::GroupOf(int64_t view) const {
+	if (m_Identity || view < 0 || view >= Count() || m_Order[(size_t)view] >= 0)
+		return -1;
+	return -1 - m_Order[(size_t)view];
 }
 
 int64_t DgRowMap::ToView(int64_t data) const {
@@ -1288,4 +1300,308 @@ const DgEditStep* DgUndoStack::Undo() {
 
 const DgEditStep* DgUndoStack::Redo() {
 	return CanRedo() ? &m_Steps[m_Done++] : nullptr;
+}
+
+// ---- Filtering, sorting and grouping: the rows in view -------------------------------------------------------
+
+std::wstring DgLower(std::wstring text) {
+	for (auto& c : text)
+		c = (wchar_t)towlower(c);
+	return text;
+}
+
+namespace {
+	// the kinds a range can compare: numbers (and check boxes), dates, text
+	int RangeRank(int type) {
+		switch (type) {
+			case DgType::Int:
+			case DgType::Float:
+			case DgType::Bool:     return 0;
+			case DgType::DateTime: return 1;
+			case DgType::Text:     return 2;
+		}
+		return -1;
+	}
+
+	std::wstring Shown(const DgValue& value, const DgColumn& column, const DgNumberFormat& nf, DgValueTextFn text) {
+		return text ? text(value, column, nf) : DgFormat(value, column, nf);
+	}
+
+	bool SameValue(const DgValue* a, const DgValue* b) {
+		bool ea = !a || a->type == DgType::Empty, eb = !b || b->type == DgType::Empty;
+		if (ea || eb)
+			return ea == eb;
+		return DgCompareValues(*a, *b, nullptr) == 0;
+	}
+
+	struct Canceled {
+	};
+
+	struct Accumulator {
+		int64_t all = 0;              // non-empty values
+		int64_t numbers = 0;
+		bool allInt = true;
+		int64_t intSum = 0;
+		double sum = 0;
+		const DgValue* min = nullptr;
+		const DgValue* max = nullptr;
+
+		void Add(const DgValue* v) {
+			if (!v || v->type == DgType::Empty)
+				return;
+			all++;
+			if (v->type == DgType::Int || v->type == DgType::Float) {
+				numbers++;
+				if (v->type == DgType::Int) {
+					intSum += v->i;
+					sum += (double)v->i;
+				}
+				else {
+					allInt = false;
+					sum += v->d;
+				}
+			}
+			if (v->type == DgType::Int || v->type == DgType::Float || v->type == DgType::DateTime) {
+				if (!min || (RangeRank(min->type) == RangeRank(v->type) && DgCompareValues(*v, *min, nullptr) < 0))
+					min = v;
+				if (!max || (RangeRank(max->type) == RangeRank(v->type) && DgCompareValues(*v, *max, nullptr) > 0))
+					max = v;
+			}
+		}
+
+		DgValue Result(int kind) const {
+			switch (kind) {
+				case DgAggKind::Sum:   return numbers == 0 ? DgValue{} : allInt ? DgValue::Int(intSum) : DgValue::Float(sum);
+				case DgAggKind::Avg:   return numbers == 0 ? DgValue{} : DgValue::Float(sum / (double)numbers);
+				case DgAggKind::Min:   return min ? *min : DgValue{};
+				case DgAggKind::Max:   return max ? *max : DgValue{};
+				case DgAggKind::Count: return DgValue::Int(all);
+			}
+			return {};
+		}
+	};
+}
+
+bool DgFilterMatch(const DgFilter& filter, const DgValue& value, const DgColumn& column, const DgNumberFormat& nf, DgValueTextFn text) {
+	bool empty = value.type == DgType::Empty;
+	switch (filter.kind) {
+		case DgFilterKind::Contains:
+			if (filter.text.empty())
+				return true;
+			return !empty && DgLower(Shown(value, column, nf, text)).find(DgLower(filter.text)) != std::wstring::npos;
+		case DgFilterKind::Range: {
+			if (empty)
+				return false;
+			int rank = RangeRank(value.type);
+			if (filter.min.type != DgType::Empty
+				&& (RangeRank(filter.min.type) != rank || DgCompareValues(value, filter.min, nullptr) < 0))
+				return false;
+			if (filter.max.type != DgType::Empty
+				&& (RangeRank(filter.max.type) != rank || DgCompareValues(value, filter.max, nullptr) > 0))
+				return false;
+			return true;
+		}
+		case DgFilterKind::Values:
+			if (empty)
+				return filter.blanks;
+			return std::binary_search(filter.values.begin(), filter.values.end(), Shown(value, column, nf, text));
+	}
+	return true;
+}
+
+DgViewResult DgBuildView(const DgViewInput& input, const std::atomic<bool>* cancel) {
+	DgViewResult result;
+	if (input.filters.empty() && input.sortKeys.empty() && input.groupIds.empty()) {
+		result.identity = true;
+		return result;
+	}
+	auto columnIndex = [&](int id) {
+		for (size_t i = 0; i < input.columns.size(); i++)
+			if (input.columns[i].id == id)
+				return (int)i;
+		return -1;
+	};
+	auto valueOf = [&](int ci, int64_t row) -> const DgValue* {
+		if (ci < 0 || ci >= (int)input.values.size())
+			return nullptr;
+		auto& values = input.values[(size_t)ci];
+		return row < (int64_t)values.size() ? &values[(size_t)row] : nullptr;
+	};
+	auto canceled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
+	static const DgValue empty;
+	static const DgColumn noColumn;
+
+	try {
+		// the rows that pass every filter
+		std::vector<int> filterColumns;
+		for (auto& f : input.filters)
+			filterColumns.push_back(columnIndex(f.id));
+		auto& order = result.order;
+		order.reserve((size_t)std::max<int64_t>(0, input.count));
+		for (int64_t row = 0; row < input.count; row++) {
+			if ((row & 0xFFFF) == 0 && canceled())
+				throw Canceled();
+			bool pass = true;
+			for (size_t f = 0; f < input.filters.size() && pass; f++) {
+				int ci = filterColumns[f];
+				auto v = valueOf(ci, row);
+				pass = DgFilterMatch(input.filters[f], v ? *v : empty, ci >= 0 ? input.columns[(size_t)ci] : noColumn, input.nf, input.text);
+			}
+			if (pass)
+				order.push_back(row);
+		}
+
+		// sorted by the groups, then the keys
+		struct Key {
+			int ci;
+			bool descending;
+		};
+		std::vector<Key> keys;
+		for (int id : input.groupIds) {
+			bool descending = false;
+			for (auto& k : input.sortKeys)
+				if (k.id == id)
+					descending = k.descending;
+			keys.push_back({ columnIndex(id), descending });
+		}
+		for (auto& k : input.sortKeys)
+			if (std::find(input.groupIds.begin(), input.groupIds.end(), k.id) == input.groupIds.end())
+				keys.push_back({ columnIndex(k.id), k.descending });
+		if (!keys.empty()) {
+			size_t compares = 0;
+			std::stable_sort(order.begin(), order.end(), [&](int64_t a, int64_t b) {
+				if ((++compares & 0xFFFFF) == 0 && canceled())
+					throw Canceled();
+				for (auto& k : keys) {
+					auto va = valueOf(k.ci, a), vb = valueOf(k.ci, b);
+					bool ea = !va || va->type == DgType::Empty, eb = !vb || vb->type == DgType::Empty;
+					if (ea || eb) {
+						if (ea != eb)
+							return eb;   // empty last, either way
+						continue;
+					}
+					int c = DgCompareValues(*va, *vb, input.compare);
+					if (c != 0)
+						return k.descending ? c > 0 : c < 0;
+				}
+				return false;
+			});
+		}
+
+		// the groups, each with its aggregates
+		size_t levels = input.groupIds.size();
+		if (levels > 0 && !order.empty()) {
+			std::vector<int> groupColumns;
+			for (int id : input.groupIds)
+				groupColumns.push_back(columnIndex(id));
+			std::vector<int> aggregateColumns;
+			for (size_t i = 0; i < input.columns.size(); i++)
+				if (input.columns[i].aggregate != DgAggKind::None)
+					aggregateColumns.push_back((int)i);
+			auto& groups = result.groups;
+			std::vector<size_t> open(levels);
+			std::vector<std::vector<Accumulator>> accumulators(levels);
+			auto close = [&](size_t level, size_t end) {
+				auto& g = groups[open[level]];
+				g.end = end;
+				g.subtreeEnd = groups.size();
+				for (size_t a = 0; a < aggregateColumns.size(); a++) {
+					auto& column = input.columns[(size_t)aggregateColumns[a]];
+					g.aggregates.push_back({ column.id, column.aggregate, accumulators[level][a].Result(column.aggregate) });
+				}
+			};
+			for (size_t pos = 0; pos < order.size(); pos++) {
+				if ((pos & 0xFFFF) == 0 && canceled())
+					throw Canceled();
+				int64_t row = order[pos];
+				size_t start = levels;
+				if (pos == 0)
+					start = 0;
+				else
+					for (size_t level = 0; level < levels; level++)
+						if (!SameValue(valueOf(groupColumns[level], row), valueOf(groupColumns[level], order[pos - 1]))) {
+							start = level;
+							break;
+						}
+				if (start < levels) {
+					if (pos > 0)
+						for (size_t level = levels; level-- > start;)
+							close(level, pos);
+					for (size_t level = start; level < levels; level++) {
+						DgGroup g;
+						g.level = (int)level;
+						g.id = input.groupIds[level];
+						int ci = groupColumns[level];
+						auto v = valueOf(ci, row);
+						if (v)
+							g.value = *v;
+						std::wstring shown = g.value.type == DgType::Empty ? L"\x1E"
+							: Shown(g.value, ci >= 0 ? input.columns[(size_t)ci] : noColumn, input.nf, input.text);
+						g.key = (level ? groups[open[level - 1]].key + L"\x1F" : L"") + std::to_wstring(g.id) + L"=" + shown;
+						g.first = pos;
+						open[level] = groups.size();
+						groups.push_back(std::move(g));
+						accumulators[level].assign(aggregateColumns.size(), Accumulator());
+					}
+				}
+				for (size_t level = 0; level < levels; level++) {
+					groups[open[level]].count++;
+					for (size_t a = 0; a < aggregateColumns.size(); a++)
+						accumulators[level][a].Add(valueOf(aggregateColumns[a], row));
+				}
+			}
+			for (size_t level = levels; level-- > 0;)
+				close(level, order.size());
+		}
+	}
+	catch (const Canceled&) {
+		result = DgViewResult();
+		result.canceled = true;
+	}
+	return result;
+}
+
+std::vector<int64_t> DgFlatten(const DgViewResult& view, const std::unordered_set<std::wstring>& collapsed) {
+	if (view.identity)
+		return {};
+	if (view.groups.empty())
+		return view.order;
+	std::vector<int64_t> entries;
+	entries.reserve(view.order.size() + view.groups.size());
+	auto emit = [&](auto& self, size_t i) -> void {
+		entries.push_back(-1 - (int64_t)i);
+		auto& g = view.groups[i];
+		if (collapsed.count(g.key))
+			return;
+		if (i + 1 < g.subtreeEnd) {
+			for (size_t j = i + 1; j < g.subtreeEnd; j = view.groups[j].subtreeEnd)
+				self(self, j);
+		}
+		else {
+			for (size_t p = g.first; p < g.end; p++)
+				entries.push_back(view.order[p]);
+		}
+	};
+	for (size_t j = 0; j < view.groups.size(); j = view.groups[j].subtreeEnd)
+		emit(emit, j);
+	return entries;
+}
+
+std::wstring DgAggregateText(const DgAggregate& aggregate, const DgColumn& column, const DgNumberFormat& nf, DgValueTextFn text) {
+	if (aggregate.value.type == DgType::Empty)
+		return {};
+	bool group = (column.flags & DgColFlag::GroupDigits) != 0;
+	switch (aggregate.kind) {
+		case DgAggKind::Sum:
+			return L"\x03A3 " + Shown(aggregate.value, column, nf, text);
+		case DgAggKind::Avg:   // an integer column's average keeps its fraction
+			return L"avg " + DgFormatFloat(aggregate.value.d, column.type == DgColType::Float ? column.decimals : 2, group, nf);
+		case DgAggKind::Min:
+			return L"min " + Shown(aggregate.value, column, nf, text);
+		case DgAggKind::Max:
+			return L"max " + Shown(aggregate.value, column, nf, text);
+		case DgAggKind::Count:
+			return L"n " + DgFormatInt(aggregate.value.i, true, nf);
+	}
+	return {};
 }

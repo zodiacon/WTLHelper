@@ -9,6 +9,10 @@
 // Edit > Editable lets cells be edited (F2, typing, a double-click; Enter, Tab, Esc), pasted (Ctrl+V), cleared
 // (Delete), cut, and undone (Ctrl+Z, Ctrl+Y); check boxes toggle with a click or Space. ID is read-only and Quantity
 // rejects negative numbers (DGVN_VALIDATE). In virtual mode the demo keeps the changed cells itself (DGVN_SETCELL).
+// The filter row under the titles filters as you type ("contains"); the button on each title has a menu to sort,
+// group, and pick the values shown. Group > groups by Category (and In stock), with the quantity's sum and the price's
+// average on each group's row; a click on a group's row opens or closes it (Ctrl+- closes the caret's, Ctrl++ opens
+// all). Data > Store (1 million rows) filters, sorts and groups on the worker thread ("Working..." meanwhile).
 // The log at the bottom shows the notifications.
 
 #include <atlbase.h>
@@ -44,6 +48,8 @@ enum : UINT {
 	CMD_CUSTOMCOLORS, CMD_DARKMODE, CMD_FITALL, CMD_SHOWALL, CMD_CLEARLOG, CMD_GOTO_END,
 	CMD_COPY, CMD_COPYTITLES, CMD_SELECTALL, CMD_SELCELLS, CMD_SELROWS, CMD_SELSINGLE, CMD_DELETEROWS, CMD_UNSORT,
 	CMD_EDITABLE, CMD_UNDO, CMD_REDO, CMD_CUT, CMD_PASTE, CMD_CLEAR,
+	CMD_FILTERROW, CMD_HEADERMENU, CMD_GROUPCAT, CMD_GROUPCATSTOCK, CMD_UNGROUP, CMD_EXPANDALL, CMD_COLLAPSEALL, CMD_STOREBIG,
+	CMD_CLEARFILTERS,
 	CMD_HIDE = 2000, CMD_FIT, CMD_FREEZE,
 };
 
@@ -117,7 +123,7 @@ private:
 	}
 
 	int AddColumn(LPCWSTR title, int type, int width, UINT extraMask = 0, int fill = 0, int decimals = 2,
-		UINT flags = 0, LPCWSTR items = nullptr) {
+		UINT flags = 0, LPCWSTR items = nullptr, int aggregate = DGVAGG_NONE) {
 		DGVCOLUMN c{};
 		c.mask = DGVCM_TITLE | DGVCM_TYPE | DGVCM_WIDTH | extraMask;
 		c.pszTitle = title;
@@ -127,6 +133,9 @@ private:
 		c.decimals = decimals;
 		c.flags = flags;
 		c.pszEnumItems = items;
+		c.aggregate = aggregate;
+		if (aggregate)
+			c.mask |= DGVCM_AGGREGATE;
 		return m_Grid.InsertColumn(c);
 	}
 
@@ -134,8 +143,8 @@ private:
 		m_IdId = AddColumn(L"ID", DGVCT_INTEGER, 90, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS | DGVCF_READONLY);
 		m_IdName = AddColumn(L"Name", DGVCT_IMAGETEXT, 140);
 		m_IdCategory = AddColumn(L"Category", DGVCT_ENUM, 100, DGVCM_ENUMITEMS, 0, 0, 0, L"Hardware\0Fasteners\0Tools\0Plumbing\0");
-		m_IdPrice = AddColumn(L"Price", DGVCT_FLOAT, 80, DGVCM_DECIMALS | DGVCM_FLAGS, 0, 2, DGVCF_GROUPDIGITS);
-		m_IdQty = AddColumn(L"Quantity", DGVCT_INTEGER, 80, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS);
+		m_IdPrice = AddColumn(L"Price", DGVCT_FLOAT, 90, DGVCM_DECIMALS | DGVCM_FLAGS, 0, 2, DGVCF_GROUPDIGITS, nullptr, DGVAGG_AVG);
+		m_IdQty = AddColumn(L"Quantity", DGVCT_INTEGER, 100, DGVCM_FLAGS, 0, 0, DGVCF_GROUPDIGITS, nullptr, DGVAGG_SUM);
 		m_IdStock = AddColumn(L"In stock", DGVCT_BOOL, 70);
 		m_IdProgress = AddColumn(L"Fulfilled", DGVCT_PROGRESS, 100);
 		m_IdModified = AddColumn(L"Modified", DGVCT_DATETIME, 140);
@@ -198,8 +207,9 @@ private:
 		Check(CMD_STORE, cmd == CMD_STORE);
 		Check(CMD_VIRTUAL, cmd == CMD_VIRTUAL);
 		Check(CMD_HUGE, cmd == CMD_HUGE);
-		if (cmd == CMD_STORE) {
-			FillStore(5000);
+		Check(CMD_STOREBIG, cmd == CMD_STOREBIG);
+		if (cmd == CMD_STORE || cmd == CMD_STOREBIG) {
+			FillStore(cmd == CMD_STOREBIG ? 1'000'000 : 5000);
 			return;
 		}
 		m_Grid.SetVirtual(true);
@@ -295,6 +305,7 @@ private:
 		edit.AppendMenu(MF_STRING, CMD_UNSORT, L"&Unsort");
 		data.CreatePopupMenu();
 		data.AppendMenu(MF_STRING, CMD_STORE, L"&Store (5,000 rows)");
+		data.AppendMenu(MF_STRING, CMD_STOREBIG, L"Store (1 &million rows)");
 		data.AppendMenu(MF_STRING, CMD_VIRTUAL, L"&Virtual (10 million rows)");
 		data.AppendMenu(MF_STRING, CMD_HUGE, L"Virtual (5 &billion rows)");
 		data.AppendMenu(MF_SEPARATOR);
@@ -317,14 +328,27 @@ private:
 #ifdef DEMO_WTLHELPER
 		view.AppendMenu(MF_STRING, CMD_DARKMODE, L"&Dark Mode");
 #endif
+		CMenuHandle group;
+		group.CreatePopupMenu();
+		group.AppendMenu(MF_STRING, CMD_GROUPCAT, L"By &Category");
+		group.AppendMenu(MF_STRING, CMD_GROUPCATSTOCK, L"By Category, then &In Stock");
+		group.AppendMenu(MF_STRING, CMD_UNGROUP, L"&Not Grouped");
+		group.AppendMenu(MF_SEPARATOR);
+		group.AppendMenu(MF_STRING, CMD_EXPANDALL, L"&Open All\tCtrl++");
+		group.AppendMenu(MF_STRING, CMD_COLLAPSEALL, L"&Close All");
+		group.AppendMenu(MF_SEPARATOR);
+		group.AppendMenu(MF_STRING, CMD_CLEARFILTERS, L"Clear All &Filters");
+		group.AppendMenu(MF_STRING, CMD_FILTERROW, L"Filter &Row");
+		group.AppendMenu(MF_STRING, CMD_HEADERMENU, L"&Menus on the Titles");
 		m_Menu.CreateMenu();
 		m_Menu.AppendMenu(MF_POPUP, file, L"&File");
 		m_Menu.AppendMenu(MF_POPUP, edit, L"&Edit");
 		m_Menu.AppendMenu(MF_POPUP, data, L"&Data");
+		m_Menu.AppendMenu(MF_POPUP, group, L"&Group");
 		m_Menu.AppendMenu(MF_POPUP, view, L"&View");
 		SetMenu(m_Menu);
 
-		m_Grid.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | DGVS_ROWHEADER | DGVS_EDITABLE, WS_EX_CLIENTEDGE, IDC_GRID);
+		m_Grid.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | DGVS_ROWHEADER | DGVS_EDITABLE | DGVS_FILTERROW | DGVS_HEADERMENU, WS_EX_CLIENTEDGE, IDC_GRID);
 		m_Log.Create(m_hWnd, rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOSEL,
 			WS_EX_CLIENTEDGE, IDC_LOG);
 		m_Log.SetFont(m_Grid.GetFont());
@@ -344,6 +368,8 @@ private:
 		Check(CMD_ROWNUMBERS, true);
 		Check(CMD_SELCELLS, true);
 		Check(CMD_EDITABLE, true);
+		Check(CMD_FILTERROW, true);
+		Check(CMD_HEADERMENU, true);
 		Check(CMD_HORZLINES, true);
 		Check(CMD_VERTLINES, true);
 		SetFrozen(1);
@@ -463,6 +489,30 @@ private:
 			case CMD_CLEAR:
 				m_Grid.ClearSelectedCells();
 				break;
+			case CMD_STOREBIG:
+				SetData(id);
+				break;
+			case CMD_GROUPCAT:
+			case CMD_GROUPCATSTOCK:
+			case CMD_UNGROUP: {
+				int ids[] = { m_IdCategory, m_IdStock };
+				if (!m_Grid.SetGroupColumns(ids, id == CMD_GROUPCAT ? 1 : id == CMD_GROUPCATSTOCK ? 2 : 0))
+					Log(L"Grouping: the store's rows only");
+				break;
+			}
+			case CMD_EXPANDALL:
+			case CMD_COLLAPSEALL:
+				m_Grid.ExpandAllGroups(id == CMD_EXPANDALL);
+				break;
+			case CMD_CLEARFILTERS:
+				m_Grid.ClearFilter(0);
+				break;
+			case CMD_FILTERROW:
+				ToggleStyle(id, DGVS_FILTERROW, true);
+				break;
+			case CMD_HEADERMENU:
+				ToggleStyle(id, DGVS_HEADERMENU, true);
+				break;
 			case CMD_ROWNUMBERS:
 				ToggleStyle(id, DGVS_ROWHEADER, true);
 				break;
@@ -564,6 +614,34 @@ private:
 					nm->idColumn, hdr->code == DGVN_ENDEDIT && nm->fCanceled ? L" (canceled)" : L"");
 				break;
 			}
+			case DGVN_FILTERCHANGED: {
+				auto nm = (NMDGVFILTER*)hdr;
+				if (!nm->pFilter)
+					Log(L"DGVN_FILTERCHANGED: column %d cleared", nm->idColumn);
+				else
+					Log(L"DGVN_FILTERCHANGED: column %d, kind %d \"%s\" (%d values)", nm->idColumn, nm->pFilter->kind,
+						nm->pFilter->pszText, nm->pFilter->cValues);
+				if (m_Grid.IsVirtual())
+					Log(L"  virtual mode: the app filters; the demo doesn't");
+				else if (!m_Grid.IsBusy())
+					Log(L"  %lld of %lld rows pass", m_Grid.GetFilteredRowCount(), m_Grid.GetRowCount());
+				break;
+			}
+			case DGVN_GROUPCHANGED: {
+				int ids[4];
+				int count = m_Grid.GetGroupColumns(ids, 4);
+				Log(L"DGVN_GROUPCHANGED: %d column(s)", count);
+				break;
+			}
+			case DGVN_GROUPEXPANDED: {
+				auto nm = (NMDGVGROUP*)hdr;
+				Log(L"DGVN_GROUPEXPANDED: row %lld %s", nm->iViewRow, nm->fExpanded ? L"opened" : L"closed");
+				break;
+			}
+			case DGVN_VIEWREADY:
+				Log(L"DGVN_VIEWREADY: %lld of %lld rows pass, %lld rows shown", m_Grid.GetFilteredRowCount(), m_Grid.GetRowCount(),
+					m_Grid.GetViewRowCount());
+				break;
 			case DGVN_CELLSCHANGED: {
 				static const wchar_t* reasons[] = { L"edit", L"paste", L"clear", L"toggle", L"undo", L"redo" };
 				auto nm = (NMDGVCHANGE*)hdr;

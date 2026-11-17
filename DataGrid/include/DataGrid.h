@@ -36,6 +36,8 @@ constexpr wchar_t WC_DATAGRID[] = L"WC_DataGrid";
 #define DGVS_NOCARETROW        0x0040   // the caret's row isn't shaded
 #define DGVS_NOSORT            0x0080   // a click on a title doesn't sort (DGVN_COLUMNCLICK is still sent)
 #define DGVS_EDITABLE          0x0100   // the user can edit cells (F2, typing, a double-click), paste, clear and undo
+#define DGVS_FILTERROW         0x0200   // a row under the titles to type each column's filter in
+#define DGVS_HEADERMENU        0x0400   // a button on each title for a menu: sort, group, filter by its values
 
 // ---- Values ---------------------------------------------------------------------
 
@@ -125,7 +127,8 @@ inline DGVVALUE DgvDateTime(const FILETIME& value) {
 #define DGVCM_FLAGS       0x0080
 #define DGVCM_ENUMITEMS   0x0100
 #define DGVCM_PARAM       0x0200
-#define DGVCM_ALL         0x03FF
+#define DGVCM_AGGREGATE   0x0400
+#define DGVCM_ALL         0x07FF
 
 struct DGVCOLUMN {
 	UINT mask;               // DGVCM_*: the members that count (InsertColumn: the rest take their defaults)
@@ -139,6 +142,31 @@ struct DGVCOLUMN {
 	UINT flags;              // DGVCF_*
 	LPCWSTR pszEnumItems;    // DGVCT_ENUM: the names, each ending with a 0, the list with another ("Low\0High\0")
 	LPARAM lParam;
+	int aggregate;           // DGVAGG_*: what it shows on group rows
+};
+
+#define DGVAGG_NONE       0
+#define DGVAGG_SUM        1   // numbers
+#define DGVAGG_AVG        2
+#define DGVAGG_MIN        3   // numbers or dates
+#define DGVAGG_MAX        4
+#define DGVAGG_COUNT      5   // cells that aren't empty
+
+// ---- Filters ------------------------------------------------------------------------
+
+#define DGVFK_CONTAINS    0   // pszText anywhere in the cell's shown text, case ignored
+#define DGVFK_RANGE       1   // from minValue to maxValue, both included (DGVVT_EMPTY: open); numbers or dates
+#define DGVFK_VALUES      2   // one of ppszValues (shown texts), or empty when fBlanks
+
+struct DGVFILTER {
+	int idColumn;
+	int kind;                // DGVFK_*
+	LPCWSTR pszText;
+	DGVVALUE minValue;
+	DGVVALUE maxValue;
+	const LPCWSTR* ppszValues;
+	int cValues;
+	BOOL fBlanks;
 };
 
 // ---- Hit testing ------------------------------------------------------------------
@@ -150,12 +178,16 @@ struct DGVCOLUMN {
 #define DGVHT_ROWHEADER      0x0008   // a row's number
 #define DGVHT_CORNER         0x0010   // above the row numbers
 #define DGVHT_EMPTY          0x0020   // past the last row or column
+#define DGVHT_FILTERROW      0x0040   // a column's cell in the filter row
+#define DGVHT_GROUP          0x0080   // a group's row (iRow -1, iViewRow says which)
+#define DGVHT_HEADERBUTTON   0x0100   // the menu button on a title (DGVS_HEADERMENU)
 
 struct DGVHITTEST {
 	POINT pt;               // in: client coordinates
 	UINT flags;             // out: DGVHT_*
 	LONGLONG iRow;          // -1 if none
 	int idColumn;           // 0 if none
+	LONGLONG iViewRow;      // the row in view (-1 if none): a group's row has no data row
 };
 
 // ---- Colors ------------------------------------------------------------------------
@@ -215,6 +247,28 @@ struct NMDGVSORT {
 	NMHDR hdr;
 	int cKeys;               // 0: unsorted
 	const DGVSORTKEY* pKeys; // the first is the main one
+};
+
+// Filtering and grouping: the store's rows are filtered, sorted and grouped together, on a worker thread past
+// 100,000 rows (the last rows in view stay until DGVN_VIEWREADY). Virtual mode keeps and shows the filters (the app
+// filters its rows on DGVN_FILTERCHANGED) and doesn't group.
+#define DGVN_FILTERCHANGING  (DGVN_FIRST - 16)  // NMDGVFILTER; the user is filtering: non-zero stops it
+#define DGVN_FILTERCHANGED   (DGVN_FIRST - 17)  // NMDGVFILTER
+#define DGVN_GROUPCHANGED    (DGVN_FIRST - 18)  // NMHDR; the user grouped by other columns
+#define DGVN_GROUPEXPANDED   (DGVN_FIRST - 19)  // NMDGVGROUP; the user opened or closed a group
+#define DGVN_VIEWREADY       (DGVN_FIRST - 20)  // NMHDR; the rows rebuilt on the worker thread are shown
+
+struct NMDGVFILTER {
+	NMHDR hdr;
+	int idColumn;            // 0: all of them (cleared)
+	const DGVFILTER* pFilter;   // nullptr: cleared
+};
+
+struct NMDGVGROUP {
+	NMHDR hdr;
+	LONGLONG iViewRow;
+	int idColumn;
+	BOOL fExpanded;
 };
 
 // Editing (DGVS_EDITABLE): the user's changes to cells go through DGVN_VALIDATE (each cell), are written (the store,
@@ -303,6 +357,9 @@ struct DgData;
 struct DgCell;
 struct DgSortKey;
 struct DgCellChange;
+struct DgViewResult;
+struct DgFilter;
+struct DgGroup;
 
 class CDataGridCtrl : public ATL::CWindowImpl<CDataGridCtrl> {
 public:
@@ -352,14 +409,21 @@ public:
 		MESSAGE_HANDLER(WM_DGV_ENDEDIT, OnEndEditPosted)
 		MESSAGE_HANDLER(WM_COMMAND, OnEditorCommand)
 		MESSAGE_HANDLER(WM_NOTIFY, OnEditorNotify)
+		MESSAGE_HANDLER(WM_DGV_VIEWDONE, OnViewDone)
+		MESSAGE_HANDLER(WM_DGV_ENDFILTER, OnEndFilterPosted)
 	ALT_MSG_MAP(1)   // the editor
 		MESSAGE_HANDLER(WM_KEYDOWN, OnEditorKeyDown)
 		MESSAGE_HANDLER(WM_CHAR, OnEditorChar)
 		MESSAGE_HANDLER(WM_GETDLGCODE, OnEditorGetDlgCode)
 		MESSAGE_HANDLER(WM_KILLFOCUS, OnEditorKillFocus)
+	ALT_MSG_MAP(2)   // the filter row's edit box
+		MESSAGE_HANDLER(WM_KEYDOWN, OnFilterKeyDown)
+		MESSAGE_HANDLER(WM_CHAR, OnEditorChar)
+		MESSAGE_HANDLER(WM_GETDLGCODE, OnFilterGetDlgCode)
+		MESSAGE_HANDLER(WM_KILLFOCUS, OnFilterKillFocus)
 	END_MSG_MAP()
 
-	enum : UINT { WM_DGV_ENDEDIT = WM_USER + 100 };
+	enum : UINT { WM_DGV_ENDEDIT = WM_USER + 100, WM_DGV_VIEWDONE, WM_DGV_ENDFILTER };
 
 	// ---- Columns ------------------------------------------------------------------------------------
 
@@ -442,6 +506,20 @@ public:
 	bool    CanUndo() const;
 	bool    CanRedo() const;
 	void    ClearUndo();
+
+	// ---- Filters and groups -----------------------------------------------------------------------------
+
+	BOOL    SetFilter(const DGVFILTER& filter);             // replaces the column's; no notification
+	BOOL    ClearFilter(int id = 0);                        // 0: all of them
+	bool    HasFilter(int id) const;                        // 0: any
+	LONGLONG GetFilteredRowCount() const;                  // the data rows that pass the filters
+	BOOL    SetGroupColumns(const int* ids, int count);     // the store only; outermost first
+	int     GetGroupColumns(int* ids, int count) const;     // returns how many there are
+	bool    IsGroupRow(LONGLONG viewRow) const;
+	BOOL    ExpandGroup(LONGLONG viewRow, bool expand);     // a group's row; no notification
+	void    ExpandAllGroups(bool expand);
+	LONGLONG GetViewRowCount() const;                      // the rows in view: the data rows that pass, and the groups'
+	bool    IsBusy() const;                                // rows being rebuilt on the worker thread
 
 	// ---- Looks -----------------------------------------------------------------------------------------
 
@@ -535,9 +613,29 @@ private:
 	void    ShowError(const std::wstring& text, LONGLONG viewRow, int displayCol);
 	void    HideError();
 
+	// DataGridView.cpp
+	LRESULT OnViewDone(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnEndFilterPosted(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFilterKeyDown(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFilterGetDlgCode(UINT, WPARAM, LPARAM, BOOL&);
+	LRESULT OnFilterKillFocus(UINT, WPARAM, LPARAM, BOOL&);
+	void    ShowView(DgViewResult view);             // the rows in view from a rebuilt view
+	void    Reflatten(LONGLONG from = 0);                   // the entries again; a hidden caret goes to the first row shown from there
+	bool    ChangeFilter(int id, const DgFilter* filter, bool user);   // nullptr: clear (id 0: all)
+	bool    ChangeGroups(std::vector<int> ids, bool user);
+	void    ToggleGroup(LONGLONG viewRow, bool user);
+	void    ShowHeaderMenu(int displayCol);
+	void    OpenFilterEdit(int displayCol);
+	void    CloseFilterEdit(bool apply);
+	void    PositionFilterEdit();
+	bool    FilterRect(int displayCol, RECT& rc) const;
+	std::wstring FilterSummary(int id) const;              // what the filter row shows for a column's filter
+	void    ApplyFilterText(int id, const std::wstring& text);   // the filter row's: a "contains" filter, or none
+
 	// DataGridPaint.cpp
 	void    Paint(HDC hdc, const RECT& clip);
 	void    UpdateColors();
+	void    PaintGroupRow(HDC hdc, const DgGroup& group, int y);   // its open or closed mark, label and aggregates
 
 	// DataGridHeader.cpp
 	bool    HeaderMouseDown(POINT pt, const DGVHITTEST& hit, int displayCol);
@@ -554,4 +652,5 @@ private:
 	UINT m_Dpi = 96;
 	int m_WheelRemainder = 0, m_HWheelRemainder = 0;
 	ATL::CContainedWindow m_Editor;   // the open editor (an edit box, a drop-down list or a date picker)
+	ATL::CContainedWindow m_FilterEdit;   // the filter row's, while one of its cells is typed in
 };

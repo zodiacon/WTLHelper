@@ -7,10 +7,12 @@
 // checks that they agree.
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <numeric>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -29,7 +31,13 @@ namespace DgColFlag {     // DGVCF_*
 	enum : unsigned { Hidden = 1, NoResize = 2, NoReorder = 4, GroupDigits = 8, NoSort = 16, ReadOnly = 32 };
 }
 namespace DgHitFlag {     // DGVHT_*
-	enum : unsigned { Nowhere = 0, Cell = 1, Header = 2, HeaderDivider = 4, RowHeader = 8, Corner = 0x10, Empty = 0x20 };
+	enum : unsigned { Nowhere = 0, Cell = 1, Header = 2, HeaderDivider = 4, RowHeader = 8, Corner = 0x10, Empty = 0x20, FilterRow = 0x40 };
+}
+namespace DgAggKind {     // DGVAGG_*: what a column shows on group rows
+	enum : int { None, Sum, Avg, Min, Max, Count };
+}
+namespace DgFilterKind {  // DGVFK_*
+	enum : int { Contains, Range, Values };
 }
 
 struct DgValue {
@@ -66,6 +74,7 @@ struct DgColumn {
 	unsigned flags = 0;
 	std::vector<std::wstring> enumItems;
 	intptr_t param = 0;
+	int aggregate = DgAggKind::None;
 
 	bool Hidden() const {
 		return (flags & DgColFlag::Hidden) != 0;
@@ -112,7 +121,8 @@ struct DgColLayout {
 
 struct DgLayout {
 	int rowHeader = 0;      // the row numbers' width
-	int header = 0;         // the header's height (0: none)
+	int header = 0;         // the header's height (0: none), with the filter row
+	int titles = 0;         // the titles' part of it (the filter row is under them)
 	int rowHeight = 1;
 	int frozenCount = 0;    // the first columns that don't scroll
 	int frozenWidth = 0;
@@ -135,7 +145,8 @@ struct DgLayoutParams {
 	int clientWidth = 0;
 	int dpi = 96;
 	int rowHeader = 0;
-	int header = 0;
+	int header = 0;         // the titles
+	int filterRow = 0;      // under them (0: none)
 	int rowHeight = 1;
 	int frozen = 0;
 };
@@ -259,7 +270,8 @@ private:
 
 // ---- Rows in view and in the data ------------------------------------------------------------------
 
-// The identity until an order is set (sorting and filtering, later); then the rows in view are those in the order.
+// The identity until an order is set (sorted, filtered, grouped); then the rows in view are its entries: a data row
+// (>= 0), or a group's row (-1 - the group's index in DgViewResult::groups).
 class DgRowMap {
 public:
 	void Reset(int64_t count);
@@ -270,8 +282,9 @@ public:
 	bool Identity() const {
 		return m_Identity;
 	}
-	int64_t ToData(int64_t view) const;           // -1 if out of range
+	int64_t ToData(int64_t view) const;           // -1 if out of range or a group's row
 	int64_t ToView(int64_t data) const;           // -1 if not in view
+	int64_t GroupOf(int64_t view) const;          // the group a group row shows; -1 for a data row
 
 private:
 	bool m_Identity = true;
@@ -447,6 +460,82 @@ private:
 	size_t m_Limit;
 };
 
+
+// ---- Filtering, sorting and grouping: the rows in view -------------------------------------------------------
+
+// The text a value shows, for "contains" and value filters (DataGridCtrl's gives dates in the user's format).
+using DgValueTextFn = std::wstring (*)(const DgValue& value, const DgColumn& column, const DgNumberFormat& nf);
+
+struct DgFilter {
+	int id = 0;                       // the column
+	int kind = DgFilterKind::Contains;
+	std::wstring text;                // Contains: anywhere in the shown text, case ignored
+	DgValue min, max;                 // Range: both ends included, an empty end open; numbers or dates
+	std::vector<std::wstring> values; // Values: the shown texts let through (sorted)
+	bool blanks = false;              // Values: empty cells too
+};
+
+std::wstring DgLower(std::wstring text);
+bool DgFilterMatch(const DgFilter& filter, const DgValue& value, const DgColumn& column, const DgNumberFormat& nf,
+	DgValueTextFn text = nullptr);
+
+struct DgAggregate {
+	int id = 0;
+	int kind = DgAggKind::None;
+	DgValue value;                    // empty when nothing to aggregate
+};
+
+// A group of rows with the same value in a grouping column, inside its parent group (pre-order in DgViewResult).
+struct DgGroup {
+	int level = 0;                    // 0: grouped by the first column
+	int id = 0;                       // the grouping column
+	DgValue value;
+	std::wstring key;                 // the path of values, to keep it collapsed across rebuilds
+	int64_t count = 0;                // its rows
+	size_t first = 0, end = 0;        // its rows in DgViewResult::order
+	size_t subtreeEnd = 0;            // the index past its last subgroup in DgViewResult::groups
+	std::vector<DgAggregate> aggregates;
+};
+
+struct DgViewInput {
+	int64_t count = 0;                             // data rows
+	std::vector<DgColumn> columns;                 // those the sort keys, filters, groups and aggregates name
+	std::vector<std::vector<DgValue>> values;      // each column's values by data row (missing ones are empty)
+	std::vector<DgSortKey> sortKeys;
+	std::vector<DgFilter> filters;
+	std::vector<int> groupIds;                     // outermost first
+	DgNumberFormat nf;
+	DgTextCompare compare = nullptr;
+	DgValueTextFn text = nullptr;
+};
+
+struct DgViewResult {
+	std::vector<int64_t> order;       // the data rows that pass the filters: sorted, grouped
+	std::vector<DgGroup> groups;
+	bool identity = false;            // nothing filtered, sorted or grouped: every row in order (order left empty)
+	bool canceled = false;
+};
+
+// Filters, then sorts (by the group columns first, ascending unless a sort key gives their direction, then the
+// sort keys), then groups, with each group's aggregates. A set cancel flag stops it (canceled).
+DgViewResult DgBuildView(const DgViewInput& input, const std::atomic<bool>* cancel = nullptr);
+
+// The entries of the rows in view (DgRowMap): each group's row, then its subgroups or rows, unless its key is collapsed.
+std::vector<int64_t> DgFlatten(const DgViewResult& view, const std::unordered_set<std::wstring>& collapsed);
+
+// The shown texts of a column's values, in the values' order, at most max (more: there were others); blanks: empty
+// cells were seen.
+template<typename ValueAt>
+std::vector<std::wstring> DgDistinctTexts(int64_t count, ValueAt valueAt, const DgColumn& column, const DgNumberFormat& nf,
+	DgValueTextFn text, size_t max, bool& blanks, bool& more);
+
+// From a group's row, the nearest data row in a direction (+1, -1), else the other way; -1 if there's none.
+template<typename IsGroup>
+int64_t DgSkipGroupRows(int64_t row, int direction, int64_t count, IsGroup isGroup);
+
+// The aggregate's text on a group's row ("Σ 1,234", "avg 3.50").
+std::wstring DgAggregateText(const DgAggregate& aggregate, const DgColumn& column, const DgNumberFormat& nf, DgValueTextFn text = nullptr);
+
 // ---- Templates ----------------------------------------------------------------------------------------
 
 
@@ -475,6 +564,12 @@ std::vector<int64_t> DgSortOrder(int64_t count, const std::vector<bool>& descend
 
 template<typename TextOf, typename TitleOf>
 std::vector<std::vector<std::wstring>> DgSelectionTable(const DgSelection& selection, TextOf text, TitleOf title, bool titles) {
+	return DgSelectionTable(selection, [](int64_t) { return true; }, text, title, titles);
+}
+
+// keep(row): whether a row goes in (not a group's)
+template<typename Keep, typename TextOf, typename TitleOf>
+std::vector<std::vector<std::wstring>> DgSelectionTable(const DgSelection& selection, Keep keep, TextOf text, TitleOf title, bool titles) {
 	std::vector<std::vector<std::wstring>> table;
 	auto cols = selection.Cols();
 	if (titles) {
@@ -485,10 +580,55 @@ std::vector<std::vector<std::wstring>> DgSelectionTable(const DgSelection& selec
 	}
 	for (auto [first, last] : selection.Rows())
 		for (int64_t r = first; r <= last; r++) {
+			if (!keep(r))
+				continue;
 			std::vector<std::wstring> row;
 			for (int c : cols)
 				row.push_back(selection.Contains(r, c) ? text(r, c) : std::wstring());
 			table.push_back(std::move(row));
 		}
 	return table;
+}
+
+template<typename ValueAt>
+std::vector<std::wstring> DgDistinctTexts(int64_t count, ValueAt valueAt, const DgColumn& column, const DgNumberFormat& nf,
+	DgValueTextFn text, size_t max, bool& blanks, bool& more) {
+	blanks = more = false;
+	std::unordered_map<std::wstring, DgValue> seen;   // a value of each text, to order them by
+	for (int64_t row = 0; row < count; row++) {
+		const DgValue* v = valueAt(row);
+		if (!v || v->type == DgType::Empty) {
+			blanks = true;
+			continue;
+		}
+		auto shown = text ? text(*v, column, nf) : DgFormat(*v, column, nf);
+		if (seen.count(shown))
+			continue;
+		if (seen.size() >= max) {
+			more = true;
+			continue;
+		}
+		seen.emplace(std::move(shown), *v);
+	}
+	std::vector<std::pair<std::wstring, DgValue>> list(seen.begin(), seen.end());
+	std::sort(list.begin(), list.end(), [](auto& a, auto& b) {
+		int c = DgCompareValues(a.second, b.second, nullptr);
+		return c != 0 ? c < 0 : a.first < b.first;
+	});
+	std::vector<std::wstring> texts;
+	for (auto& [t, v] : list)
+		texts.push_back(t);
+	return texts;
+}
+
+template<typename IsGroup>
+int64_t DgSkipGroupRows(int64_t row, int direction, int64_t count, IsGroup isGroup) {
+	if (count <= 0)
+		return -1;
+	row = std::clamp<int64_t>(row, 0, count - 1);
+	for (int pass = 0; pass < 2; pass++, direction = -direction)
+		for (int64_t r = row; r >= 0 && r < count; r += direction)
+			if (!isGroup(r))
+				return r;
+	return -1;
 }

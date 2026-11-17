@@ -1,61 +1,29 @@
-// Unit tests for the DataGrid model.
+// Unit tests for the DataGrid model, with Catch2 (vcpkg: catch2, the static triplets).
 //
-// Deliberately dependency-free (same approach as GraphControlTests): a console exe that returns the number of failed
-// checks. Only the pure parts are covered: the columns and their order, laying them out (fill and frozen columns),
-// scrolling and the scroll bar's mapping, hit testing, where a dragged column goes, moving the caret, formatting
-// values, the store, the virtual grid's cache and the row map. Anything that needs an HWND is checked by hand with
-// DataGridDemo.
+// A console exe; Catch2's command line picks what runs: DataGridTests.exe "[edit]" runs the editing tests,
+// DataGridTests.exe Undo one test, --list-tests lists them. Only the pure parts are covered (DataGridModel.h): the
+// columns and their order, layout (fill, frozen columns, the filter row), scrolling and the scroll bar's mapping, hit
+// testing, drop places, the caret's moves, formatting, the store, the virtual grid's cache, the row map, the
+// selection, sorting, copying, parsing what's typed and pasted, undo, filters, groups and their aggregates. Anything
+// that needs an HWND is checked by hand with DataGridDemo.
 
 #include "DataGridModel.h"
+
+#include <catch2/catch_session.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
 
-// ---- Tiny harness ------------------------------------------------------------
+// the checks' shorthands: wide strings compared as std::wstring, integers of any type as long long
+#define CHECK_STR(a, b)  CHECK(std::wstring(a) == std::wstring(b))
+#define CHECK_INT(a, b)  CHECK(static_cast<long long>(a) == static_cast<long long>(b))
 
-static int g_checks = 0;
-static int g_failures = 0;
-static const wchar_t* g_currentTest = L"";
-
-static void Check(bool ok, const char* expr, int line) {
-	g_checks++;
-	if (!ok) {
-		g_failures++;
-		wprintf(L"  FAIL  %s:%d  %S\n", g_currentTest, line, expr);
-	}
+int main(int argc, char* argv[]) {
+	return Catch::Session().run(argc, argv);
 }
-
-static void CheckStr(const std::wstring& actual, const std::wstring& expected, const char* expr, int line) {
-	g_checks++;
-	if (actual != expected) {
-		g_failures++;
-		wprintf(L"  FAIL  %s:%d  %S\n        got:  \"%s\"\n        want: \"%s\"\n", g_currentTest, line, expr, actual.c_str(), expected.c_str());
-	}
-}
-
-static void CheckInt(long long actual, long long expected, const char* expr, int line) {
-	g_checks++;
-	if (actual != expected) {
-		g_failures++;
-		wprintf(L"  FAIL  %s:%d  %S\n        got: %lld, want: %lld\n", g_currentTest, line, expr, actual, expected);
-	}
-}
-
-#define CHECK(expr)      Check((expr), #expr, __LINE__)
-#define CHECK_STR(a, b)  CheckStr((a), (b), #a " == " #b, __LINE__)
-#define CHECK_INT(a, b)  CheckInt((long long)(a), (long long)(b), #a " == " #b, __LINE__)
-
-#define TEST(name)															\
-	static void name();														\
-	static void Run_##name() {												\
-		g_currentTest = L## #name;											\
-		const int before = g_failures;										\
-		name();																\
-		wprintf(L"%s %s\n", before == g_failures ? L"  ok  " : L"  --  ", L## #name);	\
-	}																		\
-	static void name()
 
 // ---- Helpers --------------------------------------------------------------------
 
@@ -89,12 +57,12 @@ static DgLayoutParams Params(int clientWidth, int rowHeader = 0, int frozen = 0)
 
 // ---- Columns ----------------------------------------------------------------------
 
-TEST(Columns) {
+TEST_CASE("Columns", "[data]") {
 	DgColumnSet set;
 	int a = set.Insert(Col(L"A", 100));
 	int b = set.Insert(Col(L"B", 100));
 	int c = set.Insert(Col(L"C", 100), 0);   // first
-	CHECK(a > 0 && b > a && c > b);
+	CHECK((a > 0 && b > a && c > b));
 	CHECK(set.Order() == (std::vector<int>{ c, a, b }));
 	CHECK_INT(set.Find(b)->slot, 1);
 	CHECK_INT(set.DisplayIndexOf(b), 2);
@@ -119,7 +87,7 @@ TEST(Columns) {
 	CHECK_INT(set.SlotCount(), 4);
 }
 
-TEST(EnumItems) {
+TEST_CASE("EnumItems", "[format]") {
 	auto items = DgSplitEnumItems(L"Low\0Medium\0High\0");
 	CHECK_INT(items.size(), 3);
 	CHECK_STR(items[2], L"High");
@@ -129,7 +97,7 @@ TEST(EnumItems) {
 
 // ---- Layout -------------------------------------------------------------------------
 
-TEST(LayoutFixed) {
+TEST_CASE("LayoutFixed", "[layout]") {
 	auto set = ThreeColumns();
 	auto L = DgLayoutColumns(set, Params(500, 30));
 	CHECK_INT(L.cols.size(), 3);
@@ -155,7 +123,7 @@ TEST(LayoutFixed) {
 	CHECK_INT(L.cols[1].width, 24);
 }
 
-TEST(LayoutFill) {
+TEST_CASE("LayoutFill", "[layout]") {
 	DgColumnSet set;
 	set.Insert(Col(L"Fixed", 100));
 	set.Insert(Col(L"One", 0, 1));
@@ -174,7 +142,7 @@ TEST(LayoutFill) {
 	CHECK_INT(L.totalWidth, 148);
 }
 
-TEST(LayoutHidden) {
+TEST_CASE("LayoutHidden", "[layout]") {
 	auto set = ThreeColumns();
 	set.Find(set.Order()[0])->flags |= DgColFlag::Hidden;
 	auto L = DgLayoutColumns(set, Params(500));
@@ -184,7 +152,7 @@ TEST(LayoutHidden) {
 	CHECK_INT(L.totalWidth, 130);
 }
 
-TEST(LayoutFrozen) {
+TEST_CASE("LayoutFrozen", "[layout]") {
 	auto set = ThreeColumns();
 	auto L = DgLayoutColumns(set, Params(300, 20, 2));
 	CHECK_INT(L.frozenCount, 2);
@@ -203,7 +171,7 @@ TEST(LayoutFrozen) {
 
 // ---- Scrolling -------------------------------------------------------------------------
 
-TEST(ScrollX) {
+TEST_CASE("ScrollX", "[layout]") {
 	auto set = ThreeColumns();
 	auto L = DgLayoutColumns(set, Params(120));
 	CHECK_INT(DgMaxScrollX(L, 120), 110);
@@ -222,7 +190,7 @@ TEST(ScrollX) {
 	CHECK_INT(DgScrollXToShow(L, 0, 200, 2), 30);     // 50+80 in a view of 100
 }
 
-TEST(ScrollRows) {
+TEST_CASE("ScrollRows", "[layout]") {
 	auto L = DgLayoutColumns(ThreeColumns(), Params(500));   // header 20, rows of 10
 	CHECK_INT(DgFullRows(L, 125), 10);
 	CHECK_INT(DgFullRows(L, 5), 1);
@@ -233,7 +201,7 @@ TEST(ScrollRows) {
 	CHECK_INT(DgTopToShow(20, 10, 5), 5);
 }
 
-TEST(ScrollMap) {
+TEST_CASE("ScrollMap", "[layout]") {
 	CHECK_INT(DgScrollMap::Range(1000), 1000);
 	CHECK_INT(DgScrollMap::ToPos(500, 1000), 500);
 	CHECK_INT(DgScrollMap::FromPos(500, 1000), 500);
@@ -245,9 +213,9 @@ TEST(ScrollMap) {
 	CHECK_INT(DgScrollMap::FromPos(0, huge), 0);
 	CHECK_INT(DgScrollMap::FromPos(DgScrollMap::MaxPos, huge), huge);
 	int mid = DgScrollMap::ToPos(huge / 2, huge);
-	CHECK(mid > DgScrollMap::MaxPos / 2 - 2 && mid < DgScrollMap::MaxPos / 2 + 2);
+	CHECK((mid > DgScrollMap::MaxPos / 2 - 2 && mid < DgScrollMap::MaxPos / 2 + 2));
 	int64_t back = DgScrollMap::FromPos(mid, huge);
-	CHECK(back > huge / 2 - 10000 && back < huge / 2 + 10000);
+	CHECK((back > huge / 2 - 10000 && back < huge / 2 + 10000));
 	CHECK(DgScrollMap::FromPos(1, huge) > 0);                  // off the top
 	CHECK(DgScrollMap::FromPos(DgScrollMap::MaxPos - 1, huge) < huge);
 	// monotonic
@@ -261,7 +229,7 @@ TEST(ScrollMap) {
 
 // ---- Hit testing ----------------------------------------------------------------------------
 
-TEST(HitTest) {
+TEST_CASE("HitTest", "[layout]") {
 	auto set = ThreeColumns();
 	auto L = DgLayoutColumns(set, Params(300, 20, 1));   // A frozen at 20-120; B 120-170, C 170-250
 	DgView view{ 0, 5, 100, 300, 125 };
@@ -317,7 +285,7 @@ TEST(HitTest) {
 	CHECK_INT(hit.col, 0);
 }
 
-TEST(DropIndex) {
+TEST_CASE("DropIndex", "[layout]") {
 	auto set = ThreeColumns();
 	auto L = DgLayoutColumns(set, Params(500));   // 0-100, 100-150, 150-230
 	CHECK_INT(DgDropIndex(L, 0, 10), 0);
@@ -334,7 +302,7 @@ TEST(DropIndex) {
 
 // ---- The caret -------------------------------------------------------------------------------
 
-TEST(Navigate) {
+TEST_CASE("Navigate", "[caret]") {
 	DgPos p{ 5, 1 };
 	CHECK(DgNavigate(p, DgKey::Left, false, 10, 3, 4) == (DgPos{ 5, 0 }));
 	CHECK(DgNavigate({ 5, 0 }, DgKey::Left, false, 10, 3, 4) == (DgPos{ 5, 0 }));
@@ -358,7 +326,7 @@ TEST(Navigate) {
 
 // ---- Formatting -----------------------------------------------------------------------------
 
-TEST(FormatNumbers) {
+TEST_CASE("FormatNumbers", "[format]") {
 	DgNumberFormat nf;
 	CHECK_STR(DgFormatInt(0, true, nf), L"0");
 	CHECK_STR(DgFormatInt(999, true, nf), L"999");
@@ -376,7 +344,7 @@ TEST(FormatNumbers) {
 	CHECK_STR(DgFormatInt(-1234, true, german), L"-1.234");
 }
 
-TEST(FormatDates) {
+TEST_CASE("FormatDates", "[format]") {
 	// days after 1970-01-01, past FILETIME's 1601 epoch
 	const int64_t TicksPerSecond = 10'000'000;
 	const int64_t epoch = 116444736000000000LL;   // 1970-01-01 as a FILETIME
@@ -388,7 +356,7 @@ TEST(FormatDates) {
 	CHECK_STR(DgFormatDateTime(leap), L"2000-02-29 00:00:00");
 }
 
-TEST(FormatByColumn) {
+TEST_CASE("FormatByColumn", "[format]") {
 	DgNumberFormat nf;
 	DgColumn text;
 	CHECK_STR(DgFormat(DgValue::Text(L"hi"), text, nf), L"hi");
@@ -431,7 +399,7 @@ TEST(FormatByColumn) {
 	CHECK(DgProgress(DgValue::Float(-3)) == 0);
 }
 
-TEST(Align) {
+TEST_CASE("Align", "[format]") {
 	DgColumn c;
 	CHECK_INT(DgEffectiveAlign(c), DgAlign::Left);
 	c.type = DgColType::Float;
@@ -446,36 +414,36 @@ TEST(Align) {
 
 // ---- The store, the cache, the row map --------------------------------------------------------
 
-TEST(Store) {
+TEST_CASE("Store", "[data]") {
 	DgStore s;
 	s.Resize(3);
 	CHECK(s.Set(1, 2, DgCell{ DgValue::Text(L"b"), 4 }));
 	CHECK(!s.Set(3, 0, DgCell{}));
 	CHECK(!s.Set(0, -1, DgCell{}));
-	CHECK(s.Get(1, 2) && s.Get(1, 2)->value.s == L"b" && s.Get(1, 2)->image == 4);
+	CHECK((s.Get(1, 2) && s.Get(1, 2)->value.s == L"b" && s.Get(1, 2)->image == 4));
 	CHECK(s.Get(1, 7) == nullptr);
 	CHECK(s.Get(0, 0) == nullptr);
 	CHECK_INT(s.Insert(1, 2), 1);              // two before it
 	CHECK_INT(s.Count(), 5);
-	CHECK(s.Get(3, 2) && s.Get(3, 2)->value.s == L"b");
+	CHECK((s.Get(3, 2) && s.Get(3, 2)->value.s == L"b"));
 	CHECK_INT(s.Insert(-1, 1), 5);             // at the end
 	CHECK_INT(s.Insert(99, 1), 6);
 	CHECK(s.Erase(0, 3));
-	CHECK(s.Get(0, 2) && s.Get(0, 2)->value.s == L"b");
+	CHECK((s.Get(0, 2) && s.Get(0, 2)->value.s == L"b"));
 	CHECK(!s.Erase(2, 9));
 	s.ClearSlot(2);
-	CHECK(s.Get(0, 2) && s.Get(0, 2)->value.type == DgType::Empty);
+	CHECK((s.Get(0, 2) && s.Get(0, 2)->value.type == DgType::Empty));
 	s.Resize(1);
 	CHECK_INT(s.Count(), 1);
 }
 
-TEST(Cache) {
+TEST_CASE("Cache", "[data]") {
 	DgCellCache c;
 	c.Put(10, 1, DgCell{ DgValue::Int(1) });
 	c.Put(10, 2, DgCell{ DgValue::Int(2) });
 	c.Put(11, 1, DgCell{ DgValue::Int(3) });
 	c.Put(10, 1, DgCell{ DgValue::Int(4) });   // replaced
-	CHECK(c.Find(10, 1) && c.Find(10, 1)->value.i == 4);
+	CHECK((c.Find(10, 1) && c.Find(10, 1)->value.i == 4));
 	CHECK(c.Find(10, 3) == nullptr);
 	CHECK(c.Find(12, 1) == nullptr);
 	CHECK_INT(c.RowCount(), 2);
@@ -490,7 +458,7 @@ TEST(Cache) {
 	CHECK_INT(c.RowCount(), 0);
 }
 
-TEST(RowMap) {
+TEST_CASE("RowMap", "[data]") {
 	DgRowMap m;
 	m.Reset(5);
 	CHECK(m.Identity());
@@ -513,7 +481,7 @@ TEST(RowMap) {
 
 // ---- Selection ---------------------------------------------------------------------------------
 
-TEST(PosFromPoint) {
+TEST_CASE("PosFromPoint", "[layout]") {
 	auto set = ThreeColumns();
 	auto L = DgLayoutColumns(set, Params(300, 20, 1));   // A frozen at 20-120; B 120-170, C 170-250
 	DgView view{ 0, 5, 100, 300, 125 };
@@ -532,7 +500,7 @@ TEST(PosFromPoint) {
 	CHECK_INT(DgPosFromPoint(scrolled, v2, 5, 45).col, 1);          // the first one in view
 }
 
-TEST(SelectionCells) {
+TEST_CASE("SelectionCells", "[selection]") {
 	DgSelection s;
 	s.Reset({ 2, 1 }, 4);
 	CHECK(s.Ranges() == (std::vector<DgRange>{ { 2, 2, 1, 1 } }));
@@ -570,7 +538,7 @@ TEST(SelectionCells) {
 	CHECK(s.Empty());
 }
 
-TEST(SelectionModes) {
+TEST_CASE("SelectionModes", "[selection]") {
 	DgSelection s;
 	s.SetMode(DgSelMode::Rows, { 3, 2 }, 4);
 	CHECK(s.Ranges() == (std::vector<DgRange>{ { 3, 3, 0, 3 } }));
@@ -596,7 +564,7 @@ TEST(SelectionModes) {
 	CHECK(s.Ranges() == (std::vector<DgRange>{ { 2, 2, 2, 2 } }));
 }
 
-TEST(SelectionClamp) {
+TEST_CASE("SelectionClamp", "[selection]") {
 	DgSelection s;
 	s.Reset({ 2, 1 }, 4);
 	s.Extend({ 5, 3 }, 4);
@@ -619,7 +587,7 @@ TEST(SelectionClamp) {
 
 // ---- Sorting -------------------------------------------------------------------------------------
 
-TEST(ClickSort) {
+TEST_CASE("ClickSort", "[sort]") {
 	std::vector<DgSortKey> k;
 	k = DgClickSort(k, 3, false);
 	CHECK(k == (std::vector<DgSortKey>{ { 3, false } }));
@@ -639,7 +607,7 @@ TEST(ClickSort) {
 	CHECK(k == (std::vector<DgSortKey>{ { 3, false } }));
 }
 
-TEST(CompareValues) {
+TEST_CASE("CompareValues", "[sort]") {
 	CHECK_INT(DgCompareValues(DgValue::Int(2), DgValue::Float(2.5), nullptr), -1);
 	CHECK_INT(DgCompareValues(DgValue::Float(2.0), DgValue::Int(2), nullptr), 0);
 	CHECK_INT(DgCompareValues(DgValue::Bool(true), DgValue::Int(0), nullptr), 1);
@@ -655,7 +623,7 @@ TEST(CompareValues) {
 	CHECK_INT(DgCompareValues(DgValue::Text(L"B"), DgValue::Text(L"a"), noCase), 1);
 }
 
-TEST(SortOrder) {
+TEST_CASE("SortOrder", "[sort]") {
 	std::vector<DgValue> col{ DgValue::Int(3), DgValue{}, DgValue::Int(1), DgValue::Int(3), DgValue::Text(L"a"), DgValue::Float(2) };
 	auto value = [&](int64_t row, size_t) -> const DgValue* { return &col[(size_t)row]; };
 	CHECK(DgSortOrder(6, { false }, value, nullptr) == (std::vector<int64_t>{ 2, 5, 0, 3, 4, 1 }));
@@ -674,7 +642,7 @@ TEST(SortOrder) {
 
 // ---- Copying -----------------------------------------------------------------------------------------
 
-TEST(Tsv) {
+TEST_CASE("Tsv", "[clipboard]") {
 	CHECK_STR(DgTsvField(L"plain"), L"plain");
 	CHECK_STR(DgTsvField(L"a\tb"), L"\"a\tb\"");
 	CHECK_STR(DgTsvField(L"say \"hi\""), L"\"say \"\"hi\"\"\"");
@@ -683,7 +651,7 @@ TEST(Tsv) {
 	CHECK_STR(DgBuildTsv({}), L"");
 }
 
-TEST(Html) {
+TEST_CASE("Html", "[clipboard]") {
 	CHECK_STR(DgHtmlEscape(L"<a & \"b\">\r\nx\ny"), L"&lt;a &amp; &quot;b&quot;&gt;<br>x<br>y");
 	CHECK_STR(DgBuildHtmlTable({ { L"A" }, { L"1" } }, true), L"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>");
 	CHECK_STR(DgBuildHtmlTable({ { L"1", L"<" } }, false), L"<table><tr><td>1</td><td>&lt;</td></tr></table>");
@@ -705,7 +673,7 @@ TEST(Html) {
 	CHECK(cf.substr((size_t)startFragment, (size_t)(endFragment - startFragment)) == fragment);
 }
 
-TEST(SelectionTable) {
+TEST_CASE("SelectionTable", "[selection]") {
 	DgSelection s;
 	s.Reset({ 1, 0 }, 3);
 	s.Extend({ 2, 1 }, 3);
@@ -737,29 +705,29 @@ static bool SlashDate(const std::wstring& text, int64_t& ticks) {   // "17/11/20
 	return DgParseIsoDateTime(iso, ticks);
 }
 
-TEST(ParseNumbers) {
+TEST_CASE("ParseNumbers", "[edit]") {
 	DgNumberFormat nf;
 	auto in = TypedColumn(DgColType::Integer);
 	auto p = DgParseValue(L"1,234", in, nf);
-	CHECK(p.ok && p.value == DgValue::Int(1234));
+	CHECK((p.ok && p.value == DgValue::Int(1234)));
 	p = DgParseValue(L" -12 ", in, nf);
-	CHECK(p.ok && p.value == DgValue::Int(-12));
+	CHECK((p.ok && p.value == DgValue::Int(-12)));
 	p = DgParseValue(L"-9223372036854775808", in, nf);
-	CHECK(p.ok && p.value.i == INT64_MIN);
+	CHECK((p.ok && p.value.i == INT64_MIN));
 	CHECK(!DgParseValue(L"9223372036854775808", in, nf).ok);       // too big
 	CHECK(!DgParseValue(L"1.5", in, nf).ok);
 	CHECK_STR(DgParseValue(L"x", in, nf).error, L"Enter a whole number.");
 	CHECK(!DgParseValue(L"-", in, nf).ok);
 	p = DgParseValue(L"   ", in, nf);                                // nothing: an empty cell
-	CHECK(p.ok && p.value.type == DgType::Empty);
+	CHECK((p.ok && p.value.type == DgType::Empty));
 
 	auto fl = TypedColumn(DgColType::Float);
 	p = DgParseValue(L"3.25", fl, nf);
-	CHECK(p.ok && p.value == DgValue::Float(3.25));
+	CHECK((p.ok && p.value == DgValue::Float(3.25)));
 	p = DgParseValue(L"1e3", fl, nf);
-	CHECK(p.ok && p.value.d == 1000);
+	CHECK((p.ok && p.value.d == 1000));
 	p = DgParseValue(L"1,234.5", fl, nf);
-	CHECK(p.ok && p.value.d == 1234.5);
+	CHECK((p.ok && p.value.d == 1234.5));
 	CHECK(!DgParseValue(L"inf", fl, nf).ok);
 	CHECK(!DgParseValue(L"nan", fl, nf).ok);
 	CHECK(!DgParseValue(L"0x10", fl, nf).ok);
@@ -767,15 +735,15 @@ TEST(ParseNumbers) {
 
 	DgNumberFormat german{ L".", L"," };
 	p = DgParseValue(L"1.234,5", fl, german);
-	CHECK(p.ok && p.value.d == 1234.5);
+	CHECK((p.ok && p.value.d == 1234.5));
 	p = DgParseValue(L"1.234", in, german);
-	CHECK(p.ok && p.value.i == 1234);
+	CHECK((p.ok && p.value.i == 1234));
 	DgNumberFormat french{ L"\x202F", L"," };                         // grouped with a narrow no-break space
 	p = DgParseValue(L"1\x202F" L"234,5", fl, french);
-	CHECK(p.ok && p.value.d == 1234.5);
+	CHECK((p.ok && p.value.d == 1234.5));
 }
 
-TEST(ParseOthers) {
+TEST_CASE("ParseOthers", "[edit]") {
 	DgNumberFormat nf;
 	auto bo = TypedColumn(DgColType::Bool);
 	CHECK(DgParseValue(L"Yes", bo, nf).value == DgValue::Bool(true));
@@ -804,7 +772,7 @@ TEST(ParseOthers) {
 	CHECK(DgParseValue(L"x", TypedColumn(DgColType::Link), nf).value == DgValue::Text(L"x"));
 }
 
-TEST(ParseDates) {
+TEST_CASE("ParseDates", "[edit]") {
 	DgNumberFormat nf;
 	auto dt = TypedColumn(DgColType::DateTime);
 	int64_t t = 0;
@@ -815,7 +783,7 @@ TEST(ParseDates) {
 	CHECK(DgParseIsoDateTime(L" 2026-11-17T13:05:09 ", t));
 	CHECK_STR(DgFormatDateTime(t), L"2026-11-17 13:05:09");
 	CHECK(DgParseIsoDateTime(L"2024-02-29", t));
-	CHECK(DgParseIsoDateTime(L"1601-01-01", t) && t == 0);
+	CHECK((DgParseIsoDateTime(L"1601-01-01", t) && t == 0));
 	CHECK(!DgParseIsoDateTime(L"2025-02-29", t));
 	CHECK(!DgParseIsoDateTime(L"2026-11-31", t));
 	CHECK(!DgParseIsoDateTime(L"2026-13-01", t));
@@ -826,11 +794,11 @@ TEST(ParseDates) {
 
 	CHECK(!DgParseValue(L"17/11/2026", dt, nf).ok);
 	auto p = DgParseValue(L"17/11/2026", dt, nf, SlashDate);        // the user's format
-	CHECK(p.ok && DgFormatDateTime(p.value.i) == L"2026-11-17 00:00:00");
+	CHECK((p.ok && DgFormatDateTime(p.value.i) == L"2026-11-17 00:00:00"));
 	CHECK(DgParseValue(L"2026-11-17", dt, nf, SlashDate).ok);        // ISO first
 }
 
-TEST(EditText) {
+TEST_CASE("EditText", "[edit]") {
 	DgNumberFormat nf;
 	DgColumn in = TypedColumn(DgColType::Integer);
 	in.flags = DgColFlag::GroupDigits;
@@ -856,11 +824,11 @@ TEST(EditText) {
 	// what's edited parses back to the same value
 	for (auto v : { DgValue::Float(1e-7), DgValue::Float(-123456.789), DgValue::Float(1.0 / 3) }) {
 		auto back = DgParseValue(DgEditText(v, fl, german), fl, german);
-		CHECK(back.ok && back.value == v);
+		CHECK((back.ok && back.value == v));
 	}
 }
 
-TEST(ParseTsv) {
+TEST_CASE("ParseTsv", "[edit]") {
 	using Rows = std::vector<std::vector<std::wstring>>;
 	CHECK(DgParseTsv(L"a\tb\r\nc\td\r\n") == (Rows{ { L"a", L"b" }, { L"c", L"d" } }));
 	CHECK(DgParseTsv(L"a\tb\nc") == (Rows{ { L"a", L"b" }, { L"c" } }));
@@ -874,13 +842,13 @@ TEST(ParseTsv) {
 	CHECK(DgParseTsv(DgBuildTsv(table)) == table);
 }
 
-TEST(PasteTargets) {
+TEST_CASE("PasteTargets", "[edit]") {
 	std::vector<std::vector<std::wstring>> two{ { L"a", L"b" }, { L"c", L"d" } };
 	DgSelection s;
 	s.Reset({ 2, 1 }, 3);
 	auto cells = DgPasteTargets(two, s, 4, 3, 100);
 	CHECK_INT(cells.size(), 4);
-	CHECK(cells[3].row == 3 && cells[3].col == 2 && *cells[3].text == L"d");
+	CHECK((cells[3].row == 3 && cells[3].col == 2 && *cells[3].text == L"d"));
 	s.Reset({ 3, 2 }, 3);                                           // cut at the edges
 	cells = DgPasteTargets(two, s, 4, 3, 100);
 	CHECK_INT(cells.size(), 1);
@@ -899,11 +867,11 @@ TEST(PasteTargets) {
 	s.Reset({ 0, 0 }, 3);
 	s.Extend({ 1, 1 }, 3);                                          // several fields: from the top-left
 	cells = DgPasteTargets(two, s, 4, 3, 100);
-	CHECK(cells[0].row == 0 && cells[0].col == 0);
+	CHECK((cells[0].row == 0 && cells[0].col == 0));
 	CHECK_INT(DgPasteTargets({}, s, 4, 3, 100).size(), 0);
 }
 
-TEST(EditKeys) {
+TEST_CASE("EditKeys", "[edit]") {
 	CHECK(DgEditKey(0x1B, false, false) == DgEditAction::Cancel);
 	CHECK(DgEditKey(0x0D, false, false) == DgEditAction::CommitDown);
 	CHECK(DgEditKey(0x0D, true, false) == DgEditAction::CommitUp);
@@ -915,25 +883,25 @@ TEST(EditKeys) {
 	CHECK(DgEditKey('A', false, true) == DgEditAction::None);
 }
 
-TEST(Undo) {
+TEST_CASE("Undo", "[edit]") {
 	auto step = [](int64_t row) {
 		DgEditStep s;
 		s.changes.push_back({ row, 1, DgCell{}, DgCell{ DgValue::Int(row) } });
 		return s;
 	};
 	DgUndoStack u(3);
-	CHECK(!u.CanUndo() && !u.CanRedo());
+	CHECK((!u.CanUndo() && !u.CanRedo()));
 	CHECK(u.Undo() == nullptr);
 	u.Push(step(1));
 	u.Push(step(2));
 	u.Push(step(3));
 	auto s = u.Undo();
-	CHECK(s && s->changes[0].row == 3);
+	CHECK((s && s->changes[0].row == 3));
 	s = u.Undo();
-	CHECK(s && s->changes[0].row == 2);
+	CHECK((s && s->changes[0].row == 2));
 	CHECK(u.CanRedo());
 	s = u.Redo();
-	CHECK(s && s->changes[0].row == 2);
+	CHECK((s && s->changes[0].row == 2));
 	u.Push(step(4));                                                // drops the undone 3
 	CHECK(!u.CanRedo());
 	CHECK_INT(u.Count(), 3);
@@ -947,47 +915,243 @@ TEST(Undo) {
 	CHECK(!u.CanRedo());
 }
 
-int wmain() {
-	wprintf(L"DataGrid model tests\n\n");
+// ---- Filtering and grouping -----------------------------------------------------------------------------
 
-	Run_Columns();
-	Run_EnumItems();
-	Run_LayoutFixed();
-	Run_LayoutFill();
-	Run_LayoutHidden();
-	Run_LayoutFrozen();
-	Run_ScrollX();
-	Run_ScrollRows();
-	Run_ScrollMap();
-	Run_HitTest();
-	Run_DropIndex();
-	Run_Navigate();
-	Run_FormatNumbers();
-	Run_FormatDates();
-	Run_FormatByColumn();
-	Run_Align();
-	Run_Store();
-	Run_Cache();
-	Run_RowMap();
-	Run_PosFromPoint();
-	Run_SelectionCells();
-	Run_SelectionModes();
-	Run_SelectionClamp();
-	Run_ClickSort();
-	Run_CompareValues();
-	Run_SortOrder();
-	Run_Tsv();
-	Run_Html();
-	Run_SelectionTable();
-	Run_ParseNumbers();
-	Run_ParseOthers();
-	Run_ParseDates();
-	Run_EditText();
-	Run_ParseTsv();
-	Run_PasteTargets();
-	Run_EditKeys();
-	Run_Undo();
-
-	wprintf(L"\n%d checks, %d failed\n", g_checks, g_failures);
-	return g_failures;
+TEST_CASE("FilterRowLayout", "[layout]") {
+	auto set = ThreeColumns();
+	auto p = Params(300, 20);
+	p.filterRow = 15;
+	auto L = DgLayoutColumns(set, p);                               // titles 0-20, the filter row 20-35
+	CHECK_INT(L.header, 35);
+	CHECK_INT(L.titles, 20);
+	DgView view{ 0, 0, 100, 300, 200 };
+	CHECK_INT(DgHitTest(L, view, 60, 10, 3).flags, DgHitFlag::Header);
+	auto hit = DgHitTest(L, view, 60, 25, 3);
+	CHECK_INT(hit.flags, DgHitFlag::FilterRow);
+	CHECK_INT(hit.col, 0);
+	CHECK_INT(DgHitTest(L, view, 121, 25, 3).flags, DgHitFlag::FilterRow);   // no dividers there
+	CHECK_INT(DgHitTest(L, view, 10, 25, 3).flags, DgHitFlag::Corner);
+	CHECK_INT(DgHitTest(L, view, 290, 25, 3).flags, DgHitFlag::Empty);
+	hit = DgHitTest(L, view, 60, 36, 3);                            // the first row starts under it
+	CHECK_INT(hit.flags, DgHitFlag::Cell);
+	CHECK_INT(hit.row, 0);
+	CHECK_INT(DgFullRows(L, 135), 10);
 }
+
+TEST_CASE("RowMapGroups", "[data]") {
+	DgRowMap m;
+	m.SetOrder({ -1, 3, 1, -2, 0 }, 4);
+	CHECK_INT(m.Count(), 5);
+	CHECK_INT(m.ToData(0), -1);
+	CHECK_INT(m.GroupOf(0), 0);
+	CHECK_INT(m.ToData(1), 3);
+	CHECK_INT(m.GroupOf(1), -1);
+	CHECK_INT(m.GroupOf(3), 1);
+	CHECK_INT(m.ToView(0), 4);
+	CHECK_INT(m.ToView(2), -1);                                     // in a collapsed group or filtered out
+	m.Reset(3);
+	CHECK_INT(m.GroupOf(0), -1);
+}
+
+TEST_CASE("FilterMatch", "[view]") {
+	DgNumberFormat nf;
+	DgColumn text;
+	DgFilter contains;
+	contains.text = L"ELL";
+	CHECK(DgFilterMatch(contains, DgValue::Text(L"Hello"), text, nf));
+	CHECK(!DgFilterMatch(contains, DgValue::Text(L"Help"), text, nf));
+	CHECK(!DgFilterMatch(contains, DgValue{}, text, nf));
+	contains.text.clear();
+	CHECK(DgFilterMatch(contains, DgValue{}, text, nf));            // nothing to look for: everything
+	DgColumn grouped;
+	grouped.type = DgColType::Integer;
+	grouped.flags = DgColFlag::GroupDigits;
+	contains.text = L"1,2";                                         // the text as shown
+	CHECK(DgFilterMatch(contains, DgValue::Int(1234), grouped, nf));
+
+	DgFilter range;
+	range.kind = DgFilterKind::Range;
+	range.min = DgValue::Int(10);
+	range.max = DgValue::Float(20.5);
+	CHECK(DgFilterMatch(range, DgValue::Int(10), grouped, nf));
+	CHECK(DgFilterMatch(range, DgValue::Float(20.5), grouped, nf));
+	CHECK(!DgFilterMatch(range, DgValue::Int(21), grouped, nf));
+	CHECK(!DgFilterMatch(range, DgValue::Int(9), grouped, nf));
+	CHECK(!DgFilterMatch(range, DgValue::Text(L"15"), grouped, nf)); // not a number
+	CHECK(!DgFilterMatch(range, DgValue{}, grouped, nf));
+	range.max = DgValue{};                                          // open above
+	CHECK(DgFilterMatch(range, DgValue::Int(1000), grouped, nf));
+	DgFilter dates;
+	dates.kind = DgFilterKind::Range;
+	dates.min = DgValue::DateTime(100);
+	CHECK(DgFilterMatch(dates, DgValue::DateTime(150), grouped, nf));
+	CHECK(!DgFilterMatch(dates, DgValue::Int(150), grouped, nf));
+
+	DgFilter values;
+	values.kind = DgFilterKind::Values;
+	values.values = { L"a", L"c" };
+	CHECK(DgFilterMatch(values, DgValue::Text(L"c"), text, nf));
+	CHECK(!DgFilterMatch(values, DgValue::Text(L"b"), text, nf));
+	CHECK(!DgFilterMatch(values, DgValue{}, text, nf));
+	values.blanks = true;
+	CHECK(DgFilterMatch(values, DgValue{}, text, nf));
+}
+
+// six rows: a category (1), a quantity summed (2), a price averaged (3), a flag (4)
+static DgViewInput Products() {
+	DgViewInput in;
+	in.count = 6;
+	DgColumn cat, qty, price, flag;
+	cat.id = 1;
+	qty.id = 2;
+	qty.type = DgColType::Integer;
+	qty.aggregate = DgAggKind::Sum;
+	price.id = 3;
+	price.type = DgColType::Float;
+	price.aggregate = DgAggKind::Avg;
+	flag.id = 4;
+	flag.type = DgColType::Bool;
+	in.columns = { cat, qty, price, flag };
+	auto T = [](const wchar_t* s) { return DgValue::Text(s); };
+	in.values = {
+		{ T(L"A"), T(L"B"), T(L"A"), DgValue{}, T(L"B"), T(L"A") },
+		{ DgValue::Int(5), DgValue::Int(3), DgValue::Int(1), DgValue::Int(7), DgValue::Int(2), DgValue::Int(4) },
+		{ DgValue::Float(1), DgValue::Float(2), DgValue::Float(3), DgValue::Float(4), DgValue::Float(5), DgValue::Float(6) },
+		{ DgValue::Bool(true), DgValue::Bool(false), DgValue::Bool(true), DgValue::Bool(true), DgValue::Bool(false), DgValue::Bool(false) },
+	};
+	return in;
+}
+
+TEST_CASE("BuildViewFilterSort", "[view]") {
+	using Rows = std::vector<int64_t>;
+	auto in = Products();
+	CHECK(DgBuildView(in).identity);
+	DgFilter f;
+	f.id = 1;
+	f.text = L"a";
+	in.filters = { f };
+	auto v = DgBuildView(in);
+	CHECK(!v.identity);
+	CHECK(v.order == (Rows{ 0, 2, 5 }));
+	CHECK(DgFlatten(v, {}) == (Rows{ 0, 2, 5 }));
+	in.sortKeys = { { 2, false } };
+	CHECK(DgBuildView(in).order == (Rows{ 2, 5, 0 }));
+	in.filters.clear();
+	CHECK(DgBuildView(in).order == (Rows{ 2, 4, 1, 5, 0, 3 }));
+	DgFilter none;
+	none.id = 1;
+	none.text = L"zzz";
+	in.filters = { none };
+	v = DgBuildView(in);
+	CHECK((v.order.empty() && !v.identity));                          // nothing left, not "everything"
+	std::atomic<bool> stop{ true };
+	CHECK(DgBuildView(in, &stop).canceled);
+}
+
+TEST_CASE("BuildViewGroups", "[view]") {
+	using Rows = std::vector<int64_t>;
+	auto in = Products();
+	in.groupIds = { 1 };
+	auto v = DgBuildView(in);
+	CHECK(v.order == (Rows{ 0, 2, 5, 1, 4, 3 }));                  // A, B, then the blank one; stable inside
+	CHECK_INT(v.groups.size(), 3);
+	auto& a = v.groups[0];
+	CHECK(a.value == DgValue::Text(L"A"));
+	CHECK_STR(a.key, L"1=A");
+	CHECK_INT(a.count, 3);
+	CHECK((a.first == 0 && a.end == 3 && a.subtreeEnd == 1));
+	CHECK_INT(a.aggregates.size(), 2);
+	CHECK((a.aggregates[0].id == 2 && a.aggregates[0].value == DgValue::Int(10)));   // 5 + 1 + 4
+	CHECK((a.aggregates[1].value.type == DgType::Float && std::fabs(a.aggregates[1].value.d - 10.0 / 3) < 1e-12));
+	CHECK(v.groups[2].value.type == DgType::Empty);
+	CHECK(DgFlatten(v, {}) == (Rows{ -1, 0, 2, 5, -2, 1, 4, -3, 3 }));
+	CHECK(DgFlatten(v, { L"1=B" }) == (Rows{ -1, 0, 2, 5, -2, -3, 3 }));
+
+	in.sortKeys = { { 1, true }, { 2, true } };                     // the group's direction from its key; inside, by quantity
+	v = DgBuildView(in);
+	CHECK(v.order == (Rows{ 1, 4, 0, 5, 2, 3 }));
+	CHECK(v.groups[0].value == DgValue::Text(L"B"));
+}
+
+TEST_CASE("BuildViewNested", "[view]") {
+	using Rows = std::vector<int64_t>;
+	auto in = Products();
+	in.groupIds = { 1, 4 };
+	auto v = DgBuildView(in);
+	// A (F: 5; T: 0, 2), B (F: 1, 4), blank (T: 3)
+	CHECK_INT(v.groups.size(), 7);
+	CHECK((v.groups[0].level == 0 && v.groups[0].subtreeEnd == 3));
+	CHECK((v.groups[1].level == 1 && v.groups[1].count == 1 && v.groups[1].subtreeEnd == 2));
+	CHECK_STR(v.groups[1].key, L"1=A\x1F" L"4=false");
+	CHECK((v.groups[3].value == DgValue::Text(L"B") && v.groups[3].subtreeEnd == 5));
+	CHECK_INT(v.groups[3].count, 2);
+	CHECK(v.groups[4].aggregates[0].value == DgValue::Int(5));     // B, false: 3 + 2
+	CHECK(DgFlatten(v, {}) == (Rows{ -1, -2, 5, -3, 0, 2, -4, -5, 1, 4, -6, -7, 3 }));
+	CHECK(DgFlatten(v, { L"1=A" }) == (Rows{ -1, -4, -5, 1, 4, -6, -7, 3 }));
+	CHECK(DgFlatten(v, { L"1=A\x1F" L"4=true" }) == (Rows{ -1, -2, 5, -3, -4, -5, 1, 4, -6, -7, 3 }));
+
+	DgFilter f;                                                     // filtering first: the groups only have what's left
+	f.id = 2;
+	f.kind = DgFilterKind::Range;
+	f.min = DgValue::Int(4);
+	in.filters = { f };
+	v = DgBuildView(in);
+	CHECK(DgFlatten(v, {}) == (Rows{ -1, -2, 5, -3, 0, -4, -5, 3 }));
+}
+
+TEST_CASE("Aggregates", "[view]") {
+	DgNumberFormat nf;
+	DgColumn qty;
+	qty.type = DgColType::Integer;
+	qty.flags = DgColFlag::GroupDigits;
+	CHECK_STR(DgAggregateText({ 2, DgAggKind::Sum, DgValue::Int(12345) }, qty, nf), L"\x03A3 12,345");
+	CHECK_STR(DgAggregateText({ 2, DgAggKind::Avg, DgValue::Float(10.0 / 3) }, qty, nf), L"avg 3.33");
+	CHECK_STR(DgAggregateText({ 2, DgAggKind::Count, DgValue::Int(1500) }, qty, nf), L"n 1,500");
+	CHECK_STR(DgAggregateText({ 2, DgAggKind::Max, DgValue::Int(7) }, qty, nf), L"max 7");
+	CHECK_STR(DgAggregateText({ 2, DgAggKind::Sum, DgValue{} }, qty, nf), L"");
+
+	auto in = Products();                                           // count, min and max, mixed with empties
+	in.columns[1].aggregate = DgAggKind::Max;
+	in.columns[3].aggregate = DgAggKind::Count;
+	in.values[1][2] = DgValue{};
+	in.groupIds = { 1 };
+	auto v = DgBuildView(in);
+	auto& a = v.groups[0].aggregates;                               // A: rows 0, 2, 5
+	CHECK_INT(a.size(), 3);
+	CHECK((a[0].kind == DgAggKind::Max && a[0].value == DgValue::Int(5)));
+	CHECK((a[2].kind == DgAggKind::Count && a[2].value == DgValue::Int(3)));
+}
+
+TEST_CASE("DistinctTexts", "[view]") {
+	DgNumberFormat nf;
+	DgColumn text;
+	std::vector<DgValue> values{ DgValue::Text(L"B"), DgValue::Text(L"A"), DgValue{}, DgValue::Text(L"A"), DgValue::Text(L"C") };
+	auto at = [&](int64_t row) -> const DgValue* { return &values[(size_t)row]; };
+	bool blanks, more;
+	auto texts = DgDistinctTexts(5, at, text, nf, nullptr, 10, blanks, more);
+	CHECK(texts == (std::vector<std::wstring>{ L"A", L"B", L"C" }));
+	CHECK((blanks && !more));
+	texts = DgDistinctTexts(5, at, text, nf, nullptr, 2, blanks, more);
+	CHECK(texts == (std::vector<std::wstring>{ L"A", L"B" }));
+	CHECK(more);
+	std::vector<DgValue> numbers{ DgValue::Int(10), DgValue::Int(9), DgValue::Int(100) };   // by value, not text
+	auto atNumber = [&](int64_t row) -> const DgValue* { return &numbers[(size_t)row]; };
+	DgColumn in;
+	in.type = DgColType::Integer;
+	texts = DgDistinctTexts(3, atNumber, in, nf, nullptr, 10, blanks, more);
+	CHECK(texts == (std::vector<std::wstring>{ L"9", L"10", L"100" }));
+	CHECK(!blanks);
+}
+
+TEST_CASE("SkipGroupRows", "[caret]") {
+	auto isGroup = [](int64_t row) { return row == 0 || row == 3; };
+	CHECK_INT(DgSkipGroupRows(0, 1, 5, isGroup), 1);
+	CHECK_INT(DgSkipGroupRows(3, 1, 5, isGroup), 4);
+	CHECK_INT(DgSkipGroupRows(3, -1, 5, isGroup), 2);
+	CHECK_INT(DgSkipGroupRows(0, -1, 5, isGroup), 1);               // nothing above: the other way
+	CHECK_INT(DgSkipGroupRows(4, 1, 5, isGroup), 4);
+	CHECK_INT(DgSkipGroupRows(9, 1, 5, isGroup), 4);                // clamped
+	CHECK_INT(DgSkipGroupRows(0, 1, 2, [](int64_t) { return true; }), -1);
+	CHECK_INT(DgSkipGroupRows(0, 1, 0, isGroup), -1);
+}
+

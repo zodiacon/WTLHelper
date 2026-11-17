@@ -45,6 +45,39 @@ namespace {
 		}
 		return DT_LEFT;
 	}
+
+	enum class Glyph { Down, Right, Funnel };
+
+	// a small filled shape in the middle of box
+	void PaintGlyph(HDC dc, Glyph glyph, const RECT& box, COLORREF color) {
+		int s = std::max(4, (int)std::min(box.right - box.left, box.bottom - box.top) / 2);   // its size
+		int cx = (box.left + box.right) / 2, cy = (box.top + box.bottom) / 2;
+		HBRUSH brush = ::CreateSolidBrush(color);
+		HPEN pen = ::CreatePen(PS_SOLID, 1, color);
+		HGDIOBJ oldBrush = ::SelectObject(dc, brush), oldPen = ::SelectObject(dc, pen);
+		switch (glyph) {
+			case Glyph::Down: {
+				POINT p[3] = { { cx - s / 2, cy - s / 4 }, { cx + s / 2, cy - s / 4 }, { cx, cy + s / 4 } };
+				::Polygon(dc, p, 3);
+				break;
+			}
+			case Glyph::Right: {
+				POINT p[3] = { { cx - s / 4, cy - s / 2 }, { cx - s / 4, cy + s / 2 }, { cx + s / 4, cy } };
+				::Polygon(dc, p, 3);
+				break;
+			}
+			case Glyph::Funnel: {   // a cone over a stem
+				POINT p[6] = { { cx - s / 2, cy - s / 2 }, { cx + s / 2, cy - s / 2 }, { cx + s / 8, cy },
+					{ cx + s / 8, cy + s / 2 }, { cx - s / 8, cy + s / 2 - s / 6 }, { cx - s / 8, cy } };
+				::Polygon(dc, p, 6);
+				break;
+			}
+		}
+		::SelectObject(dc, oldBrush);
+		::SelectObject(dc, oldPen);
+		::DeleteObject(brush);
+		::DeleteObject(pen);
+	}
 }
 
 void CDataGridCtrl::UpdateColors() {
@@ -151,6 +184,10 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 		if (y >= clip.bottom || y + L.rowHeight <= clip.top)
 			continue;
 		int64_t dataRow = d.rows.ToData(r);
+		if (int64_t g = d.rows.GroupOf(r); g >= 0 && g < (int64_t)d.view.groups.size()) {
+			PaintGroupRow(dc, d.view.groups[(size_t)g], y);
+			continue;
+		}
 		bool caretRow = r == caretView && !(style & DGVS_NOCARETROW);
 		if (caretRow)
 			Fill(dc, RECT{ L.rowHeader, y, contentRight, y + L.rowHeight }, c.caretRow);
@@ -272,11 +309,11 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 	// ---- the header
 	if (L.header > 0 && clip.top < L.header) {
 		dc.SelectFont(m_hBold);
-		Fill(dc, RECT{ 0, 0, w, L.header }, c.headerBack);
+		Fill(dc, RECT{ 0, 0, w, L.titles }, c.headerBack);
 		for (int i : order) {
 			int x = L.Left(i, d.scrollX), right = x + L.cols[i].width;
-			RECT cell{ x, 0, right, L.header };
-			RECT area{ i < L.frozenCount ? L.rowHeader : L.ScrollLeft(), 0, i < L.frozenCount ? L.ScrollLeft() : w, L.header };
+			RECT cell{ x, 0, right, L.titles };
+			RECT area{ i < L.frozenCount ? L.rowHeader : L.ScrollLeft(), 0, i < L.frozenCount ? L.ScrollLeft() : w, L.titles };
 			RECT visible;
 			if (!::IntersectRect(&visible, &cell, &area))
 				continue;
@@ -289,12 +326,24 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			Fill(dc, visible, pressed ? c.headerPressed : hot ? c.headerHot : c.headerBack);
 			dc.SaveDC();
 			dc.IntersectClipRect(&visible);
-			RECT text{ x + pad, 0, right - pad, L.header };
+			RECT text{ x + pad, 0, right - pad, L.titles };
+			// the menu's button (a funnel when it's filtered), or a funnel alone without the menu
+			bool filtered = HasFilter(column->id);
+			if ((style & DGVS_HEADERMENU) || filtered) {
+				int bw = Scale(18);
+				RECT button{ right - bw, Scale(3), right - Scale(2), L.titles - Scale(3) };
+				if ((style & DGVS_HEADERMENU) && d.hotCol == i)
+					Fill(dc, button, c.headerPressed);
+				COLORREF glyph = filtered ? c.caret : Blend(c.headerBack, c.headerText, 60);
+				if (filtered || ((style & DGVS_HEADERMENU) && d.hotCol == i))
+					PaintGlyph(dc, filtered ? Glyph::Funnel : Glyph::Down, button, glyph);
+				text.right = button.left - Scale(2);
+			}
 			// sorted by it: an arrow at the right, with its place among the keys when there are several
 			auto key = std::find_if(d.sortKeys.begin(), d.sortKeys.end(), [&](auto& k) { return k.id == column->id; });
 			if (key != d.sortKeys.end()) {
 				int aw = Scale(8), hgt = Scale(4);
-				int ax = text.right - aw, ay = (L.header - hgt) / 2;
+				int ax = text.right - aw, ay = (L.titles - hgt) / 2;
 				COLORREF arrow = Blend(c.headerBack, c.headerText, 70);
 				CBrush brush;
 				brush.CreateSolidBrush(arrow);
@@ -312,7 +361,7 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 					auto number = std::to_wstring(key - d.sortKeys.begin() + 1);
 					HFONT f = dc.SelectFont(m_hFont);
 					dc.SetTextColor(arrow);
-					RECT nr{ text.right - d.digitWidth * 2, 0, text.right, L.header };
+					RECT nr{ text.right - d.digitWidth * 2, 0, text.right, L.titles };
 					dc.DrawText(number.c_str(), (int)number.size(), &nr, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
 					dc.SelectFont(f);
 					text.right = nr.right - d.digitWidth * (int)number.size() - Scale(3);
@@ -323,25 +372,57 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			dc.DrawText(column->title.c_str(), (int)column->title.size(), &text,
 				DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | AlignFlags(align == DgAlign::Center ? DgAlign::Center : align));
 			dc.RestoreDC(-1);
-			VLine(dc, right - 1, Scale(4), L.header - Scale(4), c.grid);
+			VLine(dc, right - 1, Scale(4), L.titles - Scale(4), c.grid);
 		}
 		if (L.rowHeader > 0) {
-			Fill(dc, RECT{ 0, 0, L.rowHeader, L.header }, c.headerBack);
-			VLine(dc, L.rowHeader - 1, 0, L.header, c.grid);
+			Fill(dc, RECT{ 0, 0, L.rowHeader, L.titles }, c.headerBack);
+			VLine(dc, L.rowHeader - 1, 0, L.titles, c.grid);
 		}
 		if (L.frozenCount > 0)
-			VLine(dc, L.ScrollLeft() - 1, 0, L.header, Blend(c.back, c.text, 45));
-		HLine(dc, 0, w, L.header - 1, Blend(c.back, c.text, 25));
+			VLine(dc, L.ScrollLeft() - 1, 0, L.titles, Blend(c.back, c.text, 45));
+		HLine(dc, 0, w, L.titles - 1, Blend(c.back, c.text, 25));
+
+		// the filter row: each column's filter, or "Filter..." where the mouse is
+		if (L.header > L.titles) {
+			dc.SelectFont(m_hFont);
+			Fill(dc, RECT{ 0, L.titles, w, L.header }, c.back);
+			for (int i : order) {
+				RECT visible;
+				if (!FilterRect(i, visible))
+					continue;
+				int id = L.cols[i].id;
+				if (id == d.filterEditId)
+					continue;   // its edit box is over it
+				int x = L.Left(i, d.scrollX), right = x + L.cols[i].width;
+				auto summary = FilterSummary(id);
+				bool placeholder = summary.empty() && d.hotFilterCol == i;
+				if (placeholder)
+					summary = L"Filter\x2026";
+				dc.SaveDC();
+				dc.IntersectClipRect(&visible);
+				RECT text{ x + pad, L.titles, right - pad, L.header };
+				dc.SetTextColor(placeholder ? Blend(c.back, c.text, 45) : c.caret);
+				dc.DrawText(summary.c_str(), (int)summary.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+				dc.RestoreDC(-1);
+				VLine(dc, right - 1, L.titles, L.header, c.grid);
+			}
+			if (L.rowHeader > 0) {
+				Fill(dc, RECT{ 0, L.titles, L.rowHeader, L.header }, c.headerBack);
+				VLine(dc, L.rowHeader - 1, L.titles, L.header, c.grid);
+			}
+			HLine(dc, 0, w, L.header - 1, Blend(c.back, c.text, 25));
+			dc.SelectFont(m_hBold);
+		}
 
 		// a column being dragged: its title follows the mouse, a bar marks where it would go
 		if (d.drag == DgData::Drag::Reorder && d.dragCol >= 0 && d.dragCol < n) {
 			auto column = d.columns.Find(L.cols[d.dragCol].id);
 			int left = d.dragX - d.dragOffset;
-			RECT ghost{ left, 0, left + L.cols[d.dragCol].width, L.header };
+			RECT ghost{ left, 0, left + L.cols[d.dragCol].width, L.titles };
 			Fill(dc, ghost, c.headerPressed);
 			Frame(dc, ghost, 1, c.caret);
 			if (column) {
-				RECT text{ ghost.left + pad, 0, ghost.right - pad, L.header };
+				RECT text{ ghost.left + pad, 0, ghost.right - pad, L.titles };
 				dc.SetTextColor(c.headerText);
 				dc.DrawText(column->title.c_str(), (int)column->title.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 			}
@@ -354,6 +435,18 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 			}
 		}
 	}
+	// rows being rebuilt on the worker thread: a note in the corner over the last ones
+	if (d.job) {
+		dc.SelectFont(m_hFont);
+		std::wstring note = L"Working\x2026";
+		SIZE size{};
+		dc.GetTextExtent(note.c_str(), (int)note.size(), &size);
+		RECT box{ w - size.cx - Scale(28), h - size.cy - Scale(18), w - Scale(8), h - Scale(8) };
+		Fill(dc, box, c.headerBack);
+		Frame(dc, box, 1, c.grid);
+		dc.SetTextColor(c.headerText);
+		dc.DrawText(note.c_str(), (int)note.size(), &box, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+	}
 	dc.SelectFont(oldFont);
 
 	// a virtual grid keeps the cells around the rows in view
@@ -361,4 +454,56 @@ void CDataGridCtrl::Paint(HDC hdc, const RECT& clip) {
 		int64_t full = DgFullRows(L, h);
 		d.cache.Trim(first - full, last + full);
 	}
+}
+
+void CDataGridCtrl::PaintGroupRow(HDC hdc, const DgGroup& group, int y) {
+	auto& d = *m_Data;
+	auto& c = d.colors;
+	auto& L = d.layout;
+	CDCHandle dc(hdc);
+	int w = d.clientWidth, pad = Scale(6), h = L.rowHeight;
+	Fill(dc, RECT{ L.rowHeader, y, w, y + h }, Blend(c.back, c.text, 7));
+	if (L.rowHeader > 0) {
+		Fill(dc, RECT{ 0, y, L.rowHeader, y + h }, c.headerBack);
+		VLine(dc, L.rowHeader - 1, y, y + h, c.grid);
+	}
+	// open or closed, indented by its level
+	bool open = !d.collapsed.count(group.key);
+	int left = L.rowHeader + Scale(4) + group.level * Scale(16);
+	RECT mark{ left, y, left + Scale(16), y + h };
+	PaintGlyph(dc, open ? Glyph::Down : Glyph::Right, mark, Blend(c.back, c.text, 65));
+
+	// the aggregates in their columns, the label up to the first of them
+	auto column = d.columns.Find(group.id);
+	int labelLeft = mark.right + Scale(2), labelRight = w;
+	HFONT old = dc.SelectFont(m_hFont);
+	for (auto& a : group.aggregates) {
+		int i = L.IndexOf(a.id);
+		auto aggColumn = d.columns.Find(a.id);
+		if (i < 0 || !aggColumn)
+			continue;
+		auto text = DgAggregateText(a, *aggColumn, d.numberFormat, DgValueText);
+		RECT cell{ L.Left(i, d.scrollX), y, L.Right(i, d.scrollX), y + h };
+		RECT area{ i < L.frozenCount ? L.rowHeader : L.ScrollLeft(), y, i < L.frozenCount ? L.ScrollLeft() : w, y + h };
+		RECT visible;
+		if (text.empty() || !::IntersectRect(&visible, &cell, &area))
+			continue;
+		if (visible.left > labelLeft + Scale(60))
+			labelRight = std::min(labelRight, (int)visible.left - pad);
+		dc.SaveDC();
+		dc.IntersectClipRect(&visible);
+		RECT inner{ cell.left + pad, y, cell.right - pad, y + h - 1 };
+		dc.SetTextColor(Blend(c.back, c.text, 80));
+		dc.DrawText(text.c_str(), (int)text.size(), &inner, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | AlignFlags(DgEffectiveAlign(*aggColumn)));
+		dc.RestoreDC(-1);
+	}
+	std::wstring value = group.value.type == DgType::Empty ? L"(Blank)" : column ? DgValueText(group.value, *column, d.numberFormat) : L"";
+	std::wstring label = (column ? column->title + L": " : L"") + value + L"    " + DgFormatInt(group.count, true, d.numberFormat)
+		+ (group.count == 1 ? L" row" : L" rows");
+	dc.SelectFont(m_hBold);
+	dc.SetTextColor(c.text);
+	RECT text{ labelLeft, y, labelRight, y + h - 1 };
+	dc.DrawText(label.c_str(), (int)label.size(), &text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+	dc.SelectFont(old);
+	HLine(dc, L.rowHeader, w, y + h - 1, c.grid);
 }
