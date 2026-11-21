@@ -965,8 +965,8 @@ public:
 				CFont font;
 				HFONT hOldFont = nullptr;
 				if (pItem->mask & TLVIF_STATE) {
-					LOGFONT lf;
-					::GetObject(m_ctrlTree.GetFont(), sizeof(LOGFONT), &lf);
+					LOGFONTW lf;
+					::GetObjectW(m_ctrlTree.GetFont(), sizeof(lf), &lf);	// not the GetObject macro: some headers #undef it
 					if (pItem->state & TLVIS_BOLD) lf.lfWeight += FW_BOLD - FW_NORMAL;
 					if (pItem->state & TLVIS_ITALIC) lf.lfItalic = TRUE;
 					if (pItem->state & TLVIS_UNDERLINE) lf.lfUnderline = TRUE;

@@ -87,11 +87,11 @@ struct DpiHelper final {
 
 	// a font like hFont (created at fromDpi) for toDpi; the caller owns the new font
 	static HFONT ScaleFont(HFONT hFont, UINT toDpi, UINT fromDpi) noexcept {
-		LOGFONT lf{};
-		if (::GetObject(hFont, sizeof(lf), &lf) != sizeof(lf))
+		LOGFONTW lf{};
+		if (::GetObjectW(hFont, sizeof(lf), &lf) != sizeof(lf))	// not the GetObject macro: some headers #undef it (DbgModelClientEx.h)
 			return nullptr;
 		lf.lfHeight = Scale(lf.lfHeight, toDpi, fromDpi);
 		lf.lfWidth = Scale(lf.lfWidth, toDpi, fromDpi);
-		return ::CreateFontIndirect(&lf);
+		return ::CreateFontIndirectW(&lf);
 	}
 };
