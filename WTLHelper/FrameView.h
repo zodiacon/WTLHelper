@@ -16,8 +16,11 @@ public:
 	}
 
 	void OnFinalMessage(HWND) override {
-		if(!m_Static)
-			delete this;
+		// not 'delete this': 'this' here is CFrameView<T, TFrame, TBase>*, and nothing in the ATL chain
+		// gives it (or CWindowImplBaseT) a virtual destructor, so deleting through it would only run
+		// CFrameView's own (trivial) destructor and leak whatever T itself owns
+		if (!m_Static)
+			delete static_cast<T*>(this);
 	}
 
 private:
